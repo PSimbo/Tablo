@@ -3,6 +3,7 @@ use std::io;
 use std::io::Write;
 
 mod lexer;
+mod parser;
 
 use lexer::Lexer;
 
