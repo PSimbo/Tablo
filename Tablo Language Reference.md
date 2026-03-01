@@ -4,11 +4,11 @@ Tablo Language Reference
 Introduction
 ------------
 
-The Tablo language is a procedural language with first-class support for database access operations. This allows you to write your query code right within your processing code and have both type-checked at compile time.
+The Tablo language is a procedural language with first-class support for database access operations. This allows you to write your database query code right within your procedural code and have both type-checked at compile time.
 
-The syntax aims to be familiar to users of C-like languages such as C, C++, C#, Java, Javascript/Typescript, Go, etc.
+The syntax aims to be familiar to users of C-like languages such as C, C++, C#, Java, Javascript/Typescript, Go, etc. while the query syntax aims to be as similar to standard SQL as possible.
 
-This file details the syntax of the Table language.
+This file details the syntax of the Tablo language.
 
 ### A Simple Example
 
@@ -16,34 +16,56 @@ This file details the syntax of the Table language.
 with exampledb;
 
 obj ForumPost {
-  id: posts.id,
-  author: users.surname + ', ' + users."given-names",
-  "timestamp": timestamp(posts.date, posts.time),
-  msg: posts.text,
+  id: i32,
+  author: string,
+  "timestamp": timestamp,
+  msg: string,
   comments: {
-    "timestamp": timestamp(comments.date, comments.time),
-    comment: comments.text,
+    "timestamp": timestamp,
+    comment: string,
   }[],
 }
 
-fn FindPosts(id?: i32, madeBy?: i32, since?: date, until?: date): ForumPost[] {
+fn FindPosts(id: i32, madeBy: i32, since: date, until: date) ForumPost[]!:
   // If the user gets the dates in the wrong order, swap them.
   var tempDate: date = null;
-  if until < since {
+
+  if until < since:
     tempDate = since;
     since = until;
     until = tempDate;
-  }
+  end
 
-  return find each ForumPost from posts
-    left join users on users.id = posts.author
-    left join comments on comments.post = posts.id
-    where posts.id = id
-      and posts.author = madeBy
-      and posts.date >= since
-      and posts.date <= until
-    order by posts.date desc, posts.time desc;
-}
+  query post = select author, "date", posts.id, "time" from posts
+                 left join users on users.id = author
+                 where posts.id = id
+                   and author = madeBy
+                   and "date" >= since
+                   and "date" <= until
+                 order by "date" desc, "time" desc;
+
+  var forumPosts: ForumPost[]! = [];
+
+  for each post:
+    var forumPost: ForumPost = {
+      id: post.posts.id,
+      author: post.posts.author,
+      "timestamp": timestamp(post.posts.date, post.posts.date),
+      comments: [],
+    };
+
+    for each comment = select "text", "timestamp" from comments where comments.post = post.post.id order by "timestamp":
+      forumPost.comments += {
+        comment: comment.text,
+        "timestamp", timestamp(comment.date, comment.time),
+      };
+    end
+
+    forumPosts += forumPost;
+  end
+
+  return forumPosts;
+end
 ~~~
 
 The example above shows the definition of a data structure and a function that returns an array of data that adheres to the structure. Tablo is designed such that the functional parts look as much as possible like a typical C-like language while the query syntax looks as much as possible like regular SQL.
@@ -181,7 +203,6 @@ Tablo supports the following primitive data types:
 | `timestamptz` | Timestamp with time-zone |
 | `timetz`      | Time with time-zone      |
 | `uuid`        | Universally unique ID    |
-| `xml`         | XML                      |
 
 It is up to the Tablo interpreter to determine how these types map to the available data types in the connected database and target language. Some target languages may support options by which the type mapping can be modified. In rare cases, some data types may be unsupported for a certain database type of target language.
 
@@ -244,7 +265,6 @@ The following identifiers are reserved as keywords:
 | `where`       | Starts a WHERE clause                                 |
 | `while`       | Starts a while-loop statement                         |
 | `with`        | Specifies the active databases for table resolution   |
-| `xml`         | XML data type                                         |
 | `xor`         | Logical XOR                                           |
 
 Keyword Literals
@@ -352,7 +372,7 @@ The `xor` operator evaluates to the result of a logical XOR of the two operands.
 
 ### Mathematical Operators
 
-The `+` operator evaluates to the sum of its operands. In the case of strings, it is used for concatenation. Operands must be numeric, date/time, or `str`. The operands may be dissimilar if both types are numeric.
+The `+` operator evaluates to the sum of its operands. In the case of strings, it is used for concatenation. Operands must be numeric, date/time, or `text`. The operands may be dissimilar if both types are numeric.
 
 TODO: Create a section to describe automatic type conversions that result from operations on dissimilar operands.
 
@@ -401,6 +421,40 @@ Variables
 
 The `var` keyword is used to declare a new variable. At present, the data type must be specified. Optionally, an initial value may be assigned. If no initial value is assigned, the variable contains a null value.
 
+~~~
+var boolean: bool; // Initial value is `null`.
+var integer: int = 5;
+~~~
+
+A variable may be declared as non-nullable by adding a `!` after the type name. In this case, if no initial value is assigned, the variable contains a non-null default value.
+
+The `query` type has no non-null default value. If marked as non-nullable, a variable of type `query` must have an initial value specified.
+
+~~~
+var decimal: dec!; // Initial value is 0.0.
+var string: text!; // Initial value is '';
+var allOrders: query! = select * from Orders; // Initial value is required.
+~~~
+
+The non-null default values for each data type are:
+
+| Type          | Default Value                   |
+|---------------|---------------------------------|
+| `blob`        | Empty blob                      |
+| `bool`        | `false`                         |
+| `date`        | The current local date          |
+| `dec`         | `0.0`                           |
+| `float`       | `0.0`                           |
+| `int`         | `0`                             |
+| `json`        | `{}`                            |
+| `query`       | No default value                |
+| `text`        | `''`                            |
+| `time`        | The current local time          |
+| `timestamp`   | The current local date and time |
+| `timestamptz` | The current local date and time |
+| `timetz`      | The current local time          |
+| `uuid`        | A new random UUID               |
+
 Arrays
 ------
 
@@ -410,7 +464,7 @@ Tablo supports simple 1D arrays. Due to poor support for arrays in databases (th
 var array1d: int[] = [1, 2, 4, 8];
 ~~~
 
-At present, there is not support for multi-dimensional arrays.
+At present, there is no support for multi-dimensional arrays.
 
 Scopes
 ------
@@ -426,15 +480,13 @@ Tablo supports if statements. There is no need to enclose the condition in paren
 var allowAnyDates: bool = true;
 var curDate: date = today();
 
-if allowAnyDates {
+if allowAnyDates:
     ...
-}
-else if curDate > @2029-12-31 or curDate < @2000-01-01 {
+else if curDate > @2029-12-31 or curDate < @2000-01-01:
     ...
-}
-else {
+else:
     ...
-}
+end
 ~~~
 
 For Loops
@@ -443,13 +495,13 @@ For Loops
 Tablo supports for loops. For loops always use the `in` operator where the right operand is any iterable.
 
 ~~~
-for i in 0...10 {
+for i in 0...10:
     var rec: ExampleData = fetchedExampleData[i];
 
-    for val in rec[i].vals {
+    for val in rec[i].vals:
         ...
-    }
-}
+    end
+end
 ~~~
 
 Queries
@@ -464,12 +516,12 @@ obj CompanyData {
 }
 
 // Define a query that returns multiple results.
-var getExampleCompanies: query = each CompanyData from coymast where coymast.id > 10;
+var getExampleCompanies: query = select CompanyData from coymast where coymast.id > 10;
 
 // Execute the query and iterate the results...
-for c in getExampleCompanies {
+for c in getExampleCompanies:
   ...
-}
+end
 
 // Define a query that returns a single result.
 var getExampleCompany: query = first CompanyData from coymast where coymast.name == 'Example';
