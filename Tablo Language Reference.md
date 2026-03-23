@@ -4,7 +4,7 @@ Tablo Language Reference
 Introduction
 ------------
 
-The Tablo language is a procedural language with first-class support for database access operations. This allows you to write your database query code right within your procedural code and have both type-checked at compile time.
+The Tablo language is a procedural language with first-class support for database access operations. You can write your database query code right within your procedural code and have both type-checked at compile time.
 
 The syntax aims to be familiar to users of C-like languages such as C, C++, C#, Java, Javascript/Typescript, Go, etc. while the query syntax aims to be as similar to standard SQL as possible.
 
@@ -16,146 +16,68 @@ This file details the syntax of the Tablo language.
 with exampledb;
 
 obj ForumPost {
-  id: i32,
-  author: string,
+  id: int,
+  author: text,
   "timestamp": timestamp,
-  msg: string,
-  comments: {
-    "timestamp": timestamp,
-    comment: string,
-  }[],
+  msg: text,
+  comments: [
+    {
+      "timestamp": timestamp,
+      comment: text,
+    }
+  ],
 }
 
-fn FindPosts(id: i32, madeBy: i32, since: date, until: date) ForumPost[]!:
+fn FindPosts(id: int, madeBy: int, since: date, until: date) [ForumPost]! {
   // If the user gets the dates in the wrong order, swap them.
   var tempDate: date = null;
 
-  if until < since:
+  if until < since {
     tempDate = since;
     since = until;
     until = tempDate;
-  end
+  }
 
-  query post = select author, "date", posts.id, "time" from posts
-                 left join users on users.id = author
-                 where posts.id = id
-                   and author = madeBy
-                   and "date" >= since
-                   and "date" <= until
-                 order by "date" desc, "time" desc;
+  var mut forumPosts: [ForumPost]! = [];
 
-  var forumPosts: ForumPost[]! = [];
-
-  for each post:
+  for rec post in posts
+                  where posts.id = id
+                    and author = madeBy
+                    and "date" >= since
+                    and "date" <= until
+                  order by "date" desc, "time" desc {
     var forumPost: ForumPost = {
-      id: post.posts.id,
-      author: post.posts.author,
-      "timestamp": timestamp(post.posts.date, post.posts.date),
+      id: post.id,
+      author: post.author,
+      "timestamp": timestamp(post.date, post.time),
+      msg: post.message,
       comments: [],
     };
 
-    for each comment = select "text", "timestamp" from comments where comments.post = post.post.id order by "timestamp":
+    for rec comment in comments
+                       where comments.id = post.id
+                       order by "timestamp" {
       forumPost.comments += {
         comment: comment.text,
-        "timestamp", timestamp(comment.date, comment.time),
+        "timestamp": timestamp(comment.date, comment.time),
       };
-    end
+    }
 
     forumPosts += forumPost;
-  end
+  }
 
   return forumPosts;
-end
-~~~
-
-The example above shows the definition of a data structure and a function that returns an array of data that adheres to the structure. Tablo is designed such that the functional parts look as much as possible like a typical C-like language while the query syntax looks as much as possible like regular SQL.
-
-If we were to use the above code to generate some C# code, we might get something like this:
-
-~~~C#
-public sealed record ForumPost
-{
-    public int Id { get; init; }
-    public string Author { get; init; }
-    public DateTime Timestamp { get; init; }
-    public Comment[] Comments { get; init; } = Array.Empty<Comment>();
-    
-    public sealed record Comment
-    {
-        public DateTime Timestamp { get; init; }
-        public string Comment { get; init; }
-    }
-}
-
-public async Task<ForumPost[]> FindPosts(DbContext ctx, object args)
-{
-    var _args = args
-        .GetType()
-        .GetProperties()
-        .ToDictionary(p => p.Name, p => p.GetValue(args));
-
-    // If the user gets the dates in the wrong order, swap them.
-    DateTime? tempDate = null;
-    if (_args.ContainsKey("until")
-        && _args.ContainsKey("since")
-        && (DateTime)_args["until"] < (DateTime)_args["since"])
-    {
-        tempDate = (DateTime)_args["since"];
-        _args["since"] = (DateTime)_args["until"];
-        _args["until"] = tempDate;
-    }
-
-    var query = from p in ctx.Set<Posts>()
-                join u in ctx.Set<Users>() on u.Id equals p.Author into users
-                from u in users.DefaultIfEmpty()
-                join c in ctx.Set<Comments>() on c.Post equals p.Id into comments
-                from c in comments.DefaultIfEmpty()
-                select new { Post = p, User = u, Comment = c };
-
-    if (_args.ContainsKey("id"))
-        query = query.Where(q => q.Post.Id == (int)_args["id"]);
-
-    if (_args.ContainsKey("madeBy"))
-        query = query.Where(q => q.Post.Author == (int)_args["madeBy"]);
-
-    if (_args.ContainsKey("since"))
-        query = query.Where(q => q.Post.Date >= (DateTime)_args["since"]);
-
-    if (_args.ContainsKey("until"))
-        query = query.Where(q => p.Post.Date <= (DateTime)_args["until"]);
-
-    var records = await query.ToListAsync();
-
-    return records
-        .GroupBy(r => r.Post.Id)
-        .Select(g => 
-            {
-                var first = g.First();
-
-                return new ForumPost
-                {
-                    Id = first.Post.Id,
-                    Author = $"{first.User.Surname} {first.User.GivenNames}",
-                    Timestamp = first.Post.Date.Add(first.Post.Time),
-                    Comments = g
-                        .Select(c => new ForumPost.Comment
-                            {
-                                Timestamp = c.Date.Add(c.Time),
-                                Comment = c.Text,
-                            }
-                        )
-                        .ToArray(),
-                };
-            }
-        )
-        .ToArray();
 }
 ~~~
+
+Note that this project is somewhat inspired by the OpenEdge Progress ABL language but aims to be significantly more user-friendly as well as dropping the requirement to have an active database connection in order to compile the code.
 
 Core Concepts
 -------------
 
-Many of the design decisions that drive the development of Tablo stem from the fact that code may need to be generated in a completely different language based on the Tablo code. Therefore, it makes as few assumptions as possible about the capabilities of the target language.
+The language itself does not constrain the output that may be generated. For example, the code may be transpiled to another language (e.g. C#), where the first-class database access code is replaced with some idiomatic means of accessing the database(s). Alternatively, the code could be run in an interpreter with an open connection to the database(s). Or the code could be compiled into a standalone shared library. Or, perhaps support could be added to a particular database system to allow stored procedures to be written using Tablo syntax. In short, the language itself is unopinionated about how it may be used.
+
+Many of the design decisions that drive the development of Tablo stem from the fact that code may need to be transpiled to a completely different language and needs to support database backends with differing capabilities. Therefore, it makes as few assumptions as possible about the capabilities of the target language and database backend.
 
 Comments
 --------
@@ -189,14 +111,13 @@ Tablo supports the following primitive data types:
 
 | Type          | Description              |
 |---------------|--------------------------|
-| `blob`        | Binary data              |
+| `bin`         | Binary data              |
 | `bool`        | Boolean                  |
 | `date`        | Date                     |
 | `dec`         | Decimal                  |
 | `float`       | floating point           |
 | `int`         | integer                  |
 | `json`        | JSON                     |
-| `query`       | Query                    |
 | `text`        | Text                     |
 | `time`        | Time                     |
 | `timestamp`   | Timestamp                |
@@ -204,7 +125,22 @@ Tablo supports the following primitive data types:
 | `timetz`      | Time with time-zone      |
 | `uuid`        | Universally unique ID    |
 
-It is up to the Tablo interpreter to determine how these types map to the available data types in the connected database and target language. Some target languages may support options by which the type mapping can be modified. In rare cases, some data types may be unsupported for a certain database type of target language.
+It is up to the Tablo interpreter to determine how these types map to the available data types in the connected database and target language. Some target languages may support options by which the type mapping can be modified. In rare cases, some data types may be unsupported for a certain database type or target language.
+
+Note that there are no separate types for `float`s and `int`s of different byte lengths. Both types are always treated as having the largest byte length supported by the operating system. Also note that integers do not overflow or underflow. Adding to an integer such that the results exceeds the maximum value results in the value being set to the maximum value. If a `float` or `int` is assigned to a database field that lacks the precision to store the value, the assigned value is clamped to the supported range.
+
+___
+**TODO**: Should I add a `uint` data type?
+
+___
+
+Decimals that are read from a database field internally store the precision and scale of field. Uninitialized variables of type `dec` default to a precision of 7 and a scale of 2. Binary operators involving two decimals will typically produce a `dec` value whose precision and scale are such that the number of whole digits (precision minus scale) and the number of fractional digits are both the maxima of those for the operands. For example, multiply a decimal with precision 5 and scale 6 (-1 whole digits) with a decimal with precision 7 and scale 3 (4 whole digits) results in a decimal with precision 10 and scale 6 (4 whole digits). If a `dec` is assigned to a database field that lacks the range to store the value, the assigned value is clamped to the supported range. If the database field lacks the precision to store the value, the assigned value is truncated to the supported precision.
+
+Note that the `json` data type does not require that the database backend have explicit support for storing JSON data. Tablo provides functions for converting JSON data to and from strings.
+
+Beyond the primitive data types listed in this section, custom data types may be defined as objects (see the "Objects" section).
+
+Technically, Tablo supports one more primitive data type: the record pointer. However, the semantics for record pointers are quite different compared to other variables. For one, a record pointer is declared using the `rec` keyword rather than the `var` keyword and is immutable unless the `mut` keyword is also specified. Record pointers are described further in the "Database Queries" section.
 
 Identifiers
 -----------
@@ -220,52 +156,64 @@ Note that some tokens that match the definition of an identifier are considered 
 Reserved Words
 --------------
 
-Some identifiers are reserved as keywords within the syntax of the language. Keywords are always unquoted, formed of alphanumeric characters only, and are case-insensitive. If a quoted identifier matches a keyword in all respects except for fact that it is quoted rather than unquoted then the identifier is valid and will not be treated as a keyword.
+Some identifiers are reserved as keywords within the syntax of the language. Keywords are always unquoted, formed of alphanumeric characters only, and are case-insensitive. If a quoted identifier matches a keyword in all respects except for the fact that it is quoted rather than unquoted then the identifier is valid and will not be treated as a keyword.
 
 The following identifiers are reserved as keywords:
 
-| Keyword       | Description                                           |
-|---------------|-------------------------------------------------------|
-| `and`         | Logical AND                                           |
-| `blob`        | Binary data data type                                 |
-| `bool`        | Boolean data type                                     |
-| `by`          | Follows keywords `group` or `order`                   |
-| `date`        | Date data type                                        |
-| `dec`         | Decimal data type                                     |
-| `each`        | Starts a query that returns multiple results          |
-| `else`        | Starts an else-block for an if statement              |
-| `fail`        | Exits a function by throwing an error                 |
-| `false`       | A literal false value                                 |
-| `first`       | Starts a query that returns the first matching result |
-| `float`       | floating-point data type                              |
-| `fn`          | Starts a function definition                          |
-| `for`         | Starts a for-loop statement                           |
-| `group`       | Starts a GROUP BY clause                              |
-| `if`          | Starts an if statement                                |
-| `in`          | Accesses elements in an iterator                      |
-| `int`         | integer data type                                     |
-| `json`        | JSON data type                                        |
-| `last`        | Starts a query that returns the last matching result  |
-| `limit`       | Specifies the LIMIT value for a query                 |
-| `not`         | Logical NOT                                           |
-| `null`        | A literal null value                                  |
-| `obj`         | Starts an object definition                           |
-| `or`          | Logical OR                                            |
-| `order`       | Starts an ORDER BY clause                             |
-| `query`       | Query data type                                       |
-| `return`      | Exits a function by returning a result                |
-| `text`        | String data type                                      |
-| `time`        | Time data type                                        |
-| `timestamp`   | Timestamp data type                                   |
-| `timestamptz` | Timestamp (with time-zone) data type                  |
-| `timetz`      | Time (with time-zone) data type                       |
-| `true`        | A literal true value                                  |
-| `uuid`        | UUID data type                                        |
-| `var`         | Starts a variable declaration                         |
-| `where`       | Starts a WHERE clause                                 |
-| `while`       | Starts a while-loop statement                         |
-| `with`        | Specifies the active databases for table resolution   |
-| `xor`         | Logical XOR                                           |
+| Keyword       | Description                                         |
+|---------------|-----------------------------------------------------|
+| `and`         | Logical AND                                         |
+| `asc`         | Marks the sort order for a field as ascending       |
+| `bin`         | Binary data data type                               |
+| `bool`        | Boolean data type                                   |
+| `by`          | Follows keywords `group` or `order`                 |
+| `const`       | Starts a constant variable declaration              |
+| `count`       | Returns the number of records matching a query      |
+| `create`      | Commits a database record creation                  |
+| `date`        | Date data type                                      |
+| `dec`         | Decimal data type                                   |
+| `delete`      | Commits a database record deletion                  |
+| `desc`        | Marks the sort order for a field as descending      |
+| `else`        | Starts an else-block for an if statement            |
+| `fail`        | Exits a function by throwing an error               |
+| `false`       | A literal false value                               |
+| `first`       | Follows keyword `find`                              |
+| `float`       | floating-point data type                            |
+| `fn`          | Starts a function definition                        |
+| `for`         | Starts a for-loop statement                         |
+| `group`       | Starts a GROUP BY clause                            |
+| `if`          | Starts an if statement                              |
+| `in`          | Accesses elements in an iterator                    |
+| `int`         | integer data type                                   |
+| `json`        | JSON data type                                      |
+| `last`        | Follows keyword `find`                              |
+| `limit`       | Specifies the LIMIT value for a query               |
+| `mut`         | Marks a variable as mutable                         |
+| `not`         | Logical NOT                                         |
+| `null`        | A literal null value                                |
+| `obj`         | Starts an object definition                         |
+| `or`          | Logical OR                                          |
+| `order`       | Starts an ORDER BY clause                           |
+| `rec`         | Record pointer data type                            |
+| `return`      | Exits a function by returning a result              |
+| `text`        | String data type                                    |
+| `time`        | Time data type                                      |
+| `timestamp`   | Timestamp data type                                 |
+| `timestamptz` | Timestamp (with time-zone) data type                |
+| `timetz`      | Time (with time-zone) data type                     |
+| `true`        | A literal true value                                |
+| `update`      | Commits a database record update                    |
+| `uuid`        | UUID data type                                      |
+| `var`         | Starts a variable declaration                       |
+| `where`       | Starts a WHERE clause                               |
+| `while`       | Starts a while-loop statement                       |
+| `with`        | Specifies the active databases for table resolution |
+| `xor`         | Logical XOR                                         |
+
+---
+**TODO**: I feel like we're missing a `datetz` data type for storing dates with time-zones but there seems to be no support for such things in databases. Unless I just haven't been able to find the right documentation?
+
+---
 
 Keyword Literals
 ----------------
@@ -274,14 +222,14 @@ Variables of type `bool` may be assigned the literal values `true` and `false`.
 
 Unless marked as non-null, a variable of any data type may be assigned the null value. This is done using the reserved word `null`.
 
-Unless marked as required, an argument of any data type my hold a void value. The void value cannot be manually assigned. Only arguments that have not been provided when a function is called receive the void value.
+Unless marked as required, an argument of any data type my hold a void value. The void value cannot be manually assigned. Only arguments that have not been provided when a function is called receive the void value. For the purposes of conversion to and from JSON, the void value is equivalent to `undefined`.
 
 Integer Literals
 ----------------
 
 An integer literal is represented as a sequence of digits, which may be broken only by single `_` characters.
 
-Unless otherwise specified, digits are interpreted as base-10 digits. Both base-16 (hexadecimal), base-8 (octal), and base-2 (binary) digits are also supported. To specify a hexadecimal integer, prefix it with `0x`. To specify an octal integer, prefix it with `0o`. To specify a binary integer, prefix it with `0b`.
+Unless otherwise specified, digits are interpreted as base-10 digits. Base-16 (hexadecimal), base-8 (octal), and base-2 (binary) digits are also supported. To specify a hexadecimal integer, prefix it with `0x`. To specify an octal integer, prefix it with `0o`. To specify a binary integer, prefix it with `0b`.
 
 Negative integers are specified by prefixing the digits with a `-`. If a prefix is required to specify the base, the `-` is placed before the base prefix.
 
@@ -303,9 +251,9 @@ At present, only base-10 digits are supported. Exponential notation is not suppo
 String Literals
 ---------------
 
-Strings are delimited with `'` characters and may contain any characters except the character with code zero. Some characters need to be escaped. String supports interpolation using the `${` and `}` delimiters. Any valid expression may be placed within the string interpolation delimiters.
+Strings are delimited with `'` characters and may contain any characters except the character with code zero. Some characters need to be escaped. Strings support interpolation using the `${` and `}` delimiters. Any valid expression may be placed within the string interpolation delimiters.
 
-Note that there is no special syntax for multi-line strings. And new line characters in the strings remain in the assigned value. For any string that spans mutliple lines, leading whitespace is trimmed up to the number of whitespace characters preceding either the initial or final `'` (whichever is the smaller).
+Note that there is no special syntax for multi-line strings. Any new line characters in the strings remain in the assigned value. For any string that spans mutliple lines, leading whitespace is trimmed up to the number of whitespace characters preceding either the initial or final `'` (whichever is smaller).
 
 The following escape sequences are supported:
 
@@ -320,12 +268,14 @@ The following escape sequences are supported:
 | `\t`     | Tab             |
 | `\v`     | Vertical tab    |
 
+A single string literal may be composed of several string literals via concatenation using the `+` operator. In fact, the use of the binary `+` operator where only one of the operands is a string will result in the other operand being automatically converted to a string for concatenation.
+
 Date & Time Literals
 --------------------
 
 Date literals are prefixed with `@` and expressed in `<year>-<month>-<day>` format.
 
-Time literals are also prefixed with `@` and expressed in `<hour>:<minute>:<second>.<fractional part>` format. The fractional part may be omitted, in which case the fractional part is set to zero. Both the fractional part and the seconds may be omitted, in which case both the fractional part and seconds are set to zero.
+Time literals are also prefixed with `@` and expressed in `<hour>:<minute>:<second>.<fractional part>` format. The fractional part may be omitted, in which case the fractional part is set to zero. If the fractional part is omited then the seconds may also be omitted, in which case both the fractional part and seconds are set to zero.
 
 Time literals may also include a time-zone suffix expressed as either `+` or `-` and followed by an offset in `<hour>:<minute>` format. This is not required when assigning to `timetz` values. If omitted, the time-zone defaults to the default specified in the `--tz` compiler argument or to the current system locale time-zone if no default is specified. Specifying a time-zone when assigning to a `time` value results in a compile error.
 
@@ -374,7 +324,10 @@ The `xor` operator evaluates to the result of a logical XOR of the two operands.
 
 The `+` operator evaluates to the sum of its operands. In the case of strings, it is used for concatenation. Operands must be numeric, date/time, or `text`. The operands may be dissimilar if both types are numeric.
 
-TODO: Create a section to describe automatic type conversions that result from operations on dissimilar operands.
+---
+**TODO**: Create a section to describe automatic type conversions that result from operations on dissimilar operands.
+
+---
 
 The `-` operator evaluates to the difference of its operands. As a unary perfix operator, it evaluates to the numeric negation of its operand. Operands must be numeric or date/time. The operands may be dissimilar if both types are numeric.
 
@@ -421,44 +374,70 @@ Variables
 
 The `var` keyword is used to declare a new variable. At present, the data type must be specified. Optionally, an initial value may be assigned. If no initial value is assigned, the variable contains a null value.
 
+Alternatively, the `const` keyword may be used to declare a new constant. Unlike variables declared with `var`, the value of a constant may not be modified.
+
 ~~~
 var boolean: bool; // Initial value is `null`.
-var integer: int = 5;
+const integer: int = 5;
 ~~~
 
 A variable may be declared as non-nullable by adding a `!` after the type name. In this case, if no initial value is assigned, the variable contains a non-null default value.
 
-The `query` type has no non-null default value. If marked as non-nullable, a variable of type `query` must have an initial value specified.
-
 ~~~
 var decimal: dec!; // Initial value is 0.0.
 var string: text!; // Initial value is '';
-var allOrders: query! = select * from Orders; // Initial value is required.
 ~~~
 
 The non-null default values for each data type are:
 
 | Type          | Default Value                   |
 |---------------|---------------------------------|
-| `blob`        | Empty blob                      |
+| `bin`         | Empty binary sequence           |
 | `bool`        | `false`                         |
 | `date`        | The current local date          |
-| `dec`         | `0.0`                           |
+| `dec`         | `0.0` (precision: 7, scale: 2)  |
 | `float`       | `0.0`                           |
 | `int`         | `0`                             |
 | `json`        | `{}`                            |
-| `query`       | No default value                |
 | `text`        | `''`                            |
 | `time`        | The current local time          |
 | `timestamp`   | The current local date and time |
 | `timestamptz` | The current local date and time |
 | `timetz`      | The current local time          |
-| `uuid`        | A new random UUID               |
+| `uuid`        | A new random UUID (v4)          |
+
+Objects
+-------
+
+Tablo supports a somewhat struct-like, somewhat JSON-like construct called "objects". Objects are like structs in the sense that they allow the users to create custom data types with a defined structure. Objects are like JSON in the sense that the outermost element may be an array and the internal structure supports deep nesting. You can think of objects as strongly-typed JSON data.
+
+~~~
+obj LocationData {
+  addressLines: [text]! | {
+    line1: text,
+    line2: text,
+    line3: text,
+    line4: text,
+  },
+  name: text!,
+  postalCode: text,
+};
+
+obj CustomerCollection [
+  {
+    id: int!,
+    name: text,
+    location: LocationData,
+  }
+];
+~~~
+
+Tablo supports bi-directional conversion between JSON data and objects.
 
 Arrays
 ------
 
-Tablo supports simple 1D arrays. Due to poor support for arrays in databases (the obvious exception being PostgreSQL), arrays may only be used when compiling against a PostgreSQL database.
+Tablo supports simple 1D arrays. For database backends that do not support arrays (i.e. anything except PostgreSQL), arrays may be used but no attempt is made to add support for assigning array values to database fields.
 
 ~~~
 var array1d: int[] = [1, 2, 4, 8];
@@ -480,13 +459,15 @@ Tablo supports if statements. There is no need to enclose the condition in paren
 var allowAnyDates: bool = true;
 var curDate: date = today();
 
-if allowAnyDates:
-    ...
-else if curDate > @2029-12-31 or curDate < @2000-01-01:
-    ...
-else:
-    ...
-end
+if allowAnyDates {
+  ...
+}
+else if curDate > @2029-12-31 or curDate < @2000-01-01 {
+  ...
+}
+else {
+  ...
+}
 ~~~
 
 For Loops
@@ -495,40 +476,219 @@ For Loops
 Tablo supports for loops. For loops always use the `in` operator where the right operand is any iterable.
 
 ~~~
-for i in 0...10:
-    var rec: ExampleData = fetchedExampleData[i];
+for i in 0...10 {
+    var fib: int[] = [1, 1, 2, 3, 5, 8];
 
-    for val in rec[i].vals:
+    for val in fib {
         ...
-    end
-end
-~~~
-
-Queries
--------
-
-Tablo's `query` type allows database queries to be assigned to variables for re-use.
-
-~~~
-obj CompanyData {
-  id: coymast.coyno,
-  name: coymast.name,
+    }
 }
-
-// Define a query that returns multiple results.
-var getExampleCompanies: query = select CompanyData from coymast where coymast.id > 10;
-
-// Execute the query and iterate the results...
-for c in getExampleCompanies:
-  ...
-end
-
-// Define a query that returns a single result.
-var getExampleCompany: query = first CompanyData from coymast where coymast.name == 'Example';
-
-// Execute the query and assign the result.
-var exampleCompany: CompanyData = getExampleCompanies();
 ~~~
+
+Database Queries
+----------------
+
+Database queries are implicitly executed when any of the following code structures are encountered:
+
+* `for` loop
+* `find [first | last]` statement
+* `count` statement
+
+Database modifications are executed by the following statements:
+
+* `create` statement
+* `update` statement
+* `delete` statement
+
+### Query Syntax
+
+#### Where Clause
+
+TODO
+
+#### Order By Clause
+
+TODO
+
+#### Group By Clause
+
+TODO
+
+#### Limit Clause
+
+TODO
+
+### Record Pointers
+
+A record pointer is a variable that provides the user with the ability to get and set the field values for a database table record. Unlike other variables, a record pointer is declared with the `rec` keyword instead of `var`. They are also immutable unless the user opts into mutability by specifying the `mut` keyword.
+
+There are two valid ways to construct a record pointer. The first is with a database query of some kind. The second is as a mutable record pointer for the creation of a new record.
+
+~~~
+rec loc = find tblLocations where id = 42;
+
+rec mut comp = new tblCompanies;
+comp.name = "Acme Ltd.";
+comp.locationName = loc.name;
+comp.country = "SA";
+create comp;
+~~~
+
+The fields that may be accessed via a record pointer are entirely dependent upon the base database table for the query from which the record pointer was constructed.
+
+Note that the data provided by a record pointer represents a snapshot of the corresponding record. Tablo does not (and could not) guarantee that the underlying record data remains unmodified at the point in time at which the record pointer data is referenced.
+
+When a record pointer's fields are modified, by default the changes are not committed to the database until the end of the enclosing scope. To force the changes to be committed at an earlier point in the code, the appropriate `create` or `update` keyword may be used.
+
+If a record is deleted via its record pointer, the deletion is committed to the database at the point at which the `delete` keyword appears. From that point on, the record pointer may not be used to access field data and calling `exists()` on the record pointer will return `false`.
+
+### For Loops
+
+When a `for` loop's loop variable is preceded by the `rec` keyword, the `for` loop represents a database query. A record pointer is assigned to the loop variable for each iteration.
+
+In order to modify the database data via the loop variable, it must be marked as `mut`.
+
+~~~
+for rec mut comp in tblCompanies where countryCode = "JP" {
+  ...
+}
+~~~
+
+Database access for loops may be nested:
+
+~~~
+for rec cust in tblCustomers where id >= 10 {
+  var n: text = cust.name;
+
+  for rec loc in tblCustomerLocations where id = cust.id {
+    var address: [text] = [loc.addr1, loc.addr2, loc.addr3, loc.addr4];
+
+    ...
+  }
+}
+~~~
+
+The following query syntax is valid for `for` loops:
+
+* `where` clause
+* `order by` clause
+* `group by` clause
+* `limit` clause
+
+Note that Tablo is free to implement the database query logic in whichever way it deems appropriate for the given code structure and database backend. This may include re-ordering, batching, or merging database queries for the sake of performance, memory usage, or any other relevant criteria. However, it guarantees that:
+
+1. The field list for the query shall be limited to the smallest possible set. Specifically:
+  * If a field is referenced in the `for` loop's `where` clause but its value is otherwise never referenced, it is not included in the field list.
+  * If a field is reference in dead code, it is not included in the field list.
+  * If a field is referenced in a code path that may or may not be executed, it is included in the field list.
+  * In any circumstance where it is not possible to determine the field list, the field list will include all fields for the table.
+2. The runtime results shall be identical, absent any concurrent modification of the database data.
+
+---
+**TODO**: What about calculated fields? The user is free to perform any calculations on a record pointer's fields within the body of the `for` loop so perhaps we don't need calculated fields as part of the query syntax.
+
+___
+
+For database backends that support record locking, the `for` loop will include locked records if the loop variable is immutable but exclude locked records if the loop variable is mutable. If required, the lock state of a record may be determined using the `locked()` function.
+
+### Find Statements
+
+A `find` statement searches the database for a single record. By default, the first matching record is returned. This can be made explicit by writing `find first`. Alternatively, to return the last matching record, use `find last`. In determining which record is the first or last, the `order by` clause is considered. If no `order by` clause is specified then Tablo can make no guarantees about which record will be returned in either scenario.
+
+~~~
+rec custAcme = find first tblCustomers where name = 'Acme';
+var l = count tblCustomerLocations where id = custAcme.id;
+~~~
+
+The following query syntax is valid for `find` statements:
+
+* `where` clause
+* `order by` clause
+* `group by` clause
+
+When assigning the result of a `find` expression to a record pointer, it may be that no record can be assigned. This may be for one of two reasons:
+
+1. No matching record exists, or
+2. A matching record exists but is locked
+
+When no result can be assigned to the record pointer, it ends up in one of two "nullish" states. If no matching record could be found, this may be checked with `exists()` (returns `true` if the record exists but is locked). If a matching record exists but is locked, this may be checked with `locked()` (returns `false` if no matching record was found). For database backends that do not support record locking, the `locked()` function always returns false. Calling the `locked()` function on a read-only record pointer produces a compiler warning. If a record both exists and is not locked then it is not nullish and the record pointer may be used as the condition for an `if` statement, where it evaluates to `true`.
+
+~~~
+{
+  rec mut custAcme = find first tblCustomers where name = 'Acme';
+
+  if custAcme {
+    custAcme.name += ' Ltd.';
+  }
+}
+~~~
+
+As with `for` loops, the field list for the query is automatically determined based on the fields that are referenced in code.
+
+### Count Statements
+
+The `count` statement executes a database query and returns the number of matching records. The result of a `count` statement is of type `int`.
+
+~~~
+var numCompanies: int = count tblCompanies where active = true;
+~~~
+
+The following query syntax is valid for `count` statements:
+
+* `where` clause
+* `group by` clause
+* `limit` clause
+
+---
+**TODO**: Applying grouping effectively allows the user to count the number of records where a column has distinct values. Would some kind of `DISTINCT` syntax be better/clearer?
+
+**TODO**: Do we need to support the `limit` clause for `count` statements? Imposing an upper limit on the returned value seems like something that doesn't require explicit support within the query syntax -- the `max()` function could be used on the result instead.
+
+---
+
+### Create Statements
+
+For the creation of new database records, a mutable record pointer must first be declared and assigned using a `new` expression. It is not valid to omit the assignment.
+
+With the new record pointer, field values may be assigned as required. Finally, the `create` keyword is used to commit the new record to the database. If the database table contains required fields that have not been assigned a value then a compiler warning is produced. Note that the record pointer is automatically committed when code execution leaves the enclosing scope. This includes the case where the end of the scope is reached and when a `return` or `break` statement is encountered. The only exception is when a runtime error is thrown, in which case no new record is committed to the database.
+
+~~~
+rec mut newComp = new tblCompanies;
+newComp.name = "Acme Ltd.";
+create newComp;
+~~~
+
+Following a `create` statement, the record pointer remains valid and mutable and may be modified further with subsequent `update` statements.
+
+### Update Statements
+
+The `update` keyword is used to manually commit database changes via a mutable record pointer. Note that any changes made to a mutable record pointer's fields are automatically committed when code execution leaves the enclosing scope. This includes the case where the end of the scope is reached and when a `return` or `break` statement is encountered. The only exception is when a runtime error is thrown, in which case no database changes are committed.
+
+~~~
+rec mut loc = find first tblLocations where id = 101;
+loc.country = "AU";
+update loc;
+~~~
+
+If an `update` statement is used on a record pointer that doesn't exist or is locked then a runtime error is thrown. The compiler may generate warnings for attempts to update unchecked record pointers.
+
+Following an `update` statement, the record pointer remains valid and mutable and may be modified further with subsequent `update` statements.
+
+### Delete Statements
+
+The `delete` keyword is used to delete a database record via a mutable record pointer. Any modifications made to the record pointers field data is discarded.
+
+~~~
+rec mut invalidComp = find first tblCompanies where id = -1;
+
+if invalidComp {
+  delete invalidComp;
+}
+~~~
+
+If a `delete` statement is used on a record pointer that doesn't exist or is locked then a runtime error is thrown. The compiler may generate warnings for attempts to delete unchecked record pointers.
+
+Following a `delete` statement, the record pointer is no longer valid. Calling the `exists()` function on the record pointer returns `false`.
 
 Functions
 ---------
@@ -538,53 +698,61 @@ TODO
 Built-In Functions
 ------------------
 
-### `date(): date`
+### `date(): date!`
 
 Returns the current date in the local time-zone.
 
-### `date(d!: datetz): date`
+### `date(d: datetz!): date!`
 
 Returns the date `d`.
 
-### `date(ts!: timestamp): date`
+### `date(ts: timestamp!): date!`
 
 Returns the date portion of the timestamp `ts`.
 
-### `date(ts!: timestamptz): date`
+### `date(ts: timestamptz!): date!`
 
 Returns the date portion of the timestamp `ts`.
 
-### `date(d!: text): date`
+### `date(d: text!): date`
 
 Returns the date obtained by parsing `d`. If `d` cannot be parsed as a date then the function fails.
 
-### `date(tz!: dec): date`
+### `date(tz: dec!): date!`
 
 Returns the current date in the time-zone specified by `tz`.
 
-### `float(v!: dec): float`
+### `float(v: dec!): float`
 
 Returns the `float` obtained by casting `v`. If `v` cannot be converted then the function fails.
 
-### `float(v!: int): float`
+### `float(v: int!): float`
 
 Returns the `float` obtained by casting `v`. If `v` cannot be converted then the function fails.
 
-### `float(v!: text): float`
+### `float(v: text!): float`
 
 Returns the `float` obtained by parsing `v`. If `v` cannot be parsed as a `float` then the function fails.
 
-### `int(v!: dec): int`
+### `int(v: dec!): int`
 
 Returns the `int` obtained by casting `v`. If `v` cannot be converted then the function fails.
 
-### `int(v!: float): int`
+### `int(v: float!): int`
 
 Returns the `int` obtained by casting `v`. If `v` cannot be converted then the function fails.
 
-### `int(v!: text): int`
+### `int(v: text!): int`
 
 Returns the `int` obtained by parsing `v`. If `v` cannot be parsed as an `int` then the function fails.
+
+### `max(a: int!, b: int!): int!`
+
+TODO
+
+### `min(a: int!, b: int!): int!`
+
+TODO
 
 ### `text(v: bool): text`
 
@@ -618,63 +786,63 @@ Returns the string representation of `v`.
 
 Returns the string representation of `v`.
 
-### `time(): time`
+### `time(): time!`
 
 Returns the current time in the local time-zone.
 
-### `time(ts!: timestamp): time`
+### `time(ts: timestamp!): time!`
 
 Returns the time portion of the timestamp `ts`.
 
-### `time(ts!: timestamptz): time`
+### `time(ts: timestamptz!): time!`
 
 Returns the time portion of the timestamp `ts`.
 
-### `time(t!: timetz): time`
+### `time(t: timetz!): time!`
 
 Returns the time `t`.
 
-### `time(v!: text): time`
+### `time(v: text!): time!`
 
 Returns the time obtained by parsing `v`. If `v` cannot be parsed as a time then the function fails.
 
-### `time(tz!: dec): time`
+### `time(tz: dec!): time!`
 
 Returns the current time in the time-zone specified by `tz`.
 
-### `timestamp(): timestamp`
+### `timestamp(): timestamp!`
 
 Returns the current date and time in the local time-zone.
 
-### `timestamp(ts!: timestamptz): timestamp`
+### `timestamp(ts: timestamptz!): timestamp!`
 
 Returns the timestamp `ts`.
 
-### `timestamp(d!: date, t!: time): timestamp`
+### `timestamp(d: date!, t: time!): timestamp!`
 
 Returns the timestamp formed from the date `d` and the time `t`.
 
-### `timestamp(v!: text): timestamp`
+### `timestamp(v: text!): timestamp`
 
 Returns the timestamp obtained by parsing `v`. If `v` cannot be parsed as a timestamp then the function fails.
 
-### `timestamptz(): timestamptz`
+### `timestamptz(): timestamptz!`
 
 Returns the current date and time in the local time-zone.
 
-### `timestamptz(d!: date, t!: timetz): timestamptz`
+### `timestamptz(d: date!, t: timetz!): timestamptz!`
 
 Returns the timestamp formed from the date `d` and the time `t`.
 
-### `timestamptz(d!: date, t!: time, tz!: dec): timestamptz`
+### `timestamptz(d: date!, t: time!, tz: dec!): timestamptz!`
 
 Returns the timestamp formed from the date `d` and the time `t` in time-zone `tz`.
 
-### `timetz(): timetz`
+### `timetz(): timetz!`
 
 Returns the current time in the local time-zone.
 
-### `timetz(ts!: timestamptz): timetz`
+### `timetz(ts: timestamptz!): timetz!`
 
 Returns the time portion of the timestamp `ts`.
 
@@ -682,7 +850,7 @@ Returns the time portion of the timestamp `ts`.
 
 Returns the timestamp obtained by parsing `v`. If `v` cannot be parsed as a timestamp then the function fails.
 
-### `timetz(t!: time, tz!: dec): timetz`
+### `timetz(t: time!, tz: dec!): timetz!`
 
 Returns the time `t` in time-zone `tz`.
 
