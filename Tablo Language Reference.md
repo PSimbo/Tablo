@@ -448,7 +448,23 @@ At present, there is no support for multi-dimensional arrays.
 Scopes
 ------
 
-TODO
+Scopes in Tablo are lexical. A variable or function is valid only within the scope in which it is declared and within any nested scopes.
+
+Both variables and functions may be declared either at file scope or within any nested scope.
+
+If a variable within a nested scope matches the name of a variable in an outer scope then the variable in the nested scoped "shadows" the variable in the outer scope. Until the end of the nested scope, references to the variable will resolve to that scope's variable. After the nested scope ends, references to the variable will once again resolve to the outer scope's variable.
+
+Within a given scope, a function may be called before its declaration appears in the source code. Functions do not need to be forward-declared and Tablo provides no syntax for doing so.
+
+Anonymous scopes are supported and are created using a bare block:
+
+~~~
+{
+  var i: int = 42;
+}
+~~~
+
+Anonymous scopes are particularly useful for controlling the lifetime of mutable record pointers and, therefore, the point at which pending database changes are automatically committed.
 
 If Statements
 -------------
@@ -801,6 +817,11 @@ The function overload resolution process is as follows:
   * Any required parameter is left unbound after argument binding is complete
 4. If multiple candidate functions remain after binding and type-checking then the call is ambiguous and a compile error is produced.
 5. In the event of such an ambiguity, the caller may disambiguate the call by converting one or more positional arguments to named arguments.
+
+Importing Modules
+-----------------
+
+TODO
 
 Built-In Functions
 ------------------
