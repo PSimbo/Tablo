@@ -706,7 +706,101 @@ Following a `delete` statement, the record pointer is no longer valid. Calling t
 Functions
 ---------
 
-TODO
+Functions are declared using the `fn` keyword followed by the function name, a parameter list, the return type, and a block containing the function body.
+
+~~~
+fn FindPosts(id: int, madeBy: int, since: date, until: date) [ForumPost]! {
+  ...
+}
+~~~
+
+The parameter list is enclosed between `(` and `)` characters, which are required even if the parameter list is empty. Each parameter is declared using the syntax `<name>: <type>`. Parameters are separated by commas.
+
+The return type follows immediately after the parameter list. Any valid Tablo type may be used as the return type, including arrays, objects, and nullable or non-nullable types.
+
+The function body is enclosed between `{` and `}` characters and contains zero or more statements. Function parameters are referenced by name within the body of the function.
+
+The `return` statement exits the body of the function, optionally returning a value:
+
+~~~
+return forumPosts;
+~~~
+
+For a function that returns `void`, the final `return` statement may be omitted.
+
+To call a function, use the function name followed by an argument list between `(` and `)` characters:
+
+~~~
+var ts: timestamp! = timestamp(post.date, post.time);
+~~~
+
+Arguments may be passed positionally or by name.
+
+### Function Parameters
+
+Tablo functions support:
+
+* Function overloading
+* Calling with named arguments
+* Default parameter values
+* Variable number of arguments ("varargs")
+
+Any function may be called with a mix of positional arguments, named arguments, and "varargs" arguments provided that:
+
+* All positional arguments are specified before all named arguments.
+* Any unnamed "varargs" arguments are specified after all positional and named arguments.
+* Each named argument must match the corresponding parameter name in the function declaration.
+* No named argument is provided more than once.
+* Any omitted parameter must either be nullable or have a default value.
+
+~~~
+fn Name(<Positional Args>, <Named Args>, <Varargs>): void {}
+~~~
+
+To specify that a function accepts a variable number of arguments ("varargs"), the `...` syntax is used to mark the "varargs" argument. If present, this parameter must be the final parameter in the parameter list, must have an array type, and may not define a default value. The "varargs" argument may be provided as a named argument but only if the value is passed as a single array of the appropriate type.
+
+~~~
+fn Example(arg1: text, arg2: int! = 1, ...args: [int]) void {
+}
+
+// `arg1` set to 'Foo', `arg2` defaults to 1, `args` is [].
+Example('Foo');
+
+// `arg1` set to 'Bar', `arg2` set to 5, `args` is [].
+Example(arg1: 'Bar', arg2: 5);
+
+// `arg1` set to 'Baz', `arg2` set to 3, `args` set to [7, 9].
+Example('Baz', arg2: 3, 7, 9);
+
+// `arg1` set to 'Qux', `arg2` set to 3, `args` set to [2, 1].
+Example('Qux', 3, 2, 1);
+
+// `arg1` set to 'Quux', `arg2` defaults to 1, `args` set to [3, 2, 1].
+Example(arg1: 'Quux', args: [3, 2, 1]);
+
+// `arg1` defaults to null, `arg2` defaults to 1, `args` set to [3, 2, 1].
+// Must specify `args` as a named parameter or the first "varargs" argument would be interpreted as a positional argument.
+Example(args: [3, 2, 1]);
+~~~
+
+### Function Overloading
+
+Note that named arguments are not merely a convenience for readability. They also form part of the function overload resolution process and may be used to disambiguate otherwise ambiguous function calls.
+
+The function overload resolution process is as follows:
+
+1. Collect all functions in scope that have the same name as the called function.
+2. For each candidate function, attempt to bind all supplied arguments to parameters:
+  * Positional arguments are bound from left to right.
+  * Named arguments are bound by parameter name.
+  * Unnamed "varargs" arguments are bound to the final "varargs" parameter, if one exists.
+3. A candidate function is discarded if:
+  * Any supplied named argument does not match one of its parameters
+  * Any parameter receives more than one value
+  * Any supplied argument has an incompatible type
+  * Any required parameter is left unbound after argument binding is complete
+4. If multiple candidate functions remain after binding and type-checking then the call is ambiguous and a compile error is produced.
+5. In the event of such an ambiguity, the caller may disambiguate the call by converting one or more positional arguments to named arguments.
 
 Built-In Functions
 ------------------
