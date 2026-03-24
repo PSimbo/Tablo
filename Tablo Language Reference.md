@@ -575,6 +575,29 @@ The following query syntax is valid for `for` loops:
 * `group by` clause
 * `limit` clause
 
+When a `group by` clause is present, each iteration of the `for` loop still corresponds to a single database record. Grouping does not merge multiple database records into a single record pointer. Instead, grouping simply partitions the ordered query result into contiguous groups.
+
+The expressions in the `group by` clause define the grouping keys. Two adjacent iterations belong to the same group if and only if all grouping key values are equal.
+
+The order of records remains significant when grouping is used. In the absence of an explicit `order by` clause, Tablo may not guarantee a stable ordering of groups or records within groups. Therefore, in most cases a `group by` clause should be paired with an `order by` clause whose leading expressions match the grouping expressions.
+
+The built-in functions `firstof()` and `lastof()` may be used within the body of the `for` loop to detect group boundaries. These functions evaluate the current loop iteration relative to the current grouping.
+
+~~~
+for rec cust in tblCustomers
+             where active = true
+             order by countryCode, name
+             group by countryCode {
+  if firstof(countryCode) {
+    // First record in the current country group.
+  }
+
+  if lastof(countryCode) {
+    // Last record in the current country group.
+  }
+}
+~~~
+
 Note that Tablo is free to implement the database query logic in whichever way it deems appropriate for the given code structure and database backend. This may include re-ordering, batching, or merging database queries for the sake of performance, memory usage, or any other relevant criteria. However, it guarantees that:
 
 1. The field list for the query shall be limited to the smallest possible set. Specifically:
@@ -604,7 +627,6 @@ The following query syntax is valid for `find` statements:
 
 * `where` clause
 * `order by` clause
-* `group by` clause
 
 When assigning the result of a `find` expression to a record pointer, it may be that no record can be assigned. This may be for one of two reasons:
 
@@ -636,15 +658,6 @@ var numCompanies: int = count tblCompanies where active = true;
 The following query syntax is valid for `count` statements:
 
 * `where` clause
-* `group by` clause
-* `limit` clause
-
----
-**TODO**: Applying grouping effectively allows the user to count the number of records where a column has distinct values. Would some kind of `DISTINCT` syntax be better/clearer?
-
-**TODO**: Do we need to support the `limit` clause for `count` statements? Imposing an upper limit on the returned value seems like something that doesn't require explicit support within the query syntax -- the `max()` function could be used on the result instead.
-
----
 
 ### Create Statements
 
@@ -722,6 +735,12 @@ Returns the date obtained by parsing `d`. If `d` cannot be parsed as a date then
 
 Returns the current date in the time-zone specified by `tz`.
 
+### `firstof(v1!: any, v2: any, ...): bool!`
+
+Returns `true` when the current iteration of a grouped `for` loop is the first iteration of the group identified by the supplied grouping expression values. Otherwise returns `false`.
+
+It is valid to call `firstof()` only within the body of a grouped database `for` loop. The expressions passed to `firstof()` must correspond to a prefix of the enclosing loop's `group by` expressions.
+
 ### `float(v: dec!): float`
 
 Returns the `float` obtained by casting `v`. If `v` cannot be converted then the function fails.
@@ -753,6 +772,12 @@ TODO
 ### `min(a: int!, b: int!): int!`
 
 TODO
+
+### `lastof(v1!: any, v2: any, ...): bool!`
+
+Returns `true` when the current iteration of a grouped `for` loop is the last iteration of the group identified by the supplied grouping expression values. Otherwise returns `false`.
+
+It is valid to call `lastof(...)` only within the body of a grouped database `for` loop. The expressions passed to `lastof(...)` must correspond to a prefix of the enclosing loop's `group by` expressions.
 
 ### `text(v: bool): text`
 
