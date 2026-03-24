@@ -818,10 +818,54 @@ The function overload resolution process is as follows:
 4. If multiple candidate functions remain after binding and type-checking then the call is ambiguous and a compile error is produced.
 5. In the event of such an ambiguity, the caller may disambiguate the call by converting one or more positional arguments to named arguments.
 
-Importing Modules
------------------
+Modules
+-------
 
-TODO
+Each Tablo source file represents a single "module". Code from another module may be imported using the `use` keyword followed by a relative file path expressed as a string literal:
+
+~~~
+use '../Common/DateUtils';
+use './Warehouse/ParcelQueries';
+~~~
+
+The path is resolved relative to the file containing the `use` statement.
+
+`use` statements may appear at file scope or within any nested scope.
+
+Unless otherwise specified, a `use` statement imports all function declarations from the target module into the scope in which the `use` statement appears. Imported functions may then be called within that scope and any nested scopes. For the time being, variables may not be imported.
+
+In order to specify a subset of the target module's functions to be imported, insert a comma-separated list of function names and the `from` keyword after the `use` keyword.
+
+~~~
+use NewV4, NewV7 from '../Common/UuidUtils';
+~~~
+
+Normal function overloading and shadowing rules apply for imported functions, just as if the function had been defined locally. Imported functions do not become visible outside the scope in which the corresponding `use` statement appears.
+
+Note that `use` statements are *not* simple preprocessor directives for including file content as you may be familiar with from C or C++. Importing a module does not cause that module's own imports to be implicitly imported as well.
+
+During compilation, Tablo first resolves the module graph and gathers the function declarations visible from each module. Function bodies are compiled only after this resolution step has completed. This allows modules to reference functions declared in each other, including in the presence of circular module dependencies, provided that each function call can be resolved unambiguously. Each function is compiled at most once, even if its containing module is imported by multiple other modules.
+
+Tablo also supports global variables. A variable must be explicitly declared using the `global` keyword in order to be visible outside the module in which it is defined.
+
+~~~
+global var ConnectionString: text = '...';
+~~~
+
+Global variables are not imported by ordinary `use` statements. In order to access a global variable defined in another module, the importing module must explicitly import it using `use global ... from ...`:
+
+~~~
+use global ConnectionString from '../Common/Config';
+~~~
+
+As with imported functions, normal shadowing rules apply for imported global variables. A global variable imported into a scope does not become visible outside that scope.
+
+All global variables are initialized before any user-written functions are executed. This guarantee applies regardless of which files import which globals, and it also applies to globals that are never imported or never referenced. This rule exists both for safety and so that any side-effects resulting from global initialization occur deterministically before normal program execution begins. It is forbidden for a global to attempt to use the value of another global to determine its initial value.
+
+___
+**TODO**: Decide how much control over function visibility we want and update the relevant other sections in this document.
+
+___
 
 Built-In Functions
 ------------------
