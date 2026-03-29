@@ -296,19 +296,29 @@ Operators
 
 The `==` operator is used to compare two values for equality. It evaluates to `true` if the values are equal.
 
-The `!=` operator is used to compare two value for inequality. It evaluates to `false` if the values are equal.
+The `!=` operator is used to compare two values for inequality. It evaluates to `false` if the values are equal.
+
+Equality comparison is supported for primitive scalar types such as numeric values, `bool`, date/time values, and `text`.
+
+For `text` values, equality comparison is case-sensitive. Two `text` values are equal if and only if they contain the same sequence of characters.
+
+If a case-insensitive text equality comparison is required, the expected approach is to normalize the casing of both operands explicitly. For example: `lower(a) == lower(b)`.
 
 ### Comparison Operators
 
-The `>`, `>=`, `<`, and `<=` operators are used to compare the numeric ordering of two values. Operands must be numeric or date/time.
+The `>`, `>=`, `<`, and `<=` operators are used to compare the ordering of two values. Operands must be numeric, date/time, or `text`.
 
-The `>` operator evaluates to `true` if the left value is strictly greater than the right. Operands must be numeric or date/time.
+The `>` operator evaluates to `true` if the left value is strictly greater than the right. Operands must be numeric, date/time, or `text`.
 
-The `>=` operator evaluates to `false` if the left value is strictly less than the right. Operands must be numeric or date/time.
+The `>=` operator evaluates to `false` if the left value is strictly less than the right. Operands must be numeric, date/time, or `text`.
 
-The `<` operator evaluates to `true` if the left value is strictly less than the right. Operands must be numeric or date/time.
+The `<` operator evaluates to `true` if the left value is strictly less than the right. Operands must be numeric, date/time, or `text`.
 
-The `<=` operator evaluates to `false` if the left value is strictly greater than the right. Operands must be numeric or date/time.
+The `<=` operator evaluates to `false` if the left value is strictly greater than the right. Operands must be numeric, date/time, or `text`.
+
+For `text` values, the comparison is guaranteed to be case-sensitive but the exact implementation is dependent on the database backend. If portability is a concern, code should not rely on a subtle ordering details of `text` value ordering.
+
+If a case-insensitive text ordering comparison is required, the expected approach is to normalize the casing of both operands explicitly. For example: `lower(a) < lower(b)`.
 
 ### Logical Operators
 
@@ -912,6 +922,12 @@ Returns the `float` obtained by casting `v`. If `v` cannot be converted then the
 
 Returns the `float` obtained by parsing `v`. If `v` cannot be parsed as a `float` then the function fails.
 
+### `ilike(v: text!, pattern: text!): bool!`
+
+Returns `true` if `v` matches `pattern` according to Tablo's case-insensitive SQL-style wildcard matching rules. Otherwise returns `false`.
+
+**TODO**: Detail the exact wildcard syntax and escaping rules.
+
 ### `int(v: dec!): int`
 
 Returns the `int` obtained by casting `v`. If `v` cannot be converted then the function fails.
@@ -937,6 +953,12 @@ TODO
 Returns `true` when the current iteration of a grouped `for` loop is the last iteration of the group identified by the supplied grouping expression values. Otherwise returns `false`.
 
 It is valid to call `lastof(...)` only within the body of a grouped database `for` loop. The expressions passed to `lastof(...)` must correspond to a prefix of the enclosing loop's `group by` expressions.
+
+### `like(v: text!, pattern: text!): bool!`
+
+Returns `true` if `v` matches `pattern` according to Tablo's SQL-style wildcard matching rules. Otherwise returns `false`.
+
+**TODO**: Detail the exact wildcard syntax and escaping rules.
 
 ### `text(v: bool): text`
 
