@@ -14,24 +14,55 @@ At present, Tablo syntax looks like this:
 with exampledb;
 
 obj ForumPost {
-  id: posts.id,
-  author: users.surname + ', ' + users."given-names",
-  "timestamp": str(posts.date) + ' ' + str(posts),
-  msg: posts.text,
-  comments: {
-    "timestamp": str(comments.date) + ' ' + str(comments.time),
-    comment: comments.text,
-  }[],
+  id: int,
+  author: text,
+  "timestamp": timestamp,
+  msg: text,
+  comments: [
+    {
+      "timestamp": timestamp,
+      comment: text,
+    }
+  ],
 }
 
-fn FindPosts(id?: i32, madeBy: i32, since?: date, until?: date): ForumPost[] {
-  return find each ForumPost from posts
-    left join users on users.id = posts.author
-    left join comments on comments.post = posts.id
-    where posts.id = id
-      and posts.author = madeBy
-      and posts.date >= since
-      and posts.date <= until
-    order by posts.date desc, posts.time desc;
+fn FindPosts(id: int, madeBy: int, since: date, until: date) [ForumPost]! {
+  var tempDate: date = null;
+
+  if until < since {
+    tempDate = since;
+    since = until;
+    until = tempDate;
+  }
+
+  var mut forumPosts: [ForumPost]! = [];
+
+  for rec post in posts
+                  where posts.id = id
+                    and author = madeBy
+                    and "date" >= since
+                    and "date" <= until
+                  order by "date" desc, "time" desc {
+    var forumPost: ForumPost = {
+      id: post.id,
+      author: post.author,
+      "timestamp": timestamp(post.date, post.time),
+      msg: post.message,
+      comments: [],
+    };
+
+    for rec comment in comments
+                       where comments.id = post.id
+                       order by "timestamp" {
+      forumPost.comments += {
+        comment: comment.text,
+        "timestamp": timestamp(comment.date, comment.time),
+      };
+    }
+
+    forumPosts += forumPost;
+  }
+
+  return forumPosts;
 }
 ~~~
