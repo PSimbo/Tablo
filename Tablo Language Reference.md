@@ -129,10 +129,7 @@ It is up to the Tablo interpreter to determine how these types map to the availa
 
 Note that there are no separate types for `float`s and `int`s of different byte lengths. Both types are always treated as having the largest byte length supported by the operating system. Also note that integers do not overflow or underflow. Adding to an integer such that the results exceeds the maximum value results in the value being set to the maximum value. If a `float` or `int` is assigned to a database field that lacks the precision to store the value, the assigned value is clamped to the supported range.
 
-___
-**TODO**: Should I add a `uint` data type?
-
-___
+Likewise, due to limited support in backend databases, Tablo does not have a dedicated type for unsigned integers.
 
 Decimals that are read from a database field internally store the precision and scale of field. Uninitialized variables of type `dec` default to a precision of 7 and a scale of 2. Binary operators involving two decimals will typically produce a `dec` value whose precision and scale are such that the number of whole digits (precision minus scale) and the number of fractional digits are both the maxima of those for the operands. For example, multiply a decimal with precision 5 and scale 6 (-1 whole digits) with a decimal with precision 7 and scale 3 (4 whole digits) results in a decimal with precision 10 and scale 6 (4 whole digits). If a `dec` is assigned to a database field that lacks the range to store the value, the assigned value is clamped to the supported range. If the database field lacks the precision to store the value, the assigned value is truncated to the supported precision.
 
@@ -209,11 +206,6 @@ The following identifiers are reserved as keywords:
 | `while`       | Starts a while-loop statement                       |
 | `with`        | Specifies the active databases for table resolution |
 | `xor`         | Logical XOR                                         |
-
----
-**TODO**: I feel like we're missing a `datetz` data type for storing dates with time-zones but there seems to be no support for such things in databases. Unless I just haven't been able to find the right documentation?
-
----
 
 Keyword Literals
 ----------------
@@ -334,11 +326,6 @@ The `xor` operator evaluates to the result of a logical XOR of the two operands.
 
 The `+` operator evaluates to the sum of its operands. In the case of strings, it is used for concatenation. Operands must be numeric, date/time, or `text`. The operands may be dissimilar if both types are numeric.
 
----
-**TODO**: Create a section to describe automatic type conversions that result from operations on dissimilar operands.
-
----
-
 The `-` operator evaluates to the difference of its operands. As a unary perfix operator, it evaluates to the numeric negation of its operand. Operands must be numeric or date/time. The operands may be dissimilar if both types are numeric.
 
 The `*` operator evaluates to the product of its operands. Operands must be numeric and may be dissimilar.
@@ -378,6 +365,22 @@ xor
 or
 = += -= *= /= %=
 ~~~
+
+### Automatic Type Conversions
+
+Tablo supports a fairly limited set of automatic type conversions. In general, an explicit conversion is required when using one type in a place where another is expected.
+
+Numeric values may be implicitly converted between `int` and `dec` where necessary. In these cases, the `int` operand is automatically converted to a `dec` representation using the same scale and precision as the `dec` operand.
+
+Note that `float` and `dec` are not implicitly converted to one another. Any operation involving both `float` and `dec` requires an explicit conversion.
+
+Tablo does not automatically convert `text` values to numeric or date/time values. Built-in functions exist for parsing strings as these types.
+
+When the `+` operator is used and either operand is of type `text`, the other operand is implicitly converted to `text` and the result is the concatenation of the operands. Operator precedence rules still apply before this conversion is considered. For example, `1 + 2 + ' foo'` evaluates to `'3 foo'`, not `'12 foo'`.
+
+In all of the above cases, if both operands are non-nullable then the result is also a non-nullable type. If either or both operands are nullable then the result is a nullable type.
+
+With one notable exception, no automatic conversions occur when passing arguments to functions. A function must receive exactly the types it expects or a compile error results. The aforementioned exception is the automatic conversion from a nullable type to the corresponding non-nullable type. If a function expects a non-nullable value and the compiler can infer that the provided value cannot be null then the type is automatically converted. Alternatively, the `!` operator may be applied to an expression to assert that it is non-null. If the `!` operator is used on an expression that evaluates to null at runtime then the program fails.
 
 Variables
 ---------
