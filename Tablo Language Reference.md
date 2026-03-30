@@ -160,6 +160,7 @@ The following identifiers are reserved as keywords:
 | Keyword       | Description                                         |
 |---------------|-----------------------------------------------------|
 | `and`         | Logical AND                                         |
+| `as`          | Defines an alias for a query sub-expression         |
 | `asc`         | Marks the sort order for a field as ascending       |
 | `bin`         | Binary data data type                               |
 | `bool`        | Boolean data type                                   |
@@ -533,19 +534,86 @@ Database modifications are executed by the following statements:
 
 #### Where Clause
 
-TODO
+A `where` clause filters the records considered by a database query. The syntax is intentionally similar to SQL. The expression following the `where` keyword must evaluate to a `bool` value.
+
+~~~
+for rec post in posts where posts.id = id and "date" >= since {
+  ...
+}
+~~~
+
+The expression in a `where` clause uses normal Tablo expression syntax. This includes literals, variables, field references, comparison operators, logical operators, grouping with parentheses, and function calls.
+
+Any unquoted field references that match the name of a variable or function in scope must be specified as `<table>.<field>`.
+
+In nested database queries, a `where` clause may reference fields from record pointers declared in the enclosing scope(s).
+
+Any function used within a `where` clause must be valid for use in query expressions. The exact set of functions that may be used in query expressions is defined in the "Built-In Functions" section (TODO: update the Built-In Functions section).
+
+If a `where` clause contains an expression that cannot be converted into valid query syntax for the backend database then compilation fails.
 
 #### Order By Clause
 
-TODO
+An `order by` clause specifies the order in which records are returned by a database query. The syntax is intentionally similar to SQL.
+
+~~~
+for rec post in posts
+                where posts.id = id
+                order by "date" desc, "time" desc {
+  ...
+}
+~~~
+
+An `order by` clause consists of one or more comma-separated expressions. Each expression may optionally be followed by either `asc` or `desc` to specify ascending or descending order respectively. If neither is specified then ascending order is assumed.
+
+The expressions in an `order by` clause use normal Tablo expression syntax. The exact set of functions that may be used in query expressions is defined in the "Built-In Functions" section.
+
+If an `order by` clause contains an expression that cannot be converted into valid query syntax for the backend database then compilation fails.
+
+If no `order by` clause is specified then Tablo makes no guarantee about the order in which records are returned.
 
 #### Group By Clause
 
-TODO
+A `group by` clause partitions the records returned by a database query into contiguous groups. Unlike SQL, the purpose of grouping in Tablo is not to merge multiple records into a single aggregate row. Each iteration of the query still corresponds to a single database record.
+
+~~~
+for rec cust in customers
+             group by lower(countryCode) as country, city {
+  if firstof(country) {
+    ...
+  }
+
+  if lastof(country, city) {
+    ...
+  }
+}
+~~~
+
+The expressions in a `group by` clause use normal Tablo expression syntax. The exact set of functions that may be used in query expressions is defined in the "Built-In Functions" section. Each grouping expression may optionally be followed by the `as` keyword and an alias. If a grouping expression is not a simple field reference then an alias should be provided if the grouping level is to be referenced via `firstof(...)` or `lastof(...)`.
+
+The expressions in the `group by` clause also determine the ordering of the query result. In effect, `group by a, b, c` implies ordering by `a`, then `b`, then `c`.
+
+For this reason, a query expression must not specify both a `group by` clause and an `order by` clause.
+
+The `firstof(...)` and `lastof(...)` functions may be used within the body of a grouped database query to detect the start and end boundaries of groups respectively. The arguments passed to these functions must identify the first grouping level, the first two grouping levels, and so on, in the same order as the enclosing `group by` clause. Each argument must be either the simple field reference from the corresponding grouping expression or the alias assigned to that grouping expression.
+
+If a `group by` clause contains an expression that cannot be converted into valid query syntax for the backend database then compilation fails.
 
 #### Limit Clause
 
-TODO
+A `limit` clause specifies the maximum number of records that may be returned by a database query. The syntax is intentionally similar to SQL.
+
+~~~
+for rec post in posts where author = madeBy limit 10 {
+  ...
+}
+~~~
+
+The expression following the `limit` keyword must evaluate to an `int` value.
+
+If the evaluated limit value is negative then it is treated as zero.
+
+If no `limit` clause is specified then Tablo does not impose a limit on the number of records returned.
 
 ### Record Pointers
 
@@ -608,20 +676,19 @@ When a `group by` clause is present, each iteration of the `for` loop still corr
 
 The expressions in the `group by` clause define the grouping keys. Two adjacent iterations belong to the same group if and only if all grouping key values are equal.
 
-The order of records remains significant when grouping is used. In the absence of an explicit `order by` clause, Tablo may not guarantee a stable ordering of groups or records within groups. Therefore, in most cases a `group by` clause should be paired with an `order by` clause whose leading expressions match the grouping expressions.
+The expressions in the `group by` clause also determine the ordering of the grouped query.
 
 The built-in functions `firstof()` and `lastof()` may be used within the body of the `for` loop to detect group boundaries. These functions evaluate the current loop iteration relative to the current grouping.
 
 ~~~
 for rec cust in tblCustomers
              where active = true
-             order by countryCode, name
-             group by countryCode {
-  if firstof(countryCode) {
+             group by lower(countryCode) as country {
+  if firstof(country) {
     // First record in the current country group.
   }
 
-  if lastof(countryCode) {
+  if lastof(country) {
     // Last record in the current country group.
   }
 }
@@ -911,7 +978,7 @@ Returns the current date in the time-zone specified by `tz`.
 
 Returns `true` when the current iteration of a grouped `for` loop is the first iteration of the group identified by the supplied grouping expression values. Otherwise returns `false`.
 
-It is valid to call `firstof()` only within the body of a grouped database `for` loop. The expressions passed to `firstof()` must correspond to a prefix of the enclosing loop's `group by` expressions.
+It is valid to call `firstof()` only within the body of a grouped database `for` loop. The arguments passed to `firstof()` must identify the first grouping level, the first two grouping levels, and so on, in the same order as the enclosing `group by` clause. Each argument must be either the simple field reference from the corresponding grouping expression or the alias assigned to that grouping expression.
 
 ### `float(v: dec!): float`
 
@@ -955,7 +1022,7 @@ TODO
 
 Returns `true` when the current iteration of a grouped `for` loop is the last iteration of the group identified by the supplied grouping expression values. Otherwise returns `false`.
 
-It is valid to call `lastof(...)` only within the body of a grouped database `for` loop. The expressions passed to `lastof(...)` must correspond to a prefix of the enclosing loop's `group by` expressions.
+It is valid to call `lastof(...)` only within the body of a grouped database `for` loop. The arguments passed to `lastof(...)` must identify the first grouping level, the first two grouping levels, and so on, in the same order as the enclosing `group by` clause. Each argument must be either the simple field reference from the corresponding grouping expression or the alias assigned to that grouping expression.
 
 ### `like(v: text!, pattern: text!): bool!`
 
