@@ -192,6 +192,7 @@ The following identifiers are reserved as keywords:
 | `obj`         | Starts an object definition                         |
 | `or`          | Logical OR                                          |
 | `order`       | Starts an ORDER BY clause                           |
+| `pub`         | Marks a function as public                          |
 | `rec`         | Record pointer data type                            |
 | `return`      | Exits a function by returning a result              |
 | `text`        | String data type                                    |
@@ -703,11 +704,6 @@ Note that Tablo is free to implement the database query logic in whichever way i
   * In any circumstance where it is not possible to determine the field list, the field list will include all fields for the table.
 2. The runtime results shall be identical, absent any concurrent modification of the database data.
 
----
-**TODO**: What about calculated fields? The user is free to perform any calculations on a record pointer's fields within the body of the `for` loop so perhaps we don't need calculated fields as part of the query syntax.
-
-___
-
 For database backends that support record locking, the `for` loop will include locked records if the loop variable is immutable but exclude locked records if the loop variable is mutable. If required, the lock state of a record may be determined using the `locked()` function.
 
 ### Find Statements
@@ -804,8 +800,10 @@ Functions
 
 Functions are declared using the `fn` keyword followed by the function name, a parameter list, the return type, and a block containing the function body.
 
+By default, a function may only be referenced within the module in which it is declared. In order for a function to be imported by another module, it must be marked with the `pub` keyword.
+
 ~~~
-fn FindPosts(id: int, madeBy: int, since: date, until: date) [ForumPost]! {
+pub fn FindPosts(id: int, madeBy: int, since: date, until: date) [ForumPost]! {
   ...
 }
 ~~~
@@ -831,6 +829,8 @@ var ts: timestamp! = timestamp(post.date, post.time);
 ~~~
 
 Arguments may be passed positionally or by name.
+
+Functions may be defined both at file scope and nested within other scopes. Only functions defined at file scope may be marked as `pub`.
 
 ### Function Parameters
 
@@ -912,15 +912,15 @@ The path is resolved relative to the file containing the `use` statement.
 
 `use` statements may appear at file scope or within any nested scope.
 
-Unless otherwise specified, a `use` statement imports all function declarations from the target module into the scope in which the `use` statement appears. Imported functions may then be called within that scope and any nested scopes. For the time being, variables may not be imported.
+Unless otherwise specified, a `use` statement imports all `pub` function declarations from the target module into the scope in which the `use` statement appears. Imported functions may then be called within that scope as well as any nested scopes. For the time being, variables may not be imported by ordinary `use` statements.
 
-In order to specify a subset of the target module's functions to be imported, insert a comma-separated list of function names and the `from` keyword after the `use` keyword.
+In order to specify a subset of the target module's `pub` functions to import, insert a comma-separated list of function names and the `from` keyword after the `use` keyword.
 
 ~~~
 use NewV4, NewV7 from '../Common/UuidUtils';
 ~~~
 
-Normal function overloading and shadowing rules apply for imported functions, just as if the function had been defined locally. Imported functions do not become visible outside the scope in which the corresponding `use` statement appears.
+Normal function overloading and shadowing rules apply for imported functions, just as if the function had been defined locally. Imported functions do not become visible outside the scope in which the corresponding `use` statement appears. Functions that are not marked `pub` may not be imported from another module.
 
 Note that `use` statements are *not* simple preprocessor directives for including file content as you may be familiar with from C or C++. Importing a module does not cause that module's own imports to be implicitly imported as well.
 
@@ -941,11 +941,6 @@ use global ConnectionString from '../Common/Config';
 As with imported functions, normal shadowing rules apply for imported global variables. A global variable imported into a scope does not become visible outside that scope.
 
 All global variables are initialized before any user-written functions are executed. This guarantee applies regardless of which files import which globals, and it also applies to globals that are never imported or never referenced. This rule exists both for safety and so that any side-effects resulting from global initialization occur deterministically before normal program execution begins. It is forbidden for a global to attempt to use the value of another global to determine its initial value.
-
-___
-**TODO**: Decide how much control over function visibility we want and update the relevant other sections in this document.
-
-___
 
 Built-In Functions
 ------------------
