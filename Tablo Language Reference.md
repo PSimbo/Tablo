@@ -549,7 +549,7 @@ Any unquoted field references that match the name of a variable or function in s
 
 In nested database queries, a `where` clause may reference fields from record pointers declared in the enclosing scope(s).
 
-Any function used within a `where` clause must be valid for use in query expressions. The exact set of functions that may be used in query expressions is defined in the "Built-In Functions" section (TODO: update the Built-In Functions section).
+Any function used within a `where` clause must be valid for use in query expressions. Any function that may *not* be used in query expressions are described as such in the "Built-In Functions" section.
 
 If a `where` clause contains an expression that cannot be converted into valid query syntax for the backend database then compilation fails.
 
@@ -945,6 +945,8 @@ All global variables are initialized before any user-written functions are execu
 Built-In Functions
 ------------------
 
+Unless otherwise specified, built-in functions may be used in query expressions such as `where`, `order by`, and `group by` clauses.
+
 ### `date(): date!`
 
 Returns the current date in the local time-zone.
@@ -973,7 +975,7 @@ Returns the current date in the time-zone specified by `tz`.
 
 Returns `true` when the current iteration of a grouped `for` loop is the first iteration of the group identified by the supplied grouping expression values. Otherwise returns `false`.
 
-It is valid to call `firstof()` only within the body of a grouped database `for` loop. The arguments passed to `firstof()` must identify the first grouping level, the first two grouping levels, and so on, in the same order as the enclosing `group by` clause. Each argument must be either the simple field reference from the corresponding grouping expression or the alias assigned to that grouping expression.
+It is valid to call `firstof()` only within the body of a grouped database `for` loop. It must not be used in query expressions. The arguments passed to `firstof()` must identify the first grouping level, the first two grouping levels, and so on, in the same order as the enclosing `group by` clause. Each argument must be either the simple field reference from the corresponding grouping expression or the alias assigned to that grouping expression.
 
 ### `float(v: dec!): float`
 
@@ -991,7 +993,9 @@ Returns the `float` obtained by parsing `v`. If `v` cannot be parsed as a `float
 
 Returns `true` if `v` matches `pattern` according to Tablo's case-insensitive SQL-style wildcard matching rules. Otherwise returns `false`.
 
-**TODO**: Detail the exact wildcard syntax and escaping rules.
+As with SQL's `LIKE` syntax, `%` matches zero or more characters and `_` matches exactly one character. Matching is against the entire string rather than an arbitrary substring.
+
+The `\` character is used to escape wildcard characters within the pattern. Therefore `\%` matches a literal percent sign, `\_` matches a literal underscore, and `\\` matches a literal backslash.
 
 ### `int(v: dec!): int`
 
@@ -1007,23 +1011,25 @@ Returns the `int` obtained by parsing `v`. If `v` cannot be parsed as an `int` t
 
 ### `max(a: int!, b: int!): int!`
 
-TODO
+Returns the greater of the two `int` values `a` and `b`.
 
 ### `min(a: int!, b: int!): int!`
 
-TODO
+Returns the lesser of the two `int` values `a` and `b`.
 
 ### `lastof(v1!: any, v2: any, ...): bool!`
 
 Returns `true` when the current iteration of a grouped `for` loop is the last iteration of the group identified by the supplied grouping expression values. Otherwise returns `false`.
 
-It is valid to call `lastof(...)` only within the body of a grouped database `for` loop. The arguments passed to `lastof(...)` must identify the first grouping level, the first two grouping levels, and so on, in the same order as the enclosing `group by` clause. Each argument must be either the simple field reference from the corresponding grouping expression or the alias assigned to that grouping expression.
+It is valid to call `lastof()` only within the body of a grouped database `for` loop. It must not be used in query expressions. The arguments passed to `lastof()` must identify the first grouping level, the first two grouping levels, and so on, in the same order as the enclosing `group by` clause. Each argument must be either the simple field reference from the corresponding grouping expression or the alias assigned to that grouping expression.
 
 ### `like(v: text!, pattern: text!): bool!`
 
 Returns `true` if `v` matches `pattern` according to Tablo's SQL-style wildcard matching rules. Otherwise returns `false`.
 
-**TODO**: Detail the exact wildcard syntax and escaping rules.
+As with SQL's `LIKE` syntax, `%` matches zero or more characters and `_` matches exactly one character. Matching is against the entire string rather than an arbitrary substring.
+
+The `\` character is used to escape wildcard characters within the pattern. Therefore `\%` matches a literal percent sign, `\_` matches a literal underscore, and `\\` matches a literal backslash.
 
 ### `text(v: bool): text`
 
