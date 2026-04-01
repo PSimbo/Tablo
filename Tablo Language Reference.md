@@ -449,6 +449,12 @@ obj CustomerCollection [
 
 Tablo supports bi-directional conversion between JSON data and objects.
 
+Internal fields are accessed using the `.` operator:
+
+~~~
+var addr1: text = locData.addressLines.line1;
+~~~
+
 Arrays
 ------
 
@@ -458,7 +464,38 @@ Tablo supports simple 1D arrays. For database backends that do not support array
 var array1d: int[] = [1, 2, 4, 8];
 ~~~
 
+Arrays are indexed with integer values where the and index of 1 corresponds to the first element in the array (i.e. one-based indexing is used).
+
 At present, there is no support for multi-dimensional arrays.
+
+Enumerations
+------------
+
+Tablo supports enumerations ("enums"). The enum may have a primitive type (excluding the `json` type) specified, in which case all variants within the enum share that same type. If not specified, an enum's type is `int!`.
+
+Unless the enum's type is `int!`, each variant must specify a corresponding value. Otherwise, some or all of the values may be omitted, in which case the variants are automatically assigned incrementing values relative to the nearest predecessor for which an explicit value is defined. If the first variant's value is not specified, it receives a value of 1. The variants are numbered in the order in which they are declared.
+
+~~~
+enum HttpResponseCode: int! {
+  Ok: 200,
+  Created,                     // 201
+  Accepted,                    // 202
+  NonAuthoritativeInformation, // 203
+  NoContent,                   // 204
+  BadRequest: 400,
+  Unauthorized,                // 401
+  PaymentRequired,             // 402
+  Forbidden,                   // 403
+  NotFound,                    // 404
+  ...
+}
+~~~
+
+Enum variants are accessed using the `.` operator:
+
+~~~
+var resp: HttpResponseCode = HttpResponseCode.Created;
+~~~
 
 Scopes
 ------
@@ -897,6 +934,10 @@ The function overload resolution process is as follows:
   * Any required parameter is left unbound after argument binding is complete
 4. If multiple candidate functions remain after binding and type-checking then the call is ambiguous and a compile error is produced.
 5. In the event of such an ambiguity, the caller may disambiguate the call by converting one or more positional arguments to named arguments.
+
+### Async Functions
+
+TODO
 
 Modules
 -------
