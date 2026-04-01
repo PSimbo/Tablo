@@ -684,7 +684,7 @@ When a `for` loop's loop variable is preceded by the `rec` keyword, the `for` lo
 In order to modify the database data via the loop variable, it must be marked as `mut`.
 
 ~~~
-for rec mut comp in tblCompanies where countryCode = "JP" {
+for rec mut comp in tblCompanies where countryCode = 'JP' {
   ...
 }
 ~~~
@@ -796,7 +796,7 @@ With the new record pointer, field values may be assigned as required. Finally, 
 
 ~~~
 rec mut newComp = new tblCompanies;
-newComp.name = "Acme Ltd.";
+newComp.name = 'Acme Ltd.';
 create newComp;
 ~~~
 
@@ -808,7 +808,7 @@ The `update` keyword is used to manually commit database changes via a mutable r
 
 ~~~
 rec mut loc = find first tblLocations where id = 101;
-loc.country = "AU";
+loc.country = 'AU';
 update loc;
 ~~~
 
