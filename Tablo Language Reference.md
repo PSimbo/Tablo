@@ -663,9 +663,9 @@ There are two valid ways to construct a record pointer. The first is with a data
 rec loc = find tblLocations where id = 42;
 
 rec mut comp = new tblCompanies;
-comp.name = "Acme Ltd.";
+comp.name = 'Acme Ltd.';
 comp.locationName = loc.name;
-comp.country = "SA";
+comp.country = 'SA';
 create comp;
 ~~~
 
