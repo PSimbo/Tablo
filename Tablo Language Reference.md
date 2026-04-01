@@ -461,7 +461,7 @@ Arrays
 Tablo supports simple 1D arrays. For database backends that do not support arrays (i.e. anything except PostgreSQL), arrays may be used but no attempt is made to add support for assigning array values to database fields.
 
 ~~~
-var array1d: int[] = [1, 2, 4, 8];
+var array1d: [int] = [1, 2, 4, 8];
 ~~~
 
 Arrays are indexed with integer values where the and index of 1 corresponds to the first element in the array (i.e. one-based indexing is used).
