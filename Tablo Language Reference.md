@@ -545,7 +545,7 @@ Tablo supports for loops. For loops always use the `in` operator where the right
 
 ~~~
 for i in 0...10 {
-    var fib: int[] = [1, 1, 2, 3, 5, 8];
+    var fib: [int] = [1, 1, 2, 3, 5, 8];
 
     for val in fib {
         ...
