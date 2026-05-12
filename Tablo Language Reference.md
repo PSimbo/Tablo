@@ -832,6 +832,49 @@ If a `delete` statement is used on a record pointer that doesn't exist or is loc
 
 Following a `delete` statement, the record pointer is no longer valid. Calling the `exists()` function on the record pointer returns `false`.
 
+Transactions
+------------
+
+Tablo supports explicit transaction blocks.
+
+A transaction groups a set of database changes into a single atomic unit. If the transaction completes successfully, all of its changes are committed. If it fails or is cancelled, all of its changes are rolled back.
+
+Each `transaction { ... }` block introduces a transaction boundary.
+
+If a `transaction { ... }` block is entered while no transaction is active, a new transaction begins.
+
+If a `transaction { ... }` block is entered while another transaction is already active, the inner block creates a nested rollback boundary within the enclosing transaction. If the inner block fails or is cancelled, changes made since entering the inner block are rolled back. If the inner block succeeds, its changes remain part of the enclosing transaction, but they are still rolled back if the enclosing transaction later fails.
+
+~~~
+transaction {
+  rec mut cust = find first tblCustomers where id = 42;
+  rec mut loc = find first tblLocations where id = cust.locationId;
+
+  if cust and loc {
+    cust.name = "Acme Ltd.";
+    loc.countryCode = "GB";
+  }
+}
+~~~
+
+In the example above, both database modifications are part of the same transaction.
+
+~~~
+transaction {
+  rec mut cust = find first tblCustomers where id = 42;
+
+  transaction {
+    if cust {
+      cust.name = "Acme Ltd.";
+    }
+  }
+}
+~~~
+
+In the example above, the inner `transaction` block creates a nested rollback boundary within the outer transaction. If the inner block fails, changes made within the inner block are rolled back. If it succeeds, its changes remain part of the outer transaction and may still be rolled back if the outer transaction later fails.
+
+TODO: Once error handling semantics have been designed, this section should be updated to describe how a programmer may choose to override the default behaviour where the failure of an inner transaction results in the failure of its enclosing transaction, such that the failure of the inner transaction may be ignored and the outer transaction may proceed.
+
 Functions
 ---------
 
@@ -937,7 +980,58 @@ The function overload resolution process is as follows:
 
 ### Async Functions
 
-TODO
+Tablo supports concurrency using the principles of structured concurrency.
+
+Functions are synchronous by default. Each function that supports being run asynchronously must be prefixed with the `async` keyword:
+
+~~~
+async fn LoadPosts(authorId: int!) [ForumPost]! {
+  ...
+}
+~~~
+
+Synchronous code may introduce a structured asynchronous scope using an `async { ... }` block:
+
+~~~
+var posts: [ForumPost]! = async {
+  var postsTask: task<[ForumPost]!> = LoadPosts(42);
+  return suspend postsTask;
+};
+~~~
+
+The `async { ... }` block is an explicit boundary between blocking code and concurrent code. Control does not leave the block until all child work started within the block has either completed or been cancelled.
+
+Within an asynchronous context, a plain call to an `async` function does not immediately suspend execution. Instead, it creates a child task and evaluates to a task handle. The type of such a handle is represented using a generic type such as `task<T>`, where `T` is the eventual result type.
+
+~~~
+async {
+  var postsTask: task<[ForumPost]!> = LoadPosts(42);
+  var usersTask: task<[User]!> = LoadUsers();
+
+  var posts: [ForumPost]! = suspend postsTask;
+  var users: [User]! = suspend usersTask;
+}
+~~~
+
+The `suspend` keyword marks a suspension point within an asynchronous context. It may be used with any expression that represents a valid suspension point. This makes suspension explicit at the point where execution may pause.
+
+It is possible to call an `async` function from a synchronous context. When doing so, the caller must use the `block` keyword:
+
+~~~
+var posts: [ForumPost]! = block LoadPosts(42);
+~~~
+
+Blocking execution of an `async` function behaves as though the function body were executed inside a fresh implicit structured `async` scope. Child tasks created within that call behave the same way as child tasks created within an explicit `async { ... }` block. Plain calls to `async` functions are therefore only valid within async contexts; synchronous code must use `block`.
+
+Structured asynchronous scopes wait for all child tasks to complete before exiting. If a scope is exited because of failure or cancellation, any unfinished child tasks are first cancelled and then awaited before control leaves the scope.
+
+Cancellation propagates downward through the task tree. Cancelling a task or scope recursively cancels all child tasks that were spawned within it.
+
+An unhandled error in a child task fails the enclosing structured asynchronous scope. When this occurs, sibling child tasks are cancelled, the scope waits for cancellation cleanup to complete, and the error then propagates to the parent scope. Runtime errors raised in concurrent code preserve a coherent logical call stack across suspension and resumption points, and runtime stack traces resemble those of synchronous code as closely as possible.
+
+If child tasks are spawned within a `transaction { ... }` block, they participate in the same enclosing transaction/savepoint tree rather than creating independent transaction contexts. If a child task within a transaction fails or is cancelled, the corresponding transaction scope fails and is rolled back in accordance with the normal transaction rules. The language guarantees the transactional semantics of concurrent work within a transaction, although implementations may serialize database operations within a shared transaction if required by the backend or runtime.
+
+Concurrent child tasks must not freely share ordinary mutable in-memory state. Immutable captured values may be shared across concurrent tasks. Shared mutable access to database data is permitted, subject to the locking and transaction semantics of the underlying database backend and the corresponding rules of Tablo record pointers and transactions.
 
 Modules
 -------
