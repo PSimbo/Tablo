@@ -1033,6 +1033,67 @@ If child tasks are spawned within a `transaction { ... }` block, they participat
 
 Concurrent child tasks must not freely share ordinary mutable in-memory state. Immutable captured values may be shared across concurrent tasks. Shared mutable access to database data is permitted, subject to the locking and transaction semantics of the underlying database backend and the corresponding rules of Tablo record pointers and transactions.
 
+Error Handling
+--------------
+
+Tablo supports structured error handling using `try`, `catch`, and `finally` blocks.
+
+Within a function, the `fail` keyword exits the current function by throwing an error. Unless the error is caught by a surrounding `try` / `catch` block, it continues to propagate outward until it reaches a caller or terminates execution.
+
+~~~
+fn UpdateCustomer(id: int!, name: text!) void {
+  if name == '' {
+    fail 'Customer name must not be empty.';
+  }
+
+  rec mut cust = find first tblCustomers where id = id;
+
+  if not cust {
+    fail 'Customer not found.';
+  }
+
+  cust.name = name;
+}
+~~~
+
+A `try` block is used to execute code that may fail. One or more `catch` blocks may follow it in order to handle failures. An optional `finally` block may be used to execute cleanup code regardless of whether execution completed successfully or because of a failure.
+
+~~~
+try {
+  UpdateCustomer(42, 'Acme Ltd.');
+}
+catch {
+  ...
+}
+finally {
+  ...
+}
+~~~
+
+If a failure occurs within the `try` block, normal execution of that block stops and the first matching `catch` block is executed. If no `catch` block is present, or no `catch` block handles the failure, the failure continues to propagate after the `finally` block has executed.
+
+The `finally` block is always executed after the `try` block and any associated `catch` block, regardless of whether a failure occurred.
+
+~~~
+try {
+  transaction {
+    rec mut cust = find first tblCustomers where id = 42;
+
+    if cust {
+      cust.name = 'Acme Ltd.';
+    }
+    else {
+      fail 'Customer not found.';
+    }
+  }
+}
+catch {
+  // Handle the failure. The transaction has already been rolled back.
+}
+~~~
+
+If a failure causes control to leave a `transaction { ... }` block, the transaction is rolled back in accordance with the transaction rules described earlier in this document. Similarly, if a failure occurs within a structured async scope, it is handled in accordance with the async error propagation rules.
+
 Modules
 -------
 
