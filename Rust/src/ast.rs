@@ -14,6 +14,12 @@ pub enum Expr {
 	Integer(IntegerLiteral),
 	Decimal(DecimalLiteral),
 	Binary(BinaryExpr),
+	Unary(UnaryExpr),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnaryOperator {
+	Negate,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -31,4 +37,10 @@ pub struct DecimalLiteral {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IntegerLiteral {
 	pub value: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnaryExpr {
+	pub operand: Box<Expr>,
+	pub operator: UnaryOperator,
 }

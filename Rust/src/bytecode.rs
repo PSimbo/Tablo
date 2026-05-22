@@ -6,6 +6,7 @@ pub enum Instruction {
 	Divide,
 	Modulo,
 	Multiply,
+	Negate,
 	PushDecimal(Decimal),
 	PushInteger(i64),
 	Subtract,

@@ -3,6 +3,8 @@ use crate::ast::BinaryOperator;
 use crate::ast::DecimalLiteral;
 use crate::ast::Expr;
 use crate::ast::IntegerLiteral;
+use crate::ast::UnaryExpr;
+use crate::ast::UnaryOperator;
 use crate::value::Decimal;
 
 use super::token::Token;
@@ -20,6 +22,7 @@ enum BindingPower {
 	Default,
 	Additive,
 	Multiplicative,
+	Unary,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -183,6 +186,15 @@ impl Parser {
 		}))
 	}
 
+	fn parse_negation_expression(&mut self) -> Result<Expr, ParseError> {
+		let operand = self.parse_expression_with_binding_power(BindingPower::Unary)?;
+
+		Ok(Expr::Unary(UnaryExpr {
+			operand: Box::new(operand),
+			operator: UnaryOperator::Negate,
+		}))
+	}
+
 	fn parse_prefix(&mut self) -> Result<Expr, ParseError> {
 		let token = self.next().ok_or(ParseError {
 			message: String::from("Expected an expression."),
@@ -190,6 +202,7 @@ impl Parser {
 		})?;
 
 		match token.kind {
+			TokenKind::Dash => self.parse_negation_expression(),
 			TokenKind::DecimalLiteral => self.parse_decimal_literal(token),
 			TokenKind::IntegerLiteral => self.parse_integer_literal(token),
 			TokenKind::LeftParenthesis => self.parse_group_expression(token.start),
@@ -212,6 +225,8 @@ mod tests {
 	use crate::ast::DecimalLiteral;
 	use crate::ast::Expr;
 	use crate::ast::IntegerLiteral;
+	use crate::ast::UnaryExpr;
+	use crate::ast::UnaryOperator;
 	use crate::source::SourceText;
 	use crate::value::Decimal;
 
@@ -326,6 +341,38 @@ mod tests {
 					right: Box::new(Expr::Integer(IntegerLiteral {
 						value: 3,
 					})),
+				})),
+			})
+		);
+	}
+
+	#[test]
+	fn parses_unary_negation() {
+		assert_eq!(
+			parse("-42"),
+			Expr::Unary(UnaryExpr {
+				operand: Box::new(Expr::Integer(IntegerLiteral {
+					value: 42,
+				})),
+				operator: UnaryOperator::Negate,
+			})
+		);
+	}
+
+	#[test]
+	fn parses_unary_negation_before_multiplication() {
+		assert_eq!(
+			parse("-2 * 3"),
+			Expr::Binary(BinaryExpr {
+				left: Box::new(Expr::Unary(UnaryExpr {
+					operand: Box::new(Expr::Integer(IntegerLiteral {
+						value: 2,
+					})),
+					operator: UnaryOperator::Negate,
+				})),
+				operator: BinaryOperator::Multiply,
+				right: Box::new(Expr::Integer(IntegerLiteral {
+					value: 3,
 				})),
 			})
 		);

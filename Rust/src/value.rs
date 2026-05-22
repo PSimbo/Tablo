@@ -104,6 +104,11 @@ impl Decimal {
 		})
 	}
 
+	pub fn negated(mut self) -> Self {
+		self.coefficient = self.coefficient.saturating_neg();
+		self
+	}
+
 	pub fn to_scale_with_precision(&self, precision: u8, scale: u8) -> Result<Self, String> {
 		let whole_digits = precision.checked_sub(scale).ok_or(String::from("Invalid decimal precision and scale."))?;
 		let current_whole_digits = self.whole_digits();
@@ -213,10 +218,26 @@ mod tests {
 	use super::Decimal;
 
 	#[test]
+	fn accepts_38_digit_decimal_literal() {
+		let decimal = Decimal::from_literal("3.1415926535897932384626433832795028841").unwrap();
+
+		assert_eq!(decimal.precision, 38);
+		assert_eq!(decimal.scale, 37);
+		assert_eq!(decimal.to_string(), "3.1415926535897932384626433832795028841");
+	}
+
+	#[test]
 	fn formats_decimal_with_scale() {
 		let decimal = Decimal::from_literal("1.20").unwrap();
 
 		assert_eq!(decimal.to_string(), "1.20");
+	}
+
+	#[test]
+	fn negates_decimal() {
+		let decimal = Decimal::from_literal("1.25").unwrap().negated();
+
+		assert_eq!(decimal.to_string(), "-1.25");
 	}
 
 	#[test]
@@ -226,5 +247,12 @@ mod tests {
 		assert_eq!(decimal.coefficient, 50);
 		assert_eq!(decimal.precision, 3);
 		assert_eq!(decimal.scale, 2);
+	}
+
+	#[test]
+	fn rejects_39_digit_decimal_literal() {
+		let error = Decimal::from_literal("3.14159265358979323846264338327950288415").unwrap_err();
+
+		assert_eq!(error, "Decimal literal `3.14159265358979323846264338327950288415` exceeds the supported precision.");
 	}
 }

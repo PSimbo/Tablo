@@ -33,30 +33,10 @@ impl VirtualMachine {
 
 	fn execute_instruction(&mut self, instruction: &Instruction, instruction_index: usize) -> Result<(), VmError> {
 		match instruction {
-			Instruction::PushDecimal(value) => {
-				self.stack.push(Value::Decimal(value.clone()));
-				Ok(())
-			}
-			Instruction::PushInteger(value) => {
-				self.stack.push(Value::Integer(*value));
-				Ok(())
-			}
 			Instruction::Add => {
 				let rhs = self.pop_numeric(instruction_index)?;
 				let lhs = self.pop_numeric(instruction_index)?;
 				self.stack.push(add_values(lhs, rhs, instruction_index)?);
-				Ok(())
-			}
-			Instruction::Subtract => {
-				let rhs = self.pop_numeric(instruction_index)?;
-				let lhs = self.pop_numeric(instruction_index)?;
-				self.stack.push(subtract_values(lhs, rhs, instruction_index)?);
-				Ok(())
-			}
-			Instruction::Multiply => {
-				let rhs = self.pop_numeric(instruction_index)?;
-				let lhs = self.pop_numeric(instruction_index)?;
-				self.stack.push(multiply_values(lhs, rhs, instruction_index)?);
 				Ok(())
 			}
 			Instruction::Divide => {
@@ -69,6 +49,31 @@ impl VirtualMachine {
 				let rhs = self.pop_numeric(instruction_index)?;
 				let lhs = self.pop_numeric(instruction_index)?;
 				self.stack.push(modulo_values(lhs, rhs, instruction_index)?);
+				Ok(())
+			}
+			Instruction::Multiply => {
+				let rhs = self.pop_numeric(instruction_index)?;
+				let lhs = self.pop_numeric(instruction_index)?;
+				self.stack.push(multiply_values(lhs, rhs, instruction_index)?);
+				Ok(())
+			}
+			Instruction::Negate => {
+				let value = self.pop_numeric(instruction_index)?;
+				self.stack.push(negate_value(value));
+				Ok(())
+			}
+			Instruction::PushDecimal(value) => {
+				self.stack.push(Value::Decimal(value.clone()));
+				Ok(())
+			}
+			Instruction::PushInteger(value) => {
+				self.stack.push(Value::Integer(*value));
+				Ok(())
+			}
+			Instruction::Subtract => {
+				let rhs = self.pop_numeric(instruction_index)?;
+				let lhs = self.pop_numeric(instruction_index)?;
+				self.stack.push(subtract_values(lhs, rhs, instruction_index)?);
 				Ok(())
 			}
 		}
@@ -154,6 +159,16 @@ fn multiply_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<V
 			let (lhs, rhs) = coerce_numeric_values(lhs, rhs, instruction_index)?;
 			Ok(Value::Decimal(lhs.checked_mul(&rhs).map_err(|message| vm_error(instruction_index, message))?))
 		}
+	}
+}
+
+fn negate_value(value: Value) -> Value {
+	match value {
+		Value::Decimal(mut decimal) => {
+			decimal.coefficient = decimal.coefficient.saturating_neg();
+			Value::Decimal(decimal)
+		}
+		Value::Integer(integer) => Value::Integer(integer.saturating_neg()),
 	}
 }
 
@@ -296,5 +311,29 @@ mod tests {
 		let result = VirtualMachine::new().run(&program).unwrap();
 
 		assert_eq!(result, Some(Value::Decimal(Decimal::from_literal("3.25").unwrap())));
+	}
+
+	#[test]
+	fn runs_unary_negation_for_integer() {
+		let program = Program::new(vec![
+			Instruction::PushInteger(42),
+			Instruction::Negate,
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(-42)));
+	}
+
+	#[test]
+	fn runs_unary_negation_for_decimal() {
+		let program = Program::new(vec![
+			Instruction::PushDecimal(Decimal::from_literal("1.25").unwrap()),
+			Instruction::Negate,
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Decimal(Decimal::from_literal("1.25").unwrap().negated())));
 	}
 }

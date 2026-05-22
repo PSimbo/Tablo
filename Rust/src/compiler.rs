@@ -1,6 +1,8 @@
 use crate::ast::BinaryOperator;
 use crate::ast::DecimalLiteral;
 use crate::ast::Expr;
+use crate::ast::UnaryExpr;
+use crate::ast::UnaryOperator;
 use crate::bytecode::Instruction;
 use crate::bytecode::Program;
 
@@ -40,6 +42,13 @@ impl Compiler {
 					BinaryOperator::Subtract => instructions.push(Instruction::Subtract),
 				}
 			}
+			Expr::Unary(UnaryExpr { operand, operator }) => {
+				self.compile_into(operand, instructions);
+
+				match operator {
+					UnaryOperator::Negate => instructions.push(Instruction::Negate),
+				}
+			}
 		}
 	}
 }
@@ -51,6 +60,8 @@ mod tests {
 	use crate::ast::DecimalLiteral;
 	use crate::ast::Expr;
 	use crate::ast::IntegerLiteral;
+	use crate::ast::UnaryExpr;
+	use crate::ast::UnaryOperator;
 	use crate::bytecode::Instruction;
 	use crate::value::Decimal;
 
@@ -137,6 +148,23 @@ mod tests {
 			Instruction::PushInteger(2),
 			Instruction::Multiply,
 			Instruction::Subtract,
+		]);
+	}
+
+	#[test]
+	fn compiles_unary_negation() {
+		let expression = Expr::Unary(UnaryExpr {
+			operand: Box::new(Expr::Integer(IntegerLiteral {
+				value: 42,
+			})),
+			operator: UnaryOperator::Negate,
+		});
+
+		let program = Compiler::new().compile_expression(&expression);
+
+		assert_eq!(program.instructions, vec![
+			Instruction::PushInteger(42),
+			Instruction::Negate,
 		]);
 	}
 }

@@ -102,6 +102,16 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_39_digit_decimal_source_text() {
+		let error = run("3.14159265358979323846264338327950288415").unwrap_err();
+
+		assert_eq!(error, TabloError::Parse(crate::syntax::parser::ParseError {
+			position: 0,
+			message: String::from("Decimal literal `3.14159265358979323846264338327950288415` exceeds the supported precision."),
+		}));
+	}
+
+	#[test]
 	fn returns_lex_error_from_single_call_api() {
 		let error = run("1 ? 2").unwrap_err();
 
@@ -109,6 +119,15 @@ mod tests {
 			position: 2,
 			message: String::from("Unexpected character `?`."),
 		}));
+	}
+
+	#[test]
+	fn runs_38_digit_decimal_literal() {
+		let result = run("3.1415926535897932384626433832795028841").unwrap();
+
+		assert_eq!(result, Some(Value::Decimal(
+			crate::value::Decimal::from_literal("3.1415926535897932384626433832795028841").unwrap()
+		)));
 	}
 
 	#[test]
@@ -156,6 +175,20 @@ mod tests {
 		let result = run("1 + 2 + 3").unwrap();
 
 		assert_eq!(result, Some(Value::Integer(6)));
+	}
+
+	#[test]
+	fn runs_unary_negated_decimal_source_text() {
+		let result = run("-1.25").unwrap();
+
+		assert_eq!(result, Some(Value::Decimal(crate::value::Decimal::from_literal("1.25").unwrap().negated())));
+	}
+
+	#[test]
+	fn runs_unary_negated_integer_source_text() {
+		let result = run("-42").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(-42)));
 	}
 
 	fn unique_test_output_path(test_name: &str) -> PathBuf {

@@ -13,6 +13,7 @@ const OPCODE_MULTIPLY: u8 = 4;
 const OPCODE_PUSH_DECIMAL: u8 = 5;
 const OPCODE_PUSH_INTEGER: u8 = 6;
 const OPCODE_SUBTRACT: u8 = 7;
+const OPCODE_NEGATE: u8 = 8;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectFileError {
@@ -65,6 +66,7 @@ pub fn write_program(program: &Program) -> Vec<u8> {
 			Instruction::Divide => bytes.push(OPCODE_DIVIDE),
 			Instruction::Modulo => bytes.push(OPCODE_MODULO),
 			Instruction::Multiply => bytes.push(OPCODE_MULTIPLY),
+			Instruction::Negate => bytes.push(OPCODE_NEGATE),
 			Instruction::PushDecimal(value) => {
 				bytes.push(OPCODE_PUSH_DECIMAL);
 				bytes.extend_from_slice(&value.coefficient.to_le_bytes());
@@ -158,6 +160,7 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_DIVIDE => Ok(Instruction::Divide),
 			OPCODE_MODULO => Ok(Instruction::Modulo),
 			OPCODE_MULTIPLY => Ok(Instruction::Multiply),
+			OPCODE_NEGATE => Ok(Instruction::Negate),
 			OPCODE_PUSH_DECIMAL => Ok(Instruction::PushDecimal(self.read_decimal()?)),
 			OPCODE_PUSH_INTEGER => Ok(Instruction::PushInteger(self.read_i64()?)),
 			OPCODE_SUBTRACT => Ok(Instruction::Subtract),
