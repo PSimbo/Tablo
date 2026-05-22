@@ -61,65 +61,30 @@ impl Lexer {
 			}));
 		}
 
-		if next == '+' {
-			self.advance_char();
+		let token_kind = match next {
+			'+' => TokenKind::Plus,
+			'-' => TokenKind::Dash,
+			'*' => TokenKind::Asterisk,
+			'/' => TokenKind::ForwardSlash,
+			'%' => TokenKind::Percent,
+			'(' => TokenKind::LeftParenthesis,
+			')' => TokenKind::RightParenthesis,
+			_ => {
+				return Err(LexError {
+					position: self.position,
+					message: format!("Unexpected character `{next}`."),
+				});
+			}
+		};
 
-			return Ok(Some(Token {
-				end: self.position,
-				kind: TokenKind::Plus,
-				lexeme: String::from("+"),
-				start,
-			}));
-		}
+		self.advance_char();
 
-		if next == '-' {
-			self.advance_char();
-
-			return Ok(Some(Token {
-				end: self.position,
-				kind: TokenKind::Dash,
-				lexeme: String::from("-"),
-				start,
-			}));
-		}
-
-		if next == '*' {
-			self.advance_char();
-
-			return Ok(Some(Token {
-				end: self.position,
-				kind: TokenKind::Asterisk,
-				lexeme: String::from("*"),
-				start,
-			}));
-		}
-
-		if next == '/' {
-			self.advance_char();
-
-			return Ok(Some(Token {
-				end: self.position,
-				kind: TokenKind::ForwardSlash,
-				lexeme: String::from("/"),
-				start,
-			}));
-		}
-
-		if next == '%' {
-			self.advance_char();
-
-			return Ok(Some(Token {
-				end: self.position,
-				kind: TokenKind::Percent,
-				lexeme: String::from("%"),
-				start,
-			}));
-		}
-
-		Err(LexError {
-			position: self.position,
-			message: format!("Unexpected character `{next}`."),
-		})
+		Ok(Some(Token {
+			end: self.position,
+			kind: token_kind,
+			lexeme: next.to_string(),
+			start,
+		}))
 	}
 
 	pub fn tokenize(&mut self) -> Result<Vec<Token>, LexError> {
@@ -223,6 +188,20 @@ mod tests {
 		assert_eq!(tokens[9].kind, TokenKind::Plus);
 		assert_eq!(tokens[10].kind, TokenKind::IntegerLiteral);
 		assert_eq!(tokens[11].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
+	fn tokenizes_parentheses() {
+		let mut lexer = Lexer::new(SourceText::new("(1 + 2)"));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens.len(), 6);
+		assert_eq!(tokens[0].kind, TokenKind::LeftParenthesis);
+		assert_eq!(tokens[1].kind, TokenKind::IntegerLiteral);
+		assert_eq!(tokens[2].kind, TokenKind::Plus);
+		assert_eq!(tokens[3].kind, TokenKind::IntegerLiteral);
+		assert_eq!(tokens[4].kind, TokenKind::RightParenthesis);
+		assert_eq!(tokens[5].kind, TokenKind::EndOfFile);
 	}
 
 	#[test]

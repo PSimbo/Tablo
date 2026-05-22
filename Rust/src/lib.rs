@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::fmt::Display;
 
 pub mod ast;
 pub mod bytecode;
@@ -11,6 +12,7 @@ pub mod vm;
 
 use bytecode::Program;
 use compiler::Compiler;
+use object_file::read_program_from_path;
 use object_file::ObjectFileError;
 use object_file::write_program_to_path;
 use source::SourceText;
@@ -30,6 +32,17 @@ pub enum TabloError {
 	Runtime(VmError),
 }
 
+impl Display for TabloError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			TabloError::Lex(error) => write!(f, "Lex error at byte {}: {}", error.position, error.message),
+			TabloError::ObjectFile(error) => write!(f, "Object file error at byte {}: {}", error.offset, error.message),
+			TabloError::Parse(error) => write!(f, "Parse error at byte {}: {}", error.position, error.message),
+			TabloError::Runtime(error) => write!(f, "Runtime error at instruction {}: {}", error.instruction_index, error.message),
+		}
+	}
+}
+
 pub fn compile(source: impl Into<String>, output_path: impl AsRef<Path>) -> Result<(), TabloError> {
 	let program = compile_to_program(source)?;
 	write_program_to_path(output_path, &program).map_err(TabloError::ObjectFile)
@@ -37,8 +50,17 @@ pub fn compile(source: impl Into<String>, output_path: impl AsRef<Path>) -> Resu
 
 pub fn run(source: impl Into<String>) -> Result<Option<Value>, TabloError> {
 	let program = compile_to_program(source)?;
+	run_program(&program)
+}
+
+pub fn run_program(program: &Program) -> Result<Option<Value>, TabloError> {
 	let mut vm = VirtualMachine::new();
 	vm.run(&program).map_err(TabloError::Runtime)
+}
+
+pub fn run_file(path: impl AsRef<Path>) -> Result<Option<Value>, TabloError> {
+	let program = read_program_from_path(path).map_err(TabloError::ObjectFile)?;
+	run_program(&program)
 }
 
 fn compile_to_program(source: impl Into<String>) -> Result<Program, TabloError> {
@@ -60,6 +82,8 @@ mod tests {
 	use crate::value::Value;
 
 	use super::compile;
+	use super::run_file;
+	use super::run_program;
 	use super::run;
 	use super::TabloError;
 
@@ -82,6 +106,29 @@ mod tests {
 		let result = run("1 + 2 + 3").unwrap();
 
 		assert_eq!(result, Some(Value::Integer(6)));
+	}
+
+	#[test]
+	fn runs_program() {
+		let program = crate::bytecode::Program::new(vec![
+			Instruction::PushInteger(7),
+			Instruction::PushInteger(5),
+			Instruction::Subtract,
+		]);
+
+		let result = run_program(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(2)));
+	}
+
+	#[test]
+	fn runs_object_file() {
+		let output_path = unique_test_output_path("runs_object_file");
+		compile("8 / 2", &output_path).unwrap();
+		let result = run_file(&output_path).unwrap();
+		let _ = std::fs::remove_file(&output_path);
+
+		assert_eq!(result, Some(Value::Integer(4)));
 	}
 
 	#[test]

@@ -87,6 +87,23 @@ impl Parser {
 		Ok(left)
 	}
 
+	fn parse_group_expression(&mut self, start: usize) -> Result<Expr, ParseError> {
+		let expression = self.parse_expression_with_binding_power(BindingPower::Default)?;
+		let closing = self.next().ok_or(ParseError {
+			message: String::from("Expected `)` to close grouped expression."),
+			position: start,
+		})?;
+
+		if closing.kind != TokenKind::RightParenthesis {
+			return Err(ParseError {
+				message: format!("Expected `)` to close grouped expression, found `{}`.", closing.lexeme),
+				position: closing.start,
+			});
+		}
+
+		Ok(expression)
+	}
+
 	fn parse_infix(&mut self, left: Expr, operator: Token, binding_power: BindingPower) -> Result<Expr, ParseError> {
 		match operator.kind {
 			TokenKind::Asterisk => {
@@ -161,6 +178,7 @@ impl Parser {
 
 		match token.kind {
 			TokenKind::IntegerLiteral => self.parse_integer_literal(token),
+			TokenKind::LeftParenthesis => self.parse_group_expression(token.start),
 			TokenKind::EndOfFile => Err(ParseError {
 				message: String::from("Expected an expression."),
 				position: token.start,
@@ -189,6 +207,28 @@ mod tests {
 		let tokens = lexer.tokenize().unwrap();
 		let mut parser = Parser::new(tokens);
 		parser.parse_expression().unwrap()
+	}
+
+	#[test]
+	fn parses_grouped_expression() {
+		assert_eq!(
+			parse("(1 + 2) * 3"),
+			Expr::Binary(BinaryExpr {
+				left: Box::new(Expr::Binary(BinaryExpr {
+					left: Box::new(Expr::Integer(IntegerLiteral {
+						value: 1,
+					})),
+					operator: BinaryOperator::Add,
+					right: Box::new(Expr::Integer(IntegerLiteral {
+						value: 2,
+					})),
+				})),
+				operator: BinaryOperator::Multiply,
+				right: Box::new(Expr::Integer(IntegerLiteral {
+					value: 3,
+				})),
+			})
+		);
 	}
 
 	#[test]
@@ -263,6 +303,17 @@ mod tests {
 				})),
 			})
 		);
+	}
+
+	#[test]
+	fn rejects_missing_closing_parenthesis() {
+		let mut lexer = Lexer::new(SourceText::new("(1 + 2"));
+		let tokens = lexer.tokenize().unwrap();
+		let mut parser = Parser::new(tokens);
+		let error = parser.parse_expression().unwrap_err();
+
+		assert_eq!(error.message, "Expected `)` to close grouped expression, found ``.");
+		assert_eq!(error.position, 6);
 	}
 
 	#[test]

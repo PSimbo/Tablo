@@ -5,8 +5,10 @@ pub enum TokenKind {
 	EndOfFile,
 	ForwardSlash,
 	IntegerLiteral,
+	LeftParenthesis,
 	Percent,
 	Plus,
+	RightParenthesis,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
