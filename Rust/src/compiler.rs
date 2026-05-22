@@ -1,4 +1,5 @@
 use crate::ast::BinaryOperator;
+use crate::ast::DecimalLiteral;
 use crate::ast::Expr;
 use crate::bytecode::Instruction;
 use crate::bytecode::Program;
@@ -21,6 +22,9 @@ impl Compiler {
 		let _ = self;
 
 		match expression {
+			Expr::Decimal(DecimalLiteral { value }) => {
+				instructions.push(Instruction::PushDecimal(value.clone()));
+			}
 			Expr::Integer(integer) => {
 				instructions.push(Instruction::PushInteger(integer.value));
 			}
@@ -44,24 +48,13 @@ impl Compiler {
 mod tests {
 	use crate::ast::BinaryExpr;
 	use crate::ast::BinaryOperator;
+	use crate::ast::DecimalLiteral;
 	use crate::ast::Expr;
 	use crate::ast::IntegerLiteral;
 	use crate::bytecode::Instruction;
+	use crate::value::Decimal;
 
 	use super::Compiler;
-
-	#[test]
-	fn compiles_integer_literal() {
-		let expression = Expr::Integer(IntegerLiteral {
-			value: 42,
-		});
-
-		let program = Compiler::new().compile_expression(&expression);
-
-		assert_eq!(program.instructions, vec![
-			Instruction::PushInteger(42),
-		]);
-	}
 
 	#[test]
 	fn compiles_addition_in_post_order() {
@@ -89,6 +82,32 @@ mod tests {
 			Instruction::PushInteger(3),
 			Instruction::Add,
 			Instruction::Add,
+		]);
+	}
+
+	#[test]
+	fn compiles_decimal_literal() {
+		let expression = Expr::Decimal(DecimalLiteral {
+			value: Decimal::from_literal("1.25").unwrap(),
+		});
+
+		let program = Compiler::new().compile_expression(&expression);
+
+		assert_eq!(program.instructions, vec![
+			Instruction::PushDecimal(Decimal::from_literal("1.25").unwrap()),
+		]);
+	}
+
+	#[test]
+	fn compiles_integer_literal() {
+		let expression = Expr::Integer(IntegerLiteral {
+			value: 42,
+		});
+
+		let program = Compiler::new().compile_expression(&expression);
+
+		assert_eq!(program.instructions, vec![
+			Instruction::PushInteger(42),
 		]);
 	}
 

@@ -50,12 +50,24 @@ impl Lexer {
 		let next = self.peek_char().unwrap();
 
 		if next.is_ascii_digit() {
-			let lexeme = self.lex_integer_literal();
+			let (kind, lexeme) = self.lex_numeric_literal(false);
 			let end = self.position;
 
 			return Ok(Some(Token {
 				end,
-				kind: TokenKind::IntegerLiteral,
+				kind,
+				lexeme,
+				start,
+			}));
+		}
+
+		if next == '.' && self.peek_next_char().is_some_and(|c| c.is_ascii_digit()) {
+			let (kind, lexeme) = self.lex_numeric_literal(true);
+			let end = self.position;
+
+			return Ok(Some(Token {
+				end,
+				kind,
 				lexeme,
 				start,
 			}));
@@ -108,8 +120,7 @@ impl Lexer {
 		Some(next)
 	}
 
-	fn lex_integer_literal(&mut self) -> String {
-		let start = self.position;
+	fn lex_digit_sequence(&mut self) {
 		let mut previous_was_underscore = false;
 
 		while let Some(next) = self.peek_char() {
@@ -127,8 +138,26 @@ impl Lexer {
 
 			break;
 		}
+	}
 
-		self.source.as_str()[start..self.position].to_string()
+	fn lex_numeric_literal(&mut self, starts_with_decimal_separator: bool) -> (TokenKind, String) {
+		let start = self.position;
+
+		if starts_with_decimal_separator {
+			self.advance_char();
+			self.lex_digit_sequence();
+			return (TokenKind::DecimalLiteral, self.source.as_str()[start..self.position].to_string());
+		}
+
+		self.lex_digit_sequence();
+
+		if self.peek_char() == Some('.') && self.peek_next_char().is_some_and(|c| c.is_ascii_digit()) {
+			self.advance_char();
+			self.lex_digit_sequence();
+			return (TokenKind::DecimalLiteral, self.source.as_str()[start..self.position].to_string());
+		}
+
+		(TokenKind::IntegerLiteral, self.source.as_str()[start..self.position].to_string())
 	}
 
 	fn peek_char(&self) -> Option<char> {
@@ -156,21 +185,6 @@ mod tests {
 	use super::TokenKind;
 
 	#[test]
-	fn tokenizes_integer_addition_expression() {
-		let mut lexer = Lexer::new(SourceText::new("1 + 2"));
-		let tokens = lexer.tokenize().unwrap();
-
-		assert_eq!(tokens.len(), 4);
-		assert_eq!(tokens[0].kind, TokenKind::IntegerLiteral);
-		assert_eq!(tokens[0].lexeme, "1");
-		assert_eq!(tokens[1].kind, TokenKind::Plus);
-		assert_eq!(tokens[1].lexeme, "+");
-		assert_eq!(tokens[2].kind, TokenKind::IntegerLiteral);
-		assert_eq!(tokens[2].lexeme, "2");
-		assert_eq!(tokens[3].kind, TokenKind::EndOfFile);
-	}
-
-	#[test]
 	fn tokenizes_all_supported_arithmetic_operators() {
 		let mut lexer = Lexer::new(SourceText::new("1 - 2 * 3 / 4 % 5 + 6"));
 		let tokens = lexer.tokenize().unwrap();
@@ -191,17 +205,32 @@ mod tests {
 	}
 
 	#[test]
-	fn tokenizes_parentheses() {
-		let mut lexer = Lexer::new(SourceText::new("(1 + 2)"));
+	fn tokenizes_decimal_literals() {
+		let mut lexer = Lexer::new(SourceText::new("1.25 + .5"));
 		let tokens = lexer.tokenize().unwrap();
 
-		assert_eq!(tokens.len(), 6);
-		assert_eq!(tokens[0].kind, TokenKind::LeftParenthesis);
-		assert_eq!(tokens[1].kind, TokenKind::IntegerLiteral);
-		assert_eq!(tokens[2].kind, TokenKind::Plus);
-		assert_eq!(tokens[3].kind, TokenKind::IntegerLiteral);
-		assert_eq!(tokens[4].kind, TokenKind::RightParenthesis);
-		assert_eq!(tokens[5].kind, TokenKind::EndOfFile);
+		assert_eq!(tokens.len(), 4);
+		assert_eq!(tokens[0].kind, TokenKind::DecimalLiteral);
+		assert_eq!(tokens[0].lexeme, "1.25");
+		assert_eq!(tokens[1].kind, TokenKind::Plus);
+		assert_eq!(tokens[2].kind, TokenKind::DecimalLiteral);
+		assert_eq!(tokens[2].lexeme, ".5");
+		assert_eq!(tokens[3].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
+	fn tokenizes_integer_addition_expression() {
+		let mut lexer = Lexer::new(SourceText::new("1 + 2"));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens.len(), 4);
+		assert_eq!(tokens[0].kind, TokenKind::IntegerLiteral);
+		assert_eq!(tokens[0].lexeme, "1");
+		assert_eq!(tokens[1].kind, TokenKind::Plus);
+		assert_eq!(tokens[1].lexeme, "+");
+		assert_eq!(tokens[2].kind, TokenKind::IntegerLiteral);
+		assert_eq!(tokens[2].lexeme, "2");
+		assert_eq!(tokens[3].kind, TokenKind::EndOfFile);
 	}
 
 	#[test]
@@ -213,6 +242,56 @@ mod tests {
 		assert_eq!(tokens[0].kind, TokenKind::IntegerLiteral);
 		assert_eq!(tokens[0].lexeme, "1_234");
 		assert_eq!(tokens[1].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
+	fn tokenizes_negative_decimal_literal_as_dash_then_decimal_literal() {
+		let mut lexer = Lexer::new(SourceText::new("-1.25 + -.5"));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens.len(), 6);
+		assert_eq!(tokens[0].kind, TokenKind::Dash);
+		assert_eq!(tokens[0].lexeme, "-");
+		assert_eq!(tokens[1].kind, TokenKind::DecimalLiteral);
+		assert_eq!(tokens[1].lexeme, "1.25");
+		assert_eq!(tokens[2].kind, TokenKind::Plus);
+		assert_eq!(tokens[3].kind, TokenKind::Dash);
+		assert_eq!(tokens[3].lexeme, "-");
+		assert_eq!(tokens[4].kind, TokenKind::DecimalLiteral);
+		assert_eq!(tokens[4].lexeme, ".5");
+		assert_eq!(tokens[5].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
+	fn tokenizes_negative_integer_literal_as_dash_then_integer_literal() {
+		let mut lexer = Lexer::new(SourceText::new("-123 + -4_567"));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens.len(), 6);
+		assert_eq!(tokens[0].kind, TokenKind::Dash);
+		assert_eq!(tokens[0].lexeme, "-");
+		assert_eq!(tokens[1].kind, TokenKind::IntegerLiteral);
+		assert_eq!(tokens[1].lexeme, "123");
+		assert_eq!(tokens[2].kind, TokenKind::Plus);
+		assert_eq!(tokens[3].kind, TokenKind::Dash);
+		assert_eq!(tokens[3].lexeme, "-");
+		assert_eq!(tokens[4].kind, TokenKind::IntegerLiteral);
+		assert_eq!(tokens[4].lexeme, "4_567");
+		assert_eq!(tokens[5].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
+	fn tokenizes_parentheses() {
+		let mut lexer = Lexer::new(SourceText::new("(1 + 2)"));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens.len(), 6);
+		assert_eq!(tokens[0].kind, TokenKind::LeftParenthesis);
+		assert_eq!(tokens[1].kind, TokenKind::IntegerLiteral);
+		assert_eq!(tokens[2].kind, TokenKind::Plus);
+		assert_eq!(tokens[3].kind, TokenKind::IntegerLiteral);
+		assert_eq!(tokens[4].kind, TokenKind::RightParenthesis);
+		assert_eq!(tokens[5].kind, TokenKind::EndOfFile);
 	}
 
 	#[test]

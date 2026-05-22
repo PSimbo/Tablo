@@ -2,6 +2,7 @@
 pub enum TokenKind {
 	Asterisk,
 	Dash,
+	DecimalLiteral,
 	EndOfFile,
 	ForwardSlash,
 	IntegerLiteral,

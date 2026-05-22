@@ -131,7 +131,11 @@ Note that there are no separate types for `float`s and `int`s of different byte 
 
 Likewise, due to limited support in backend databases, Tablo does not have a dedicated type for unsigned integers.
 
-Decimals that are read from a database field internally store the precision and scale of field. Uninitialized variables of type `dec` default to a precision of 7 and a scale of 2. Binary operators involving two decimals will typically produce a `dec` value whose precision and scale are such that the number of whole digits (precision minus scale) and the number of fractional digits are both the maxima of those for the operands. For example, multiply a decimal with precision 5 and scale 6 (-1 whole digits) with a decimal with precision 7 and scale 3 (4 whole digits) results in a decimal with precision 10 and scale 6 (4 whole digits). If a `dec` is assigned to a database field that lacks the range to store the value, the assigned value is clamped to the supported range. If the database field lacks the precision to store the value, the assigned value is truncated to the supported precision.
+Decimal values internally store an exact decimal number together with a precision and scale. Decimal values are not floating-point approximations.
+
+Decimals that are read from a database field internally store the precision and scale of that field. Uninitialized variables of type `dec` default to a precision of 7 and a scale of 2. Binary operators involving two decimals will typically produce a `dec` value whose precision and scale are such that the number of whole digits (precision minus scale) and the number of fractional digits are both the maxima of those for the operands. For example, multiply a decimal with precision 5 and scale 6 (-1 whole digits) with a decimal with precision 7 and scale 3 (4 whole digits) results in a decimal with precision 10 and scale 6 (4 whole digits). If a `dec` is assigned to a database field that lacks the range to store the value, the assigned value is clamped to the supported range. If the database field lacks the precision to store the value, the assigned value is truncated to the supported precision.
+
+Every Tablo implementation must support decimal values with at least 38 digits of precision.
 
 Note that the `json` data type does not require that the database backend have explicit support for storing JSON data. Tablo provides functions for converting JSON data to and from strings.
 
@@ -234,9 +238,19 @@ At present, exponential notation is not supported.
 Decimal Literals
 ----------------
 
-A decimal literal is represented as, at minimum, a `.` followed by a sequence of digits. Optionally, the `.` may be preceded by another sequence of digits. If omited, the initial sequence of digits is treated as being equivalent to `0`. Each sequence of digits may only be broken by single `_` characters.
+A decimal literal is represented as, at minimum, a `.` followed by a sequence of digits. Optionally, the `.` may be preceded by another sequence of digits. If omitted, the initial sequence of digits is treated as being equivalent to `0`. Each sequence of digits may only be broken by single `_` characters.
 
 Negative values are specified be prefixing the digits with a `-`.
+
+Decimal literals are represented exactly. The precision of a decimal literal is the total number of decimal digits in its canonical form, excluding the sign and decimal point. The scale is the number of digits after the decimal point. If the integer part is omitted, it is treated as `0` when determining the precision and scale.
+
+For example:
+
+~~~
+1.23  // precision: 3, scale: 2
+0.50  // precision: 3, scale: 2
+.5    // precision: 2, scale: 1 (equivalent to 0.5)
+~~~
 
 Attempting to assign a decimal literal to a variable of a type for which the number is outside the supported range results in a compile error.
 
@@ -269,7 +283,7 @@ Date & Time Literals
 
 Date literals are prefixed with `@` and expressed in `<year>-<month>-<day>` format.
 
-Time literals are also prefixed with `@` and expressed in `<hour>:<minute>:<second>.<fractional part>` format. The fractional part may be omitted, in which case the fractional part is set to zero. If the fractional part is omited then the seconds may also be omitted, in which case both the fractional part and seconds are set to zero.
+Time literals are also prefixed with `@` and expressed in `<hour>:<minute>:<second>.<fractional part>` format. The fractional part may be omitted, in which case the fractional part is set to zero. If the fractional part is omitted then the seconds may also be omitted, in which case both the fractional part and seconds are set to zero.
 
 Time literals may also include a time-zone suffix expressed as either `+` or `-` and followed by an offset in `<hour>:<minute>` format. This is not required when assigning to `timetz` values. If omitted, the time-zone defaults to the default specified in the `--tz` compiler argument or to the current system locale time-zone if no default is specified. Specifying a time-zone when assigning to a `time` value results in a compile error.
 
@@ -297,6 +311,8 @@ Equality comparison is supported for primitive scalar types such as numeric valu
 For `text` values, equality comparison is case-sensitive. Two `text` values are equal if and only if they contain the same sequence of characters.
 
 If a case-insensitive text equality comparison is required, the expected approach is to normalize the casing of both operands explicitly. For example: `lower(a) == lower(b)`.
+
+Decimal values may be compared with other decimal values even if they have dissimilar scales and precisions provided that no loss of precision would occur should the scales and/or precisions be made to match. Decimal values may be compared with integer values as the integer will be automatically converted to a decimal as per the "Automatic Type Conversions" section below.
 
 ### Comparison Operators
 

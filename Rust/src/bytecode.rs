@@ -1,3 +1,16 @@
+use crate::value::Decimal;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Instruction {
+	Add,
+	Divide,
+	Modulo,
+	Multiply,
+	PushDecimal(Decimal),
+	PushInteger(i64),
+	Subtract,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Program {
 	pub instructions: Vec<Instruction>,
@@ -9,14 +22,4 @@ impl Program {
 			instructions,
 		}
 	}
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum Instruction {
-	Add,
-	Divide,
-	Modulo,
-	Multiply,
-	PushInteger(i64),
-	Subtract,
 }

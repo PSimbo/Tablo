@@ -1,5 +1,6 @@
 use crate::bytecode::Program;
 use crate::bytecode::Instruction;
+use crate::value::Decimal;
 use crate::value::Value;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -32,71 +33,144 @@ impl VirtualMachine {
 
 	fn execute_instruction(&mut self, instruction: &Instruction, instruction_index: usize) -> Result<(), VmError> {
 		match instruction {
+			Instruction::PushDecimal(value) => {
+				self.stack.push(Value::Decimal(value.clone()));
+				Ok(())
+			}
 			Instruction::PushInteger(value) => {
 				self.stack.push(Value::Integer(*value));
 				Ok(())
 			}
 			Instruction::Add => {
-				let rhs = self.pop_integer(instruction_index)?;
-				let lhs = self.pop_integer(instruction_index)?;
-
-				self.stack.push(Value::Integer(lhs.saturating_add(rhs)));
+				let rhs = self.pop_numeric(instruction_index)?;
+				let lhs = self.pop_numeric(instruction_index)?;
+				self.stack.push(add_values(lhs, rhs, instruction_index)?);
 				Ok(())
 			}
 			Instruction::Subtract => {
-				let rhs = self.pop_integer(instruction_index)?;
-				let lhs = self.pop_integer(instruction_index)?;
-
-				self.stack.push(Value::Integer(lhs.saturating_sub(rhs)));
+				let rhs = self.pop_numeric(instruction_index)?;
+				let lhs = self.pop_numeric(instruction_index)?;
+				self.stack.push(subtract_values(lhs, rhs, instruction_index)?);
 				Ok(())
 			}
 			Instruction::Multiply => {
-				let rhs = self.pop_integer(instruction_index)?;
-				let lhs = self.pop_integer(instruction_index)?;
-
-				self.stack.push(Value::Integer(lhs.saturating_mul(rhs)));
+				let rhs = self.pop_numeric(instruction_index)?;
+				let lhs = self.pop_numeric(instruction_index)?;
+				self.stack.push(multiply_values(lhs, rhs, instruction_index)?);
 				Ok(())
 			}
 			Instruction::Divide => {
-				let rhs = self.pop_integer(instruction_index)?;
-				let lhs = self.pop_integer(instruction_index)?;
-
-				if rhs == 0 {
-					return Err(VmError {
-						instruction_index,
-						message: String::from("Division by zero."),
-					});
-				}
-
-				self.stack.push(Value::Integer(lhs / rhs));
+				let rhs = self.pop_numeric(instruction_index)?;
+				let lhs = self.pop_numeric(instruction_index)?;
+				self.stack.push(divide_values(lhs, rhs, instruction_index)?);
 				Ok(())
 			}
 			Instruction::Modulo => {
-				let rhs = self.pop_integer(instruction_index)?;
-				let lhs = self.pop_integer(instruction_index)?;
-
-				if rhs == 0 {
-					return Err(VmError {
-						instruction_index,
-						message: String::from("Modulo by zero."),
-					});
-				}
-
-				self.stack.push(Value::Integer(lhs % rhs));
+				let rhs = self.pop_numeric(instruction_index)?;
+				let lhs = self.pop_numeric(instruction_index)?;
+				self.stack.push(modulo_values(lhs, rhs, instruction_index)?);
 				Ok(())
 			}
 		}
 	}
 
-	fn pop_integer(&mut self, instruction_index: usize) -> Result<i64, VmError> {
+	fn pop_numeric(&mut self, instruction_index: usize) -> Result<Value, VmError> {
 		let value = self.stack.pop().ok_or(VmError {
 			instruction_index,
-			message: String::from("Stack underflow while reading integer operand."),
+			message: String::from("Stack underflow while reading numeric operand."),
 		})?;
 
-		match value {
-			Value::Integer(integer) => Ok(integer),
+		Ok(value)
+	}
+}
+
+fn add_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
+	match (lhs, rhs) {
+		(Value::Integer(lhs), Value::Integer(rhs)) => Ok(Value::Integer(lhs.saturating_add(rhs))),
+		(lhs, rhs) => {
+			let (lhs, rhs) = coerce_numeric_values(lhs, rhs, instruction_index)?;
+			Ok(Value::Decimal(lhs.checked_add(&rhs).map_err(|message| vm_error(instruction_index, message))?))
 		}
+	}
+}
+
+fn coerce_numeric_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<(Decimal, Decimal), VmError> {
+	match (lhs, rhs) {
+		(Value::Decimal(lhs), Value::Decimal(rhs)) => Ok((lhs, rhs)),
+		(Value::Decimal(lhs), Value::Integer(rhs)) => {
+			let rhs = Decimal::from_integer(rhs)
+				.to_scale_with_precision(lhs.precision, lhs.scale)
+				.map_err(|message| vm_error(instruction_index, message))?;
+
+			Ok((lhs, rhs))
+		}
+		(Value::Integer(lhs), Value::Decimal(rhs)) => {
+			let lhs = Decimal::from_integer(lhs)
+				.to_scale_with_precision(rhs.precision, rhs.scale)
+				.map_err(|message| vm_error(instruction_index, message))?;
+
+			Ok((lhs, rhs))
+		}
+		(Value::Integer(lhs), Value::Integer(rhs)) => Ok((Decimal::from_integer(lhs), Decimal::from_integer(rhs))),
+	}
+}
+
+fn divide_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
+	match (lhs, rhs) {
+		(Value::Integer(lhs), Value::Integer(rhs)) => {
+			if rhs == 0 {
+				return Err(vm_error(instruction_index, String::from("Division by zero.")));
+			}
+
+			Ok(Value::Integer(lhs / rhs))
+		}
+		(lhs, rhs) => {
+			let (lhs, rhs) = coerce_numeric_values(lhs, rhs, instruction_index)?;
+			Ok(Value::Decimal(lhs.checked_div(&rhs).map_err(|message| vm_error(instruction_index, message))?))
+		}
+	}
+}
+
+fn modulo_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
+	match (lhs, rhs) {
+		(Value::Integer(lhs), Value::Integer(rhs)) => {
+			if rhs == 0 {
+				return Err(vm_error(instruction_index, String::from("Modulo by zero.")));
+			}
+
+			Ok(Value::Integer(lhs % rhs))
+		}
+		(lhs, rhs) => {
+			let (lhs, rhs) = coerce_numeric_values(lhs, rhs, instruction_index)?;
+			Ok(Value::Decimal(lhs.checked_rem(&rhs).map_err(|message| vm_error(instruction_index, message))?))
+		}
+	}
+}
+
+fn multiply_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
+	match (lhs, rhs) {
+		(Value::Integer(lhs), Value::Integer(rhs)) => Ok(Value::Integer(lhs.saturating_mul(rhs))),
+		(lhs, rhs) => {
+			let (lhs, rhs) = coerce_numeric_values(lhs, rhs, instruction_index)?;
+			Ok(Value::Decimal(lhs.checked_mul(&rhs).map_err(|message| vm_error(instruction_index, message))?))
+		}
+	}
+}
+
+fn subtract_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
+	match (lhs, rhs) {
+		(Value::Integer(lhs), Value::Integer(rhs)) => Ok(Value::Integer(lhs.saturating_sub(rhs))),
+		(lhs, rhs) => {
+			let (lhs, rhs) = coerce_numeric_values(lhs, rhs, instruction_index)?;
+			Ok(Value::Decimal(lhs.checked_sub(&rhs).map_err(|message| vm_error(instruction_index, message))?))
+		}
+	}
+}
+
+fn vm_error(instruction_index: usize, message: String) -> VmError {
+	VmError {
+		instruction_index,
+		message,
 	}
 }
 
@@ -104,6 +178,7 @@ impl VirtualMachine {
 mod tests {
 	use crate::bytecode::Instruction;
 	use crate::bytecode::Program;
+	use crate::value::Decimal;
 	use crate::value::Value;
 
 	use super::VirtualMachine;
@@ -118,6 +193,17 @@ mod tests {
 		let result = VirtualMachine::new().run(&program).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(42)));
+	}
+
+	#[test]
+	fn runs_decimal_literal_program() {
+		let program = Program::new(vec![
+			Instruction::PushDecimal(Decimal::from_literal("1.25").unwrap()),
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Decimal(Decimal::from_literal("1.25").unwrap())));
 	}
 
 	#[test]
@@ -163,7 +249,7 @@ mod tests {
 
 		assert_eq!(error, VmError {
 			instruction_index: 1,
-			message: String::from("Stack underflow while reading integer operand."),
+			message: String::from("Stack underflow while reading numeric operand."),
 		});
 	}
 
@@ -197,5 +283,18 @@ mod tests {
 			instruction_index: 2,
 			message: String::from("Modulo by zero."),
 		});
+	}
+
+	#[test]
+	fn runs_mixed_integer_and_decimal_addition() {
+		let program = Program::new(vec![
+			Instruction::PushInteger(2),
+			Instruction::PushDecimal(Decimal::from_literal("1.25").unwrap()),
+			Instruction::Add,
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Decimal(Decimal::from_literal("3.25").unwrap())));
 	}
 }

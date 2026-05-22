@@ -1,7 +1,9 @@
 use crate::ast::BinaryExpr;
 use crate::ast::BinaryOperator;
+use crate::ast::DecimalLiteral;
 use crate::ast::Expr;
 use crate::ast::IntegerLiteral;
+use crate::value::Decimal;
 
 use super::token::Token;
 use super::token::TokenKind;
@@ -62,6 +64,17 @@ impl Parser {
 		let token = self.current()?.clone();
 		self.position += 1;
 		Some(token)
+	}
+
+	fn parse_decimal_literal(&self, token: Token) -> Result<Expr, ParseError> {
+		let value = Decimal::from_literal(&token.lexeme).map_err(|message| ParseError {
+			message,
+			position: token.start,
+		})?;
+
+		Ok(Expr::Decimal(DecimalLiteral {
+			value,
+		}))
 	}
 
 	fn parse_expression_with_binding_power(&mut self, binding_power: BindingPower) -> Result<Expr, ParseError> {
@@ -177,6 +190,7 @@ impl Parser {
 		})?;
 
 		match token.kind {
+			TokenKind::DecimalLiteral => self.parse_decimal_literal(token),
 			TokenKind::IntegerLiteral => self.parse_integer_literal(token),
 			TokenKind::LeftParenthesis => self.parse_group_expression(token.start),
 			TokenKind::EndOfFile => Err(ParseError {
@@ -195,9 +209,11 @@ impl Parser {
 mod tests {
 	use crate::ast::BinaryExpr;
 	use crate::ast::BinaryOperator;
+	use crate::ast::DecimalLiteral;
 	use crate::ast::Expr;
 	use crate::ast::IntegerLiteral;
 	use crate::source::SourceText;
+	use crate::value::Decimal;
 
 	use super::super::lexer::Lexer;
 	use super::Parser;
@@ -207,6 +223,16 @@ mod tests {
 		let tokens = lexer.tokenize().unwrap();
 		let mut parser = Parser::new(tokens);
 		parser.parse_expression().unwrap()
+	}
+
+	#[test]
+	fn parses_decimal_literal() {
+		assert_eq!(
+			parse(".5"),
+			Expr::Decimal(DecimalLiteral {
+				value: Decimal::from_literal(".5").unwrap(),
+			})
+		);
 	}
 
 	#[test]

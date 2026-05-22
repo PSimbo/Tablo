@@ -53,14 +53,14 @@ pub fn run(source: impl Into<String>) -> Result<Option<Value>, TabloError> {
 	run_program(&program)
 }
 
-pub fn run_program(program: &Program) -> Result<Option<Value>, TabloError> {
-	let mut vm = VirtualMachine::new();
-	vm.run(&program).map_err(TabloError::Runtime)
-}
-
 pub fn run_file(path: impl AsRef<Path>) -> Result<Option<Value>, TabloError> {
 	let program = read_program_from_path(path).map_err(TabloError::ObjectFile)?;
 	run_program(&program)
+}
+
+pub fn run_program(program: &Program) -> Result<Option<Value>, TabloError> {
+	let mut vm = VirtualMachine::new();
+	vm.run(&program).map_err(TabloError::Runtime)
 }
 
 fn compile_to_program(source: impl Into<String>) -> Result<Program, TabloError> {
@@ -82,9 +82,9 @@ mod tests {
 	use crate::value::Value;
 
 	use super::compile;
+	use super::run;
 	use super::run_file;
 	use super::run_program;
-	use super::run;
 	use super::TabloError;
 
 	#[test]
@@ -102,10 +102,40 @@ mod tests {
 	}
 
 	#[test]
-	fn runs_source_text() {
-		let result = run("1 + 2 + 3").unwrap();
+	fn returns_lex_error_from_single_call_api() {
+		let error = run("1 ? 2").unwrap_err();
 
-		assert_eq!(result, Some(Value::Integer(6)));
+		assert_eq!(error, TabloError::Lex(crate::syntax::lexer::LexError {
+			position: 2,
+			message: String::from("Unexpected character `?`."),
+		}));
+	}
+
+	#[test]
+	fn runs_decimal_object_file() {
+		let output_path = unique_test_output_path("runs_decimal_object_file");
+		compile("1.25 + .5", &output_path).unwrap();
+		let result = run_file(&output_path).unwrap();
+		let _ = std::fs::remove_file(&output_path);
+
+		assert_eq!(result, Some(Value::Decimal(crate::value::Decimal::from_literal("1.75").unwrap())));
+	}
+
+	#[test]
+	fn runs_decimal_source_text() {
+		let result = run("1.25 + .5").unwrap();
+
+		assert_eq!(result, Some(Value::Decimal(crate::value::Decimal::from_literal("1.75").unwrap())));
+	}
+
+	#[test]
+	fn runs_object_file() {
+		let output_path = unique_test_output_path("runs_object_file");
+		compile("8 / 2", &output_path).unwrap();
+		let result = run_file(&output_path).unwrap();
+		let _ = std::fs::remove_file(&output_path);
+
+		assert_eq!(result, Some(Value::Integer(4)));
 	}
 
 	#[test]
@@ -122,23 +152,10 @@ mod tests {
 	}
 
 	#[test]
-	fn runs_object_file() {
-		let output_path = unique_test_output_path("runs_object_file");
-		compile("8 / 2", &output_path).unwrap();
-		let result = run_file(&output_path).unwrap();
-		let _ = std::fs::remove_file(&output_path);
+	fn runs_source_text() {
+		let result = run("1 + 2 + 3").unwrap();
 
-		assert_eq!(result, Some(Value::Integer(4)));
-	}
-
-	#[test]
-	fn returns_lex_error_from_single_call_api() {
-		let error = run("1 ? 2").unwrap_err();
-
-		assert_eq!(error, TabloError::Lex(crate::syntax::lexer::LexError {
-			position: 2,
-			message: String::from("Unexpected character `?`."),
-		}));
+		assert_eq!(result, Some(Value::Integer(6)));
 	}
 
 	fn unique_test_output_path(test_name: &str) -> PathBuf {

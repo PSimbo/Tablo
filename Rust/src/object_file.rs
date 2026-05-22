@@ -2,6 +2,7 @@ use std::path::Path;
 
 use crate::bytecode::Instruction;
 use crate::bytecode::Program;
+use crate::value::Decimal;
 
 const MAGIC_BYTES: [u8; 4] = *b"TBO0";
 const FORMAT_VERSION: u16 = 1;
@@ -9,8 +10,9 @@ const OPCODE_ADD: u8 = 1;
 const OPCODE_DIVIDE: u8 = 2;
 const OPCODE_MODULO: u8 = 3;
 const OPCODE_MULTIPLY: u8 = 4;
-const OPCODE_PUSH_INTEGER: u8 = 5;
-const OPCODE_SUBTRACT: u8 = 6;
+const OPCODE_PUSH_DECIMAL: u8 = 5;
+const OPCODE_PUSH_INTEGER: u8 = 6;
+const OPCODE_SUBTRACT: u8 = 7;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectFileError {
@@ -63,6 +65,12 @@ pub fn write_program(program: &Program) -> Vec<u8> {
 			Instruction::Divide => bytes.push(OPCODE_DIVIDE),
 			Instruction::Modulo => bytes.push(OPCODE_MODULO),
 			Instruction::Multiply => bytes.push(OPCODE_MULTIPLY),
+			Instruction::PushDecimal(value) => {
+				bytes.push(OPCODE_PUSH_DECIMAL);
+				bytes.extend_from_slice(&value.coefficient.to_le_bytes());
+				bytes.push(value.precision);
+				bytes.push(value.scale);
+			}
 			Instruction::PushInteger(value) => {
 				bytes.push(OPCODE_PUSH_INTEGER);
 				bytes.extend_from_slice(&value.to_le_bytes());
@@ -150,6 +158,7 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_DIVIDE => Ok(Instruction::Divide),
 			OPCODE_MODULO => Ok(Instruction::Modulo),
 			OPCODE_MULTIPLY => Ok(Instruction::Multiply),
+			OPCODE_PUSH_DECIMAL => Ok(Instruction::PushDecimal(self.read_decimal()?)),
 			OPCODE_PUSH_INTEGER => Ok(Instruction::PushInteger(self.read_i64()?)),
 			OPCODE_SUBTRACT => Ok(Instruction::Subtract),
 			_ => Err(ObjectFileError {
@@ -163,6 +172,20 @@ impl<'a> ObjectFileReader<'a> {
 		let mut bytes = [0; 8];
 		bytes.copy_from_slice(self.read_exact(8)?);
 		Ok(i64::from_le_bytes(bytes))
+	}
+
+	fn read_decimal(&mut self) -> Result<Decimal, ObjectFileError> {
+		let mut coefficient_bytes = [0; 16];
+		coefficient_bytes.copy_from_slice(self.read_exact(16)?);
+		let coefficient = i128::from_le_bytes(coefficient_bytes);
+		let precision = self.read_u8()?;
+		let scale = self.read_u8()?;
+
+		Ok(Decimal {
+			coefficient,
+			precision,
+			scale,
+		})
 	}
 
 	fn read_u8(&mut self) -> Result<u8, ObjectFileError> {
@@ -192,20 +215,6 @@ mod tests {
 	use super::ObjectFileError;
 
 	#[test]
-	fn round_trips_program_bytes() {
-		let program = Program::new(vec![
-			Instruction::PushInteger(1),
-			Instruction::PushInteger(2),
-			Instruction::Add,
-		]);
-
-		let bytes = write_program(&program);
-		let decoded = read_program(&bytes).unwrap();
-
-		assert_eq!(decoded, program);
-	}
-
-	#[test]
 	fn rejects_invalid_magic_bytes() {
 		let error = read_program(b"NOPE").unwrap_err();
 
@@ -227,5 +236,33 @@ mod tests {
 			offset: 10,
 			message: String::from("Unknown opcode 255."),
 		});
+	}
+
+	#[test]
+	fn round_trips_decimal_program_bytes() {
+		let program = Program::new(vec![
+			Instruction::PushDecimal(crate::value::Decimal::from_literal("1.25").unwrap()),
+			Instruction::PushDecimal(crate::value::Decimal::from_literal(".5").unwrap()),
+			Instruction::Add,
+		]);
+
+		let bytes = write_program(&program);
+		let decoded = read_program(&bytes).unwrap();
+
+		assert_eq!(decoded, program);
+	}
+
+	#[test]
+	fn round_trips_program_bytes() {
+		let program = Program::new(vec![
+			Instruction::PushInteger(1),
+			Instruction::PushInteger(2),
+			Instruction::Add,
+		]);
+
+		let bytes = write_program(&program);
+		let decoded = read_program(&bytes).unwrap();
+
+		assert_eq!(decoded, program);
 	}
 }
