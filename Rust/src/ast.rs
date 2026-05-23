@@ -15,6 +15,7 @@ pub enum BinaryOperator {
 	NotEqual,
 	Or,
 	Subtract,
+	Xor,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

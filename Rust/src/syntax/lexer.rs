@@ -232,6 +232,7 @@ impl Lexer {
 			"not" => TokenKind::NotKeyword,
 			"or" => TokenKind::OrKeyword,
 			"true" => TokenKind::TrueKeyword,
+			"xor" => TokenKind::XorKeyword,
 			_ => {
 				return Err(LexError {
 					position: start,
@@ -289,10 +290,10 @@ mod tests {
 
 	#[test]
 	fn tokenizes_boolean_literals() {
-		let mut lexer = Lexer::new(SourceText::new("true false and or not"));
+		let mut lexer = Lexer::new(SourceText::new("true false and or not xor"));
 		let tokens = lexer.tokenize().unwrap();
 
-		assert_eq!(tokens.len(), 6);
+		assert_eq!(tokens.len(), 7);
 		assert_eq!(tokens[0].kind, TokenKind::TrueKeyword);
 		assert_eq!(tokens[0].lexeme, "true");
 		assert_eq!(tokens[1].kind, TokenKind::FalseKeyword);
@@ -300,7 +301,8 @@ mod tests {
 		assert_eq!(tokens[2].kind, TokenKind::AndKeyword);
 		assert_eq!(tokens[3].kind, TokenKind::OrKeyword);
 		assert_eq!(tokens[4].kind, TokenKind::NotKeyword);
-		assert_eq!(tokens[5].kind, TokenKind::EndOfFile);
+		assert_eq!(tokens[5].kind, TokenKind::XorKeyword);
+		assert_eq!(tokens[6].kind, TokenKind::EndOfFile);
 	}
 
 	#[test]

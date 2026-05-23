@@ -20,6 +20,7 @@ pub enum Instruction {
 	PushDecimal(Decimal),
 	PushInteger(i64),
 	Subtract,
+	Xor,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

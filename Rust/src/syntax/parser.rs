@@ -22,6 +22,7 @@ pub struct Parser {
 enum BindingPower {
 	Default,
 	LogicalOr,
+	LogicalXor,
 	LogicalAnd,
 	Equality,
 	Comparison,
@@ -107,17 +108,20 @@ impl Parser {
 
 		while let Some(token) = self.current() {
 			let next_binding_power = match token.kind {
-				TokenKind::OrKeyword => BindingPower::LogicalOr,
 				TokenKind::AndKeyword => BindingPower::LogicalAnd,
-				TokenKind::EqualEqual | TokenKind::BangEqual => BindingPower::Equality,
-				TokenKind::GreaterThan
-				| TokenKind::GreaterThanOrEqual
-				| TokenKind::LessThan
-				| TokenKind::LessThanOrEqual => BindingPower::Comparison,
-				TokenKind::Plus | TokenKind::Dash => BindingPower::Additive,
-				TokenKind::Asterisk
-				| TokenKind::ForwardSlash
-				| TokenKind::Percent => BindingPower::Multiplicative,
+				TokenKind::Asterisk => BindingPower::Multiplicative,
+				TokenKind::BangEqual => BindingPower::Equality,
+				TokenKind::Dash => BindingPower::Additive,
+				TokenKind::EqualEqual => BindingPower::Equality,
+				TokenKind::ForwardSlash => BindingPower::Multiplicative,
+				TokenKind::GreaterThan => BindingPower::Comparison,
+				TokenKind::GreaterThanOrEqual => BindingPower::Comparison,
+				TokenKind::LessThan => BindingPower::Comparison,
+				TokenKind::LessThanOrEqual => BindingPower::Comparison,
+				TokenKind::OrKeyword => BindingPower::LogicalOr,
+				TokenKind::Percent => BindingPower::Multiplicative,
+				TokenKind::Plus => BindingPower::Additive,
+				TokenKind::XorKeyword => BindingPower::LogicalXor,
 				_ => break,
 			};
 
@@ -265,6 +269,15 @@ impl Parser {
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
 					operator: BinaryOperator::Add,
+					right: Box::new(right),
+				}))
+			}
+			TokenKind::XorKeyword => {
+				let right = self.parse_expression_with_binding_power(binding_power)?;
+
+				Ok(Expr::Binary(BinaryExpr {
+					left: Box::new(left),
+					operator: BinaryOperator::Xor,
 					right: Box::new(right),
 				}))
 			}
@@ -485,6 +498,34 @@ mod tests {
 					operator: BinaryOperator::And,
 					right: Box::new(Expr::Boolean(BooleanLiteral {
 						value: true,
+					})),
+				})),
+			})
+		);
+	}
+
+	#[test]
+	fn parses_logical_xor_between_and_and_or() {
+		assert_eq!(
+			parse("true or false xor true and false"),
+			Expr::Binary(BinaryExpr {
+				left: Box::new(Expr::Boolean(BooleanLiteral {
+					value: true,
+				})),
+				operator: BinaryOperator::Or,
+				right: Box::new(Expr::Binary(BinaryExpr {
+					left: Box::new(Expr::Boolean(BooleanLiteral {
+						value: false,
+					})),
+					operator: BinaryOperator::Xor,
+					right: Box::new(Expr::Binary(BinaryExpr {
+						left: Box::new(Expr::Boolean(BooleanLiteral {
+							value: true,
+						})),
+						operator: BinaryOperator::And,
+						right: Box::new(Expr::Boolean(BooleanLiteral {
+							value: false,
+						})),
 					})),
 				})),
 			})

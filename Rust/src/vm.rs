@@ -141,6 +141,12 @@ impl VirtualMachine {
 				self.stack.push(subtract_values(lhs, rhs, instruction_index)?);
 				Ok(())
 			}
+			Instruction::Xor => {
+				let rhs = self.pop_boolean(instruction_index)?;
+				let lhs = self.pop_boolean(instruction_index)?;
+				self.stack.push(Value::Boolean(lhs ^ rhs));
+				Ok(())
+			}
 		}
 	}
 
@@ -552,6 +558,19 @@ mod tests {
 			Instruction::PushBoolean(false),
 			Instruction::PushBoolean(true),
 			Instruction::Or,
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
+	fn runs_logical_xor_program() {
+		let program = Program::new(vec![
+			Instruction::PushBoolean(true),
+			Instruction::PushBoolean(false),
+			Instruction::Xor,
 		]);
 
 		let result = VirtualMachine::new().run(&program).unwrap();

@@ -43,6 +43,7 @@ impl Compiler {
 					BinaryOperator::NotEqual => instructions.push(Instruction::NotEqual),
 					BinaryOperator::Or => instructions.push(Instruction::Or),
 					BinaryOperator::Subtract => instructions.push(Instruction::Subtract),
+					BinaryOperator::Xor => instructions.push(Instruction::Xor),
 				}
 			}
 			Expr::Boolean(BooleanLiteral { value }) => {
@@ -184,6 +185,27 @@ mod tests {
 		assert_eq!(program.instructions, vec![
 			Instruction::PushBoolean(false),
 			Instruction::Not,
+		]);
+	}
+
+	#[test]
+	fn compiles_logical_xor() {
+		let expression = Expr::Binary(BinaryExpr {
+			left: Box::new(Expr::Boolean(BooleanLiteral {
+				value: true,
+			})),
+			operator: BinaryOperator::Xor,
+			right: Box::new(Expr::Boolean(BooleanLiteral {
+				value: false,
+			})),
+		});
+
+		let program = Compiler::new().compile_expression(&expression);
+
+		assert_eq!(program.instructions, vec![
+			Instruction::PushBoolean(true),
+			Instruction::PushBoolean(false),
+			Instruction::Xor,
 		]);
 	}
 

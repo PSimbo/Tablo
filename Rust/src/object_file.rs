@@ -24,6 +24,7 @@ const OPCODE_NEGATE: u8 = 15;
 const OPCODE_NOT_EQUAL: u8 = 16;
 const OPCODE_NOT: u8 = 17;
 const OPCODE_OR: u8 = 18;
+const OPCODE_XOR: u8 = 19;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectFileError {
@@ -101,6 +102,7 @@ pub fn write_program(program: &Program) -> Vec<u8> {
 				bytes.extend_from_slice(&value.to_le_bytes());
 			}
 			Instruction::Subtract => bytes.push(OPCODE_SUBTRACT),
+			Instruction::Xor => bytes.push(OPCODE_XOR),
 		}
 	}
 
@@ -228,6 +230,7 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_PUSH_DECIMAL => Ok(Instruction::PushDecimal(self.read_decimal()?)),
 			OPCODE_PUSH_INTEGER => Ok(Instruction::PushInteger(self.read_i64()?)),
 			OPCODE_SUBTRACT => Ok(Instruction::Subtract),
+			OPCODE_XOR => Ok(Instruction::Xor),
 			_ => Err(ObjectFileError {
 				offset: opcode_offset,
 				message: format!("Unknown opcode {opcode}."),

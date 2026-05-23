@@ -21,6 +21,7 @@ pub enum TokenKind {
 	Plus,
 	RightParenthesis,
 	TrueKeyword,
+	XorKeyword,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
