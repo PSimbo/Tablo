@@ -141,6 +141,20 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_compound_decimal_assignment_source_text() {
+		let result = run("var x: dec = 8.0;\nx /= 2.0").unwrap();
+
+		assert_eq!(result, Some(Value::Decimal(crate::value::Decimal::from_integer(4))));
+	}
+
+	#[test]
+	fn runs_compound_integer_assignment_source_text() {
+		let result = run("var x: int = 5;\nx += 3").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(8)));
+	}
+
+	#[test]
 	fn runs_decimal_object_file() {
 		let output_path = unique_test_output_path("runs_decimal_object_file");
 		compile("1.25 + .5", &output_path).unwrap();
@@ -226,7 +240,7 @@ mod tests {
 
 	#[test]
 	fn runs_source_text_with_variable_declarations() {
-		let result = run("var x: int = 1\nvar y: int = 2\nx + y").unwrap();
+		let result = run("var x: int = 1;\nvar y: int = 2;\nx + y").unwrap();
 
 		assert_eq!(result, Some(Value::Integer(3)));
 	}

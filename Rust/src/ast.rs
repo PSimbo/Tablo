@@ -1,6 +1,16 @@
 use crate::value::Decimal;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AssignmentOperator {
+	Assign,
+	AddAssign,
+	DivideAssign,
+	ModuloAssign,
+	MultiplyAssign,
+	SubtractAssign,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BinaryOperator {
 	Add,
 	And,
@@ -27,6 +37,7 @@ pub enum DataType {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Expr {
+	Assignment(AssignmentExpr),
 	Boolean(BooleanLiteral),
 	Identifier(IdentifierExpr),
 	Integer(IntegerLiteral),
@@ -44,6 +55,13 @@ pub enum Statement {
 pub enum UnaryOperator {
 	Negate,
 	Not,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssignmentExpr {
+	pub operator: AssignmentOperator,
+	pub target: IdentifierExpr,
+	pub value: Box<Expr>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -88,6 +106,6 @@ pub struct UnaryExpr {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VariableDeclaration {
 	pub data_type: DataType,
-	pub initial_value: Expr,
+	pub initial_value: Option<Expr>,
 	pub name: String,
 }

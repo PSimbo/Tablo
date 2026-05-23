@@ -86,12 +86,68 @@ impl Lexer {
 		}
 
 		let token_kind = match next {
+			'+' if self.peek_next_char() == Some('=') => {
+				self.advance_char();
+				self.advance_char();
+
+				return Ok(Some(Token {
+					end: self.position,
+					kind: TokenKind::PlusEqual,
+					lexeme: String::from("+="),
+					start,
+				}));
+			}
 			'+' => TokenKind::Plus,
+			'-' if self.peek_next_char() == Some('=') => {
+				self.advance_char();
+				self.advance_char();
+
+				return Ok(Some(Token {
+					end: self.position,
+					kind: TokenKind::MinusEqual,
+					lexeme: String::from("-="),
+					start,
+				}));
+			}
 			'-' => TokenKind::Dash,
+			'*' if self.peek_next_char() == Some('=') => {
+				self.advance_char();
+				self.advance_char();
+
+				return Ok(Some(Token {
+					end: self.position,
+					kind: TokenKind::MultiplyEqual,
+					lexeme: String::from("*="),
+					start,
+				}));
+			}
 			'*' => TokenKind::Asterisk,
+			'/' if self.peek_next_char() == Some('=') => {
+				self.advance_char();
+				self.advance_char();
+
+				return Ok(Some(Token {
+					end: self.position,
+					kind: TokenKind::SlashEqual,
+					lexeme: String::from("/="),
+					start,
+				}));
+			}
 			'/' => TokenKind::ForwardSlash,
+			'%' if self.peek_next_char() == Some('=') => {
+				self.advance_char();
+				self.advance_char();
+
+				return Ok(Some(Token {
+					end: self.position,
+					kind: TokenKind::PercentEqual,
+					lexeme: String::from("%="),
+					start,
+				}));
+			}
 			'%' => TokenKind::Percent,
 			':' => TokenKind::Colon,
+			';' => TokenKind::Semicolon,
 			'(' => TokenKind::LeftParenthesis,
 			')' => TokenKind::RightParenthesis,
 			'!' if self.peek_next_char() == Some('=') => {
@@ -290,6 +346,19 @@ mod tests {
 	}
 
 	#[test]
+	fn tokenizes_assignment_operators() {
+		let mut lexer = Lexer::new(SourceText::new("x = y += z -= a *= b /= c %= d"));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens[1].kind, TokenKind::Equal);
+		assert_eq!(tokens[3].kind, TokenKind::PlusEqual);
+		assert_eq!(tokens[5].kind, TokenKind::MinusEqual);
+		assert_eq!(tokens[7].kind, TokenKind::MultiplyEqual);
+		assert_eq!(tokens[9].kind, TokenKind::SlashEqual);
+		assert_eq!(tokens[11].kind, TokenKind::PercentEqual);
+	}
+
+	#[test]
 	fn tokenizes_boolean_literals() {
 		let mut lexer = Lexer::new(SourceText::new("true false and or not xor bool dec int var"));
 		let tokens = lexer.tokenize().unwrap();
@@ -326,10 +395,10 @@ mod tests {
 
 	#[test]
 	fn tokenizes_identifier_and_colon() {
-		let mut lexer = Lexer::new(SourceText::new("var x: int = value"));
+		let mut lexer = Lexer::new(SourceText::new("var x: int = value;"));
 		let tokens = lexer.tokenize().unwrap();
 
-		assert_eq!(tokens.len(), 7);
+		assert_eq!(tokens.len(), 8);
 		assert_eq!(tokens[0].kind, TokenKind::VarKeyword);
 		assert_eq!(tokens[1].kind, TokenKind::Identifier);
 		assert_eq!(tokens[1].lexeme, "x");
@@ -339,7 +408,8 @@ mod tests {
 		assert_eq!(tokens[4].lexeme, "=");
 		assert_eq!(tokens[5].kind, TokenKind::Identifier);
 		assert_eq!(tokens[5].lexeme, "value");
-		assert_eq!(tokens[6].kind, TokenKind::EndOfFile);
+		assert_eq!(tokens[6].kind, TokenKind::Semicolon);
+		assert_eq!(tokens[7].kind, TokenKind::EndOfFile);
 	}
 
 	#[test]

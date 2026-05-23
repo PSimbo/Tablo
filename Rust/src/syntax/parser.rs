@@ -1,3 +1,5 @@
+use crate::ast::AssignmentExpr;
+use crate::ast::AssignmentOperator;
 use crate::ast::BinaryExpr;
 use crate::ast::BinaryOperator;
 use crate::ast::BooleanLiteral;
@@ -51,7 +53,7 @@ impl Parser {
 	}
 
 	pub fn parse_expression(&mut self) -> Result<Expr, ParseError> {
-		let expression = self.parse_expression_with_binding_power(BindingPower::Default)?;
+		let expression = self.parse_assignment_expression()?;
 		self.expect_end_of_file()?;
 		Ok(expression)
 	}
@@ -65,7 +67,7 @@ impl Parser {
 
 		let result = match self.current() {
 			Some(token) if token.kind == TokenKind::EndOfFile => None,
-			Some(_) => Some(self.parse_expression_with_binding_power(BindingPower::Default)?),
+			Some(_) => Some(self.parse_assignment_expression()?),
 			None => None,
 		};
 
@@ -115,6 +117,42 @@ impl Parser {
 		let token = self.current()?.clone();
 		self.position += 1;
 		Some(token)
+	}
+
+	fn parse_assignment_expression(&mut self) -> Result<Expr, ParseError> {
+		let left = self.parse_expression_with_binding_power(BindingPower::Default)?;
+		let Some(token) = self.current() else {
+			return Ok(left);
+		};
+
+		let operator = match token.kind {
+			TokenKind::Equal => AssignmentOperator::Assign,
+			TokenKind::MinusEqual => AssignmentOperator::SubtractAssign,
+			TokenKind::MultiplyEqual => AssignmentOperator::MultiplyAssign,
+			TokenKind::PercentEqual => AssignmentOperator::ModuloAssign,
+			TokenKind::PlusEqual => AssignmentOperator::AddAssign,
+			TokenKind::SlashEqual => AssignmentOperator::DivideAssign,
+			_ => return Ok(left),
+		};
+
+		let target = match left {
+			Expr::Identifier(target) => target,
+			_ => {
+				return Err(ParseError {
+					message: String::from("Assignment target must be an identifier."),
+					position: token.start,
+				});
+			}
+		};
+
+		self.next();
+		let value = self.parse_assignment_expression()?;
+
+		Ok(Expr::Assignment(AssignmentExpr {
+			operator,
+			target,
+			value: Box::new(value),
+		}))
 	}
 
 	fn parse_boolean_literal(&self, token: Token) -> Result<Expr, ParseError> {
@@ -413,8 +451,13 @@ impl Parser {
 		let name = self.expect_token(TokenKind::Identifier, "Expected variable name.")?;
 		self.expect_token(TokenKind::Colon, "Expected `:` after variable name.")?;
 		let data_type = self.parse_data_type()?;
-		self.expect_token(TokenKind::Equal, "Expected `=` after variable type.")?;
-		let initial_value = self.parse_expression_with_binding_power(BindingPower::Default)?;
+		let initial_value = if self.current().is_some_and(|token| token.kind == TokenKind::Equal) {
+			self.next();
+			Some(self.parse_assignment_expression()?)
+		} else {
+			None
+		};
+		self.expect_token(TokenKind::Semicolon, "Expected `;` after variable declaration.")?;
 
 		Ok(Statement::VariableDeclaration(VariableDeclaration {
 			data_type,
@@ -426,6 +469,8 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
+	use crate::ast::AssignmentExpr;
+	use crate::ast::AssignmentOperator;
 	use crate::ast::BinaryExpr;
 	use crate::ast::BinaryOperator;
 	use crate::ast::BooleanLiteral;
@@ -460,6 +505,28 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_assignment_right_associatively() {
+		assert_eq!(
+			parse("x = y = 1"),
+			Expr::Assignment(AssignmentExpr {
+				operator: AssignmentOperator::Assign,
+				target: IdentifierExpr {
+					name: String::from("x"),
+				},
+				value: Box::new(Expr::Assignment(AssignmentExpr {
+					operator: AssignmentOperator::Assign,
+					target: IdentifierExpr {
+						name: String::from("y"),
+					},
+					value: Box::new(Expr::Integer(IntegerLiteral {
+						value: 1,
+					})),
+				})),
+			})
+		);
+	}
+
+	#[test]
 	fn parses_boolean_literal() {
 		assert_eq!(
 			parse("true"),
@@ -470,23 +537,39 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_compound_assignment_expression() {
+		assert_eq!(
+			parse("x += 1"),
+			Expr::Assignment(AssignmentExpr {
+				operator: AssignmentOperator::AddAssign,
+				target: IdentifierExpr {
+					name: String::from("x"),
+				},
+				value: Box::new(Expr::Integer(IntegerLiteral {
+					value: 1,
+				})),
+			})
+		);
+	}
+
+	#[test]
 	fn parses_program_with_variable_declarations() {
 		assert_eq!(
-			parse_program("var x: int = 1\nvar y: int = 2\nx + y"),
+			parse_program("var x: int = 1;\nvar y: int = 2;\nx + y"),
 			Program {
 				statements: vec![
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Int,
-						initial_value: Expr::Integer(IntegerLiteral {
+						initial_value: Some(Expr::Integer(IntegerLiteral {
 							value: 1,
-						}),
+						})),
 						name: String::from("x"),
 					}),
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Int,
-						initial_value: Expr::Integer(IntegerLiteral {
+						initial_value: Some(Expr::Integer(IntegerLiteral {
 							value: 2,
-						}),
+						})),
 						name: String::from("y"),
 					}),
 				],
@@ -745,6 +828,23 @@ mod tests {
 					value: 3,
 				})),
 			})
+		);
+	}
+
+	#[test]
+	fn parses_variable_declaration_without_initializer() {
+		assert_eq!(
+			parse_program("var x: int;"),
+			Program {
+				statements: vec![
+					Statement::VariableDeclaration(VariableDeclaration {
+						data_type: DataType::Int,
+						initial_value: None,
+						name: String::from("x"),
+					}),
+				],
+				result: None,
+			}
 		);
 	}
 

@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use crate::ast::AssignmentExpr;
+use crate::ast::AssignmentOperator;
 use crate::ast::BinaryOperator;
 use crate::ast::BooleanLiteral;
 use crate::ast::DecimalLiteral;
@@ -42,6 +44,45 @@ impl Compiler {
 		let _ = self;
 
 		match expression {
+			Expr::Assignment(AssignmentExpr { operator, target, value }) => {
+				let slot = self.locals.get(&target.name)
+					.copied()
+					.unwrap_or_else(|| panic!("Identifier `{}` must be declared before use.", target.name));
+
+				match operator {
+					AssignmentOperator::AddAssign => {
+						instructions.push(Instruction::LoadLocal(slot));
+						self.compile_into(value, instructions);
+						instructions.push(Instruction::Add);
+					}
+					AssignmentOperator::Assign => {
+						self.compile_into(value, instructions);
+					}
+					AssignmentOperator::DivideAssign => {
+						instructions.push(Instruction::LoadLocal(slot));
+						self.compile_into(value, instructions);
+						instructions.push(Instruction::Divide);
+					}
+					AssignmentOperator::ModuloAssign => {
+						instructions.push(Instruction::LoadLocal(slot));
+						self.compile_into(value, instructions);
+						instructions.push(Instruction::Modulo);
+					}
+					AssignmentOperator::MultiplyAssign => {
+						instructions.push(Instruction::LoadLocal(slot));
+						self.compile_into(value, instructions);
+						instructions.push(Instruction::Multiply);
+					}
+					AssignmentOperator::SubtractAssign => {
+						instructions.push(Instruction::LoadLocal(slot));
+						self.compile_into(value, instructions);
+						instructions.push(Instruction::Subtract);
+					}
+				}
+
+				instructions.push(Instruction::StoreLocal(slot));
+				instructions.push(Instruction::LoadLocal(slot));
+			}
 			Expr::Binary(binary) => {
 				self.compile_into(&binary.left, instructions);
 				self.compile_into(&binary.right, instructions);
@@ -91,6 +132,46 @@ impl Compiler {
 
 	fn compile_into_checked(&mut self, expression: &Expr, instructions: &mut Vec<Instruction>) -> Result<(), CompileError> {
 		match expression {
+			Expr::Assignment(AssignmentExpr { operator, target, value }) => {
+				let slot = self.locals.get(&target.name).copied().ok_or(CompileError {
+					message: format!("Variable `{}` is not declared in this scope.", target.name),
+				})?;
+
+				match operator {
+					AssignmentOperator::AddAssign => {
+						instructions.push(Instruction::LoadLocal(slot));
+						self.compile_into_checked(value, instructions)?;
+						instructions.push(Instruction::Add);
+					}
+					AssignmentOperator::Assign => {
+						self.compile_into_checked(value, instructions)?;
+					}
+					AssignmentOperator::DivideAssign => {
+						instructions.push(Instruction::LoadLocal(slot));
+						self.compile_into_checked(value, instructions)?;
+						instructions.push(Instruction::Divide);
+					}
+					AssignmentOperator::ModuloAssign => {
+						instructions.push(Instruction::LoadLocal(slot));
+						self.compile_into_checked(value, instructions)?;
+						instructions.push(Instruction::Modulo);
+					}
+					AssignmentOperator::MultiplyAssign => {
+						instructions.push(Instruction::LoadLocal(slot));
+						self.compile_into_checked(value, instructions)?;
+						instructions.push(Instruction::Multiply);
+					}
+					AssignmentOperator::SubtractAssign => {
+						instructions.push(Instruction::LoadLocal(slot));
+						self.compile_into_checked(value, instructions)?;
+						instructions.push(Instruction::Subtract);
+					}
+				}
+
+				instructions.push(Instruction::StoreLocal(slot));
+				instructions.push(Instruction::LoadLocal(slot));
+				Ok(())
+			}
 			Expr::Identifier(IdentifierExpr { name }) => {
 				let slot = self.locals.get(name).copied().ok_or(CompileError {
 					message: format!("Variable `{name}` is not declared in this scope."),
@@ -167,6 +248,9 @@ impl Compiler {
 				let slot = self.next_local_slot;
 				self.next_local_slot += 1;
 
+				let initial_value = initial_value.as_ref().ok_or(CompileError {
+					message: format!("Variable `{name}` must currently have an initializer."),
+				})?;
 				self.compile_into_checked(initial_value, instructions)?;
 				instructions.push(Instruction::StoreLocal(slot));
 				self.locals.insert(name.clone(), slot);
@@ -179,6 +263,8 @@ impl Compiler {
 
 #[cfg(test)]
 mod tests {
+	use crate::ast::AssignmentExpr;
+	use crate::ast::AssignmentOperator;
 	use crate::ast::BinaryExpr;
 	use crate::ast::BinaryOperator;
 	use crate::ast::BooleanLiteral;
@@ -236,6 +322,42 @@ mod tests {
 
 		assert_eq!(program.instructions, vec![
 			Instruction::PushBoolean(true),
+		]);
+	}
+
+	#[test]
+	fn compiles_compound_assignment_expression() {
+		let program = AstProgram {
+			statements: vec![
+				Statement::VariableDeclaration(VariableDeclaration {
+					data_type: DataType::Int,
+					initial_value: Some(Expr::Integer(IntegerLiteral {
+						value: 5,
+					})),
+					name: String::from("x"),
+				}),
+			],
+			result: Some(Expr::Assignment(AssignmentExpr {
+				operator: AssignmentOperator::AddAssign,
+				target: IdentifierExpr {
+					name: String::from("x"),
+				},
+				value: Box::new(Expr::Integer(IntegerLiteral {
+					value: 3,
+				})),
+			})),
+		};
+
+		let bytecode = Compiler::new().compile_program(&program).unwrap();
+
+		assert_eq!(bytecode.instructions, vec![
+			Instruction::PushInteger(5),
+			Instruction::StoreLocal(0),
+			Instruction::LoadLocal(0),
+			Instruction::PushInteger(3),
+			Instruction::Add,
+			Instruction::StoreLocal(0),
+			Instruction::LoadLocal(0),
 		]);
 	}
 
@@ -359,9 +481,9 @@ mod tests {
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
-					initial_value: Expr::Integer(IntegerLiteral {
+					initial_value: Some(Expr::Integer(IntegerLiteral {
 						value: 1,
-					}),
+					})),
 					name: String::from("x"),
 				}),
 			],
