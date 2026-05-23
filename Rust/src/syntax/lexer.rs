@@ -73,6 +73,18 @@ impl Lexer {
 			}));
 		}
 
+		if next.is_ascii_alphabetic() {
+			let (kind, lexeme) = self.lex_keyword()?;
+			let end = self.position;
+
+			return Ok(Some(Token {
+				end,
+				kind,
+				lexeme,
+				start,
+			}));
+		}
+
 		let token_kind = match next {
 			'+' => TokenKind::Plus,
 			'-' => TokenKind::Dash,
@@ -160,6 +172,28 @@ impl Lexer {
 		(TokenKind::IntegerLiteral, self.source.as_str()[start..self.position].to_string())
 	}
 
+	fn lex_keyword(&mut self) -> Result<(TokenKind, String), LexError> {
+		let start = self.position;
+
+		while self.peek_char().is_some_and(|next| next.is_ascii_alphanumeric() || next == '_') {
+			self.advance_char();
+		}
+
+		let lexeme = self.source.as_str()[start..self.position].to_string();
+		let kind = match lexeme.as_str() {
+			"false" => TokenKind::FalseKeyword,
+			"true" => TokenKind::TrueKeyword,
+			_ => {
+				return Err(LexError {
+					position: start,
+					message: format!("Unexpected identifier `{lexeme}`."),
+				});
+			}
+		};
+
+		Ok((kind, lexeme))
+	}
+
 	fn peek_char(&self) -> Option<char> {
 		self.source.as_str()[self.position..].chars().next()
 	}
@@ -202,6 +236,19 @@ mod tests {
 		assert_eq!(tokens[9].kind, TokenKind::Plus);
 		assert_eq!(tokens[10].kind, TokenKind::IntegerLiteral);
 		assert_eq!(tokens[11].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
+	fn tokenizes_boolean_literals() {
+		let mut lexer = Lexer::new(SourceText::new("true false"));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens.len(), 3);
+		assert_eq!(tokens[0].kind, TokenKind::TrueKeyword);
+		assert_eq!(tokens[0].lexeme, "true");
+		assert_eq!(tokens[1].kind, TokenKind::FalseKeyword);
+		assert_eq!(tokens[1].lexeme, "false");
+		assert_eq!(tokens[2].kind, TokenKind::EndOfFile);
 	}
 
 	#[test]
@@ -301,5 +348,14 @@ mod tests {
 
 		assert_eq!(error.position, 2);
 		assert_eq!(error.message, "Unexpected character `?`.");
+	}
+
+	#[test]
+	fn rejects_unexpected_identifier() {
+		let mut lexer = Lexer::new(SourceText::new("maybe"));
+		let error = lexer.tokenize().unwrap_err();
+
+		assert_eq!(error.position, 0);
+		assert_eq!(error.message, "Unexpected identifier `maybe`.");
 	}
 }

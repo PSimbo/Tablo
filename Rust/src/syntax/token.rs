@@ -4,12 +4,14 @@ pub enum TokenKind {
 	Dash,
 	DecimalLiteral,
 	EndOfFile,
+	FalseKeyword,
 	ForwardSlash,
 	IntegerLiteral,
 	LeftParenthesis,
 	Percent,
 	Plus,
 	RightParenthesis,
+	TrueKeyword,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

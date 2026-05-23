@@ -10,10 +10,11 @@ const OPCODE_ADD: u8 = 1;
 const OPCODE_DIVIDE: u8 = 2;
 const OPCODE_MODULO: u8 = 3;
 const OPCODE_MULTIPLY: u8 = 4;
-const OPCODE_PUSH_DECIMAL: u8 = 5;
-const OPCODE_PUSH_INTEGER: u8 = 6;
-const OPCODE_SUBTRACT: u8 = 7;
-const OPCODE_NEGATE: u8 = 8;
+const OPCODE_PUSH_BOOLEAN: u8 = 5;
+const OPCODE_PUSH_DECIMAL: u8 = 6;
+const OPCODE_PUSH_INTEGER: u8 = 7;
+const OPCODE_SUBTRACT: u8 = 8;
+const OPCODE_NEGATE: u8 = 9;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectFileError {
@@ -67,6 +68,10 @@ pub fn write_program(program: &Program) -> Vec<u8> {
 			Instruction::Modulo => bytes.push(OPCODE_MODULO),
 			Instruction::Multiply => bytes.push(OPCODE_MULTIPLY),
 			Instruction::Negate => bytes.push(OPCODE_NEGATE),
+			Instruction::PushBoolean(value) => {
+				bytes.push(OPCODE_PUSH_BOOLEAN);
+				bytes.push(u8::from(*value));
+			}
 			Instruction::PushDecimal(value) => {
 				bytes.push(OPCODE_PUSH_DECIMAL);
 				bytes.extend_from_slice(&value.coefficient.to_le_bytes());
@@ -99,11 +104,17 @@ struct ObjectFileReader<'a> {
 }
 
 impl<'a> ObjectFileReader<'a> {
-	fn new(bytes: &'a [u8]) -> Self {
-		Self {
-			bytes,
-			offset: 0,
+	fn expect_format_version(&mut self) -> Result<(), ObjectFileError> {
+		let version = self.read_u16()?;
+
+		if version != FORMAT_VERSION {
+			return Err(ObjectFileError {
+				offset: MAGIC_BYTES.len(),
+				message: format!("Unsupported object file version {version}."),
+			});
 		}
+
+		Ok(())
 	}
 
 	fn expect_magic_bytes(&mut self) -> Result<(), ObjectFileError> {
@@ -119,21 +130,40 @@ impl<'a> ObjectFileReader<'a> {
 		Ok(())
 	}
 
-	fn expect_format_version(&mut self) -> Result<(), ObjectFileError> {
-		let version = self.read_u16()?;
-
-		if version != FORMAT_VERSION {
-			return Err(ObjectFileError {
-				offset: MAGIC_BYTES.len(),
-				message: format!("Unsupported object file version {version}."),
-			});
-		}
-
-		Ok(())
-	}
-
 	fn is_at_end(&self) -> bool {
 		self.offset >= self.bytes.len()
+	}
+
+	fn new(bytes: &'a [u8]) -> Self {
+		Self {
+			bytes,
+			offset: 0,
+		}
+	}
+
+	fn read_bool(&mut self) -> Result<bool, ObjectFileError> {
+		match self.read_u8()? {
+			0 => Ok(false),
+			1 => Ok(true),
+			value => Err(ObjectFileError {
+				offset: self.offset - 1,
+				message: format!("Invalid Boolean value {value}."),
+			}),
+		}
+	}
+
+	fn read_decimal(&mut self) -> Result<Decimal, ObjectFileError> {
+		let mut coefficient_bytes = [0; 16];
+		coefficient_bytes.copy_from_slice(self.read_exact(16)?);
+		let coefficient = i128::from_le_bytes(coefficient_bytes);
+		let precision = self.read_u8()?;
+		let scale = self.read_u8()?;
+
+		Ok(Decimal {
+			coefficient,
+			precision,
+			scale,
+		})
 	}
 
 	fn read_exact(&mut self, len: usize) -> Result<&'a [u8], ObjectFileError> {
@@ -151,6 +181,12 @@ impl<'a> ObjectFileReader<'a> {
 		Ok(slice)
 	}
 
+	fn read_i64(&mut self) -> Result<i64, ObjectFileError> {
+		let mut bytes = [0; 8];
+		bytes.copy_from_slice(self.read_exact(8)?);
+		Ok(i64::from_le_bytes(bytes))
+	}
+
 	fn read_instruction(&mut self) -> Result<Instruction, ObjectFileError> {
 		let opcode_offset = self.offset;
 		let opcode = self.read_u8()?;
@@ -161,6 +197,7 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_MODULO => Ok(Instruction::Modulo),
 			OPCODE_MULTIPLY => Ok(Instruction::Multiply),
 			OPCODE_NEGATE => Ok(Instruction::Negate),
+			OPCODE_PUSH_BOOLEAN => Ok(Instruction::PushBoolean(self.read_bool()?)),
 			OPCODE_PUSH_DECIMAL => Ok(Instruction::PushDecimal(self.read_decimal()?)),
 			OPCODE_PUSH_INTEGER => Ok(Instruction::PushInteger(self.read_i64()?)),
 			OPCODE_SUBTRACT => Ok(Instruction::Subtract),
@@ -169,26 +206,6 @@ impl<'a> ObjectFileReader<'a> {
 				message: format!("Unknown opcode {opcode}."),
 			}),
 		}
-	}
-
-	fn read_i64(&mut self) -> Result<i64, ObjectFileError> {
-		let mut bytes = [0; 8];
-		bytes.copy_from_slice(self.read_exact(8)?);
-		Ok(i64::from_le_bytes(bytes))
-	}
-
-	fn read_decimal(&mut self) -> Result<Decimal, ObjectFileError> {
-		let mut coefficient_bytes = [0; 16];
-		coefficient_bytes.copy_from_slice(self.read_exact(16)?);
-		let coefficient = i128::from_le_bytes(coefficient_bytes);
-		let precision = self.read_u8()?;
-		let scale = self.read_u8()?;
-
-		Ok(Decimal {
-			coefficient,
-			precision,
-			scale,
-		})
 	}
 
 	fn read_u8(&mut self) -> Result<u8, ObjectFileError> {
@@ -239,6 +256,18 @@ mod tests {
 			offset: 10,
 			message: String::from("Unknown opcode 255."),
 		});
+	}
+
+	#[test]
+	fn round_trips_boolean_program_bytes() {
+		let program = Program::new(vec![
+			Instruction::PushBoolean(true),
+		]);
+
+		let bytes = write_program(&program);
+		let decoded = read_program(&bytes).unwrap();
+
+		assert_eq!(decoded, program);
 	}
 
 	#[test]

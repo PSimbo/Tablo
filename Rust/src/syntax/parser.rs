@@ -1,5 +1,6 @@
 use crate::ast::BinaryExpr;
 use crate::ast::BinaryOperator;
+use crate::ast::BooleanLiteral;
 use crate::ast::DecimalLiteral;
 use crate::ast::Expr;
 use crate::ast::IntegerLiteral;
@@ -67,6 +68,23 @@ impl Parser {
 		let token = self.current()?.clone();
 		self.position += 1;
 		Some(token)
+	}
+
+	fn parse_boolean_literal(&self, token: Token) -> Result<Expr, ParseError> {
+		let value = match token.kind {
+			TokenKind::FalseKeyword => false,
+			TokenKind::TrueKeyword => true,
+			_ => {
+				return Err(ParseError {
+					message: format!("Token `{}` is not a Boolean literal.", token.lexeme),
+					position: token.start,
+				});
+			}
+		};
+
+		Ok(Expr::Boolean(BooleanLiteral {
+			value,
+		}))
 	}
 
 	fn parse_decimal_literal(&self, token: Token) -> Result<Expr, ParseError> {
@@ -203,6 +221,7 @@ impl Parser {
 
 		match token.kind {
 			TokenKind::Dash => self.parse_negation_expression(),
+			TokenKind::FalseKeyword | TokenKind::TrueKeyword => self.parse_boolean_literal(token),
 			TokenKind::DecimalLiteral => self.parse_decimal_literal(token),
 			TokenKind::IntegerLiteral => self.parse_integer_literal(token),
 			TokenKind::LeftParenthesis => self.parse_group_expression(token.start),
@@ -222,6 +241,7 @@ impl Parser {
 mod tests {
 	use crate::ast::BinaryExpr;
 	use crate::ast::BinaryOperator;
+	use crate::ast::BooleanLiteral;
 	use crate::ast::DecimalLiteral;
 	use crate::ast::Expr;
 	use crate::ast::IntegerLiteral;
@@ -238,6 +258,16 @@ mod tests {
 		let tokens = lexer.tokenize().unwrap();
 		let mut parser = Parser::new(tokens);
 		parser.parse_expression().unwrap()
+	}
+
+	#[test]
+	fn parses_boolean_literal() {
+		assert_eq!(
+			parse("true"),
+			Expr::Boolean(BooleanLiteral {
+				value: true,
+			})
+		);
 	}
 
 	#[test]

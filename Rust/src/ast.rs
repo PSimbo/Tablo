@@ -11,6 +11,7 @@ pub enum BinaryOperator {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Expr {
+	Boolean(BooleanLiteral),
 	Integer(IntegerLiteral),
 	Decimal(DecimalLiteral),
 	Binary(BinaryExpr),
@@ -27,6 +28,11 @@ pub struct BinaryExpr {
 	pub left: Box<Expr>,
 	pub operator: BinaryOperator,
 	pub right: Box<Expr>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BooleanLiteral {
+	pub value: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

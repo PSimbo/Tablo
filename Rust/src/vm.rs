@@ -62,6 +62,10 @@ impl VirtualMachine {
 				self.stack.push(negate_value(value));
 				Ok(())
 			}
+			Instruction::PushBoolean(value) => {
+				self.stack.push(Value::Boolean(*value));
+				Ok(())
+			}
 			Instruction::PushDecimal(value) => {
 				self.stack.push(Value::Decimal(value.clone()));
 				Ok(())
@@ -84,6 +88,13 @@ impl VirtualMachine {
 			instruction_index,
 			message: String::from("Stack underflow while reading numeric operand."),
 		})?;
+
+		if matches!(value, Value::Boolean(_)) {
+			return Err(VmError {
+				instruction_index,
+				message: String::from("Expected a numeric operand, found a Boolean value."),
+			});
+		}
 
 		Ok(value)
 	}
@@ -117,6 +128,7 @@ fn coerce_numeric_values(lhs: Value, rhs: Value, instruction_index: usize) -> Re
 			Ok((lhs, rhs))
 		}
 		(Value::Integer(lhs), Value::Integer(rhs)) => Ok((Decimal::from_integer(lhs), Decimal::from_integer(rhs))),
+		_ => Err(vm_error(instruction_index, String::from("Expected numeric operands."))),
 	}
 }
 
@@ -164,6 +176,7 @@ fn multiply_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<V
 
 fn negate_value(value: Value) -> Value {
 	match value {
+		Value::Boolean(_) => unreachable!("Boolean values are rejected before numeric negation."),
 		Value::Decimal(mut decimal) => {
 			decimal.coefficient = decimal.coefficient.saturating_neg();
 			Value::Decimal(decimal)
@@ -198,60 +211,6 @@ mod tests {
 
 	use super::VirtualMachine;
 	use super::VmError;
-
-	#[test]
-	fn runs_integer_literal_program() {
-		let program = Program::new(vec![
-			Instruction::PushInteger(42),
-		]);
-
-		let result = VirtualMachine::new().run(&program).unwrap();
-
-		assert_eq!(result, Some(Value::Integer(42)));
-	}
-
-	#[test]
-	fn runs_decimal_literal_program() {
-		let program = Program::new(vec![
-			Instruction::PushDecimal(Decimal::from_literal("1.25").unwrap()),
-		]);
-
-		let result = VirtualMachine::new().run(&program).unwrap();
-
-		assert_eq!(result, Some(Value::Decimal(Decimal::from_literal("1.25").unwrap())));
-	}
-
-	#[test]
-	fn runs_addition_program() {
-		let program = Program::new(vec![
-			Instruction::PushInteger(1),
-			Instruction::PushInteger(2),
-			Instruction::Add,
-		]);
-
-		let result = VirtualMachine::new().run(&program).unwrap();
-
-		assert_eq!(result, Some(Value::Integer(3)));
-	}
-
-	#[test]
-	fn runs_other_arithmetic_program() {
-		let program = Program::new(vec![
-			Instruction::PushInteger(20),
-			Instruction::PushInteger(5),
-			Instruction::Divide,
-			Instruction::PushInteger(3),
-			Instruction::Multiply,
-			Instruction::PushInteger(1),
-			Instruction::Subtract,
-			Instruction::PushInteger(4),
-			Instruction::Modulo,
-		]);
-
-		let result = VirtualMachine::new().run(&program).unwrap();
-
-		assert_eq!(result, Some(Value::Integer(3)));
-	}
 
 	#[test]
 	fn rejects_addition_without_enough_operands() {
@@ -301,6 +260,52 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_addition_program() {
+		let program = Program::new(vec![
+			Instruction::PushInteger(1),
+			Instruction::PushInteger(2),
+			Instruction::Add,
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
+	fn runs_boolean_literal_program() {
+		let program = Program::new(vec![
+			Instruction::PushBoolean(true),
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
+	fn runs_decimal_literal_program() {
+		let program = Program::new(vec![
+			Instruction::PushDecimal(Decimal::from_literal("1.25").unwrap()),
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Decimal(Decimal::from_literal("1.25").unwrap())));
+	}
+
+	#[test]
+	fn runs_integer_literal_program() {
+		let program = Program::new(vec![
+			Instruction::PushInteger(42),
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(42)));
+	}
+
+	#[test]
 	fn runs_mixed_integer_and_decimal_addition() {
 		let program = Program::new(vec![
 			Instruction::PushInteger(2),
@@ -314,15 +319,22 @@ mod tests {
 	}
 
 	#[test]
-	fn runs_unary_negation_for_integer() {
+	fn runs_other_arithmetic_program() {
 		let program = Program::new(vec![
-			Instruction::PushInteger(42),
-			Instruction::Negate,
+			Instruction::PushInteger(20),
+			Instruction::PushInteger(5),
+			Instruction::Divide,
+			Instruction::PushInteger(3),
+			Instruction::Multiply,
+			Instruction::PushInteger(1),
+			Instruction::Subtract,
+			Instruction::PushInteger(4),
+			Instruction::Modulo,
 		]);
 
 		let result = VirtualMachine::new().run(&program).unwrap();
 
-		assert_eq!(result, Some(Value::Integer(-42)));
+		assert_eq!(result, Some(Value::Integer(3)));
 	}
 
 	#[test]
@@ -335,5 +347,17 @@ mod tests {
 		let result = VirtualMachine::new().run(&program).unwrap();
 
 		assert_eq!(result, Some(Value::Decimal(Decimal::from_literal("1.25").unwrap().negated())));
+	}
+
+	#[test]
+	fn runs_unary_negation_for_integer() {
+		let program = Program::new(vec![
+			Instruction::PushInteger(42),
+			Instruction::Negate,
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(-42)));
 	}
 }

@@ -7,6 +7,7 @@ pub enum Instruction {
 	Modulo,
 	Multiply,
 	Negate,
+	PushBoolean(bool),
 	PushDecimal(Decimal),
 	PushInteger(i64),
 	Subtract,

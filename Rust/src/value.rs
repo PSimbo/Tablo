@@ -2,6 +2,7 @@ use std::fmt::Display;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Value {
+	Boolean(bool),
 	Decimal(Decimal),
 	Integer(i64),
 }
@@ -9,6 +10,7 @@ pub enum Value {
 impl Display for Value {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
+			Value::Boolean(value) => write!(f, "{value}"),
 			Value::Decimal(value) => write!(f, "{value}"),
 			Value::Integer(value) => write!(f, "{value}"),
 		}
@@ -292,21 +294,21 @@ mod tests {
 	}
 
 	#[test]
-	fn divides_with_rounding_when_result_repeats() {
-		let lhs = Decimal::from_literal("2.0").unwrap();
-		let rhs = Decimal::from_literal("3.0").unwrap();
-		let result = lhs.checked_div(&rhs).unwrap();
-
-		assert_eq!(result.to_string(), "0.6666666666666666666666666666666666667");
-	}
-
-	#[test]
 	fn divides_exact_values_without_trailing_zero_noise() {
 		let lhs = Decimal::from_literal("1.0").unwrap();
 		let rhs = Decimal::from_literal("2.0").unwrap();
 		let result = lhs.checked_div(&rhs).unwrap();
 
 		assert_eq!(result.to_string(), "0.5");
+	}
+
+	#[test]
+	fn divides_with_rounding_when_result_repeats() {
+		let lhs = Decimal::from_literal("2.0").unwrap();
+		let rhs = Decimal::from_literal("3.0").unwrap();
+		let result = lhs.checked_div(&rhs).unwrap();
+
+		assert_eq!(result.to_string(), "0.6666666666666666666666666666666666667");
 	}
 
 	#[test]

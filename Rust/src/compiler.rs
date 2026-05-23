@@ -1,4 +1,5 @@
 use crate::ast::BinaryOperator;
+use crate::ast::BooleanLiteral;
 use crate::ast::DecimalLiteral;
 use crate::ast::Expr;
 use crate::ast::UnaryExpr;
@@ -24,6 +25,9 @@ impl Compiler {
 		let _ = self;
 
 		match expression {
+			Expr::Boolean(BooleanLiteral { value }) => {
+				instructions.push(Instruction::PushBoolean(*value));
+			}
 			Expr::Decimal(DecimalLiteral { value }) => {
 				instructions.push(Instruction::PushDecimal(value.clone()));
 			}
@@ -57,6 +61,7 @@ impl Compiler {
 mod tests {
 	use crate::ast::BinaryExpr;
 	use crate::ast::BinaryOperator;
+	use crate::ast::BooleanLiteral;
 	use crate::ast::DecimalLiteral;
 	use crate::ast::Expr;
 	use crate::ast::IntegerLiteral;
@@ -93,6 +98,19 @@ mod tests {
 			Instruction::PushInteger(3),
 			Instruction::Add,
 			Instruction::Add,
+		]);
+	}
+
+	#[test]
+	fn compiles_boolean_literal() {
+		let expression = Expr::Boolean(BooleanLiteral {
+			value: true,
+		});
+
+		let program = Compiler::new().compile_expression(&expression);
+
+		assert_eq!(program.instructions, vec![
+			Instruction::PushBoolean(true),
 		]);
 	}
 

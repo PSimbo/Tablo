@@ -131,6 +131,13 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_boolean_source_text() {
+		let result = run("true").unwrap();
+
+		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
 	fn runs_decimal_object_file() {
 		let output_path = unique_test_output_path("runs_decimal_object_file");
 		compile("1.25 + .5", &output_path).unwrap();
@@ -145,15 +152,6 @@ mod tests {
 		let result = run("1.25 + .5").unwrap();
 
 		assert_eq!(result, Some(Value::Decimal(crate::value::Decimal::from_literal("1.75").unwrap())));
-	}
-
-	#[test]
-	fn runs_repeating_decimal_division() {
-		let result = run("2.0 / 3.0").unwrap();
-
-		assert_eq!(result, Some(Value::Decimal(
-			crate::value::Decimal::from_literal("0.6666666666666666666666666666666666667").unwrap()
-		)));
 	}
 
 	#[test]
@@ -177,6 +175,15 @@ mod tests {
 		let result = run_program(&program).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(2)));
+	}
+
+	#[test]
+	fn runs_repeating_decimal_division() {
+		let result = run("2.0 / 3.0").unwrap();
+
+		assert_eq!(result, Some(Value::Decimal(
+			crate::value::Decimal::from_literal("0.6666666666666666666666666666666666667").unwrap()
+		)));
 	}
 
 	#[test]
