@@ -131,11 +131,13 @@ Note that there are no separate types for `float`s and `int`s of different byte 
 
 Likewise, due to limited support in backend databases, Tablo does not have a dedicated type for unsigned integers.
 
-Decimal values internally store an exact decimal number together with a precision and scale. Decimal values are not floating-point approximations.
+Decimal values are exact decimal numbers. They are not floating-point approximations.
 
-Decimals that are read from a database field internally store the precision and scale of that field. Uninitialized variables of type `dec` default to a precision of 7 and a scale of 2. Binary operators involving two decimals will typically produce a `dec` value whose precision and scale are such that the number of whole digits (precision minus scale) and the number of fractional digits are both the maxima of those for the operands. For example, multiply a decimal with precision 5 and scale 6 (-1 whole digits) with a decimal with precision 7 and scale 3 (4 whole digits) results in a decimal with precision 10 and scale 6 (4 whole digits). If a `dec` is assigned to a database field that lacks the range to store the value, the assigned value is clamped to the supported range. If the database field lacks the precision to store the value, the assigned value is truncated to the supported precision.
+The internal representation of a decimal value, including any tracked metadata such as scale or precision, is implementation-defined and is not part of the language semantics. As far as the programmer is concerned, a variable of type `dec` may hold any decimal value supported by the implementation.
 
-Every Tablo implementation must support decimal values with at least 38 digits of precision.
+Every Tablo implementation must support decimal values with at least 38 decimal digits.
+
+If a `dec` value is assigned to a database field whose supported range is too small to store the value, the assigned value is clamped to the supported range.
 
 Note that the `json` data type does not require that the database backend have explicit support for storing JSON data. Tablo provides functions for converting JSON data to and from strings.
 
@@ -242,15 +244,7 @@ A decimal literal is represented as, at minimum, a `.` followed by a sequence of
 
 Negative values are specified be prefixing the digits with a `-`.
 
-Decimal literals are represented exactly. The precision of a decimal literal is the total number of decimal digits in its canonical form, excluding the sign and decimal point. The scale is the number of digits after the decimal point. If the integer part is omitted, it is treated as `0` when determining the precision and scale.
-
-For example:
-
-~~~
-1.23  // precision: 3, scale: 2
-0.50  // precision: 3, scale: 2
-.5    // precision: 2, scale: 1 (equivalent to 0.5)
-~~~
+Decimal literals are represented exactly. If the integer part is omitted, it is treated as `0`. For example, `.5` is equivalent to `0.5`.
 
 Attempting to assign a decimal literal to a variable of a type for which the number is outside the supported range results in a compile error.
 
@@ -312,7 +306,7 @@ For `text` values, equality comparison is case-sensitive. Two `text` values are 
 
 If a case-insensitive text equality comparison is required, the expected approach is to normalize the casing of both operands explicitly. For example: `lower(a) == lower(b)`.
 
-Decimal values may be compared with other decimal values even if they have dissimilar scales and precisions provided that no loss of precision would occur should the scales and/or precisions be made to match. Decimal values may be compared with integer values as the integer will be automatically converted to a decimal as per the "Automatic Type Conversions" section below.
+Decimal values may be compared with other decimal values. Decimal values may also be compared with integer values as the integer will be automatically converted to a decimal as per the "Automatic Type Conversions" section below.
 
 ### Comparison Operators
 
@@ -388,7 +382,7 @@ or
 
 Tablo supports a fairly limited set of automatic type conversions. In general, an explicit conversion is required when using one type in a place where another is expected.
 
-Numeric values may be implicitly converted between `int` and `dec` where necessary. In these cases, the `int` operand is automatically converted to a `dec` representation using the same scale and precision as the `dec` operand.
+Numeric values may be implicitly converted between `int` and `dec` where necessary.
 
 Note that `float` and `dec` are not implicitly converted to one another. Any operation involving both `float` and `dec` requires an explicit conversion.
 
@@ -426,7 +420,7 @@ The non-null default values for each data type are:
 | `bin`         | Empty binary sequence           |
 | `bool`        | `false`                         |
 | `date`        | The current local date          |
-| `dec`         | `0.0` (precision: 7, scale: 2)  |
+| `dec`         | `0.0`                           |
 | `float`       | `0.0`                           |
 | `int`         | `0`                             |
 | `json`        | `{}`                            |
