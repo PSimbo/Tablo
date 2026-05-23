@@ -13,6 +13,7 @@ enum ComparisonKind {
 
 #[derive(Default)]
 pub struct VirtualMachine {
+	locals: Vec<Value>,
 	stack: Vec<Value>,
 }
 
@@ -25,12 +26,14 @@ pub struct VmError {
 impl VirtualMachine {
 	pub fn new() -> Self {
 		Self {
+			locals: Vec::new(),
 			stack: Vec::new(),
 		}
 	}
 
 	pub fn run(&mut self, program: &Program) -> Result<Option<Value>, VmError> {
 		self.stack.clear();
+		self.locals.clear();
 
 		for (instruction_index, instruction) in program.instructions.iter().enumerate() {
 			self.execute_instruction(instruction, instruction_index)?;
@@ -89,6 +92,14 @@ impl VirtualMachine {
 				self.stack.push(compare_values(lhs, rhs, instruction_index, ComparisonKind::LessThanOrEqual)?);
 				Ok(())
 			}
+			Instruction::LoadLocal(slot) => {
+				let value = self.locals.get(*slot as usize).cloned().ok_or(VmError {
+					instruction_index,
+					message: format!("Local slot {} has not been initialized.", slot),
+				})?;
+				self.stack.push(value);
+				Ok(())
+			}
 			Instruction::Modulo => {
 				let rhs = self.pop_numeric(instruction_index)?;
 				let lhs = self.pop_numeric(instruction_index)?;
@@ -139,6 +150,17 @@ impl VirtualMachine {
 				let rhs = self.pop_numeric(instruction_index)?;
 				let lhs = self.pop_numeric(instruction_index)?;
 				self.stack.push(subtract_values(lhs, rhs, instruction_index)?);
+				Ok(())
+			}
+			Instruction::StoreLocal(slot) => {
+				let value = self.pop_value(instruction_index)?;
+				let slot = *slot as usize;
+
+				if self.locals.len() <= slot {
+					self.locals.resize(slot + 1, Value::Boolean(false));
+				}
+
+				self.locals[slot] = value;
 				Ok(())
 			}
 			Instruction::Xor => {
@@ -525,6 +547,21 @@ mod tests {
 		let result = VirtualMachine::new().run(&program).unwrap();
 
 		assert_eq!(result, Some(Value::Decimal(Decimal::from_literal("3.25").unwrap())));
+	}
+
+	#[test]
+	fn runs_local_store_and_load_program() {
+		let program = Program::new(vec![
+			Instruction::PushInteger(1),
+			Instruction::StoreLocal(0),
+			Instruction::LoadLocal(0),
+			Instruction::PushInteger(2),
+			Instruction::Add,
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(3)));
 	}
 
 	#[test]

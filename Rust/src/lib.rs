@@ -11,6 +11,7 @@ pub mod value;
 pub mod vm;
 
 use bytecode::Program;
+use compiler::CompileError;
 use compiler::Compiler;
 use object_file::read_program_from_path;
 use object_file::ObjectFileError;
@@ -26,6 +27,7 @@ use vm::VmError;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TabloError {
+	Compile(CompileError),
 	Lex(LexError),
 	ObjectFile(ObjectFileError),
 	Parse(ParseError),
@@ -35,6 +37,7 @@ pub enum TabloError {
 impl Display for TabloError {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
+			TabloError::Compile(error) => write!(f, "Compile error: {}", error.message),
 			TabloError::Lex(error) => write!(f, "Lex error at byte {}: {}", error.position, error.message),
 			TabloError::ObjectFile(error) => write!(f, "Object file error at byte {}: {}", error.offset, error.message),
 			TabloError::Parse(error) => write!(f, "Parse error at byte {}: {}", error.position, error.message),
@@ -68,9 +71,9 @@ fn compile_to_program(source: impl Into<String>) -> Result<Program, TabloError> 
 	let mut lexer = Lexer::new(source);
 	let tokens = lexer.tokenize().map_err(TabloError::Lex)?;
 	let mut parser = Parser::new(tokens);
-	let expression = parser.parse_expression().map_err(TabloError::Parse)?;
+	let program = parser.parse_program().map_err(TabloError::Parse)?;
 
-	Ok(Compiler::new().compile_expression(&expression))
+	Compiler::new().compile_program(&program).map_err(TabloError::Compile)
 }
 
 #[cfg(test)]
@@ -219,6 +222,13 @@ mod tests {
 		let result = run("1 + 2 + 3").unwrap();
 
 		assert_eq!(result, Some(Value::Integer(6)));
+	}
+
+	#[test]
+	fn runs_source_text_with_variable_declarations() {
+		let result = run("var x: int = 1\nvar y: int = 2\nx + y").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(3)));
 	}
 
 	#[test]

@@ -91,6 +91,7 @@ impl Lexer {
 			'*' => TokenKind::Asterisk,
 			'/' => TokenKind::ForwardSlash,
 			'%' => TokenKind::Percent,
+			':' => TokenKind::Colon,
 			'(' => TokenKind::LeftParenthesis,
 			')' => TokenKind::RightParenthesis,
 			'!' if self.peek_next_char() == Some('=') => {
@@ -115,6 +116,7 @@ impl Lexer {
 					start,
 				}));
 			}
+			'=' => TokenKind::Equal,
 			'>' if self.peek_next_char() == Some('=') => {
 				self.advance_char();
 				self.advance_char();
@@ -228,17 +230,16 @@ impl Lexer {
 		let lexeme = self.source.as_str()[start..self.position].to_string();
 		let kind = match lexeme.as_str() {
 			"and" => TokenKind::AndKeyword,
+			"bool" => TokenKind::BoolKeyword,
+			"dec" => TokenKind::DecKeyword,
 			"false" => TokenKind::FalseKeyword,
+			"int" => TokenKind::IntKeyword,
 			"not" => TokenKind::NotKeyword,
 			"or" => TokenKind::OrKeyword,
 			"true" => TokenKind::TrueKeyword,
+			"var" => TokenKind::VarKeyword,
 			"xor" => TokenKind::XorKeyword,
-			_ => {
-				return Err(LexError {
-					position: start,
-					message: format!("Unexpected identifier `{lexeme}`."),
-				});
-			}
+			_ => TokenKind::Identifier,
 		};
 
 		Ok((kind, lexeme))
@@ -290,10 +291,10 @@ mod tests {
 
 	#[test]
 	fn tokenizes_boolean_literals() {
-		let mut lexer = Lexer::new(SourceText::new("true false and or not xor"));
+		let mut lexer = Lexer::new(SourceText::new("true false and or not xor bool dec int var"));
 		let tokens = lexer.tokenize().unwrap();
 
-		assert_eq!(tokens.len(), 7);
+		assert_eq!(tokens.len(), 11);
 		assert_eq!(tokens[0].kind, TokenKind::TrueKeyword);
 		assert_eq!(tokens[0].lexeme, "true");
 		assert_eq!(tokens[1].kind, TokenKind::FalseKeyword);
@@ -302,7 +303,11 @@ mod tests {
 		assert_eq!(tokens[3].kind, TokenKind::OrKeyword);
 		assert_eq!(tokens[4].kind, TokenKind::NotKeyword);
 		assert_eq!(tokens[5].kind, TokenKind::XorKeyword);
-		assert_eq!(tokens[6].kind, TokenKind::EndOfFile);
+		assert_eq!(tokens[6].kind, TokenKind::BoolKeyword);
+		assert_eq!(tokens[7].kind, TokenKind::DecKeyword);
+		assert_eq!(tokens[8].kind, TokenKind::IntKeyword);
+		assert_eq!(tokens[9].kind, TokenKind::VarKeyword);
+		assert_eq!(tokens[10].kind, TokenKind::EndOfFile);
 	}
 
 	#[test]
@@ -317,6 +322,24 @@ mod tests {
 		assert_eq!(tokens[2].kind, TokenKind::DecimalLiteral);
 		assert_eq!(tokens[2].lexeme, ".5");
 		assert_eq!(tokens[3].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
+	fn tokenizes_identifier_and_colon() {
+		let mut lexer = Lexer::new(SourceText::new("var x: int = value"));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens.len(), 7);
+		assert_eq!(tokens[0].kind, TokenKind::VarKeyword);
+		assert_eq!(tokens[1].kind, TokenKind::Identifier);
+		assert_eq!(tokens[1].lexeme, "x");
+		assert_eq!(tokens[2].kind, TokenKind::Colon);
+		assert_eq!(tokens[3].kind, TokenKind::IntKeyword);
+		assert_eq!(tokens[4].kind, TokenKind::Equal);
+		assert_eq!(tokens[4].lexeme, "=");
+		assert_eq!(tokens[5].kind, TokenKind::Identifier);
+		assert_eq!(tokens[5].lexeme, "value");
+		assert_eq!(tokens[6].kind, TokenKind::EndOfFile);
 	}
 
 	#[test]
@@ -420,11 +443,13 @@ mod tests {
 	}
 
 	#[test]
-	fn rejects_unexpected_identifier() {
+	fn tokenizes_identifier() {
 		let mut lexer = Lexer::new(SourceText::new("maybe"));
-		let error = lexer.tokenize().unwrap_err();
+		let tokens = lexer.tokenize().unwrap();
 
-		assert_eq!(error.position, 0);
-		assert_eq!(error.message, "Unexpected identifier `maybe`.");
+		assert_eq!(tokens.len(), 2);
+		assert_eq!(tokens[0].kind, TokenKind::Identifier);
+		assert_eq!(tokens[0].lexeme, "maybe");
+		assert_eq!(tokens[1].kind, TokenKind::EndOfFile);
 	}
 }

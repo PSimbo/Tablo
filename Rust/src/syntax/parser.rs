@@ -1,11 +1,16 @@
 use crate::ast::BinaryExpr;
 use crate::ast::BinaryOperator;
 use crate::ast::BooleanLiteral;
+use crate::ast::DataType;
 use crate::ast::DecimalLiteral;
 use crate::ast::Expr;
+use crate::ast::IdentifierExpr;
 use crate::ast::IntegerLiteral;
+use crate::ast::Program;
+use crate::ast::Statement;
 use crate::ast::UnaryExpr;
 use crate::ast::UnaryOperator;
+use crate::ast::VariableDeclaration;
 use crate::value::Decimal;
 
 use super::token::Token;
@@ -51,6 +56,27 @@ impl Parser {
 		Ok(expression)
 	}
 
+	pub fn parse_program(&mut self) -> Result<Program, ParseError> {
+		let mut statements = Vec::new();
+
+		while self.current().is_some_and(|token| token.kind == TokenKind::VarKeyword) {
+			statements.push(self.parse_variable_declaration_statement()?);
+		}
+
+		let result = match self.current() {
+			Some(token) if token.kind == TokenKind::EndOfFile => None,
+			Some(_) => Some(self.parse_expression_with_binding_power(BindingPower::Default)?),
+			None => None,
+		};
+
+		self.expect_end_of_file()?;
+
+		Ok(Program {
+			result,
+			statements,
+		})
+	}
+
 	fn current(&self) -> Option<&Token> {
 		self.tokens.get(self.position)
 	}
@@ -67,6 +93,22 @@ impl Parser {
 				position: 0,
 			}),
 		}
+	}
+
+	fn expect_token(&mut self, expected_kind: TokenKind, message: &str) -> Result<Token, ParseError> {
+		let token = self.next().ok_or(ParseError {
+			message: String::from(message),
+			position: 0,
+		})?;
+
+		if token.kind != expected_kind {
+			return Err(ParseError {
+				message: format!("{message} Found `{}` instead.", token.lexeme),
+				position: token.start,
+			});
+		}
+
+		Ok(token)
 	}
 
 	fn next(&mut self) -> Option<Token> {
@@ -90,6 +132,23 @@ impl Parser {
 		Ok(Expr::Boolean(BooleanLiteral {
 			value,
 		}))
+	}
+
+	fn parse_data_type(&mut self) -> Result<DataType, ParseError> {
+		let token = self.next().ok_or(ParseError {
+			message: String::from("Expected a data type."),
+			position: 0,
+		})?;
+
+		match token.kind {
+			TokenKind::BoolKeyword => Ok(DataType::Bool),
+			TokenKind::DecKeyword => Ok(DataType::Dec),
+			TokenKind::IntKeyword => Ok(DataType::Int),
+			_ => Err(ParseError {
+				message: format!("Expected a supported data type, found `{}`.", token.lexeme),
+				position: token.start,
+			}),
+		}
 	}
 
 	fn parse_decimal_literal(&self, token: Token) -> Result<Expr, ParseError> {
@@ -151,6 +210,12 @@ impl Parser {
 		}
 
 		Ok(expression)
+	}
+
+	fn parse_identifier_expression(&self, token: Token) -> Expr {
+		Expr::Identifier(IdentifierExpr {
+			name: token.lexeme,
+		})
 	}
 
 	fn parse_infix(&mut self, left: Expr, operator: Token, binding_power: BindingPower) -> Result<Expr, ParseError> {
@@ -328,6 +393,7 @@ impl Parser {
 			TokenKind::Dash => self.parse_negation_expression(),
 			TokenKind::DecimalLiteral => self.parse_decimal_literal(token),
 			TokenKind::FalseKeyword | TokenKind::TrueKeyword => self.parse_boolean_literal(token),
+			TokenKind::Identifier => Ok(self.parse_identifier_expression(token)),
 			TokenKind::IntegerLiteral => self.parse_integer_literal(token),
 			TokenKind::LeftParenthesis => self.parse_group_expression(token.start),
 			TokenKind::NotKeyword => self.parse_not_expression(),
@@ -341,6 +407,21 @@ impl Parser {
 			}),
 		}
 	}
+
+	fn parse_variable_declaration_statement(&mut self) -> Result<Statement, ParseError> {
+		self.expect_token(TokenKind::VarKeyword, "Expected `var` to start variable declaration.")?;
+		let name = self.expect_token(TokenKind::Identifier, "Expected variable name.")?;
+		self.expect_token(TokenKind::Colon, "Expected `:` after variable name.")?;
+		let data_type = self.parse_data_type()?;
+		self.expect_token(TokenKind::Equal, "Expected `=` after variable type.")?;
+		let initial_value = self.parse_expression_with_binding_power(BindingPower::Default)?;
+
+		Ok(Statement::VariableDeclaration(VariableDeclaration {
+			data_type,
+			initial_value,
+			name: name.lexeme,
+		}))
+	}
 }
 
 #[cfg(test)]
@@ -348,11 +429,16 @@ mod tests {
 	use crate::ast::BinaryExpr;
 	use crate::ast::BinaryOperator;
 	use crate::ast::BooleanLiteral;
+	use crate::ast::DataType;
 	use crate::ast::DecimalLiteral;
 	use crate::ast::Expr;
+	use crate::ast::IdentifierExpr;
 	use crate::ast::IntegerLiteral;
+	use crate::ast::Program;
+	use crate::ast::Statement;
 	use crate::ast::UnaryExpr;
 	use crate::ast::UnaryOperator;
+	use crate::ast::VariableDeclaration;
 	use crate::source::SourceText;
 	use crate::value::Decimal;
 
@@ -366,6 +452,13 @@ mod tests {
 		parser.parse_expression().unwrap()
 	}
 
+	fn parse_program(source: &str) -> Program {
+		let mut lexer = Lexer::new(SourceText::new(source));
+		let tokens = lexer.tokenize().unwrap();
+		let mut parser = Parser::new(tokens);
+		parser.parse_program().unwrap()
+	}
+
 	#[test]
 	fn parses_boolean_literal() {
 		assert_eq!(
@@ -373,6 +466,40 @@ mod tests {
 			Expr::Boolean(BooleanLiteral {
 				value: true,
 			})
+		);
+	}
+
+	#[test]
+	fn parses_program_with_variable_declarations() {
+		assert_eq!(
+			parse_program("var x: int = 1\nvar y: int = 2\nx + y"),
+			Program {
+				statements: vec![
+					Statement::VariableDeclaration(VariableDeclaration {
+						data_type: DataType::Int,
+						initial_value: Expr::Integer(IntegerLiteral {
+							value: 1,
+						}),
+						name: String::from("x"),
+					}),
+					Statement::VariableDeclaration(VariableDeclaration {
+						data_type: DataType::Int,
+						initial_value: Expr::Integer(IntegerLiteral {
+							value: 2,
+						}),
+						name: String::from("y"),
+					}),
+				],
+				result: Some(Expr::Binary(BinaryExpr {
+					left: Box::new(Expr::Identifier(IdentifierExpr {
+						name: String::from("x"),
+					})),
+					operator: BinaryOperator::Add,
+					right: Box::new(Expr::Identifier(IdentifierExpr {
+						name: String::from("y"),
+					})),
+				})),
+			}
 		);
 	}
 

@@ -10,6 +10,7 @@ pub enum Instruction {
 	GreaterThanOrEqual,
 	LessThan,
 	LessThanOrEqual,
+	LoadLocal(u32),
 	Modulo,
 	Multiply,
 	Negate,
@@ -19,6 +20,7 @@ pub enum Instruction {
 	PushBoolean(bool),
 	PushDecimal(Decimal),
 	PushInteger(i64),
+	StoreLocal(u32),
 	Subtract,
 	Xor,
 }
