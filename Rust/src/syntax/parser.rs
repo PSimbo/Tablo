@@ -60,16 +60,29 @@ impl Parser {
 
 	pub fn parse_program(&mut self) -> Result<Program, ParseError> {
 		let mut statements = Vec::new();
+		let mut result = None;
 
-		while self.current().is_some_and(|token| token.kind == TokenKind::VarKeyword) {
-			statements.push(self.parse_variable_declaration_statement()?);
+		loop {
+			match self.current() {
+				Some(token) if token.kind == TokenKind::EndOfFile => break,
+				Some(token) if token.kind == TokenKind::VarKeyword => {
+					statements.push(self.parse_variable_declaration_statement()?);
+				}
+				Some(_) => {
+					let expression = self.parse_assignment_expression()?;
+
+					if self.current().is_some_and(|token| token.kind == TokenKind::Semicolon) {
+						self.next();
+						statements.push(Statement::Expression(expression));
+						continue;
+					}
+
+					result = Some(expression);
+					break;
+				}
+				None => break,
+			}
 		}
-
-		let result = match self.current() {
-			Some(token) if token.kind == TokenKind::EndOfFile => None,
-			Some(_) => Some(self.parse_assignment_expression()?),
-			None => None,
-		};
 
 		self.expect_end_of_file()?;
 
@@ -615,6 +628,36 @@ mod tests {
 			Expr::Decimal(DecimalLiteral {
 				value: Decimal::from_literal(".5").unwrap(),
 			})
+		);
+	}
+
+	#[test]
+	fn parses_expression_statement_before_final_expression() {
+		assert_eq!(
+			parse_program("var x: int = 1;\nx += 2;\nx"),
+			Program {
+				statements: vec![
+					Statement::VariableDeclaration(VariableDeclaration {
+						data_type: DataType::Int,
+						initial_value: Some(Expr::Integer(IntegerLiteral {
+							value: 1,
+						})),
+						name: String::from("x"),
+					}),
+					Statement::Expression(Expr::Assignment(AssignmentExpr {
+						operator: AssignmentOperator::AddAssign,
+						target: IdentifierExpr {
+							name: String::from("x"),
+						},
+						value: Box::new(Expr::Integer(IntegerLiteral {
+							value: 2,
+						})),
+					})),
+				],
+				result: Some(Expr::Identifier(IdentifierExpr {
+					name: String::from("x"),
+				})),
+			}
 		);
 	}
 

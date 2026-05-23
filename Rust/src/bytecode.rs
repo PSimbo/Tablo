@@ -17,6 +17,7 @@ pub enum Instruction {
 	Not,
 	NotEqual,
 	Or,
+	Pop,
 	PushBoolean(bool),
 	PushDecimal(Decimal),
 	PushInteger(i64),

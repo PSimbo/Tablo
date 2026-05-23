@@ -27,6 +27,7 @@ const OPCODE_NOT_EQUAL: u8 = 18;
 const OPCODE_NOT: u8 = 19;
 const OPCODE_OR: u8 = 20;
 const OPCODE_XOR: u8 = 21;
+const OPCODE_POP: u8 = 22;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectFileError {
@@ -93,6 +94,7 @@ pub fn write_program(program: &Program) -> Vec<u8> {
 			Instruction::Not => bytes.push(OPCODE_NOT),
 			Instruction::NotEqual => bytes.push(OPCODE_NOT_EQUAL),
 			Instruction::Or => bytes.push(OPCODE_OR),
+			Instruction::Pop => bytes.push(OPCODE_POP),
 			Instruction::PushBoolean(value) => {
 				bytes.push(OPCODE_PUSH_BOOLEAN);
 				bytes.push(u8::from(*value));
@@ -237,6 +239,7 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_NOT => Ok(Instruction::Not),
 			OPCODE_NOT_EQUAL => Ok(Instruction::NotEqual),
 			OPCODE_OR => Ok(Instruction::Or),
+			OPCODE_POP => Ok(Instruction::Pop),
 			OPCODE_PUSH_BOOLEAN => Ok(Instruction::PushBoolean(self.read_bool()?)),
 			OPCODE_PUSH_DECIMAL => Ok(Instruction::PushDecimal(self.read_decimal()?)),
 			OPCODE_PUSH_INTEGER => Ok(Instruction::PushInteger(self.read_i64()?)),

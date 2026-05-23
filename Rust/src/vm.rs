@@ -134,6 +134,10 @@ impl VirtualMachine {
 				self.stack.push(Value::Boolean(lhs || rhs));
 				Ok(())
 			}
+			Instruction::Pop => {
+				self.pop_value(instruction_index)?;
+				Ok(())
+			}
 			Instruction::PushBoolean(value) => {
 				self.stack.push(Value::Boolean(*value));
 				Ok(())

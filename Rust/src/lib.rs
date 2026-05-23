@@ -179,6 +179,13 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_expression_statement_before_final_expression() {
+		let result = run("var x: int = 5;\nx += 1;\nx").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(6)));
+	}
+
+	#[test]
 	fn runs_logical_source_text() {
 		let result = run("not false and true or false").unwrap();
 

@@ -238,6 +238,11 @@ impl Compiler {
 
 	fn compile_statement(&mut self, statement: &Statement, instructions: &mut Vec<Instruction>) -> Result<(), CompileError> {
 		match statement {
+			Statement::Expression(expression) => {
+				self.compile_into_checked(expression, instructions)?;
+				instructions.push(Instruction::Pop);
+				Ok(())
+			}
 			Statement::VariableDeclaration(VariableDeclaration { initial_value, name, .. }) => {
 				if self.locals.contains_key(name) {
 					return Err(CompileError {
@@ -392,6 +397,47 @@ mod tests {
 			Instruction::PushBoolean(true),
 			Instruction::PushBoolean(false),
 			Instruction::Equal,
+		]);
+	}
+
+	#[test]
+	fn compiles_expression_statement_to_pop_its_result() {
+		let program = AstProgram {
+			statements: vec![
+				Statement::VariableDeclaration(VariableDeclaration {
+					data_type: DataType::Int,
+					initial_value: Some(Expr::Integer(IntegerLiteral {
+						value: 5,
+					})),
+					name: String::from("x"),
+				}),
+				Statement::Expression(Expr::Assignment(AssignmentExpr {
+					operator: AssignmentOperator::AddAssign,
+					target: IdentifierExpr {
+						name: String::from("x"),
+					},
+					value: Box::new(Expr::Integer(IntegerLiteral {
+						value: 3,
+					})),
+				})),
+			],
+			result: Some(Expr::Identifier(IdentifierExpr {
+				name: String::from("x"),
+			})),
+		};
+
+		let bytecode = Compiler::new().compile_program(&program).unwrap();
+
+		assert_eq!(bytecode.instructions, vec![
+			Instruction::PushInteger(5),
+			Instruction::StoreLocal(0),
+			Instruction::LoadLocal(0),
+			Instruction::PushInteger(3),
+			Instruction::Add,
+			Instruction::StoreLocal(0),
+			Instruction::LoadLocal(0),
+			Instruction::Pop,
+			Instruction::LoadLocal(0),
 		]);
 	}
 

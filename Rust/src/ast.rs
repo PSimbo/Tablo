@@ -48,6 +48,7 @@ pub enum Expr {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Statement {
+	Expression(Expr),
 	VariableDeclaration(VariableDeclaration),
 }
 
