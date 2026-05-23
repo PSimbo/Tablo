@@ -148,6 +148,15 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_repeating_decimal_division() {
+		let result = run("2.0 / 3.0").unwrap();
+
+		assert_eq!(result, Some(Value::Decimal(
+			crate::value::Decimal::from_literal("0.6666666666666666666666666666666666667").unwrap()
+		)));
+	}
+
+	#[test]
 	fn runs_object_file() {
 		let output_path = unique_test_output_path("runs_object_file");
 		compile("8 / 2", &output_path).unwrap();

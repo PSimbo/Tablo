@@ -36,21 +36,49 @@ impl Decimal {
 			return Err(String::from("Division by zero."));
 		}
 
-		let mut numerator = self.coefficient;
-		let denominator = rhs.coefficient;
-		let mut scale = self.scale.saturating_sub(rhs.scale);
+		let numerator = self.coefficient.checked_mul(pow10(rhs.scale as u32)?)
+			.ok_or(String::from("Decimal division overflowed the supported precision."))?;
+		let denominator = rhs.coefficient.checked_mul(pow10(self.scale as u32)?)
+			.ok_or(String::from("Decimal division overflowed the supported precision."))?;
 
-		while numerator % denominator != 0 {
-			if scale >= Self::MAX_PRECISION {
-				return Err(String::from("Decimal division produced a result that exceeds the supported precision."));
-			}
+		let sign = if (numerator < 0) ^ (denominator < 0) { -1 } else { 1 };
+		let numerator = numerator.abs();
+		let denominator = denominator.abs();
 
-			numerator = numerator.checked_mul(10).ok_or(String::from("Decimal division overflowed the supported precision."))?;
-			scale += 1;
+		let whole_part = numerator / denominator;
+		let whole_digits = whole_digits_required(whole_part);
+
+		if whole_digits > Self::MAX_PRECISION as usize {
+			return Err(String::from("Decimal division produced a result that exceeds the supported precision."));
 		}
 
-		let coefficient = numerator / denominator;
-		Self::from_parts(coefficient, scale)
+		let scale = Self::MAX_PRECISION as usize - whole_digits;
+		let mut coefficient_digits = whole_part.to_string();
+		let mut remainder = numerator % denominator;
+
+		for _ in 0..scale {
+			remainder = remainder.checked_mul(10)
+				.ok_or(String::from("Decimal division overflowed the supported precision."))?;
+
+			let digit = remainder / denominator;
+			remainder %= denominator;
+			coefficient_digits.push(char::from(b'0' + digit as u8));
+		}
+
+		let mut coefficient = coefficient_digits.parse::<i128>()
+			.map_err(|_| String::from("Decimal division overflowed the supported precision."))?;
+
+		if remainder.checked_mul(2).is_some_and(|double_remainder| double_remainder >= denominator) {
+			coefficient = coefficient.checked_add(1)
+				.ok_or(String::from("Decimal division overflowed the supported precision."))?;
+		}
+
+		if sign < 0 {
+			coefficient = coefficient.checked_neg()
+				.ok_or(String::from("Decimal division overflowed the supported precision."))?;
+		}
+
+		Self::from_parts(coefficient, scale as u8)
 	}
 
 	pub fn checked_mul(&self, rhs: &Self) -> Result<Self, String> {
@@ -132,6 +160,7 @@ impl Decimal {
 	}
 
 	fn from_parts(coefficient: i128, scale: u8) -> Result<Self, String> {
+		let (coefficient, scale) = normalize_decimal_parts(coefficient, scale);
 		let precision = decimal_precision(coefficient, scale)?;
 
 		Ok(Self {
@@ -191,6 +220,19 @@ fn decimal_precision(coefficient: i128, scale: u8) -> Result<u8, String> {
 	Ok(precision as u8)
 }
 
+fn normalize_decimal_parts(mut coefficient: i128, mut scale: u8) -> (i128, u8) {
+	if coefficient == 0 {
+		return (0, 0);
+	}
+
+	while scale > 0 && coefficient % 10 == 0 {
+		coefficient /= 10;
+		scale -= 1;
+	}
+
+	(coefficient, scale)
+}
+
 fn normalize_integer_digits(integer_part: &str) -> String {
 	let digits = integer_part.replace('_', "");
 	let trimmed = digits.trim_start_matches('0');
@@ -211,6 +253,15 @@ fn pow10(exponent: u32) -> Result<i128, String> {
 	}
 
 	Ok(value)
+}
+
+fn whole_digits_required(whole_part: i128) -> usize {
+	if whole_part == 0 {
+		1
+	}
+	else {
+		whole_part.to_string().len()
+	}
 }
 
 #[cfg(test)]
@@ -238,6 +289,24 @@ mod tests {
 		let decimal = Decimal::from_literal("1.25").unwrap().negated();
 
 		assert_eq!(decimal.to_string(), "-1.25");
+	}
+
+	#[test]
+	fn divides_with_rounding_when_result_repeats() {
+		let lhs = Decimal::from_literal("2.0").unwrap();
+		let rhs = Decimal::from_literal("3.0").unwrap();
+		let result = lhs.checked_div(&rhs).unwrap();
+
+		assert_eq!(result.to_string(), "0.6666666666666666666666666666666666667");
+	}
+
+	#[test]
+	fn divides_exact_values_without_trailing_zero_noise() {
+		let lhs = Decimal::from_literal("1.0").unwrap();
+		let rhs = Decimal::from_literal("2.0").unwrap();
+		let result = lhs.checked_div(&rhs).unwrap();
+
+		assert_eq!(result.to_string(), "0.5");
 	}
 
 	#[test]
