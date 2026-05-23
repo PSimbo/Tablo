@@ -227,7 +227,10 @@ impl Lexer {
 
 		let lexeme = self.source.as_str()[start..self.position].to_string();
 		let kind = match lexeme.as_str() {
+			"and" => TokenKind::AndKeyword,
 			"false" => TokenKind::FalseKeyword,
+			"not" => TokenKind::NotKeyword,
+			"or" => TokenKind::OrKeyword,
 			"true" => TokenKind::TrueKeyword,
 			_ => {
 				return Err(LexError {
@@ -286,15 +289,18 @@ mod tests {
 
 	#[test]
 	fn tokenizes_boolean_literals() {
-		let mut lexer = Lexer::new(SourceText::new("true false"));
+		let mut lexer = Lexer::new(SourceText::new("true false and or not"));
 		let tokens = lexer.tokenize().unwrap();
 
-		assert_eq!(tokens.len(), 3);
+		assert_eq!(tokens.len(), 6);
 		assert_eq!(tokens[0].kind, TokenKind::TrueKeyword);
 		assert_eq!(tokens[0].lexeme, "true");
 		assert_eq!(tokens[1].kind, TokenKind::FalseKeyword);
 		assert_eq!(tokens[1].lexeme, "false");
-		assert_eq!(tokens[2].kind, TokenKind::EndOfFile);
+		assert_eq!(tokens[2].kind, TokenKind::AndKeyword);
+		assert_eq!(tokens[3].kind, TokenKind::OrKeyword);
+		assert_eq!(tokens[4].kind, TokenKind::NotKeyword);
+		assert_eq!(tokens[5].kind, TokenKind::EndOfFile);
 	}
 
 	#[test]

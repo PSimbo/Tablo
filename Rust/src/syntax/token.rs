@@ -1,5 +1,6 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TokenKind {
+	AndKeyword,
 	Asterisk,
 	BangEqual,
 	Dash,
@@ -14,6 +15,8 @@ pub enum TokenKind {
 	LeftParenthesis,
 	LessThan,
 	LessThanOrEqual,
+	NotKeyword,
+	OrKeyword,
 	Percent,
 	Plus,
 	RightParenthesis,

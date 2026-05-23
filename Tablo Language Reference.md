@@ -1364,8 +1364,9 @@ arrayType = dataType `[` integerLiteral `]`
 
 expression = ( expression assignmentOperator expression ) | logicalOr
 groupExpression = `(` expression `)`
-logicalOr = logicalAnd { `or` logicalAnd }
-logialAnd = equality { `and` equality }
+logicalOr = logicalXor { `or` logicalXor }
+logicalXor = logicalAnd { `xor` logicalAnd }
+logicalAnd = equality { `and` equality }
 equality = comparison { equalityOperator comparison }
 comparison = factor { relationalOperator factor }
 factor = term { multiplicativeOperator term }
@@ -1375,9 +1376,9 @@ literal = `null` | booleanLiteral | decimalLiteral | hexLiteral | integerLiteral
 assignmentOperator = `=` | `+=` | `-=` | `*=` | `/=` | `%=`
 equalityOperator = `==` | `!=`
 relationalOperator = `>` | `>=` | `<` | `<=`
-multiplicativeOperator = `*` | `/`
+multiplicativeOperator = `*` | `/` | `%`
 additiveOperator = `+` | `-`
-unaryOperator = `!` | `-`
+unaryOperator = `not` | `-`
 
 identifier = quotedIdentifier | unquotedIdentifier
 quotedIdentifier = `"` { `""` | unicode } `"`

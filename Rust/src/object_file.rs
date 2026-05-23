@@ -7,20 +7,23 @@ use crate::value::Decimal;
 const MAGIC_BYTES: [u8; 4] = *b"TBO0";
 const FORMAT_VERSION: u16 = 1;
 const OPCODE_ADD: u8 = 1;
-const OPCODE_DIVIDE: u8 = 2;
-const OPCODE_EQUAL: u8 = 3;
-const OPCODE_GREATER_THAN: u8 = 4;
-const OPCODE_GREATER_THAN_OR_EQUAL: u8 = 5;
-const OPCODE_LESS_THAN: u8 = 6;
-const OPCODE_LESS_THAN_OR_EQUAL: u8 = 7;
-const OPCODE_MODULO: u8 = 8;
-const OPCODE_MULTIPLY: u8 = 9;
-const OPCODE_PUSH_BOOLEAN: u8 = 10;
-const OPCODE_PUSH_DECIMAL: u8 = 11;
-const OPCODE_PUSH_INTEGER: u8 = 12;
-const OPCODE_SUBTRACT: u8 = 13;
-const OPCODE_NEGATE: u8 = 14;
-const OPCODE_NOT_EQUAL: u8 = 15;
+const OPCODE_AND: u8 = 2;
+const OPCODE_DIVIDE: u8 = 3;
+const OPCODE_EQUAL: u8 = 4;
+const OPCODE_GREATER_THAN: u8 = 5;
+const OPCODE_GREATER_THAN_OR_EQUAL: u8 = 6;
+const OPCODE_LESS_THAN: u8 = 7;
+const OPCODE_LESS_THAN_OR_EQUAL: u8 = 8;
+const OPCODE_MODULO: u8 = 9;
+const OPCODE_MULTIPLY: u8 = 10;
+const OPCODE_PUSH_BOOLEAN: u8 = 11;
+const OPCODE_PUSH_DECIMAL: u8 = 12;
+const OPCODE_PUSH_INTEGER: u8 = 13;
+const OPCODE_SUBTRACT: u8 = 14;
+const OPCODE_NEGATE: u8 = 15;
+const OPCODE_NOT_EQUAL: u8 = 16;
+const OPCODE_NOT: u8 = 17;
+const OPCODE_OR: u8 = 18;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectFileError {
@@ -70,6 +73,7 @@ pub fn write_program(program: &Program) -> Vec<u8> {
 	for instruction in &program.instructions {
 		match instruction {
 			Instruction::Add => bytes.push(OPCODE_ADD),
+			Instruction::And => bytes.push(OPCODE_AND),
 			Instruction::Divide => bytes.push(OPCODE_DIVIDE),
 			Instruction::Equal => bytes.push(OPCODE_EQUAL),
 			Instruction::GreaterThan => bytes.push(OPCODE_GREATER_THAN),
@@ -79,7 +83,9 @@ pub fn write_program(program: &Program) -> Vec<u8> {
 			Instruction::Modulo => bytes.push(OPCODE_MODULO),
 			Instruction::Multiply => bytes.push(OPCODE_MULTIPLY),
 			Instruction::Negate => bytes.push(OPCODE_NEGATE),
+			Instruction::Not => bytes.push(OPCODE_NOT),
 			Instruction::NotEqual => bytes.push(OPCODE_NOT_EQUAL),
+			Instruction::Or => bytes.push(OPCODE_OR),
 			Instruction::PushBoolean(value) => {
 				bytes.push(OPCODE_PUSH_BOOLEAN);
 				bytes.push(u8::from(*value));
@@ -205,6 +211,7 @@ impl<'a> ObjectFileReader<'a> {
 
 		match opcode {
 			OPCODE_ADD => Ok(Instruction::Add),
+			OPCODE_AND => Ok(Instruction::And),
 			OPCODE_DIVIDE => Ok(Instruction::Divide),
 			OPCODE_EQUAL => Ok(Instruction::Equal),
 			OPCODE_GREATER_THAN => Ok(Instruction::GreaterThan),
@@ -214,7 +221,9 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_MODULO => Ok(Instruction::Modulo),
 			OPCODE_MULTIPLY => Ok(Instruction::Multiply),
 			OPCODE_NEGATE => Ok(Instruction::Negate),
+			OPCODE_NOT => Ok(Instruction::Not),
 			OPCODE_NOT_EQUAL => Ok(Instruction::NotEqual),
+			OPCODE_OR => Ok(Instruction::Or),
 			OPCODE_PUSH_BOOLEAN => Ok(Instruction::PushBoolean(self.read_bool()?)),
 			OPCODE_PUSH_DECIMAL => Ok(Instruction::PushDecimal(self.read_decimal()?)),
 			OPCODE_PUSH_INTEGER => Ok(Instruction::PushInteger(self.read_i64()?)),

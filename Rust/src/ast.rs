@@ -3,6 +3,7 @@ use crate::value::Decimal;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BinaryOperator {
 	Add,
+	And,
 	Divide,
 	Equal,
 	GreaterThan,
@@ -12,6 +13,7 @@ pub enum BinaryOperator {
 	Modulo,
 	Multiply,
 	NotEqual,
+	Or,
 	Subtract,
 }
 
@@ -27,6 +29,7 @@ pub enum Expr {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnaryOperator {
 	Negate,
+	Not,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

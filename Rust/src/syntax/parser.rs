@@ -21,6 +21,8 @@ pub struct Parser {
 // the operator precedence used by the Pratt parser.
 enum BindingPower {
 	Default,
+	LogicalOr,
+	LogicalAnd,
 	Equality,
 	Comparison,
 	Additive,
@@ -105,6 +107,8 @@ impl Parser {
 
 		while let Some(token) = self.current() {
 			let next_binding_power = match token.kind {
+				TokenKind::OrKeyword => BindingPower::LogicalOr,
+				TokenKind::AndKeyword => BindingPower::LogicalAnd,
 				TokenKind::EqualEqual | TokenKind::BangEqual => BindingPower::Equality,
 				TokenKind::GreaterThan
 				| TokenKind::GreaterThanOrEqual
@@ -147,6 +151,15 @@ impl Parser {
 
 	fn parse_infix(&mut self, left: Expr, operator: Token, binding_power: BindingPower) -> Result<Expr, ParseError> {
 		match operator.kind {
+			TokenKind::AndKeyword => {
+				let right = self.parse_expression_with_binding_power(binding_power)?;
+
+				Ok(Expr::Binary(BinaryExpr {
+					left: Box::new(left),
+					operator: BinaryOperator::And,
+					right: Box::new(right),
+				}))
+			}
 			TokenKind::Asterisk => {
 				let right = self.parse_expression_with_binding_power(binding_power)?;
 
@@ -228,6 +241,15 @@ impl Parser {
 					right: Box::new(right),
 				}))
 			}
+			TokenKind::OrKeyword => {
+				let right = self.parse_expression_with_binding_power(binding_power)?;
+
+				Ok(Expr::Binary(BinaryExpr {
+					left: Box::new(left),
+					operator: BinaryOperator::Or,
+					right: Box::new(right),
+				}))
+			}
 			TokenKind::Percent => {
 				let right = self.parse_expression_with_binding_power(binding_power)?;
 
@@ -274,6 +296,15 @@ impl Parser {
 		}))
 	}
 
+	fn parse_not_expression(&mut self) -> Result<Expr, ParseError> {
+		let operand = self.parse_expression_with_binding_power(BindingPower::Unary)?;
+
+		Ok(Expr::Unary(UnaryExpr {
+			operand: Box::new(operand),
+			operator: UnaryOperator::Not,
+		}))
+	}
+
 	fn parse_prefix(&mut self) -> Result<Expr, ParseError> {
 		let token = self.next().ok_or(ParseError {
 			message: String::from("Expected an expression."),
@@ -282,10 +313,11 @@ impl Parser {
 
 		match token.kind {
 			TokenKind::Dash => self.parse_negation_expression(),
-			TokenKind::FalseKeyword | TokenKind::TrueKeyword => self.parse_boolean_literal(token),
 			TokenKind::DecimalLiteral => self.parse_decimal_literal(token),
+			TokenKind::FalseKeyword | TokenKind::TrueKeyword => self.parse_boolean_literal(token),
 			TokenKind::IntegerLiteral => self.parse_integer_literal(token),
 			TokenKind::LeftParenthesis => self.parse_group_expression(token.start),
+			TokenKind::NotKeyword => self.parse_not_expression(),
 			TokenKind::EndOfFile => Err(ParseError {
 				message: String::from("Expected an expression."),
 				position: token.start,
@@ -438,6 +470,28 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_logical_and_more_tightly_than_or() {
+		assert_eq!(
+			parse("true or false and true"),
+			Expr::Binary(BinaryExpr {
+				left: Box::new(Expr::Boolean(BooleanLiteral {
+					value: true,
+				})),
+				operator: BinaryOperator::Or,
+				right: Box::new(Expr::Binary(BinaryExpr {
+					left: Box::new(Expr::Boolean(BooleanLiteral {
+						value: false,
+					})),
+					operator: BinaryOperator::And,
+					right: Box::new(Expr::Boolean(BooleanLiteral {
+						value: true,
+					})),
+				})),
+			})
+		);
+	}
+
+	#[test]
 	fn parses_multiplicative_precedence_over_addition() {
 		assert_eq!(
 			parse("1 + 2 * 3"),
@@ -455,6 +509,19 @@ mod tests {
 						value: 3,
 					})),
 				})),
+			})
+		);
+	}
+
+	#[test]
+	fn parses_not_expression() {
+		assert_eq!(
+			parse("not false"),
+			Expr::Unary(UnaryExpr {
+				operand: Box::new(Expr::Boolean(BooleanLiteral {
+					value: false,
+				})),
+				operator: UnaryOperator::Not,
 			})
 		);
 	}

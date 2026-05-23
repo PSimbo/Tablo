@@ -47,6 +47,12 @@ impl VirtualMachine {
 				self.stack.push(add_values(lhs, rhs, instruction_index)?);
 				Ok(())
 			}
+			Instruction::And => {
+				let rhs = self.pop_boolean(instruction_index)?;
+				let lhs = self.pop_boolean(instruction_index)?;
+				self.stack.push(Value::Boolean(lhs && rhs));
+				Ok(())
+			}
 			Instruction::Divide => {
 				let rhs = self.pop_numeric(instruction_index)?;
 				let lhs = self.pop_numeric(instruction_index)?;
@@ -100,10 +106,21 @@ impl VirtualMachine {
 				self.stack.push(negate_value(value));
 				Ok(())
 			}
+			Instruction::Not => {
+				let value = self.pop_boolean(instruction_index)?;
+				self.stack.push(Value::Boolean(!value));
+				Ok(())
+			}
 			Instruction::NotEqual => {
 				let rhs = self.pop_value(instruction_index)?;
 				let lhs = self.pop_value(instruction_index)?;
 				self.stack.push(not_equals_value(lhs, rhs, instruction_index)?);
+				Ok(())
+			}
+			Instruction::Or => {
+				let rhs = self.pop_boolean(instruction_index)?;
+				let lhs = self.pop_boolean(instruction_index)?;
+				self.stack.push(Value::Boolean(lhs || rhs));
 				Ok(())
 			}
 			Instruction::PushBoolean(value) => {
@@ -124,6 +141,21 @@ impl VirtualMachine {
 				self.stack.push(subtract_values(lhs, rhs, instruction_index)?);
 				Ok(())
 			}
+		}
+	}
+
+	fn pop_boolean(&mut self, instruction_index: usize) -> Result<bool, VmError> {
+		let value = self.stack.pop().ok_or(VmError {
+			instruction_index,
+			message: String::from("Stack underflow while reading Boolean operand."),
+		})?;
+
+		match value {
+			Value::Boolean(value) => Ok(value),
+			_ => Err(VmError {
+				instruction_index,
+				message: String::from("Expected a Boolean operand."),
+			}),
 		}
 	}
 
@@ -370,6 +402,22 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_logical_and_with_numeric_operand() {
+		let program = Program::new(vec![
+			Instruction::PushBoolean(true),
+			Instruction::PushInteger(1),
+			Instruction::And,
+		]);
+
+		let error = VirtualMachine::new().run(&program).unwrap_err();
+
+		assert_eq!(error, VmError {
+			instruction_index: 2,
+			message: String::from("Expected a Boolean operand."),
+		});
+	}
+
+	#[test]
 	fn rejects_mixed_boolean_and_numeric_equality() {
 		let program = Program::new(vec![
 			Instruction::PushBoolean(true),
@@ -471,6 +519,44 @@ mod tests {
 		let result = VirtualMachine::new().run(&program).unwrap();
 
 		assert_eq!(result, Some(Value::Decimal(Decimal::from_literal("3.25").unwrap())));
+	}
+
+	#[test]
+	fn runs_logical_and_program() {
+		let program = Program::new(vec![
+			Instruction::PushBoolean(true),
+			Instruction::PushBoolean(false),
+			Instruction::And,
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Boolean(false)));
+	}
+
+	#[test]
+	fn runs_logical_not_program() {
+		let program = Program::new(vec![
+			Instruction::PushBoolean(false),
+			Instruction::Not,
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
+	fn runs_logical_or_program() {
+		let program = Program::new(vec![
+			Instruction::PushBoolean(false),
+			Instruction::PushBoolean(true),
+			Instruction::Or,
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Boolean(true)));
 	}
 
 	#[test]

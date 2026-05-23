@@ -3,6 +3,7 @@ use crate::value::Decimal;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Instruction {
 	Add,
+	And,
 	Divide,
 	Equal,
 	GreaterThan,
@@ -12,7 +13,9 @@ pub enum Instruction {
 	Modulo,
 	Multiply,
 	Negate,
+	Not,
 	NotEqual,
+	Or,
 	PushBoolean(bool),
 	PushDecimal(Decimal),
 	PushInteger(i64),

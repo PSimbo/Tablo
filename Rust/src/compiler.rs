@@ -25,21 +25,13 @@ impl Compiler {
 		let _ = self;
 
 		match expression {
-			Expr::Boolean(BooleanLiteral { value }) => {
-				instructions.push(Instruction::PushBoolean(*value));
-			}
-			Expr::Decimal(DecimalLiteral { value }) => {
-				instructions.push(Instruction::PushDecimal(value.clone()));
-			}
-			Expr::Integer(integer) => {
-				instructions.push(Instruction::PushInteger(integer.value));
-			}
 			Expr::Binary(binary) => {
 				self.compile_into(&binary.left, instructions);
 				self.compile_into(&binary.right, instructions);
 
 				match binary.operator {
 					BinaryOperator::Add => instructions.push(Instruction::Add),
+					BinaryOperator::And => instructions.push(Instruction::And),
 					BinaryOperator::Divide => instructions.push(Instruction::Divide),
 					BinaryOperator::Equal => instructions.push(Instruction::Equal),
 					BinaryOperator::GreaterThan => instructions.push(Instruction::GreaterThan),
@@ -49,14 +41,25 @@ impl Compiler {
 					BinaryOperator::Modulo => instructions.push(Instruction::Modulo),
 					BinaryOperator::Multiply => instructions.push(Instruction::Multiply),
 					BinaryOperator::NotEqual => instructions.push(Instruction::NotEqual),
+					BinaryOperator::Or => instructions.push(Instruction::Or),
 					BinaryOperator::Subtract => instructions.push(Instruction::Subtract),
 				}
+			}
+			Expr::Boolean(BooleanLiteral { value }) => {
+				instructions.push(Instruction::PushBoolean(*value));
+			}
+			Expr::Decimal(DecimalLiteral { value }) => {
+				instructions.push(Instruction::PushDecimal(value.clone()));
+			}
+			Expr::Integer(integer) => {
+				instructions.push(Instruction::PushInteger(integer.value));
 			}
 			Expr::Unary(UnaryExpr { operand, operator }) => {
 				self.compile_into(operand, instructions);
 
 				match operator {
 					UnaryOperator::Negate => instructions.push(Instruction::Negate),
+					UnaryOperator::Not => instructions.push(Instruction::Not),
 				}
 			}
 		}
@@ -164,6 +167,23 @@ mod tests {
 
 		assert_eq!(program.instructions, vec![
 			Instruction::PushInteger(42),
+		]);
+	}
+
+	#[test]
+	fn compiles_logical_not() {
+		let expression = Expr::Unary(UnaryExpr {
+			operand: Box::new(Expr::Boolean(BooleanLiteral {
+				value: false,
+			})),
+			operator: UnaryOperator::Not,
+		});
+
+		let program = Compiler::new().compile_expression(&expression);
+
+		assert_eq!(program.instructions, vec![
+			Instruction::PushBoolean(false),
+			Instruction::Not,
 		]);
 	}
 

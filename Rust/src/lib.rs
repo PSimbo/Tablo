@@ -162,6 +162,13 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_logical_source_text() {
+		let result = run("not false and true or false").unwrap();
+
+		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
 	fn runs_object_file() {
 		let output_path = unique_test_output_path("runs_object_file");
 		compile("8 / 2", &output_path).unwrap();
