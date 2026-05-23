@@ -104,6 +104,13 @@ Whitespace
 
 Whitespace has no semantic meaning and is ignored during parsing.
 
+Statements
+----------
+
+Simple statements are terminated with a `;` character. This includes variable declarations, constant declarations, expression statements, and `return` statements.
+
+Statements that are already delimited by a block are not followed by a semicolon. This includes bare blocks, `if` statements, `for` loops, and `while` loops.
+
 Primitive Types
 ---------------
 
@@ -1354,11 +1361,14 @@ Production = <Components>
 ~~~
 
 ~~~
-statement = [ block | expression | forStatement | ifStatement | returnStatement | whileStatement ] `;`
+statement = block | blockStatement | simpleStatement
 
 block = `{` { statement } `}`
 
-variableDeclaration = `var` identifier `:` dataType [ `=` expression ]
+blockStatement = forStatement | ifStatement | whileStatement
+simpleStatement = expression | returnStatement | variableDeclaration `;`
+variableDeclaration = ( `const` | `var` ) identifier `:` dataType [ `=` expression ]
+returnStatement = `return` [ expression ]
 dataType = unquotedIdentifier | arrayType
 arrayType = dataType `[` integerLiteral `]`
 
