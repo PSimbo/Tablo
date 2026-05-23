@@ -41,8 +41,14 @@ impl Compiler {
 				match binary.operator {
 					BinaryOperator::Add => instructions.push(Instruction::Add),
 					BinaryOperator::Divide => instructions.push(Instruction::Divide),
+					BinaryOperator::Equal => instructions.push(Instruction::Equal),
+					BinaryOperator::GreaterThan => instructions.push(Instruction::GreaterThan),
+					BinaryOperator::GreaterThanOrEqual => instructions.push(Instruction::GreaterThanOrEqual),
+					BinaryOperator::LessThan => instructions.push(Instruction::LessThan),
+					BinaryOperator::LessThanOrEqual => instructions.push(Instruction::LessThanOrEqual),
 					BinaryOperator::Modulo => instructions.push(Instruction::Modulo),
 					BinaryOperator::Multiply => instructions.push(Instruction::Multiply),
+					BinaryOperator::NotEqual => instructions.push(Instruction::NotEqual),
 					BinaryOperator::Subtract => instructions.push(Instruction::Subtract),
 				}
 			}
@@ -124,6 +130,27 @@ mod tests {
 
 		assert_eq!(program.instructions, vec![
 			Instruction::PushDecimal(Decimal::from_literal("1.25").unwrap()),
+		]);
+	}
+
+	#[test]
+	fn compiles_equality_expression() {
+		let expression = Expr::Binary(BinaryExpr {
+			left: Box::new(Expr::Boolean(BooleanLiteral {
+				value: true,
+			})),
+			operator: BinaryOperator::Equal,
+			right: Box::new(Expr::Boolean(BooleanLiteral {
+				value: false,
+			})),
+		});
+
+		let program = Compiler::new().compile_expression(&expression);
+
+		assert_eq!(program.instructions, vec![
+			Instruction::PushBoolean(true),
+			Instruction::PushBoolean(false),
+			Instruction::Equal,
 		]);
 	}
 

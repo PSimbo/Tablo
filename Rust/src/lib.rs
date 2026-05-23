@@ -155,6 +155,13 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_equality_source_text() {
+		let result = run("2 == 2.0").unwrap();
+
+		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
 	fn runs_object_file() {
 		let output_path = unique_test_output_path("runs_object_file");
 		compile("8 / 2", &output_path).unwrap();
@@ -175,6 +182,13 @@ mod tests {
 		let result = run_program(&program).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(2)));
+	}
+
+	#[test]
+	fn runs_relational_source_text() {
+		let result = run("1 + 2 < 4").unwrap();
+
+		assert_eq!(result, Some(Value::Boolean(true)));
 	}
 
 	#[test]

@@ -3,15 +3,23 @@ use crate::bytecode::Instruction;
 use crate::value::Decimal;
 use crate::value::Value;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct VmError {
-	pub instruction_index: usize,
-	pub message: String,
+#[derive(Clone, Copy)]
+enum ComparisonKind {
+	GreaterThan,
+	GreaterThanOrEqual,
+	LessThan,
+	LessThanOrEqual,
 }
 
 #[derive(Default)]
 pub struct VirtualMachine {
 	stack: Vec<Value>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VmError {
+	pub instruction_index: usize,
+	pub message: String,
 }
 
 impl VirtualMachine {
@@ -45,6 +53,36 @@ impl VirtualMachine {
 				self.stack.push(divide_values(lhs, rhs, instruction_index)?);
 				Ok(())
 			}
+			Instruction::Equal => {
+				let rhs = self.pop_value(instruction_index)?;
+				let lhs = self.pop_value(instruction_index)?;
+				self.stack.push(equals_value(lhs, rhs, instruction_index)?);
+				Ok(())
+			}
+			Instruction::GreaterThan => {
+				let rhs = self.pop_value(instruction_index)?;
+				let lhs = self.pop_value(instruction_index)?;
+				self.stack.push(compare_values(lhs, rhs, instruction_index, ComparisonKind::GreaterThan)?);
+				Ok(())
+			}
+			Instruction::GreaterThanOrEqual => {
+				let rhs = self.pop_value(instruction_index)?;
+				let lhs = self.pop_value(instruction_index)?;
+				self.stack.push(compare_values(lhs, rhs, instruction_index, ComparisonKind::GreaterThanOrEqual)?);
+				Ok(())
+			}
+			Instruction::LessThan => {
+				let rhs = self.pop_value(instruction_index)?;
+				let lhs = self.pop_value(instruction_index)?;
+				self.stack.push(compare_values(lhs, rhs, instruction_index, ComparisonKind::LessThan)?);
+				Ok(())
+			}
+			Instruction::LessThanOrEqual => {
+				let rhs = self.pop_value(instruction_index)?;
+				let lhs = self.pop_value(instruction_index)?;
+				self.stack.push(compare_values(lhs, rhs, instruction_index, ComparisonKind::LessThanOrEqual)?);
+				Ok(())
+			}
 			Instruction::Modulo => {
 				let rhs = self.pop_numeric(instruction_index)?;
 				let lhs = self.pop_numeric(instruction_index)?;
@@ -60,6 +98,12 @@ impl VirtualMachine {
 			Instruction::Negate => {
 				let value = self.pop_numeric(instruction_index)?;
 				self.stack.push(negate_value(value));
+				Ok(())
+			}
+			Instruction::NotEqual => {
+				let rhs = self.pop_value(instruction_index)?;
+				let lhs = self.pop_value(instruction_index)?;
+				self.stack.push(not_equals_value(lhs, rhs, instruction_index)?);
 				Ok(())
 			}
 			Instruction::PushBoolean(value) => {
@@ -98,6 +142,13 @@ impl VirtualMachine {
 
 		Ok(value)
 	}
+
+	fn pop_value(&mut self, instruction_index: usize) -> Result<Value, VmError> {
+		self.stack.pop().ok_or(VmError {
+			instruction_index,
+			message: String::from("Stack underflow while reading operand."),
+		})
+	}
 }
 
 fn add_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
@@ -108,6 +159,19 @@ fn add_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value,
 			Ok(Value::Decimal(lhs.checked_add(&rhs).map_err(|message| vm_error(instruction_index, message))?))
 		}
 	}
+}
+
+fn align_comparable_numeric_values(lhs: &Decimal, rhs: &Decimal, instruction_index: usize) -> Result<(i128, i128), VmError> {
+	let scale = lhs.scale.max(rhs.scale);
+	let lhs_factor = pow10_i128((scale - lhs.scale) as u32)
+		.map_err(|message| vm_error(instruction_index, message))?;
+	let rhs_factor = pow10_i128((scale - rhs.scale) as u32)
+		.map_err(|message| vm_error(instruction_index, message))?;
+	let lhs = lhs.coefficient.checked_mul(lhs_factor)
+		.ok_or_else(|| vm_error(instruction_index, String::from("Numeric comparison overflowed the supported precision.")))?;
+	let rhs = rhs.coefficient.checked_mul(rhs_factor)
+		.ok_or_else(|| vm_error(instruction_index, String::from("Numeric comparison overflowed the supported precision.")))?;
+	Ok((lhs, rhs))
 }
 
 fn coerce_numeric_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<(Decimal, Decimal), VmError> {
@@ -132,6 +196,24 @@ fn coerce_numeric_values(lhs: Value, rhs: Value, instruction_index: usize) -> Re
 	}
 }
 
+fn compare_decimals(lhs: &Decimal, rhs: &Decimal, instruction_index: usize) -> Result<std::cmp::Ordering, VmError> {
+	let (lhs, rhs) = align_comparable_numeric_values(lhs, rhs, instruction_index)?;
+	Ok(lhs.cmp(&rhs))
+}
+
+fn compare_values(lhs: Value, rhs: Value, instruction_index: usize, kind: ComparisonKind) -> Result<Value, VmError> {
+	let (lhs, rhs) = coerce_numeric_values(lhs, rhs, instruction_index)?;
+	let ordering = compare_decimals(&lhs, &rhs, instruction_index)?;
+	let value = match kind {
+		ComparisonKind::GreaterThan => ordering.is_gt(),
+		ComparisonKind::GreaterThanOrEqual => ordering.is_ge(),
+		ComparisonKind::LessThan => ordering.is_lt(),
+		ComparisonKind::LessThanOrEqual => ordering.is_le(),
+	};
+
+	Ok(Value::Boolean(value))
+}
+
 fn divide_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
 	match (lhs, rhs) {
 		(Value::Integer(lhs), Value::Integer(rhs)) => {
@@ -146,6 +228,24 @@ fn divide_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Val
 			Ok(Value::Decimal(lhs.checked_div(&rhs).map_err(|message| vm_error(instruction_index, message))?))
 		}
 	}
+}
+
+fn equals_value(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
+	let value = match (lhs, rhs) {
+		(Value::Boolean(lhs), Value::Boolean(rhs)) => lhs == rhs,
+		(lhs @ Value::Boolean(_), rhs) | (lhs, rhs @ Value::Boolean(_)) => {
+			return Err(vm_error(
+				instruction_index,
+				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
+			));
+		}
+		(lhs, rhs) => {
+			let (lhs, rhs) = coerce_numeric_values(lhs, rhs, instruction_index)?;
+			compare_decimals(&lhs, &rhs, instruction_index)?.is_eq()
+		}
+	};
+
+	Ok(Value::Boolean(value))
 }
 
 fn modulo_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
@@ -185,6 +285,24 @@ fn negate_value(value: Value) -> Value {
 	}
 }
 
+fn not_equals_value(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
+	match equals_value(lhs, rhs, instruction_index)? {
+		Value::Boolean(value) => Ok(Value::Boolean(!value)),
+		_ => unreachable!("Equality comparisons always produce Boolean results."),
+	}
+}
+
+fn pow10_i128(exponent: u32) -> Result<i128, String> {
+	let mut value = 1_i128;
+
+	for _ in 0..exponent {
+		value = value.checked_mul(10)
+			.ok_or(String::from("Numeric comparison overflowed the supported precision."))?;
+	}
+
+	Ok(value)
+}
+
 fn subtract_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
 	match (lhs, rhs) {
 		(Value::Integer(lhs), Value::Integer(rhs)) => Ok(Value::Integer(lhs.saturating_sub(rhs))),
@@ -192,6 +310,14 @@ fn subtract_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<V
 			let (lhs, rhs) = coerce_numeric_values(lhs, rhs, instruction_index)?;
 			Ok(Value::Decimal(lhs.checked_sub(&rhs).map_err(|message| vm_error(instruction_index, message))?))
 		}
+	}
+}
+
+fn type_name(value: &Value) -> &'static str {
+	match value {
+		Value::Boolean(_) => "bool",
+		Value::Decimal(_) => "dec",
+		Value::Integer(_) => "int",
 	}
 }
 
@@ -244,6 +370,22 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_mixed_boolean_and_numeric_equality() {
+		let program = Program::new(vec![
+			Instruction::PushBoolean(true),
+			Instruction::PushInteger(1),
+			Instruction::Equal,
+		]);
+
+		let error = VirtualMachine::new().run(&program).unwrap_err();
+
+		assert_eq!(error, VmError {
+			instruction_index: 2,
+			message: String::from("Cannot compare `bool` and `int` for equality."),
+		});
+	}
+
+	#[test]
 	fn rejects_modulo_by_zero() {
 		let program = Program::new(vec![
 			Instruction::PushInteger(1),
@@ -276,6 +418,19 @@ mod tests {
 	fn runs_boolean_literal_program() {
 		let program = Program::new(vec![
 			Instruction::PushBoolean(true),
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
+	fn runs_equality_program() {
+		let program = Program::new(vec![
+			Instruction::PushInteger(2),
+			Instruction::PushDecimal(Decimal::from_literal("2.0").unwrap()),
+			Instruction::Equal,
 		]);
 
 		let result = VirtualMachine::new().run(&program).unwrap();
@@ -335,6 +490,19 @@ mod tests {
 		let result = VirtualMachine::new().run(&program).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
+	fn runs_relational_program() {
+		let program = Program::new(vec![
+			Instruction::PushInteger(1),
+			Instruction::PushInteger(2),
+			Instruction::LessThan,
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Boolean(true)));
 	}
 
 	#[test]

@@ -93,6 +93,52 @@ impl Lexer {
 			'%' => TokenKind::Percent,
 			'(' => TokenKind::LeftParenthesis,
 			')' => TokenKind::RightParenthesis,
+			'!' if self.peek_next_char() == Some('=') => {
+				self.advance_char();
+				self.advance_char();
+
+				return Ok(Some(Token {
+					end: self.position,
+					kind: TokenKind::BangEqual,
+					lexeme: String::from("!="),
+					start,
+				}));
+			}
+			'=' if self.peek_next_char() == Some('=') => {
+				self.advance_char();
+				self.advance_char();
+
+				return Ok(Some(Token {
+					end: self.position,
+					kind: TokenKind::EqualEqual,
+					lexeme: String::from("=="),
+					start,
+				}));
+			}
+			'>' if self.peek_next_char() == Some('=') => {
+				self.advance_char();
+				self.advance_char();
+
+				return Ok(Some(Token {
+					end: self.position,
+					kind: TokenKind::GreaterThanOrEqual,
+					lexeme: String::from(">="),
+					start,
+				}));
+			}
+			'>' => TokenKind::GreaterThan,
+			'<' if self.peek_next_char() == Some('=') => {
+				self.advance_char();
+				self.advance_char();
+
+				return Ok(Some(Token {
+					end: self.position,
+					kind: TokenKind::LessThanOrEqual,
+					lexeme: String::from("<="),
+					start,
+				}));
+			}
+			'<' => TokenKind::LessThan,
 			_ => {
 				return Err(LexError {
 					position: self.position,
@@ -339,6 +385,21 @@ mod tests {
 		assert_eq!(tokens[3].kind, TokenKind::IntegerLiteral);
 		assert_eq!(tokens[4].kind, TokenKind::RightParenthesis);
 		assert_eq!(tokens[5].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
+	fn tokenizes_relational_operators() {
+		let mut lexer = Lexer::new(SourceText::new("1 == 2 != 3 > 4 >= 5 < 6 <= 7"));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens.len(), 14);
+		assert_eq!(tokens[1].kind, TokenKind::EqualEqual);
+		assert_eq!(tokens[3].kind, TokenKind::BangEqual);
+		assert_eq!(tokens[5].kind, TokenKind::GreaterThan);
+		assert_eq!(tokens[7].kind, TokenKind::GreaterThanOrEqual);
+		assert_eq!(tokens[9].kind, TokenKind::LessThan);
+		assert_eq!(tokens[11].kind, TokenKind::LessThanOrEqual);
+		assert_eq!(tokens[13].kind, TokenKind::EndOfFile);
 	}
 
 	#[test]

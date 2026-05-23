@@ -21,6 +21,8 @@ pub struct Parser {
 // the operator precedence used by the Pratt parser.
 enum BindingPower {
 	Default,
+	Equality,
+	Comparison,
 	Additive,
 	Multiplicative,
 	Unary,
@@ -103,6 +105,11 @@ impl Parser {
 
 		while let Some(token) = self.current() {
 			let next_binding_power = match token.kind {
+				TokenKind::EqualEqual | TokenKind::BangEqual => BindingPower::Equality,
+				TokenKind::GreaterThan
+				| TokenKind::GreaterThanOrEqual
+				| TokenKind::LessThan
+				| TokenKind::LessThanOrEqual => BindingPower::Comparison,
 				TokenKind::Plus | TokenKind::Dash => BindingPower::Additive,
 				TokenKind::Asterisk
 				| TokenKind::ForwardSlash
@@ -149,6 +156,15 @@ impl Parser {
 					right: Box::new(right),
 				}))
 			}
+			TokenKind::BangEqual => {
+				let right = self.parse_expression_with_binding_power(binding_power)?;
+
+				Ok(Expr::Binary(BinaryExpr {
+					left: Box::new(left),
+					operator: BinaryOperator::NotEqual,
+					right: Box::new(right),
+				}))
+			}
 			TokenKind::Dash => {
 				let right = self.parse_expression_with_binding_power(binding_power)?;
 
@@ -158,12 +174,57 @@ impl Parser {
 					right: Box::new(right),
 				}))
 			}
+			TokenKind::EqualEqual => {
+				let right = self.parse_expression_with_binding_power(binding_power)?;
+
+				Ok(Expr::Binary(BinaryExpr {
+					left: Box::new(left),
+					operator: BinaryOperator::Equal,
+					right: Box::new(right),
+				}))
+			}
 			TokenKind::ForwardSlash => {
 				let right = self.parse_expression_with_binding_power(binding_power)?;
 
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
 					operator: BinaryOperator::Divide,
+					right: Box::new(right),
+				}))
+			}
+			TokenKind::GreaterThan => {
+				let right = self.parse_expression_with_binding_power(binding_power)?;
+
+				Ok(Expr::Binary(BinaryExpr {
+					left: Box::new(left),
+					operator: BinaryOperator::GreaterThan,
+					right: Box::new(right),
+				}))
+			}
+			TokenKind::GreaterThanOrEqual => {
+				let right = self.parse_expression_with_binding_power(binding_power)?;
+
+				Ok(Expr::Binary(BinaryExpr {
+					left: Box::new(left),
+					operator: BinaryOperator::GreaterThanOrEqual,
+					right: Box::new(right),
+				}))
+			}
+			TokenKind::LessThan => {
+				let right = self.parse_expression_with_binding_power(binding_power)?;
+
+				Ok(Expr::Binary(BinaryExpr {
+					left: Box::new(left),
+					operator: BinaryOperator::LessThan,
+					right: Box::new(right),
+				}))
+			}
+			TokenKind::LessThanOrEqual => {
+				let right = self.parse_expression_with_binding_power(binding_power)?;
+
+				Ok(Expr::Binary(BinaryExpr {
+					left: Box::new(left),
+					operator: BinaryOperator::LessThanOrEqual,
 					right: Box::new(right),
 				}))
 			}
@@ -271,6 +332,28 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_comparison_more_tightly_than_equality() {
+		assert_eq!(
+			parse("1 < 2 == true"),
+			Expr::Binary(BinaryExpr {
+				left: Box::new(Expr::Binary(BinaryExpr {
+					left: Box::new(Expr::Integer(IntegerLiteral {
+						value: 1,
+					})),
+					operator: BinaryOperator::LessThan,
+					right: Box::new(Expr::Integer(IntegerLiteral {
+						value: 2,
+					})),
+				})),
+				operator: BinaryOperator::Equal,
+				right: Box::new(Expr::Boolean(BooleanLiteral {
+					value: true,
+				})),
+			})
+		);
+	}
+
+	#[test]
 	fn parses_decimal_literal() {
 		assert_eq!(
 			parse(".5"),
@@ -371,6 +454,28 @@ mod tests {
 					right: Box::new(Expr::Integer(IntegerLiteral {
 						value: 3,
 					})),
+				})),
+			})
+		);
+	}
+
+	#[test]
+	fn parses_relational_operator_after_addition() {
+		assert_eq!(
+			parse("1 + 2 < 4"),
+			Expr::Binary(BinaryExpr {
+				left: Box::new(Expr::Binary(BinaryExpr {
+					left: Box::new(Expr::Integer(IntegerLiteral {
+						value: 1,
+					})),
+					operator: BinaryOperator::Add,
+					right: Box::new(Expr::Integer(IntegerLiteral {
+						value: 2,
+					})),
+				})),
+				operator: BinaryOperator::LessThan,
+				right: Box::new(Expr::Integer(IntegerLiteral {
+					value: 4,
 				})),
 			})
 		);

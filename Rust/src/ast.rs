@@ -4,8 +4,14 @@ use crate::value::Decimal;
 pub enum BinaryOperator {
 	Add,
 	Divide,
+	Equal,
+	GreaterThan,
+	GreaterThanOrEqual,
+	LessThan,
+	LessThanOrEqual,
 	Modulo,
 	Multiply,
+	NotEqual,
 	Subtract,
 }
 
