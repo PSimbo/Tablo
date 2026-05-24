@@ -4,6 +4,12 @@ use super::token::TokenKind;
 use super::token::Token;
 
 #[derive(Clone, Copy)]
+struct MultilineStringLayout {
+	first_line_padding: usize,
+	trim_count: usize,
+}
+
+#[derive(Clone, Copy)]
 enum StringTokenMode {
 	Continuation,
 	Start,
@@ -11,7 +17,7 @@ enum StringTokenMode {
 
 pub struct Lexer {
 	end_of_file: bool,
-	interpolated_string_stack: Vec<usize>,
+	interpolated_string_stack: Vec<MultilineStringLayout>,
 	position: usize,
 	resume_interpolated_string: bool,
 	source: SourceText,
@@ -334,9 +340,15 @@ impl Lexer {
 
 	fn lex_string_token(&mut self, mode: StringTokenMode) -> Result<Token, LexError> {
 		let start = self.position;
-		let trim_count = match mode {
-			StringTokenMode::Continuation => *self.interpolated_string_stack.last().unwrap_or(&0),
-			StringTokenMode::Start => self.line_indentation_before(start),
+		let layout = match mode {
+			StringTokenMode::Continuation => self.interpolated_string_stack
+				.last()
+				.copied()
+				.unwrap_or(MultilineStringLayout {
+					first_line_padding: 0,
+					trim_count: 0,
+				}),
+			StringTokenMode::Start => self.scan_multiline_string_layout(start)?,
 		};
 
 		if matches!(mode, StringTokenMode::Start) {
@@ -348,7 +360,7 @@ impl Lexer {
 		while let Some(next) = self.peek_char() {
 			if next == '\'' {
 				self.advance_char();
-				let value = trim_multiline_string(&value, trim_count);
+				let value = layout.apply(&value, matches!(mode, StringTokenMode::Start));
 
 				let kind = match mode {
 					StringTokenMode::Start => TokenKind::StringLiteral,
@@ -377,10 +389,10 @@ impl Lexer {
 			if next == '$' && self.peek_next_char() == Some('{') {
 				self.advance_char();
 				self.advance_char();
-				let value = trim_multiline_string(&value, trim_count);
+				let value = layout.apply(&value, matches!(mode, StringTokenMode::Start));
 
 				if matches!(mode, StringTokenMode::Start) {
-					self.interpolated_string_stack.push(trim_count);
+					self.interpolated_string_stack.push(layout);
 				}
 
 				let kind = match mode {
@@ -435,14 +447,11 @@ impl Lexer {
 		})
 	}
 
-	fn line_indentation_before(&self, position: usize) -> usize {
+	fn line_character_count_including(&self, position: usize) -> usize {
 		let prefix = &self.source.as_str()[..position];
 		let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
 
-		prefix[line_start..]
-			.chars()
-			.take_while(|ch| ch.is_whitespace() && *ch != '\n' && *ch != '\r')
-			.count()
+		prefix[line_start..].chars().count() + 1
 	}
 
 	fn peek_char(&self) -> Option<char> {
@@ -455,6 +464,109 @@ impl Lexer {
 		chars.next()
 	}
 
+	fn scan_interpolation_end(&self, mut position: usize) -> Result<usize, LexError> {
+		while position < self.source.as_str().len() {
+			let next = self.source.as_str()[position..].chars().next().unwrap();
+
+			if next == '\'' {
+				position = self.scan_string_end(position)?;
+				continue;
+			}
+
+			position += next.len_utf8();
+
+			if next == '}' {
+				return Ok(position);
+			}
+		}
+
+		Err(LexError {
+			position,
+			message: String::from("Unterminated string interpolation."),
+		})
+	}
+
+	fn scan_multiline_string_layout(&self, start: usize) -> Result<MultilineStringLayout, LexError> {
+		let end = self.scan_string_end(start)?;
+		let source = self.source.as_str();
+		let opening_column = self.line_character_count_including(start);
+		let content = &source[start + '\''.len_utf8()..end - '\''.len_utf8()];
+
+		if !content.contains('\n') {
+			return Ok(MultilineStringLayout {
+				first_line_padding: 0,
+				trim_count: 0,
+			});
+		}
+
+		let content_lines: Vec<&str> = content.split('\n').collect();
+		let mut minimum_indent = opening_column;
+
+		for (index, line) in content_lines.iter().enumerate().skip(1) {
+			let mut indent = line.chars()
+				.take_while(|ch| ch.is_whitespace() && *ch != '\r')
+				.count();
+
+			let is_last_line = index == content_lines.len() - 1;
+			let line_is_only_whitespace = line.chars().all(|ch| ch.is_whitespace() && ch != '\r');
+
+			if is_last_line && line_is_only_whitespace {
+				// Treat an indentation-only final line as including the closing quote.
+				indent += 1;
+			}
+
+			minimum_indent = minimum_indent.min(indent);
+		}
+
+		Ok(MultilineStringLayout {
+			first_line_padding: opening_column.saturating_sub(minimum_indent),
+			trim_count: minimum_indent,
+		})
+	}
+
+	fn scan_string_end(&self, start: usize) -> Result<usize, LexError> {
+		let mut position = start + '\''.len_utf8();
+
+		while position < self.source.as_str().len() {
+			let next = self.source.as_str()[position..].chars().next().unwrap();
+
+			if next == '\\' {
+				position += next.len_utf8();
+
+				if position >= self.source.as_str().len() {
+					return Err(LexError {
+						position,
+						message: String::from("Unterminated escape sequence in string literal."),
+					});
+				}
+
+				let escaped = self.source.as_str()[position..].chars().next().unwrap();
+				position += escaped.len_utf8();
+				continue;
+			}
+
+			if next == '\'' {
+				return Ok(position + next.len_utf8());
+			}
+
+			if next == '$' {
+				let mut chars = self.source.as_str()[position..].chars();
+				chars.next();
+				if chars.next() == Some('{') {
+					position = self.scan_interpolation_end(position + 2)?;
+					continue;
+				}
+			}
+
+			position += next.len_utf8();
+		}
+
+		Err(LexError {
+			position: start,
+			message: String::from("Unterminated string literal."),
+		})
+	}
+
 	fn skip_whitespace(&mut self) {
 		while self.peek_char().is_some_and(char::is_whitespace) {
 			self.advance_char();
@@ -462,14 +574,31 @@ impl Lexer {
 	}
 }
 
-fn trim_multiline_string(value: &str, trim_count: usize) -> String {
+impl MultilineStringLayout {
+	fn apply(&self, value: &str, is_start_segment: bool) -> String {
+		let first_line_padding = if is_start_segment {
+			self.first_line_padding
+		}
+		else {
+			0
+		};
+
+		trim_multiline_string(value, self.trim_count, first_line_padding)
+	}
+}
+
+fn trim_multiline_string(value: &str, trim_count: usize, first_line_padding: usize) -> String {
 	if !value.contains('\n') || trim_count == 0 {
 		return value.to_string();
 	}
 
 	let mut result = String::new();
-	let mut at_line_start = true;
+	let mut at_line_start = false;
 	let mut remaining_trim = trim_count;
+
+	if first_line_padding > 0 {
+		result.push_str(&" ".repeat(first_line_padding));
+	}
 
 	for ch in value.chars() {
 		if at_line_start {
@@ -504,6 +633,17 @@ mod tests {
 
 	use super::Lexer;
 	use super::TokenKind;
+
+	#[test]
+	fn preserves_first_line_indentation_in_multiline_string() {
+		let mut lexer = Lexer::new(SourceText::new(
+			"foo = '    - Bar\n               - Baz';",
+		));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens[2].kind, TokenKind::StringLiteral);
+		assert_eq!(tokens[2].lexeme, "    - Bar\n        - Baz");
+	}
 
 	#[test]
 	fn rejects_unexpected_character() {
@@ -640,6 +780,54 @@ mod tests {
 	}
 
 	#[test]
+	fn tokenizes_multiline_interpolated_string_using_global_minimum_indentation() {
+		let mut lexer = Lexer::new(SourceText::new(
+			"    '\n        hello ${name}\n      world\n    '",
+		));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens[0].kind, TokenKind::InterpolatedStringStart);
+		assert_eq!(tokens[0].lexeme, "\n   hello ");
+		assert_eq!(tokens[3].kind, TokenKind::InterpolatedStringEnd);
+		assert_eq!(tokens[3].lexeme, "\n world\n");
+	}
+
+	#[test]
+	fn tokenizes_multiline_interpolated_string_with_indentation_trimming() {
+		let mut lexer = Lexer::new(SourceText::new(
+			"    '\n        hello ${name}\n        world\n    '",
+		));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens[0].kind, TokenKind::InterpolatedStringStart);
+		assert_eq!(tokens[0].lexeme, "\n   hello ");
+		assert_eq!(tokens[3].kind, TokenKind::InterpolatedStringEnd);
+		assert_eq!(tokens[3].lexeme, "\n   world\n");
+	}
+
+	#[test]
+	fn tokenizes_multiline_string_trim_based_on_opening_delimiter_position() {
+		let mut lexer = Lexer::new(SourceText::new(
+			"var foo: text ='- Bar\n                    - Baz';",
+		));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens[5].kind, TokenKind::StringLiteral);
+		assert_eq!(tokens[5].lexeme, "- Bar\n    - Baz");
+	}
+
+	#[test]
+	fn tokenizes_multiline_string_with_indentation_trimming() {
+		let mut lexer = Lexer::new(SourceText::new(
+			"    '\n        first\n        second\n    '",
+		));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens[0].kind, TokenKind::StringLiteral);
+		assert_eq!(tokens[0].lexeme, "\n   first\n   second\n");
+	}
+
+	#[test]
 	fn tokenizes_negative_decimal_literal_as_dash_then_decimal_literal() {
 		let mut lexer = Lexer::new(SourceText::new("-1.25 + -.5"));
 		let tokens = lexer.tokenize().unwrap();
@@ -705,30 +893,6 @@ mod tests {
 	}
 
 	#[test]
-	fn tokenizes_multiline_interpolated_string_with_indentation_trimming() {
-		let mut lexer = Lexer::new(SourceText::new(
-			"    '\n        hello ${name}\n        world\n    '",
-		));
-		let tokens = lexer.tokenize().unwrap();
-
-		assert_eq!(tokens[0].kind, TokenKind::InterpolatedStringStart);
-		assert_eq!(tokens[0].lexeme, "\n    hello ");
-		assert_eq!(tokens[3].kind, TokenKind::InterpolatedStringEnd);
-		assert_eq!(tokens[3].lexeme, "\n    world\n");
-	}
-
-	#[test]
-	fn tokenizes_multiline_string_with_indentation_trimming() {
-		let mut lexer = Lexer::new(SourceText::new(
-			"    '\n        first\n        second\n    '",
-		));
-		let tokens = lexer.tokenize().unwrap();
-
-		assert_eq!(tokens[0].kind, TokenKind::StringLiteral);
-		assert_eq!(tokens[0].lexeme, "\n    first\n    second\n");
-	}
-
-	#[test]
 	fn tokenizes_string_interpolation() {
 		let mut lexer = Lexer::new(SourceText::new("'hello ${name}!';"));
 		let tokens = lexer.tokenize().unwrap();
@@ -753,5 +917,16 @@ mod tests {
 		assert_eq!(tokens[0].kind, TokenKind::StringLiteral);
 		assert_eq!(tokens[0].lexeme, "hello\nworld");
 		assert_eq!(tokens[1].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
+	fn trims_using_closing_delimiter_line_when_it_is_the_smallest() {
+		let mut lexer = Lexer::new(SourceText::new(
+			"foo = '- Bar\n           - Baz\n  ';",
+		));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens[2].kind, TokenKind::StringLiteral);
+		assert_eq!(tokens[2].lexeme, "    - Bar\n        - Baz\n");
 	}
 }

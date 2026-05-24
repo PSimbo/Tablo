@@ -264,7 +264,10 @@ String Literals
 
 Strings are delimited with `'` characters and may contain any characters except the character with code zero. Some characters need to be escaped. Strings support interpolation using the `${` and `}` delimiters. Any valid expression may be placed within the string interpolation delimiters.
 
-Note that there is no special syntax for multi-line strings. Any new line characters in the strings remain in the assigned value. For any string that spans mutliple lines, leading whitespace is trimmed up to the number of whitespace characters preceding either the initial or final `'` (whichever is smaller).
+Note that there is no special syntax for multi-line strings. Any new line characters in the strings remain in the assigned value. For any string that spans multiple lines:
+
+* The first line is treated as if all characters leading up to and including the opening `'` were whitespace characters.
+* As much leading whitespace is trimmed from each line as possible such that the length of each line is reduced by the same amount.
 
 The following escape sequences are supported:
 
