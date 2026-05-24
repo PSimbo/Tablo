@@ -418,6 +418,56 @@ impl Parser {
 		}))
 	}
 
+	fn parse_interpolated_string(&mut self, token: Token) -> Result<Expr, ParseError> {
+		let mut parts = vec![Expr::Text(TextLiteral {
+			value: token.lexeme,
+		})];
+
+		loop {
+			let expression = self.parse_assignment_expression()?;
+			parts.push(expression);
+
+			self.expect_token(TokenKind::RightBrace, "Expected `}` to close string interpolation.")?;
+			let segment = self.next().ok_or(ParseError {
+				message: String::from("Expected a string segment after interpolation."),
+				position: 0,
+			})?;
+
+			match segment.kind {
+				TokenKind::InterpolatedStringMiddle => {
+					parts.push(Expr::Text(TextLiteral {
+						value: segment.lexeme,
+					}));
+				}
+				TokenKind::InterpolatedStringEnd => {
+					parts.push(Expr::Text(TextLiteral {
+						value: segment.lexeme,
+					}));
+					break;
+				}
+				_ => {
+					return Err(ParseError {
+						message: format!("Expected interpolated string continuation, found `{}`.", segment.lexeme),
+						position: segment.start,
+					});
+				}
+			}
+		}
+
+		let mut parts = parts.into_iter();
+		let mut expression = parts.next().unwrap();
+
+		for part in parts {
+			expression = Expr::Binary(BinaryExpr {
+				left: Box::new(expression),
+				operator: BinaryOperator::Add,
+				right: Box::new(part),
+			});
+		}
+
+		Ok(expression)
+	}
+
 	fn parse_negation_expression(&mut self) -> Result<Expr, ParseError> {
 		let operand = self.parse_expression_with_binding_power(BindingPower::Unary)?;
 
@@ -452,6 +502,7 @@ impl Parser {
 			TokenKind::FalseKeyword | TokenKind::TrueKeyword => self.parse_boolean_literal(token),
 			TokenKind::Identifier => Ok(self.parse_identifier_expression(token)),
 			TokenKind::IntegerLiteral => self.parse_integer_literal(token),
+			TokenKind::InterpolatedStringStart => self.parse_interpolated_string(token),
 			TokenKind::LeftParenthesis => self.parse_group_expression(token.start),
 			TokenKind::NotKeyword => self.parse_not_expression(),
 			TokenKind::StringLiteral => Ok(self.parse_text_literal(token)),
@@ -664,6 +715,28 @@ mod tests {
 		assert_eq!(
 			parse("42"),
 			Expr::Integer(IntegerLiteral { value: 42 })
+		);
+	}
+
+	#[test]
+	fn parses_interpolated_string() {
+		assert_eq!(
+			parse("'hello ${name}!'"),
+			Expr::Binary(BinaryExpr {
+				left: Box::new(Expr::Binary(BinaryExpr {
+					left: Box::new(Expr::Text(TextLiteral {
+						value: String::from("hello "),
+					})),
+					operator: BinaryOperator::Add,
+					right: Box::new(Expr::Identifier(IdentifierExpr {
+						name: String::from("name"),
+					})),
+				})),
+				operator: BinaryOperator::Add,
+				right: Box::new(Expr::Text(TextLiteral {
+					value: String::from("!"),
+				})),
+			})
 		);
 	}
 

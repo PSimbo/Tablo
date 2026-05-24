@@ -3,9 +3,17 @@ use crate::source::SourceText;
 use super::token::TokenKind;
 use super::token::Token;
 
+#[derive(Clone, Copy)]
+enum StringTokenMode {
+	Continuation,
+	Start,
+}
+
 pub struct Lexer {
 	end_of_file: bool,
+	interpolated_string_stack: Vec<usize>,
 	position: usize,
+	resume_interpolated_string: bool,
 	source: SourceText,
 }
 
@@ -19,7 +27,9 @@ impl Lexer {
 	pub fn new(source: SourceText) -> Self {
 		Self {
 			end_of_file: false,
+			interpolated_string_stack: Vec::new(),
 			position: 0,
+			resume_interpolated_string: false,
 			source,
 		}
 	}
@@ -29,6 +39,11 @@ impl Lexer {
 	}
 
 	pub fn next_token(&mut self) -> Result<Option<Token>, LexError> {
+		if self.resume_interpolated_string {
+			self.resume_interpolated_string = false;
+			return Ok(Some(self.lex_string_token(StringTokenMode::Continuation)?));
+		}
+
 		self.skip_whitespace();
 
 		if self.position >= self.source.as_str().len() {
@@ -74,15 +89,7 @@ impl Lexer {
 		}
 
 		if next == '\'' {
-			let lexeme = self.lex_string_literal()?;
-			let end = self.position;
-
-			return Ok(Some(Token {
-				end,
-				kind: TokenKind::StringLiteral,
-				lexeme,
-				start,
-			}));
+			return Ok(Some(self.lex_string_token(StringTokenMode::Start)?));
 		}
 
 		if next.is_ascii_alphabetic() {
@@ -162,6 +169,17 @@ impl Lexer {
 			';' => TokenKind::Semicolon,
 			'(' => TokenKind::LeftParenthesis,
 			')' => TokenKind::RightParenthesis,
+			'}' if !self.interpolated_string_stack.is_empty() => {
+				self.advance_char();
+				self.resume_interpolated_string = true;
+
+				return Ok(Some(Token {
+					end: self.position,
+					kind: TokenKind::RightBrace,
+					lexeme: String::from("}"),
+					start,
+				}));
+			}
 			'!' if self.peek_next_char() == Some('=') => {
 				self.advance_char();
 				self.advance_char();
@@ -314,16 +332,39 @@ impl Lexer {
 		(TokenKind::IntegerLiteral, self.source.as_str()[start..self.position].to_string())
 	}
 
-	fn lex_string_literal(&mut self) -> Result<String, LexError> {
+	fn lex_string_token(&mut self, mode: StringTokenMode) -> Result<Token, LexError> {
 		let start = self.position;
-		self.advance_char();
+		let trim_count = match mode {
+			StringTokenMode::Continuation => *self.interpolated_string_stack.last().unwrap_or(&0),
+			StringTokenMode::Start => self.line_indentation_before(start),
+		};
+
+		if matches!(mode, StringTokenMode::Start) {
+			self.advance_char();
+		}
 
 		let mut value = String::new();
 
 		while let Some(next) = self.peek_char() {
 			if next == '\'' {
 				self.advance_char();
-				return Ok(value);
+				let value = trim_multiline_string(&value, trim_count);
+
+				let kind = match mode {
+					StringTokenMode::Start => TokenKind::StringLiteral,
+					StringTokenMode::Continuation => TokenKind::InterpolatedStringEnd,
+				};
+
+				if matches!(mode, StringTokenMode::Continuation) {
+					self.interpolated_string_stack.pop();
+				}
+
+				return Ok(Token {
+					end: self.position,
+					kind,
+					lexeme: value,
+					start,
+				});
 			}
 
 			if next == '\0' {
@@ -334,9 +375,24 @@ impl Lexer {
 			}
 
 			if next == '$' && self.peek_next_char() == Some('{') {
-				return Err(LexError {
-					position: self.position,
-					message: String::from("String interpolation is not yet implemented."),
+				self.advance_char();
+				self.advance_char();
+				let value = trim_multiline_string(&value, trim_count);
+
+				if matches!(mode, StringTokenMode::Start) {
+					self.interpolated_string_stack.push(trim_count);
+				}
+
+				let kind = match mode {
+					StringTokenMode::Start => TokenKind::InterpolatedStringStart,
+					StringTokenMode::Continuation => TokenKind::InterpolatedStringMiddle,
+				};
+
+				return Ok(Token {
+					end: self.position,
+					kind,
+					lexeme: value,
+					start,
 				});
 			}
 
@@ -379,6 +435,16 @@ impl Lexer {
 		})
 	}
 
+	fn line_indentation_before(&self, position: usize) -> usize {
+		let prefix = &self.source.as_str()[..position];
+		let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
+
+		prefix[line_start..]
+			.chars()
+			.take_while(|ch| ch.is_whitespace() && *ch != '\n' && *ch != '\r')
+			.count()
+	}
+
 	fn peek_char(&self) -> Option<char> {
 		self.source.as_str()[self.position..].chars().next()
 	}
@@ -396,20 +462,48 @@ impl Lexer {
 	}
 }
 
+fn trim_multiline_string(value: &str, trim_count: usize) -> String {
+	if !value.contains('\n') || trim_count == 0 {
+		return value.to_string();
+	}
+
+	let mut result = String::new();
+	let mut at_line_start = true;
+	let mut remaining_trim = trim_count;
+
+	for ch in value.chars() {
+		if at_line_start {
+			if ch == '\n' {
+				result.push(ch);
+				remaining_trim = trim_count;
+				continue;
+			}
+
+			if remaining_trim > 0 && ch.is_whitespace() && ch != '\r' {
+				remaining_trim -= 1;
+				continue;
+			}
+
+			at_line_start = false;
+		}
+
+		result.push(ch);
+
+		if ch == '\n' {
+			at_line_start = true;
+			remaining_trim = trim_count;
+		}
+	}
+
+	result
+}
+
 #[cfg(test)]
 mod tests {
 	use crate::source::SourceText;
 
 	use super::Lexer;
 	use super::TokenKind;
-
-	#[test]
-	fn rejects_string_interpolation_for_now() {
-		let mut lexer = Lexer::new(SourceText::new("'hello ${name}'"));
-		let error = lexer.tokenize().unwrap_err();
-
-		assert_eq!(error.message, "String interpolation is not yet implemented.");
-	}
 
 	#[test]
 	fn rejects_unexpected_character() {
@@ -608,6 +702,46 @@ mod tests {
 		assert_eq!(tokens[9].kind, TokenKind::LessThan);
 		assert_eq!(tokens[11].kind, TokenKind::LessThanOrEqual);
 		assert_eq!(tokens[13].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
+	fn tokenizes_multiline_interpolated_string_with_indentation_trimming() {
+		let mut lexer = Lexer::new(SourceText::new(
+			"    '\n        hello ${name}\n        world\n    '",
+		));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens[0].kind, TokenKind::InterpolatedStringStart);
+		assert_eq!(tokens[0].lexeme, "\n    hello ");
+		assert_eq!(tokens[3].kind, TokenKind::InterpolatedStringEnd);
+		assert_eq!(tokens[3].lexeme, "\n    world\n");
+	}
+
+	#[test]
+	fn tokenizes_multiline_string_with_indentation_trimming() {
+		let mut lexer = Lexer::new(SourceText::new(
+			"    '\n        first\n        second\n    '",
+		));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens[0].kind, TokenKind::StringLiteral);
+		assert_eq!(tokens[0].lexeme, "\n    first\n    second\n");
+	}
+
+	#[test]
+	fn tokenizes_string_interpolation() {
+		let mut lexer = Lexer::new(SourceText::new("'hello ${name}!';"));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens[0].kind, TokenKind::InterpolatedStringStart);
+		assert_eq!(tokens[0].lexeme, "hello ");
+		assert_eq!(tokens[1].kind, TokenKind::Identifier);
+		assert_eq!(tokens[1].lexeme, "name");
+		assert_eq!(tokens[2].kind, TokenKind::RightBrace);
+		assert_eq!(tokens[3].kind, TokenKind::InterpolatedStringEnd);
+		assert_eq!(tokens[3].lexeme, "!");
+		assert_eq!(tokens[4].kind, TokenKind::Semicolon);
+		assert_eq!(tokens[5].kind, TokenKind::EndOfFile);
 	}
 
 	#[test]

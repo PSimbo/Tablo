@@ -186,6 +186,13 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_interpolated_string_source_text() {
+		let result = run("var name: text = 'world';\n'hello ${name}!'").unwrap();
+
+		assert_eq!(result, Some(Value::Text(String::from("hello world!"))));
+	}
+
+	#[test]
 	fn runs_logical_source_text() {
 		let result = run("not false and true or false").unwrap();
 
