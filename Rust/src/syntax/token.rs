@@ -32,6 +32,8 @@ pub enum TokenKind {
 	RightParenthesis,
 	Semicolon,
 	SlashEqual,
+	StringLiteral,
+	TextKeyword,
 	TrueKeyword,
 	VarKeyword,
 	XorKeyword,

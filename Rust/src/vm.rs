@@ -45,8 +45,8 @@ impl VirtualMachine {
 	fn execute_instruction(&mut self, instruction: &Instruction, instruction_index: usize) -> Result<(), VmError> {
 		match instruction {
 			Instruction::Add => {
-				let rhs = self.pop_numeric(instruction_index)?;
-				let lhs = self.pop_numeric(instruction_index)?;
+				let rhs = self.pop_value(instruction_index)?;
+				let lhs = self.pop_value(instruction_index)?;
 				self.stack.push(add_values(lhs, rhs, instruction_index)?);
 				Ok(())
 			}
@@ -150,6 +150,10 @@ impl VirtualMachine {
 				self.stack.push(Value::Integer(*value));
 				Ok(())
 			}
+			Instruction::PushText(value) => {
+				self.stack.push(Value::Text(value.clone()));
+				Ok(())
+			}
 			Instruction::Subtract => {
 				let rhs = self.pop_numeric(instruction_index)?;
 				let lhs = self.pop_numeric(instruction_index)?;
@@ -197,10 +201,10 @@ impl VirtualMachine {
 			message: String::from("Stack underflow while reading numeric operand."),
 		})?;
 
-		if matches!(value, Value::Boolean(_)) {
+		if matches!(value, Value::Boolean(_) | Value::Text(_)) {
 			return Err(VmError {
 				instruction_index,
-				message: String::from("Expected a numeric operand, found a Boolean value."),
+				message: format!("Expected a numeric operand, found a {} value.", type_name(&value)),
 			});
 		}
 
@@ -217,6 +221,9 @@ impl VirtualMachine {
 
 fn add_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
 	match (lhs, rhs) {
+		(Value::Text(lhs), Value::Text(rhs)) => Ok(Value::Text(lhs + &rhs)),
+		(Value::Text(lhs), rhs) => Ok(Value::Text(lhs + &stringify_value(&rhs))),
+		(lhs, Value::Text(rhs)) => Ok(Value::Text(stringify_value(&lhs) + &rhs)),
 		(Value::Integer(lhs), Value::Integer(rhs)) => Ok(Value::Integer(lhs.saturating_add(rhs))),
 		(lhs, rhs) => {
 			let (lhs, rhs) = coerce_numeric_values(lhs, rhs, instruction_index)?;
@@ -266,6 +273,25 @@ fn compare_decimals(lhs: &Decimal, rhs: &Decimal, instruction_index: usize) -> R
 }
 
 fn compare_values(lhs: Value, rhs: Value, instruction_index: usize, kind: ComparisonKind) -> Result<Value, VmError> {
+	if let (Value::Text(lhs), Value::Text(rhs)) = (&lhs, &rhs) {
+		let ordering = lhs.cmp(rhs);
+		let value = match kind {
+			ComparisonKind::GreaterThan => ordering.is_gt(),
+			ComparisonKind::GreaterThanOrEqual => ordering.is_ge(),
+			ComparisonKind::LessThan => ordering.is_lt(),
+			ComparisonKind::LessThanOrEqual => ordering.is_le(),
+		};
+
+		return Ok(Value::Boolean(value));
+	}
+
+	if matches!(lhs, Value::Text(_)) || matches!(rhs, Value::Text(_)) {
+		return Err(vm_error(
+			instruction_index,
+			format!("Cannot compare `{}` and `{}` for ordering.", type_name(&lhs), type_name(&rhs)),
+		));
+	}
+
 	let (lhs, rhs) = coerce_numeric_values(lhs, rhs, instruction_index)?;
 	let ordering = compare_decimals(&lhs, &rhs, instruction_index)?;
 	let value = match kind {
@@ -297,6 +323,13 @@ fn divide_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Val
 fn equals_value(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
 	let value = match (lhs, rhs) {
 		(Value::Boolean(lhs), Value::Boolean(rhs)) => lhs == rhs,
+		(Value::Text(lhs), Value::Text(rhs)) => lhs == rhs,
+		(lhs @ Value::Text(_), rhs) | (lhs, rhs @ Value::Text(_)) => {
+			return Err(vm_error(
+				instruction_index,
+				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
+			));
+		}
 		(lhs @ Value::Boolean(_), rhs) | (lhs, rhs @ Value::Boolean(_)) => {
 			return Err(vm_error(
 				instruction_index,
@@ -346,6 +379,7 @@ fn negate_value(value: Value) -> Value {
 			Value::Decimal(decimal)
 		}
 		Value::Integer(integer) => Value::Integer(integer.saturating_neg()),
+		Value::Text(_) => unreachable!("Text values are rejected before numeric negation."),
 	}
 }
 
@@ -367,6 +401,15 @@ fn pow10_i128(exponent: u32) -> Result<i128, String> {
 	Ok(value)
 }
 
+fn stringify_value(value: &Value) -> String {
+	match value {
+		Value::Boolean(value) => value.to_string(),
+		Value::Decimal(value) => value.to_string(),
+		Value::Integer(value) => value.to_string(),
+		Value::Text(value) => value.clone(),
+	}
+}
+
 fn subtract_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
 	match (lhs, rhs) {
 		(Value::Integer(lhs), Value::Integer(rhs)) => Ok(Value::Integer(lhs.saturating_sub(rhs))),
@@ -382,6 +425,7 @@ fn type_name(value: &Value) -> &'static str {
 		Value::Boolean(_) => "bool",
 		Value::Decimal(_) => "dec",
 		Value::Integer(_) => "int",
+		Value::Text(_) => "text",
 	}
 }
 
@@ -413,7 +457,7 @@ mod tests {
 
 		assert_eq!(error, VmError {
 			instruction_index: 1,
-			message: String::from("Stack underflow while reading numeric operand."),
+			message: String::from("Stack underflow while reading operand."),
 		});
 	}
 
@@ -462,6 +506,22 @@ mod tests {
 		assert_eq!(error, VmError {
 			instruction_index: 2,
 			message: String::from("Cannot compare `bool` and `int` for equality."),
+		});
+	}
+
+	#[test]
+	fn rejects_mixed_text_and_numeric_equality() {
+		let program = Program::new(vec![
+			Instruction::PushText(String::from("1")),
+			Instruction::PushInteger(1),
+			Instruction::Equal,
+		]);
+
+		let error = VirtualMachine::new().run(&program).unwrap_err();
+
+		assert_eq!(error, VmError {
+			instruction_index: 2,
+			message: String::from("Cannot compare `text` and `int` for equality."),
 		});
 	}
 
@@ -541,19 +601,6 @@ mod tests {
 	}
 
 	#[test]
-	fn runs_mixed_integer_and_decimal_addition() {
-		let program = Program::new(vec![
-			Instruction::PushInteger(2),
-			Instruction::PushDecimal(Decimal::from_literal("1.25").unwrap()),
-			Instruction::Add,
-		]);
-
-		let result = VirtualMachine::new().run(&program).unwrap();
-
-		assert_eq!(result, Some(Value::Decimal(Decimal::from_literal("3.25").unwrap())));
-	}
-
-	#[test]
 	fn runs_local_store_and_load_program() {
 		let program = Program::new(vec![
 			Instruction::PushInteger(1),
@@ -620,6 +667,19 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_mixed_integer_and_decimal_addition() {
+		let program = Program::new(vec![
+			Instruction::PushInteger(2),
+			Instruction::PushDecimal(Decimal::from_literal("1.25").unwrap()),
+			Instruction::Add,
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Decimal(Decimal::from_literal("3.25").unwrap())));
+	}
+
+	#[test]
 	fn runs_other_arithmetic_program() {
 		let program = Program::new(vec![
 			Instruction::PushInteger(20),
@@ -643,6 +703,43 @@ mod tests {
 		let program = Program::new(vec![
 			Instruction::PushInteger(1),
 			Instruction::PushInteger(2),
+			Instruction::LessThan,
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
+	fn runs_text_concatenation_program() {
+		let program = Program::new(vec![
+			Instruction::PushText(String::from("hello ")),
+			Instruction::PushInteger(42),
+			Instruction::Add,
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Text(String::from("hello 42"))));
+	}
+
+	#[test]
+	fn runs_text_literal_program() {
+		let program = Program::new(vec![
+			Instruction::PushText(String::from("hello")),
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Text(String::from("hello"))));
+	}
+
+	#[test]
+	fn runs_text_relational_program() {
+		let program = Program::new(vec![
+			Instruction::PushText(String::from("apple")),
+			Instruction::PushText(String::from("banana")),
 			Instruction::LessThan,
 		]);
 

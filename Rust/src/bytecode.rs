@@ -21,6 +21,7 @@ pub enum Instruction {
 	PushBoolean(bool),
 	PushDecimal(Decimal),
 	PushInteger(i64),
+	PushText(String),
 	StoreLocal(u32),
 	Subtract,
 	Xor,

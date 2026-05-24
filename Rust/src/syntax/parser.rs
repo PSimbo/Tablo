@@ -10,6 +10,7 @@ use crate::ast::IdentifierExpr;
 use crate::ast::IntegerLiteral;
 use crate::ast::Program;
 use crate::ast::Statement;
+use crate::ast::TextLiteral;
 use crate::ast::UnaryExpr;
 use crate::ast::UnaryOperator;
 use crate::ast::VariableDeclaration;
@@ -195,6 +196,7 @@ impl Parser {
 			TokenKind::BoolKeyword => Ok(DataType::Bool),
 			TokenKind::DecKeyword => Ok(DataType::Dec),
 			TokenKind::IntKeyword => Ok(DataType::Int),
+			TokenKind::TextKeyword => Ok(DataType::Text),
 			_ => Err(ParseError {
 				message: format!("Expected a supported data type, found `{}`.", token.lexeme),
 				position: token.start,
@@ -443,20 +445,27 @@ impl Parser {
 		match token.kind {
 			TokenKind::Dash => self.parse_negation_expression(),
 			TokenKind::DecimalLiteral => self.parse_decimal_literal(token),
+			TokenKind::EndOfFile => Err(ParseError {
+				message: String::from("Expected an expression."),
+				position: token.start,
+			}),
 			TokenKind::FalseKeyword | TokenKind::TrueKeyword => self.parse_boolean_literal(token),
 			TokenKind::Identifier => Ok(self.parse_identifier_expression(token)),
 			TokenKind::IntegerLiteral => self.parse_integer_literal(token),
 			TokenKind::LeftParenthesis => self.parse_group_expression(token.start),
 			TokenKind::NotKeyword => self.parse_not_expression(),
-			TokenKind::EndOfFile => Err(ParseError {
-				message: String::from("Expected an expression."),
-				position: token.start,
-			}),
+			TokenKind::StringLiteral => Ok(self.parse_text_literal(token)),
 			_ => Err(ParseError {
 				message: format!("Unexpected token `{}` at start of expression.", token.lexeme),
 				position: token.start,
 			}),
 		}
+	}
+
+	fn parse_text_literal(&self, token: Token) -> Expr {
+		Expr::Text(TextLiteral {
+			value: token.lexeme,
+		})
 	}
 
 	fn parse_variable_declaration_statement(&mut self) -> Result<Statement, ParseError> {
@@ -494,6 +503,7 @@ mod tests {
 	use crate::ast::IntegerLiteral;
 	use crate::ast::Program;
 	use crate::ast::Statement;
+	use crate::ast::TextLiteral;
 	use crate::ast::UnaryExpr;
 	use crate::ast::UnaryOperator;
 	use crate::ast::VariableDeclaration;
@@ -562,40 +572,6 @@ mod tests {
 					value: 1,
 				})),
 			})
-		);
-	}
-
-	#[test]
-	fn parses_program_with_variable_declarations() {
-		assert_eq!(
-			parse_program("var x: int = 1;\nvar y: int = 2;\nx + y"),
-			Program {
-				statements: vec![
-					Statement::VariableDeclaration(VariableDeclaration {
-						data_type: DataType::Int,
-						initial_value: Some(Expr::Integer(IntegerLiteral {
-							value: 1,
-						})),
-						name: String::from("x"),
-					}),
-					Statement::VariableDeclaration(VariableDeclaration {
-						data_type: DataType::Int,
-						initial_value: Some(Expr::Integer(IntegerLiteral {
-							value: 2,
-						})),
-						name: String::from("y"),
-					}),
-				],
-				result: Some(Expr::Binary(BinaryExpr {
-					left: Box::new(Expr::Identifier(IdentifierExpr {
-						name: String::from("x"),
-					})),
-					operator: BinaryOperator::Add,
-					right: Box::new(Expr::Identifier(IdentifierExpr {
-						name: String::from("y"),
-					})),
-				})),
-			}
 		);
 	}
 
@@ -821,6 +797,40 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_program_with_variable_declarations() {
+		assert_eq!(
+			parse_program("var x: int = 1;\nvar y: int = 2;\nx + y"),
+			Program {
+				statements: vec![
+					Statement::VariableDeclaration(VariableDeclaration {
+						data_type: DataType::Int,
+						initial_value: Some(Expr::Integer(IntegerLiteral {
+							value: 1,
+						})),
+						name: String::from("x"),
+					}),
+					Statement::VariableDeclaration(VariableDeclaration {
+						data_type: DataType::Int,
+						initial_value: Some(Expr::Integer(IntegerLiteral {
+							value: 2,
+						})),
+						name: String::from("y"),
+					}),
+				],
+				result: Some(Expr::Binary(BinaryExpr {
+					left: Box::new(Expr::Identifier(IdentifierExpr {
+						name: String::from("x"),
+					})),
+					operator: BinaryOperator::Add,
+					right: Box::new(Expr::Identifier(IdentifierExpr {
+						name: String::from("y"),
+					})),
+				})),
+			}
+		);
+	}
+
+	#[test]
 	fn parses_relational_operator_after_addition() {
 		assert_eq!(
 			parse("1 + 2 < 4"),
@@ -839,6 +849,35 @@ mod tests {
 					value: 4,
 				})),
 			})
+		);
+	}
+
+	#[test]
+	fn parses_string_literal() {
+		assert_eq!(
+			parse("'hello'"),
+			Expr::Text(TextLiteral {
+				value: String::from("hello"),
+			})
+		);
+	}
+
+	#[test]
+	fn parses_text_variable_declaration() {
+		assert_eq!(
+			parse_program("var name: text = 'Tablo';"),
+			Program {
+				statements: vec![
+					Statement::VariableDeclaration(VariableDeclaration {
+						data_type: DataType::Text,
+						initial_value: Some(Expr::Text(TextLiteral {
+							value: String::from("Tablo"),
+						})),
+						name: String::from("name"),
+					}),
+				],
+				result: None,
+			}
 		);
 	}
 

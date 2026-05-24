@@ -5,6 +5,7 @@ pub enum Value {
 	Boolean(bool),
 	Decimal(Decimal),
 	Integer(i64),
+	Text(String),
 }
 
 impl Display for Value {
@@ -13,6 +14,7 @@ impl Display for Value {
 			Value::Boolean(value) => write!(f, "{value}"),
 			Value::Decimal(value) => write!(f, "{value}"),
 			Value::Integer(value) => write!(f, "{value}"),
+			Value::Text(value) => write!(f, "{value}"),
 		}
 	}
 }

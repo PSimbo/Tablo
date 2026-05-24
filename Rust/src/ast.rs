@@ -33,16 +33,18 @@ pub enum DataType {
 	Bool,
 	Dec,
 	Int,
+	Text,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Expr {
 	Assignment(AssignmentExpr),
+	Binary(BinaryExpr),
 	Boolean(BooleanLiteral),
+	Decimal(DecimalLiteral),
 	Identifier(IdentifierExpr),
 	Integer(IntegerLiteral),
-	Decimal(DecimalLiteral),
-	Binary(BinaryExpr),
+	Text(TextLiteral),
 	Unary(UnaryExpr),
 }
 
@@ -96,6 +98,11 @@ pub struct IntegerLiteral {
 pub struct Program {
 	pub result: Option<Expr>,
 	pub statements: Vec<Statement>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TextLiteral {
+	pub value: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

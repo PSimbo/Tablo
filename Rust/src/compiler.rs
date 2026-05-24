@@ -9,6 +9,7 @@ use crate::ast::Expr;
 use crate::ast::IdentifierExpr;
 use crate::ast::Program as AstProgram;
 use crate::ast::Statement;
+use crate::ast::TextLiteral;
 use crate::ast::UnaryExpr;
 use crate::ast::UnaryOperator;
 use crate::ast::VariableDeclaration;
@@ -118,6 +119,9 @@ impl Compiler {
 			}
 			Expr::Integer(integer) => {
 				instructions.push(Instruction::PushInteger(integer.value));
+			}
+			Expr::Text(TextLiteral { value }) => {
+				instructions.push(Instruction::PushText(value.clone()));
 			}
 			Expr::Unary(UnaryExpr { operand, operator }) => {
 				self.compile_into(operand, instructions);
@@ -280,6 +284,7 @@ mod tests {
 	use crate::ast::IntegerLiteral;
 	use crate::ast::Program as AstProgram;
 	use crate::ast::Statement;
+	use crate::ast::TextLiteral;
 	use crate::ast::UnaryExpr;
 	use crate::ast::UnaryOperator;
 	use crate::ast::VariableDeclaration;
@@ -552,6 +557,19 @@ mod tests {
 			Instruction::LoadLocal(0),
 			Instruction::PushInteger(2),
 			Instruction::Add,
+		]);
+	}
+
+	#[test]
+	fn compiles_text_literal() {
+		let expression = Expr::Text(TextLiteral {
+			value: String::from("hello"),
+		});
+
+		let program = Compiler::new().compile_expression(&expression);
+
+		assert_eq!(program.instructions, vec![
+			Instruction::PushText(String::from("hello")),
 		]);
 	}
 

@@ -253,6 +253,27 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_text_concatenation_source_text() {
+		let result = run("'hello ' + 42").unwrap();
+
+		assert_eq!(result, Some(Value::Text(String::from("hello 42"))));
+	}
+
+	#[test]
+	fn runs_text_relational_source_text() {
+		let result = run("'apple' < 'banana'").unwrap();
+
+		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
+	fn runs_text_source_text() {
+		let result = run("'hello'").unwrap();
+
+		assert_eq!(result, Some(Value::Text(String::from("hello"))));
+	}
+
+	#[test]
 	fn runs_unary_negated_decimal_source_text() {
 		let result = run("-1.25").unwrap();
 

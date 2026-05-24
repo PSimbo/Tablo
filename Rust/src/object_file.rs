@@ -28,6 +28,7 @@ const OPCODE_NOT: u8 = 19;
 const OPCODE_OR: u8 = 20;
 const OPCODE_XOR: u8 = 21;
 const OPCODE_POP: u8 = 22;
+const OPCODE_PUSH_TEXT: u8 = 23;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectFileError {
@@ -108,6 +109,11 @@ pub fn write_program(program: &Program) -> Vec<u8> {
 			Instruction::PushInteger(value) => {
 				bytes.push(OPCODE_PUSH_INTEGER);
 				bytes.extend_from_slice(&value.to_le_bytes());
+			}
+			Instruction::PushText(value) => {
+				bytes.push(OPCODE_PUSH_TEXT);
+				bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+				bytes.extend_from_slice(value.as_bytes());
 			}
 			Instruction::StoreLocal(slot) => {
 				bytes.push(OPCODE_STORE_LOCAL);
@@ -243,6 +249,7 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_PUSH_BOOLEAN => Ok(Instruction::PushBoolean(self.read_bool()?)),
 			OPCODE_PUSH_DECIMAL => Ok(Instruction::PushDecimal(self.read_decimal()?)),
 			OPCODE_PUSH_INTEGER => Ok(Instruction::PushInteger(self.read_i64()?)),
+			OPCODE_PUSH_TEXT => Ok(Instruction::PushText(self.read_string()?)),
 			OPCODE_STORE_LOCAL => Ok(Instruction::StoreLocal(self.read_u32()?)),
 			OPCODE_SUBTRACT => Ok(Instruction::Subtract),
 			OPCODE_XOR => Ok(Instruction::Xor),
@@ -251,6 +258,15 @@ impl<'a> ObjectFileReader<'a> {
 				message: format!("Unknown opcode {opcode}."),
 			}),
 		}
+	}
+
+	fn read_string(&mut self) -> Result<String, ObjectFileError> {
+		let len = self.read_u32()? as usize;
+		let bytes = self.read_exact(len)?;
+		String::from_utf8(bytes.to_vec()).map_err(|_| ObjectFileError {
+			offset: self.offset - len,
+			message: String::from("Invalid UTF-8 string data in object file."),
+		})
 	}
 
 	fn read_u8(&mut self) -> Result<u8, ObjectFileError> {
@@ -335,6 +351,18 @@ mod tests {
 			Instruction::PushInteger(1),
 			Instruction::PushInteger(2),
 			Instruction::Add,
+		]);
+
+		let bytes = write_program(&program);
+		let decoded = read_program(&bytes).unwrap();
+
+		assert_eq!(decoded, program);
+	}
+
+	#[test]
+	fn round_trips_text_program_bytes() {
+		let program = Program::new(vec![
+			Instruction::PushText(String::from("hello")),
 		]);
 
 		let bytes = write_program(&program);

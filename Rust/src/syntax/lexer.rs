@@ -73,6 +73,18 @@ impl Lexer {
 			}));
 		}
 
+		if next == '\'' {
+			let lexeme = self.lex_string_literal()?;
+			let end = self.position;
+
+			return Ok(Some(Token {
+				end,
+				kind: TokenKind::StringLiteral,
+				lexeme,
+				start,
+			}));
+		}
+
 		if next.is_ascii_alphabetic() {
 			let (kind, lexeme) = self.lex_keyword()?;
 			let end = self.position;
@@ -256,6 +268,32 @@ impl Lexer {
 		}
 	}
 
+	fn lex_keyword(&mut self) -> Result<(TokenKind, String), LexError> {
+		let start = self.position;
+
+		while self.peek_char().is_some_and(|next| next.is_ascii_alphanumeric() || next == '_') {
+			self.advance_char();
+		}
+
+		let lexeme = self.source.as_str()[start..self.position].to_string();
+		let kind = match lexeme.as_str() {
+			"and" => TokenKind::AndKeyword,
+			"bool" => TokenKind::BoolKeyword,
+			"dec" => TokenKind::DecKeyword,
+			"false" => TokenKind::FalseKeyword,
+			"int" => TokenKind::IntKeyword,
+			"not" => TokenKind::NotKeyword,
+			"or" => TokenKind::OrKeyword,
+			"text" => TokenKind::TextKeyword,
+			"true" => TokenKind::TrueKeyword,
+			"var" => TokenKind::VarKeyword,
+			"xor" => TokenKind::XorKeyword,
+			_ => TokenKind::Identifier,
+		};
+
+		Ok((kind, lexeme))
+	}
+
 	fn lex_numeric_literal(&mut self, starts_with_decimal_separator: bool) -> (TokenKind, String) {
 		let start = self.position;
 
@@ -276,29 +314,69 @@ impl Lexer {
 		(TokenKind::IntegerLiteral, self.source.as_str()[start..self.position].to_string())
 	}
 
-	fn lex_keyword(&mut self) -> Result<(TokenKind, String), LexError> {
+	fn lex_string_literal(&mut self) -> Result<String, LexError> {
 		let start = self.position;
+		self.advance_char();
 
-		while self.peek_char().is_some_and(|next| next.is_ascii_alphanumeric() || next == '_') {
+		let mut value = String::new();
+
+		while let Some(next) = self.peek_char() {
+			if next == '\'' {
+				self.advance_char();
+				return Ok(value);
+			}
+
+			if next == '\0' {
+				return Err(LexError {
+					position: self.position,
+					message: String::from("String literals may not contain the null character."),
+				});
+			}
+
+			if next == '$' && self.peek_next_char() == Some('{') {
+				return Err(LexError {
+					position: self.position,
+					message: String::from("String interpolation is not yet implemented."),
+				});
+			}
+
+			if next == '\\' {
+				self.advance_char();
+				let escape = self.peek_char().ok_or(LexError {
+					position: self.position,
+					message: String::from("Unterminated escape sequence in string literal."),
+				})?;
+
+				let decoded = match escape {
+					'\'' => '\'',
+					'\\' => '\\',
+					'b' => '\u{0008}',
+					'f' => '\u{000C}',
+					'n' => '\n',
+					'r' => '\r',
+					't' => '\t',
+					'v' => '\u{000B}',
+					_ => {
+						return Err(LexError {
+							position: self.position,
+							message: format!("Unsupported escape sequence `\\{escape}`."),
+						});
+					}
+				};
+
+				self.advance_char();
+				value.push(decoded);
+				continue;
+			}
+
 			self.advance_char();
+			value.push(next);
 		}
 
-		let lexeme = self.source.as_str()[start..self.position].to_string();
-		let kind = match lexeme.as_str() {
-			"and" => TokenKind::AndKeyword,
-			"bool" => TokenKind::BoolKeyword,
-			"dec" => TokenKind::DecKeyword,
-			"false" => TokenKind::FalseKeyword,
-			"int" => TokenKind::IntKeyword,
-			"not" => TokenKind::NotKeyword,
-			"or" => TokenKind::OrKeyword,
-			"true" => TokenKind::TrueKeyword,
-			"var" => TokenKind::VarKeyword,
-			"xor" => TokenKind::XorKeyword,
-			_ => TokenKind::Identifier,
-		};
-
-		Ok((kind, lexeme))
+		Err(LexError {
+			position: start,
+			message: String::from("Unterminated string literal."),
+		})
 	}
 
 	fn peek_char(&self) -> Option<char> {
@@ -324,6 +402,23 @@ mod tests {
 
 	use super::Lexer;
 	use super::TokenKind;
+
+	#[test]
+	fn rejects_string_interpolation_for_now() {
+		let mut lexer = Lexer::new(SourceText::new("'hello ${name}'"));
+		let error = lexer.tokenize().unwrap_err();
+
+		assert_eq!(error.message, "String interpolation is not yet implemented.");
+	}
+
+	#[test]
+	fn rejects_unexpected_character() {
+		let mut lexer = Lexer::new(SourceText::new("1 ? 2"));
+		let error = lexer.tokenize().unwrap_err();
+
+		assert_eq!(error.position, 2);
+		assert_eq!(error.message, "Unexpected character `?`.");
+	}
 
 	#[test]
 	fn tokenizes_all_supported_arithmetic_operators() {
@@ -360,10 +455,10 @@ mod tests {
 
 	#[test]
 	fn tokenizes_boolean_literals() {
-		let mut lexer = Lexer::new(SourceText::new("true false and or not xor bool dec int var"));
+		let mut lexer = Lexer::new(SourceText::new("true false and or not xor bool dec int text var"));
 		let tokens = lexer.tokenize().unwrap();
 
-		assert_eq!(tokens.len(), 11);
+		assert_eq!(tokens.len(), 12);
 		assert_eq!(tokens[0].kind, TokenKind::TrueKeyword);
 		assert_eq!(tokens[0].lexeme, "true");
 		assert_eq!(tokens[1].kind, TokenKind::FalseKeyword);
@@ -375,8 +470,9 @@ mod tests {
 		assert_eq!(tokens[6].kind, TokenKind::BoolKeyword);
 		assert_eq!(tokens[7].kind, TokenKind::DecKeyword);
 		assert_eq!(tokens[8].kind, TokenKind::IntKeyword);
-		assert_eq!(tokens[9].kind, TokenKind::VarKeyword);
-		assert_eq!(tokens[10].kind, TokenKind::EndOfFile);
+		assert_eq!(tokens[9].kind, TokenKind::TextKeyword);
+		assert_eq!(tokens[10].kind, TokenKind::VarKeyword);
+		assert_eq!(tokens[11].kind, TokenKind::EndOfFile);
 	}
 
 	#[test]
@@ -391,6 +487,17 @@ mod tests {
 		assert_eq!(tokens[2].kind, TokenKind::DecimalLiteral);
 		assert_eq!(tokens[2].lexeme, ".5");
 		assert_eq!(tokens[3].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
+	fn tokenizes_identifier() {
+		let mut lexer = Lexer::new(SourceText::new("maybe"));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens.len(), 2);
+		assert_eq!(tokens[0].kind, TokenKind::Identifier);
+		assert_eq!(tokens[0].lexeme, "maybe");
+		assert_eq!(tokens[1].kind, TokenKind::EndOfFile);
 	}
 
 	#[test]
@@ -504,22 +611,13 @@ mod tests {
 	}
 
 	#[test]
-	fn rejects_unexpected_character() {
-		let mut lexer = Lexer::new(SourceText::new("1 ? 2"));
-		let error = lexer.tokenize().unwrap_err();
-
-		assert_eq!(error.position, 2);
-		assert_eq!(error.message, "Unexpected character `?`.");
-	}
-
-	#[test]
-	fn tokenizes_identifier() {
-		let mut lexer = Lexer::new(SourceText::new("maybe"));
+	fn tokenizes_string_literal() {
+		let mut lexer = Lexer::new(SourceText::new("'hello\\nworld'"));
 		let tokens = lexer.tokenize().unwrap();
 
 		assert_eq!(tokens.len(), 2);
-		assert_eq!(tokens[0].kind, TokenKind::Identifier);
-		assert_eq!(tokens[0].lexeme, "maybe");
+		assert_eq!(tokens[0].kind, TokenKind::StringLiteral);
+		assert_eq!(tokens[0].lexeme, "hello\nworld");
 		assert_eq!(tokens[1].kind, TokenKind::EndOfFile);
 	}
 }
