@@ -5,6 +5,7 @@ pub enum TokenKind {
 	BangEqual,
 	BoolKeyword,
 	Colon,
+	ConstKeyword,
 	Dash,
 	DecKeyword,
 	DecimalLiteral,

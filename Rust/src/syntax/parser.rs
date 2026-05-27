@@ -66,7 +66,7 @@ impl Parser {
 		loop {
 			match self.current() {
 				Some(token) if token.kind == TokenKind::EndOfFile => break,
-				Some(token) if token.kind == TokenKind::VarKeyword => {
+				Some(token) if matches!(token.kind, TokenKind::ConstKeyword | TokenKind::VarKeyword) => {
 					statements.push(self.parse_variable_declaration_statement()?);
 				}
 				Some(_) => {
@@ -520,7 +520,22 @@ impl Parser {
 	}
 
 	fn parse_variable_declaration_statement(&mut self) -> Result<Statement, ParseError> {
-		self.expect_token(TokenKind::VarKeyword, "Expected `var` to start variable declaration.")?;
+		let declaration_keyword = self.next().ok_or(ParseError {
+			message: String::from("Expected `var` or `const` to start variable declaration."),
+			position: 0,
+		})?;
+
+		let is_const = match declaration_keyword.kind {
+			TokenKind::ConstKeyword => true,
+			TokenKind::VarKeyword => false,
+			_ => {
+				return Err(ParseError {
+					message: format!("Expected `var` or `const` to start variable declaration. Found `{}` instead.", declaration_keyword.lexeme),
+					position: declaration_keyword.start,
+				});
+			}
+		};
+
 		let name = self.expect_token(TokenKind::Identifier, "Expected variable name.")?;
 		self.expect_token(TokenKind::Colon, "Expected `:` after variable name.")?;
 		let data_type = self.parse_data_type()?;
@@ -534,6 +549,7 @@ impl Parser {
 
 		Ok(Statement::VariableDeclaration(VariableDeclaration {
 			data_type,
+			is_const,
 			initial_value,
 			name: name.lexeme,
 		}))
@@ -649,6 +665,26 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_const_variable_declaration() {
+		assert_eq!(
+			parse_program("const name: text = 'Tablo';"),
+			Program {
+				statements: vec![
+					Statement::VariableDeclaration(VariableDeclaration {
+						data_type: DataType::Text,
+						is_const: true,
+						initial_value: Some(Expr::Text(TextLiteral {
+							value: String::from("Tablo"),
+						})),
+						name: String::from("name"),
+					}),
+				],
+				result: None,
+			}
+		);
+	}
+
+	#[test]
 	fn parses_decimal_literal() {
 		assert_eq!(
 			parse(".5"),
@@ -666,6 +702,7 @@ mod tests {
 				statements: vec![
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Int,
+						is_const: false,
 						initial_value: Some(Expr::Integer(IntegerLiteral {
 							value: 1,
 						})),
@@ -877,6 +914,7 @@ mod tests {
 				statements: vec![
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Int,
+						is_const: false,
 						initial_value: Some(Expr::Integer(IntegerLiteral {
 							value: 1,
 						})),
@@ -884,6 +922,7 @@ mod tests {
 					}),
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Int,
+						is_const: false,
 						initial_value: Some(Expr::Integer(IntegerLiteral {
 							value: 2,
 						})),
@@ -943,6 +982,7 @@ mod tests {
 				statements: vec![
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Text,
+						is_const: false,
 						initial_value: Some(Expr::Text(TextLiteral {
 							value: String::from("Tablo"),
 						})),
@@ -994,6 +1034,7 @@ mod tests {
 				statements: vec![
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Int,
+						is_const: false,
 						initial_value: None,
 						name: String::from("x"),
 					}),

@@ -114,6 +114,7 @@ pub struct UnaryExpr {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VariableDeclaration {
 	pub data_type: DataType,
+	pub is_const: bool,
 	pub initial_value: Option<Expr>,
 	pub name: String,
 }

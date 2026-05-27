@@ -23,8 +23,14 @@ pub struct CompileError {
 
 #[derive(Default)]
 pub struct Compiler {
-	locals: BTreeMap<String, u32>,
+	locals: BTreeMap<String, Local>,
 	next_local_slot: u32,
+}
+
+#[derive(Clone, Copy)]
+struct Local {
+	is_const: bool,
+	slot: u32,
 }
 
 impl Compiler {
@@ -47,7 +53,7 @@ impl Compiler {
 		match expression {
 			Expr::Assignment(AssignmentExpr { operator, target, value }) => {
 				let slot = self.locals.get(&target.name)
-					.copied()
+					.map(|local| local.slot)
 					.unwrap_or_else(|| panic!("Identifier `{}` must be declared before use.", target.name));
 
 				match operator {
@@ -113,7 +119,7 @@ impl Compiler {
 			}
 			Expr::Identifier(IdentifierExpr { name }) => {
 				let slot = self.locals.get(name)
-					.copied()
+					.map(|local| local.slot)
 					.unwrap_or_else(|| panic!("Identifier `{name}` must be declared before use."));
 				instructions.push(Instruction::LoadLocal(slot));
 			}
@@ -137,9 +143,25 @@ impl Compiler {
 	fn compile_into_checked(&mut self, expression: &Expr, instructions: &mut Vec<Instruction>) -> Result<(), CompileError> {
 		match expression {
 			Expr::Assignment(AssignmentExpr { operator, target, value }) => {
-				let slot = self.locals.get(&target.name).copied().ok_or(CompileError {
+				let local = self.locals.get(&target.name).copied().ok_or(CompileError {
 					message: format!("Variable `{}` is not declared in this scope.", target.name),
 				})?;
+				let slot = local.slot;
+
+				if local.is_const {
+					let operation = match operator {
+						AssignmentOperator::Assign => "=",
+						AssignmentOperator::AddAssign => "+=",
+						AssignmentOperator::DivideAssign => "/=",
+						AssignmentOperator::ModuloAssign => "%=",
+						AssignmentOperator::MultiplyAssign => "*=",
+						AssignmentOperator::SubtractAssign => "-=",
+					};
+
+					return Err(CompileError {
+						message: format!("Constant `{}` cannot be assigned using `{operation}`.", target.name),
+					});
+				}
 
 				match operator {
 					AssignmentOperator::AddAssign => {
@@ -177,7 +199,7 @@ impl Compiler {
 				Ok(())
 			}
 			Expr::Identifier(IdentifierExpr { name }) => {
-				let slot = self.locals.get(name).copied().ok_or(CompileError {
+				let slot = self.locals.get(name).map(|local| local.slot).ok_or(CompileError {
 					message: format!("Variable `{name}` is not declared in this scope."),
 				})?;
 				instructions.push(Instruction::LoadLocal(slot));
@@ -247,7 +269,7 @@ impl Compiler {
 				instructions.push(Instruction::Pop);
 				Ok(())
 			}
-			Statement::VariableDeclaration(VariableDeclaration { initial_value, name, .. }) => {
+			Statement::VariableDeclaration(VariableDeclaration { initial_value, is_const, name, .. }) => {
 				if self.locals.contains_key(name) {
 					return Err(CompileError {
 						message: format!("Variable `{name}` is already declared in this scope."),
@@ -258,11 +280,19 @@ impl Compiler {
 				self.next_local_slot += 1;
 
 				let initial_value = initial_value.as_ref().ok_or(CompileError {
-					message: format!("Variable `{name}` must currently have an initializer."),
+					message: if *is_const {
+						format!("Constant `{name}` must currently have an initializer.")
+					}
+					else {
+						format!("Variable `{name}` must currently have an initializer.")
+					},
 				})?;
 				self.compile_into_checked(initial_value, instructions)?;
 				instructions.push(Instruction::StoreLocal(slot));
-				self.locals.insert(name.clone(), slot);
+				self.locals.insert(name.clone(), Local {
+					is_const: *is_const,
+					slot,
+				});
 
 				Ok(())
 			}
@@ -341,6 +371,7 @@ mod tests {
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
+					is_const: false,
 					initial_value: Some(Expr::Integer(IntegerLiteral {
 						value: 5,
 					})),
@@ -411,6 +442,7 @@ mod tests {
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
+					is_const: false,
 					initial_value: Some(Expr::Integer(IntegerLiteral {
 						value: 5,
 					})),
@@ -532,6 +564,7 @@ mod tests {
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
+					is_const: false,
 					initial_value: Some(Expr::Integer(IntegerLiteral {
 						value: 1,
 					})),
@@ -588,5 +621,61 @@ mod tests {
 			Instruction::PushInteger(42),
 			Instruction::Negate,
 		]);
+	}
+
+	#[test]
+	fn compiles_const_declaration() {
+		let program = AstProgram {
+			statements: vec![
+				Statement::VariableDeclaration(VariableDeclaration {
+					data_type: DataType::Int,
+					is_const: true,
+					initial_value: Some(Expr::Integer(IntegerLiteral {
+						value: 5,
+					})),
+					name: String::from("x"),
+				}),
+			],
+			result: Some(Expr::Identifier(IdentifierExpr {
+				name: String::from("x"),
+			})),
+		};
+
+		let bytecode = Compiler::new().compile_program(&program).unwrap();
+
+		assert_eq!(bytecode.instructions, vec![
+			Instruction::PushInteger(5),
+			Instruction::StoreLocal(0),
+			Instruction::LoadLocal(0),
+		]);
+	}
+
+	#[test]
+	fn rejects_assignment_to_const() {
+		let program = AstProgram {
+			statements: vec![
+				Statement::VariableDeclaration(VariableDeclaration {
+					data_type: DataType::Int,
+					is_const: true,
+					initial_value: Some(Expr::Integer(IntegerLiteral {
+						value: 5,
+					})),
+					name: String::from("x"),
+				}),
+			],
+			result: Some(Expr::Assignment(AssignmentExpr {
+				operator: AssignmentOperator::Assign,
+				target: IdentifierExpr {
+					name: String::from("x"),
+				},
+				value: Box::new(Expr::Integer(IntegerLiteral {
+					value: 3,
+				})),
+			})),
+		};
+
+		let error = Compiler::new().compile_program(&program).unwrap_err();
+
+		assert_eq!(error.message, "Constant `x` cannot be assigned using `=`.");
 	}
 }

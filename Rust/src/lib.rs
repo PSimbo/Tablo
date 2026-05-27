@@ -117,12 +117,32 @@ mod tests {
 	}
 
 	#[test]
+	fn formats_source_error_with_line_and_column() {
+		let source = "1 + 2\n?";
+		let error = run(source).unwrap_err();
+
+		assert_eq!(
+			error.format_with_source(source),
+			"Lex error at line 2, column 1: Unexpected character `?`.\n  |\n2 | ?\n  | ^"
+		);
+	}
+
+	#[test]
 	fn rejects_39_digit_decimal_source_text() {
 		let error = run("3.14159265358979323846264338327950288415").unwrap_err();
 
 		assert_eq!(error, TabloError::Parse(crate::syntax::parser::ParseError {
 			position: 0,
 			message: String::from("Decimal literal `3.14159265358979323846264338327950288415` exceeds the supported precision."),
+		}));
+	}
+
+	#[test]
+	fn rejects_assignment_to_const_source_text() {
+		let error = run("const x: int = 5;\nx = 3").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Constant `x` cannot be assigned using `=`."),
 		}));
 	}
 
@@ -134,17 +154,6 @@ mod tests {
 			position: 2,
 			message: String::from("Unexpected character `?`."),
 		}));
-	}
-
-	#[test]
-	fn formats_source_error_with_line_and_column() {
-		let source = "1 + 2\n?";
-		let error = run(source).unwrap_err();
-
-		assert_eq!(
-			error.format_with_source(source),
-			"Lex error at line 2, column 1: Unexpected character `?`.\n  |\n2 | ?\n  | ^"
-		);
 	}
 
 	#[test]
@@ -175,6 +184,13 @@ mod tests {
 		let result = run("var x: int = 5;\nx += 3").unwrap();
 
 		assert_eq!(result, Some(Value::Integer(8)));
+	}
+
+	#[test]
+	fn runs_const_source_text() {
+		let result = run("const x: int = 5;\nx").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(5)));
 	}
 
 	#[test]
