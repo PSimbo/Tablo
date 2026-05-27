@@ -51,6 +51,7 @@ impl TabloError {
 		let source = SourceText::new(source);
 
 		match self {
+			TabloError::Compile(error) => source.format_diagnostic("Compile error", error.position, &error.message),
 			TabloError::Lex(error) => source.format_diagnostic("Lex error", error.position, &error.message),
 			TabloError::Parse(error) => source.format_diagnostic("Parse error", error.position, &error.message),
 			_ => self.to_string(),
@@ -117,6 +118,17 @@ mod tests {
 	}
 
 	#[test]
+	fn formats_compile_error_with_line_and_column() {
+		let source = "var x: int = true;\nx";
+		let error = run(source).unwrap_err();
+
+		assert_eq!(
+			error.format_with_source(source),
+			"Compile error at line 1, column 14: Cannot assign a value of type `bool` to a variable of type `int`.\n  |\n1 | var x: int = true;\n  |              ^"
+		);
+	}
+
+	#[test]
 	fn formats_source_error_with_line_and_column() {
 		let source = "1 + 2\n?";
 		let error = run(source).unwrap_err();
@@ -143,6 +155,27 @@ mod tests {
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Constant `x` cannot be assigned using `=`."),
+			position: 20,
+		}));
+	}
+
+	#[test]
+	fn rejects_wrong_type_in_assignment_source_text() {
+		let error = run("var x: int = 5;\nx = 'hello'").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Cannot assign a value of type `text` to a variable of type `int`."),
+			position: 18,
+		}));
+	}
+
+	#[test]
+	fn rejects_wrong_type_in_variable_initializer_source_text() {
+		let error = run("var x: int = true;\nx").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Cannot assign a value of type `bool` to a variable of type `int`."),
+			position: 13,
 		}));
 	}
 

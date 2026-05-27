@@ -2,8 +2,10 @@ use std::collections::BTreeMap;
 
 use crate::ast::AssignmentExpr;
 use crate::ast::AssignmentOperator;
+use crate::ast::BinaryExpr;
 use crate::ast::BinaryOperator;
 use crate::ast::BooleanLiteral;
+use crate::ast::DataType;
 use crate::ast::DecimalLiteral;
 use crate::ast::Expr;
 use crate::ast::IdentifierExpr;
@@ -19,6 +21,7 @@ use crate::bytecode::Program;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompileError {
 	pub message: String,
+	pub position: usize,
 }
 
 #[derive(Default)]
@@ -29,11 +32,18 @@ pub struct Compiler {
 
 #[derive(Clone, Copy)]
 struct Local {
+	data_type: DataType,
 	is_const: bool,
 	slot: u32,
 }
 
 impl Compiler {
+	pub fn compile_expression(&mut self, expression: &Expr) -> Program {
+		let mut instructions = Vec::new();
+		self.compile_into(expression, &mut instructions);
+		Program::new(instructions)
+	}
+
 	pub fn new() -> Self {
 		Self {
 			locals: BTreeMap::new(),
@@ -41,17 +51,79 @@ impl Compiler {
 		}
 	}
 
-	pub fn compile_expression(&mut self, expression: &Expr) -> Program {
-		let mut instructions = Vec::new();
-		self.compile_into(expression, &mut instructions);
-		Program::new(instructions)
+	fn assignment_result_type(&self, operator: AssignmentOperator, target: DataType, value: DataType, position: usize) -> Result<DataType, CompileError> {
+		match operator {
+			AssignmentOperator::AddAssign => {
+				let result = self.binary_result_type(BinaryOperator::Add, target, value, position)?;
+				self.ensure_assignable(target, result, position)?;
+				Ok(target)
+			}
+			AssignmentOperator::Assign => {
+				self.ensure_assignable(target, value, position)?;
+				Ok(target)
+			}
+			AssignmentOperator::DivideAssign => {
+				let result = self.binary_result_type(BinaryOperator::Divide, target, value, position)?;
+				self.ensure_assignable(target, result, position)?;
+				Ok(target)
+			}
+			AssignmentOperator::ModuloAssign => {
+				let result = self.binary_result_type(BinaryOperator::Modulo, target, value, position)?;
+				self.ensure_assignable(target, result, position)?;
+				Ok(target)
+			}
+			AssignmentOperator::MultiplyAssign => {
+				let result = self.binary_result_type(BinaryOperator::Multiply, target, value, position)?;
+				self.ensure_assignable(target, result, position)?;
+				Ok(target)
+			}
+			AssignmentOperator::SubtractAssign => {
+				let result = self.binary_result_type(BinaryOperator::Subtract, target, value, position)?;
+				self.ensure_assignable(target, result, position)?;
+				Ok(target)
+			}
+		}
+	}
+
+	fn binary_result_type(&self, operator: BinaryOperator, lhs: crate::ast::DataType, rhs: crate::ast::DataType, position: usize) -> Result<crate::ast::DataType, CompileError> {
+		match operator {
+			BinaryOperator::Add => {
+				if lhs == DataType::Text || rhs == DataType::Text {
+					return Ok(DataType::Text);
+				}
+
+				self.numeric_result_type(lhs, rhs, position)
+			}
+			BinaryOperator::And | BinaryOperator::Or | BinaryOperator::Xor => {
+				self.require_boolean_operands(operator, lhs, rhs, position)?;
+				Ok(DataType::Bool)
+			}
+			BinaryOperator::Divide | BinaryOperator::Modulo | BinaryOperator::Multiply | BinaryOperator::Subtract => {
+				self.numeric_result_type(lhs, rhs, position)
+			}
+			BinaryOperator::Equal | BinaryOperator::NotEqual => {
+				self.require_equality_operands(lhs, rhs, position)?;
+				Ok(DataType::Bool)
+			}
+			BinaryOperator::GreaterThan | BinaryOperator::GreaterThanOrEqual | BinaryOperator::LessThan | BinaryOperator::LessThanOrEqual => {
+				self.require_ordering_operands(lhs, rhs, position)?;
+				Ok(DataType::Bool)
+			}
+		}
+	}
+
+	fn compile_error(&self, position: usize, message: impl Into<String>) -> CompileError {
+		CompileError {
+			message: message.into(),
+			position,
+		}
 	}
 
 	fn compile_into(&mut self, expression: &Expr, instructions: &mut Vec<Instruction>) {
 		let _ = self;
 
 		match expression {
-			Expr::Assignment(AssignmentExpr { operator, target, value }) => {
+			Expr::Assignment(AssignmentExpr { operator, target, value, .. }) => {
 				let slot = self.locals.get(&target.name)
 					.map(|local| local.slot)
 					.unwrap_or_else(|| panic!("Identifier `{}` must be declared before use.", target.name));
@@ -111,13 +183,13 @@ impl Compiler {
 					BinaryOperator::Xor => instructions.push(Instruction::Xor),
 				}
 			}
-			Expr::Boolean(BooleanLiteral { value }) => {
+			Expr::Boolean(BooleanLiteral { value, .. }) => {
 				instructions.push(Instruction::PushBoolean(*value));
 			}
-			Expr::Decimal(DecimalLiteral { value }) => {
+			Expr::Decimal(DecimalLiteral { value, .. }) => {
 				instructions.push(Instruction::PushDecimal(value.clone()));
 			}
-			Expr::Identifier(IdentifierExpr { name }) => {
+			Expr::Identifier(IdentifierExpr { name, .. }) => {
 				let slot = self.locals.get(name)
 					.map(|local| local.slot)
 					.unwrap_or_else(|| panic!("Identifier `{name}` must be declared before use."));
@@ -126,10 +198,10 @@ impl Compiler {
 			Expr::Integer(integer) => {
 				instructions.push(Instruction::PushInteger(integer.value));
 			}
-			Expr::Text(TextLiteral { value }) => {
+			Expr::Text(TextLiteral { value, .. }) => {
 				instructions.push(Instruction::PushText(value.clone()));
 			}
-			Expr::Unary(UnaryExpr { operand, operator }) => {
+			Expr::Unary(UnaryExpr { operand, operator, .. }) => {
 				self.compile_into(operand, instructions);
 
 				match operator {
@@ -142,10 +214,11 @@ impl Compiler {
 
 	fn compile_into_checked(&mut self, expression: &Expr, instructions: &mut Vec<Instruction>) -> Result<(), CompileError> {
 		match expression {
-			Expr::Assignment(AssignmentExpr { operator, target, value }) => {
-				let local = self.locals.get(&target.name).copied().ok_or(CompileError {
-					message: format!("Variable `{}` is not declared in this scope.", target.name),
-				})?;
+			Expr::Assignment(AssignmentExpr { operator, target, value, .. }) => {
+				let local = self.locals.get(&target.name).copied().ok_or(self.compile_error(
+					target.position,
+					format!("Variable `{}` is not declared in this scope.", target.name),
+				))?;
 				let slot = local.slot;
 
 				if local.is_const {
@@ -158,10 +231,14 @@ impl Compiler {
 						AssignmentOperator::SubtractAssign => "-=",
 					};
 
-					return Err(CompileError {
-						message: format!("Constant `{}` cannot be assigned using `{operation}`.", target.name),
-					});
+					return Err(self.compile_error(
+						expression.position(),
+						format!("Constant `{}` cannot be assigned using `{operation}`.", target.name),
+					));
 				}
+
+				let value_type = self.infer_expression_type(value)?;
+				self.assignment_result_type(*operator, local.data_type, value_type, expression.position())?;
 
 				match operator {
 					AssignmentOperator::AddAssign => {
@@ -198,14 +275,19 @@ impl Compiler {
 				instructions.push(Instruction::LoadLocal(slot));
 				Ok(())
 			}
-			Expr::Identifier(IdentifierExpr { name }) => {
-				let slot = self.locals.get(name).map(|local| local.slot).ok_or(CompileError {
-					message: format!("Variable `{name}` is not declared in this scope."),
-				})?;
+			Expr::Identifier(IdentifierExpr { name, .. }) => {
+				let slot = self.locals.get(name).map(|local| local.slot).ok_or(self.compile_error(
+					expression.position(),
+					format!("Variable `{name}` is not declared in this scope."),
+				))?;
 				instructions.push(Instruction::LoadLocal(slot));
 				Ok(())
 			}
 			Expr::Binary(binary) => {
+				let left_type = self.infer_expression_type(&binary.left)?;
+				let right_type = self.infer_expression_type(&binary.right)?;
+				self.binary_result_type(binary.operator, left_type, right_type, expression.position())?;
+
 				self.compile_into_checked(&binary.left, instructions)?;
 				self.compile_into_checked(&binary.right, instructions)?;
 
@@ -228,7 +310,9 @@ impl Compiler {
 
 				Ok(())
 			}
-			Expr::Unary(UnaryExpr { operand, operator }) => {
+			Expr::Unary(UnaryExpr { operand, operator, .. }) => {
+				let _ = self.infer_expression_type(expression)?;
+
 				self.compile_into_checked(operand, instructions)?;
 
 				match operator {
@@ -269,27 +353,32 @@ impl Compiler {
 				instructions.push(Instruction::Pop);
 				Ok(())
 			}
-			Statement::VariableDeclaration(VariableDeclaration { initial_value, is_const, name, .. }) => {
+			Statement::VariableDeclaration(VariableDeclaration { data_type, initial_value, is_const, name, position }) => {
 				if self.locals.contains_key(name) {
-					return Err(CompileError {
-						message: format!("Variable `{name}` is already declared in this scope."),
-					});
+					return Err(self.compile_error(
+						*position,
+						format!("Variable `{name}` is already declared in this scope."),
+					));
 				}
 
 				let slot = self.next_local_slot;
 				self.next_local_slot += 1;
 
-				let initial_value = initial_value.as_ref().ok_or(CompileError {
-					message: if *is_const {
+				let initial_value = initial_value.as_ref().ok_or(self.compile_error(
+					*position,
+					if *is_const {
 						format!("Constant `{name}` must currently have an initializer.")
 					}
 					else {
 						format!("Variable `{name}` must currently have an initializer.")
 					},
-				})?;
+				))?;
+				let initial_type = self.infer_expression_type(initial_value)?;
+				self.ensure_assignable(*data_type, initial_type, initial_value.position())?;
 				self.compile_into_checked(initial_value, instructions)?;
 				instructions.push(Instruction::StoreLocal(slot));
 				self.locals.insert(name.clone(), Local {
+					data_type: *data_type,
 					is_const: *is_const,
 					slot,
 				});
@@ -297,6 +386,175 @@ impl Compiler {
 				Ok(())
 			}
 		}
+	}
+
+	fn data_type_name(&self, data_type: DataType) -> &'static str {
+		match data_type {
+			DataType::Bool => "bool",
+			DataType::Dec => "dec",
+			DataType::Int => "int",
+			DataType::Text => "text",
+		}
+	}
+
+	fn ensure_assignable(&self, target: DataType, value: DataType, position: usize) -> Result<(), CompileError> {
+		if target == value || (target == DataType::Dec && value == DataType::Int) {
+			return Ok(());
+		}
+
+		Err(self.compile_error(
+			position,
+			format!(
+				"Cannot assign a value of type `{}` to a variable of type `{}`.",
+				self.data_type_name(value),
+				self.data_type_name(target),
+			),
+		))
+	}
+
+	fn infer_expression_type(&self, expression: &Expr) -> Result<DataType, CompileError> {
+		match expression {
+			Expr::Assignment(AssignmentExpr { operator, target, value, .. }) => {
+				let local = self.locals.get(&target.name).copied().ok_or(self.compile_error(
+					target.position,
+					format!("Variable `{}` is not declared in this scope.", target.name),
+				))?;
+				let value_type = self.infer_expression_type(value)?;
+				self.assignment_result_type(*operator, local.data_type, value_type, expression.position())
+			}
+			Expr::Binary(BinaryExpr { left, operator, right, .. }) => {
+				let left_type = self.infer_expression_type(left)?;
+				let right_type = self.infer_expression_type(right)?;
+				self.binary_result_type(*operator, left_type, right_type, expression.position())
+			}
+			Expr::Boolean(_) => Ok(DataType::Bool),
+			Expr::Decimal(_) => Ok(DataType::Dec),
+			Expr::Identifier(IdentifierExpr { name, .. }) => {
+				self.locals.get(name).map(|local| local.data_type).ok_or(self.compile_error(
+					expression.position(),
+					format!("Variable `{name}` is not declared in this scope."),
+				))
+			}
+			Expr::Integer(_) => Ok(DataType::Int),
+			Expr::Text(_) => Ok(DataType::Text),
+			Expr::Unary(UnaryExpr { operand, operator, .. }) => {
+				let operand_type = self.infer_expression_type(operand)?;
+
+				match operator {
+					UnaryOperator::Negate => {
+						if self.is_numeric_type(operand_type) {
+							Ok(operand_type)
+						}
+						else {
+							Err(self.compile_error(
+								expression.position(),
+								format!("Unary `-` requires a numeric operand, found `{}`.", self.data_type_name(operand_type)),
+							))
+						}
+					}
+					UnaryOperator::Not => {
+						if operand_type == DataType::Bool {
+							Ok(DataType::Bool)
+						}
+						else {
+							Err(self.compile_error(
+								expression.position(),
+								format!("Unary `not` requires a `bool` operand, found `{}`.", self.data_type_name(operand_type)),
+							))
+						}
+					}
+				}
+			}
+		}
+	}
+
+	fn is_numeric_type(&self, data_type: DataType) -> bool {
+		matches!(data_type, DataType::Dec | DataType::Int)
+	}
+
+	fn numeric_result_type(&self, lhs: DataType, rhs: DataType, position: usize) -> Result<DataType, CompileError> {
+		if !self.is_numeric_type(lhs) || !self.is_numeric_type(rhs) {
+			return Err(self.compile_error(
+				position,
+				format!(
+					"Expected numeric operands, found `{}` and `{}`.",
+					self.data_type_name(lhs),
+					self.data_type_name(rhs),
+				),
+			));
+		}
+
+		if lhs == DataType::Int && rhs == DataType::Int {
+			Ok(DataType::Int)
+		}
+		else {
+			Ok(DataType::Dec)
+		}
+	}
+
+	fn operator_name(&self, operator: BinaryOperator) -> &'static str {
+		match operator {
+			BinaryOperator::Add => "+",
+			BinaryOperator::And => "and",
+			BinaryOperator::Divide => "/",
+			BinaryOperator::Equal => "==",
+			BinaryOperator::GreaterThan => ">",
+			BinaryOperator::GreaterThanOrEqual => ">=",
+			BinaryOperator::LessThan => "<",
+			BinaryOperator::LessThanOrEqual => "<=",
+			BinaryOperator::Modulo => "%",
+			BinaryOperator::Multiply => "*",
+			BinaryOperator::NotEqual => "!=",
+			BinaryOperator::Or => "or",
+			BinaryOperator::Subtract => "-",
+			BinaryOperator::Xor => "xor",
+		}
+	}
+
+	fn require_boolean_operands(&self, operator: BinaryOperator, lhs: DataType, rhs: DataType, position: usize) -> Result<(), CompileError> {
+		if lhs == DataType::Bool && rhs == DataType::Bool {
+			return Ok(());
+		}
+
+		Err(self.compile_error(
+			position,
+			format!(
+				"Operator `{}` requires `bool` operands, found `{}` and `{}`.",
+				self.operator_name(operator),
+				self.data_type_name(lhs),
+				self.data_type_name(rhs),
+			),
+		))
+	}
+
+	fn require_equality_operands(&self, lhs: DataType, rhs: DataType, position: usize) -> Result<(), CompileError> {
+		if lhs == rhs || (self.is_numeric_type(lhs) && self.is_numeric_type(rhs)) {
+			return Ok(());
+		}
+
+		Err(self.compile_error(
+			position,
+			format!(
+				"Equality comparison is not supported between `{}` and `{}`.",
+				self.data_type_name(lhs),
+				self.data_type_name(rhs),
+			),
+		))
+	}
+
+	fn require_ordering_operands(&self, lhs: DataType, rhs: DataType, position: usize) -> Result<(), CompileError> {
+		if (lhs == DataType::Text && rhs == DataType::Text) || (self.is_numeric_type(lhs) && self.is_numeric_type(rhs)) {
+			return Ok(());
+		}
+
+		Err(self.compile_error(
+			position,
+			format!(
+				"Ordering comparison is not supported between `{}` and `{}`.",
+				self.data_type_name(lhs),
+				self.data_type_name(rhs),
+			),
+		))
 	}
 }
 
@@ -327,15 +585,20 @@ mod tests {
 	fn compiles_addition_in_post_order() {
 		let expression = Expr::Binary(BinaryExpr {
 			left: Box::new(Expr::Integer(IntegerLiteral {
+				position: 0,
 				value: 1,
 			})),
 			operator: BinaryOperator::Add,
+			position: 0,
 			right: Box::new(Expr::Binary(BinaryExpr {
 				left: Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
 					value: 2,
 				})),
 				operator: BinaryOperator::Add,
+				position: 0,
 				right: Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
 					value: 3,
 				})),
 			})),
@@ -355,6 +618,7 @@ mod tests {
 	#[test]
 	fn compiles_boolean_literal() {
 		let expression = Expr::Boolean(BooleanLiteral {
+			position: 0,
 			value: true,
 		});
 
@@ -371,19 +635,24 @@ mod tests {
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
-					is_const: false,
 					initial_value: Some(Expr::Integer(IntegerLiteral {
+						position: 0,
 						value: 5,
 					})),
+					is_const: false,
 					name: String::from("x"),
+					position: 0,
 				}),
 			],
 			result: Some(Expr::Assignment(AssignmentExpr {
 				operator: AssignmentOperator::AddAssign,
+				position: 0,
 				target: IdentifierExpr {
 					name: String::from("x"),
+					position: 0,
 				},
 				value: Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
 					value: 3,
 				})),
 			})),
@@ -405,6 +674,7 @@ mod tests {
 	#[test]
 	fn compiles_decimal_literal() {
 		let expression = Expr::Decimal(DecimalLiteral {
+			position: 0,
 			value: Decimal::from_literal("1.25").unwrap(),
 		});
 
@@ -419,10 +689,13 @@ mod tests {
 	fn compiles_equality_expression() {
 		let expression = Expr::Binary(BinaryExpr {
 			left: Box::new(Expr::Boolean(BooleanLiteral {
+				position: 0,
 				value: true,
 			})),
 			operator: BinaryOperator::Equal,
+			position: 0,
 			right: Box::new(Expr::Boolean(BooleanLiteral {
+				position: 0,
 				value: false,
 			})),
 		});
@@ -442,24 +715,30 @@ mod tests {
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
-					is_const: false,
 					initial_value: Some(Expr::Integer(IntegerLiteral {
+						position: 0,
 						value: 5,
 					})),
+					is_const: false,
 					name: String::from("x"),
+					position: 0,
 				}),
 				Statement::Expression(Expr::Assignment(AssignmentExpr {
 					operator: AssignmentOperator::AddAssign,
+					position: 0,
 					target: IdentifierExpr {
 						name: String::from("x"),
+						position: 0,
 					},
 					value: Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
 						value: 3,
 					})),
 				})),
 			],
 			result: Some(Expr::Identifier(IdentifierExpr {
 				name: String::from("x"),
+				position: 0,
 			})),
 		};
 
@@ -481,6 +760,7 @@ mod tests {
 	#[test]
 	fn compiles_integer_literal() {
 		let expression = Expr::Integer(IntegerLiteral {
+			position: 0,
 			value: 42,
 		});
 
@@ -495,9 +775,11 @@ mod tests {
 	fn compiles_logical_not() {
 		let expression = Expr::Unary(UnaryExpr {
 			operand: Box::new(Expr::Boolean(BooleanLiteral {
+				position: 0,
 				value: false,
 			})),
 			operator: UnaryOperator::Not,
+			position: 0,
 		});
 
 		let program = Compiler::new().compile_expression(&expression);
@@ -512,10 +794,13 @@ mod tests {
 	fn compiles_logical_xor() {
 		let expression = Expr::Binary(BinaryExpr {
 			left: Box::new(Expr::Boolean(BooleanLiteral {
+				position: 0,
 				value: true,
 			})),
 			operator: BinaryOperator::Xor,
+			position: 0,
 			right: Box::new(Expr::Boolean(BooleanLiteral {
+				position: 0,
 				value: false,
 			})),
 		});
@@ -533,15 +818,20 @@ mod tests {
 	fn compiles_mixed_arithmetic_in_post_order() {
 		let expression = Expr::Binary(BinaryExpr {
 			left: Box::new(Expr::Integer(IntegerLiteral {
+				position: 0,
 				value: 9,
 			})),
 			operator: BinaryOperator::Subtract,
+			position: 0,
 			right: Box::new(Expr::Binary(BinaryExpr {
 				left: Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
 					value: 4,
 				})),
 				operator: BinaryOperator::Multiply,
+				position: 0,
 				right: Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
 					value: 2,
 				})),
 			})),
@@ -564,19 +854,24 @@ mod tests {
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
-					is_const: false,
 					initial_value: Some(Expr::Integer(IntegerLiteral {
+						position: 0,
 						value: 1,
 					})),
+					is_const: false,
 					name: String::from("x"),
+					position: 0,
 				}),
 			],
 			result: Some(Expr::Binary(BinaryExpr {
 				left: Box::new(Expr::Identifier(IdentifierExpr {
 					name: String::from("x"),
+					position: 0,
 				})),
 				operator: BinaryOperator::Add,
+				position: 0,
 				right: Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
 					value: 2,
 				})),
 			})),
@@ -596,6 +891,7 @@ mod tests {
 	#[test]
 	fn compiles_text_literal() {
 		let expression = Expr::Text(TextLiteral {
+			position: 0,
 			value: String::from("hello"),
 		});
 
@@ -610,9 +906,11 @@ mod tests {
 	fn compiles_unary_negation() {
 		let expression = Expr::Unary(UnaryExpr {
 			operand: Box::new(Expr::Integer(IntegerLiteral {
+				position: 0,
 				value: 42,
 			})),
 			operator: UnaryOperator::Negate,
+			position: 0,
 		});
 
 		let program = Compiler::new().compile_expression(&expression);
@@ -629,15 +927,18 @@ mod tests {
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
-					is_const: true,
 					initial_value: Some(Expr::Integer(IntegerLiteral {
+						position: 0,
 						value: 5,
 					})),
+					is_const: true,
 					name: String::from("x"),
+					position: 0,
 				}),
 			],
 			result: Some(Expr::Identifier(IdentifierExpr {
 				name: String::from("x"),
+				position: 0,
 			})),
 		};
 
@@ -656,19 +957,24 @@ mod tests {
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
-					is_const: true,
 					initial_value: Some(Expr::Integer(IntegerLiteral {
+						position: 0,
 						value: 5,
 					})),
+					is_const: true,
 					name: String::from("x"),
+					position: 0,
 				}),
 			],
 			result: Some(Expr::Assignment(AssignmentExpr {
 				operator: AssignmentOperator::Assign,
+				position: 0,
 				target: IdentifierExpr {
 					name: String::from("x"),
+					position: 0,
 				},
 				value: Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
 					value: 3,
 				})),
 			})),
@@ -677,5 +983,96 @@ mod tests {
 		let error = Compiler::new().compile_program(&program).unwrap_err();
 
 		assert_eq!(error.message, "Constant `x` cannot be assigned using `=`.");
+	}
+
+	#[test]
+	fn rejects_compound_assignment_when_result_type_changes() {
+		let program = AstProgram {
+			statements: vec![
+				Statement::VariableDeclaration(VariableDeclaration {
+					data_type: DataType::Int,
+					initial_value: Some(Expr::Integer(IntegerLiteral {
+						position: 0,
+						value: 5,
+					})),
+					is_const: false,
+					name: String::from("x"),
+					position: 0,
+				}),
+			],
+			result: Some(Expr::Assignment(AssignmentExpr {
+				operator: AssignmentOperator::AddAssign,
+				position: 0,
+				target: IdentifierExpr {
+					name: String::from("x"),
+					position: 0,
+				},
+				value: Box::new(Expr::Decimal(DecimalLiteral {
+					position: 0,
+					value: Decimal::from_literal("1.5").unwrap(),
+				})),
+			})),
+		};
+
+		let error = Compiler::new().compile_program(&program).unwrap_err();
+
+		assert_eq!(error.message, "Cannot assign a value of type `dec` to a variable of type `int`.");
+	}
+
+	#[test]
+	fn rejects_wrong_type_in_assignment() {
+		let program = AstProgram {
+			statements: vec![
+				Statement::VariableDeclaration(VariableDeclaration {
+					data_type: DataType::Int,
+					initial_value: Some(Expr::Integer(IntegerLiteral {
+						position: 0,
+						value: 5,
+					})),
+					is_const: false,
+					name: String::from("x"),
+					position: 0,
+				}),
+			],
+			result: Some(Expr::Assignment(AssignmentExpr {
+				operator: AssignmentOperator::Assign,
+				position: 0,
+				target: IdentifierExpr {
+					name: String::from("x"),
+					position: 0,
+				},
+				value: Box::new(Expr::Text(TextLiteral {
+					position: 0,
+					value: String::from("hello"),
+				})),
+			})),
+		};
+
+		let error = Compiler::new().compile_program(&program).unwrap_err();
+
+		assert_eq!(error.message, "Cannot assign a value of type `text` to a variable of type `int`.");
+	}
+
+	#[test]
+	fn rejects_wrong_type_in_variable_initializer() {
+		let program = AstProgram {
+			statements: vec![
+				Statement::VariableDeclaration(VariableDeclaration {
+					data_type: DataType::Int,
+					initial_value: Some(Expr::Boolean(BooleanLiteral {
+						position: 0,
+						value: true,
+					})),
+					is_const: false,
+					name: String::from("x"),
+					position: 0,
+				}),
+			],
+			result: None,
+		};
+
+		let error = Compiler::new().compile_program(&program).unwrap_err();
+
+		assert_eq!(error.message, "Cannot assign a value of type `bool` to a variable of type `int`.");
 	}
 }

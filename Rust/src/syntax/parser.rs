@@ -148,6 +148,7 @@ impl Parser {
 			TokenKind::SlashEqual => AssignmentOperator::DivideAssign,
 			_ => return Ok(left),
 		};
+		let operator_position = token.start;
 
 		let target = match left {
 			Expr::Identifier(target) => target,
@@ -164,6 +165,7 @@ impl Parser {
 
 		Ok(Expr::Assignment(AssignmentExpr {
 			operator,
+			position: operator_position,
 			target,
 			value: Box::new(value),
 		}))
@@ -182,6 +184,7 @@ impl Parser {
 		};
 
 		Ok(Expr::Boolean(BooleanLiteral {
+			position: token.start,
 			value,
 		}))
 	}
@@ -211,6 +214,7 @@ impl Parser {
 		})?;
 
 		Ok(Expr::Decimal(DecimalLiteral {
+			position: token.start,
 			value,
 		}))
 	}
@@ -268,6 +272,7 @@ impl Parser {
 	fn parse_identifier_expression(&self, token: Token) -> Expr {
 		Expr::Identifier(IdentifierExpr {
 			name: token.lexeme,
+			position: token.start,
 		})
 	}
 
@@ -279,6 +284,7 @@ impl Parser {
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
 					operator: BinaryOperator::And,
+					position: operator.start,
 					right: Box::new(right),
 				}))
 			}
@@ -288,6 +294,7 @@ impl Parser {
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
 					operator: BinaryOperator::Multiply,
+					position: operator.start,
 					right: Box::new(right),
 				}))
 			}
@@ -297,6 +304,7 @@ impl Parser {
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
 					operator: BinaryOperator::NotEqual,
+					position: operator.start,
 					right: Box::new(right),
 				}))
 			}
@@ -306,6 +314,7 @@ impl Parser {
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
 					operator: BinaryOperator::Subtract,
+					position: operator.start,
 					right: Box::new(right),
 				}))
 			}
@@ -315,6 +324,7 @@ impl Parser {
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
 					operator: BinaryOperator::Equal,
+					position: operator.start,
 					right: Box::new(right),
 				}))
 			}
@@ -324,6 +334,7 @@ impl Parser {
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
 					operator: BinaryOperator::Divide,
+					position: operator.start,
 					right: Box::new(right),
 				}))
 			}
@@ -333,6 +344,7 @@ impl Parser {
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
 					operator: BinaryOperator::GreaterThan,
+					position: operator.start,
 					right: Box::new(right),
 				}))
 			}
@@ -342,6 +354,7 @@ impl Parser {
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
 					operator: BinaryOperator::GreaterThanOrEqual,
+					position: operator.start,
 					right: Box::new(right),
 				}))
 			}
@@ -351,6 +364,7 @@ impl Parser {
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
 					operator: BinaryOperator::LessThan,
+					position: operator.start,
 					right: Box::new(right),
 				}))
 			}
@@ -360,6 +374,7 @@ impl Parser {
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
 					operator: BinaryOperator::LessThanOrEqual,
+					position: operator.start,
 					right: Box::new(right),
 				}))
 			}
@@ -369,6 +384,7 @@ impl Parser {
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
 					operator: BinaryOperator::Or,
+					position: operator.start,
 					right: Box::new(right),
 				}))
 			}
@@ -378,6 +394,7 @@ impl Parser {
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
 					operator: BinaryOperator::Modulo,
+					position: operator.start,
 					right: Box::new(right),
 				}))
 			}
@@ -387,6 +404,7 @@ impl Parser {
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
 					operator: BinaryOperator::Add,
+					position: operator.start,
 					right: Box::new(right),
 				}))
 			}
@@ -396,6 +414,7 @@ impl Parser {
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
 					operator: BinaryOperator::Xor,
+					position: operator.start,
 					right: Box::new(right),
 				}))
 			}
@@ -414,12 +433,14 @@ impl Parser {
 		})?;
 
 		Ok(Expr::Integer(IntegerLiteral {
+			position: token.start,
 			value,
 		}))
 	}
 
 	fn parse_interpolated_string(&mut self, token: Token) -> Result<Expr, ParseError> {
 		let mut parts = vec![Expr::Text(TextLiteral {
+			position: token.start,
 			value: token.lexeme,
 		})];
 
@@ -436,11 +457,13 @@ impl Parser {
 			match segment.kind {
 				TokenKind::InterpolatedStringMiddle => {
 					parts.push(Expr::Text(TextLiteral {
+						position: segment.start,
 						value: segment.lexeme,
 					}));
 				}
 				TokenKind::InterpolatedStringEnd => {
 					parts.push(Expr::Text(TextLiteral {
+						position: segment.start,
 						value: segment.lexeme,
 					}));
 					break;
@@ -461,6 +484,7 @@ impl Parser {
 			expression = Expr::Binary(BinaryExpr {
 				left: Box::new(expression),
 				operator: BinaryOperator::Add,
+				position: part.position(),
 				right: Box::new(part),
 			});
 		}
@@ -468,21 +492,13 @@ impl Parser {
 		Ok(expression)
 	}
 
-	fn parse_negation_expression(&mut self) -> Result<Expr, ParseError> {
-		let operand = self.parse_expression_with_binding_power(BindingPower::Unary)?;
-
-		Ok(Expr::Unary(UnaryExpr {
-			operand: Box::new(operand),
-			operator: UnaryOperator::Negate,
-		}))
-	}
-
-	fn parse_not_expression(&mut self) -> Result<Expr, ParseError> {
+	fn parse_not_expression(&mut self, position: usize) -> Result<Expr, ParseError> {
 		let operand = self.parse_expression_with_binding_power(BindingPower::Unary)?;
 
 		Ok(Expr::Unary(UnaryExpr {
 			operand: Box::new(operand),
 			operator: UnaryOperator::Not,
+			position,
 		}))
 	}
 
@@ -493,7 +509,7 @@ impl Parser {
 		})?;
 
 		match token.kind {
-			TokenKind::Dash => self.parse_negation_expression(),
+			TokenKind::Dash => self.parse_negation_expression_with_position(token.start),
 			TokenKind::DecimalLiteral => self.parse_decimal_literal(token),
 			TokenKind::EndOfFile => Err(ParseError {
 				message: String::from("Expected an expression."),
@@ -504,7 +520,7 @@ impl Parser {
 			TokenKind::IntegerLiteral => self.parse_integer_literal(token),
 			TokenKind::InterpolatedStringStart => self.parse_interpolated_string(token),
 			TokenKind::LeftParenthesis => self.parse_group_expression(token.start),
-			TokenKind::NotKeyword => self.parse_not_expression(),
+			TokenKind::NotKeyword => self.parse_not_expression(token.start),
 			TokenKind::StringLiteral => Ok(self.parse_text_literal(token)),
 			_ => Err(ParseError {
 				message: format!("Unexpected token `{}` at start of expression.", token.lexeme),
@@ -515,8 +531,19 @@ impl Parser {
 
 	fn parse_text_literal(&self, token: Token) -> Expr {
 		Expr::Text(TextLiteral {
+			position: token.start,
 			value: token.lexeme,
 		})
+	}
+
+	fn parse_negation_expression_with_position(&mut self, position: usize) -> Result<Expr, ParseError> {
+		let operand = self.parse_expression_with_binding_power(BindingPower::Unary)?;
+
+		Ok(Expr::Unary(UnaryExpr {
+			operand: Box::new(operand),
+			operator: UnaryOperator::Negate,
+			position,
+		}))
 	}
 
 	fn parse_variable_declaration_statement(&mut self) -> Result<Statement, ParseError> {
@@ -549,9 +576,10 @@ impl Parser {
 
 		Ok(Statement::VariableDeclaration(VariableDeclaration {
 			data_type,
-			is_const,
 			initial_value,
+			is_const,
 			name: name.lexeme,
+			position: declaration_keyword.start,
 		}))
 	}
 }
@@ -600,15 +628,20 @@ mod tests {
 			parse("x = y = 1"),
 			Expr::Assignment(AssignmentExpr {
 				operator: AssignmentOperator::Assign,
+				position: 0,
 				target: IdentifierExpr {
 					name: String::from("x"),
+					position: 0,
 				},
 				value: Box::new(Expr::Assignment(AssignmentExpr {
 					operator: AssignmentOperator::Assign,
+					position: 0,
 					target: IdentifierExpr {
 						name: String::from("y"),
+						position: 0,
 					},
 					value: Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
 						value: 1,
 					})),
 				})),
@@ -621,6 +654,7 @@ mod tests {
 		assert_eq!(
 			parse("true"),
 			Expr::Boolean(BooleanLiteral {
+				position: 0,
 				value: true,
 			})
 		);
@@ -632,10 +666,13 @@ mod tests {
 			parse("x += 1"),
 			Expr::Assignment(AssignmentExpr {
 				operator: AssignmentOperator::AddAssign,
+				position: 0,
 				target: IdentifierExpr {
 					name: String::from("x"),
+					position: 0,
 				},
 				value: Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
 					value: 1,
 				})),
 			})
@@ -649,15 +686,20 @@ mod tests {
 			Expr::Binary(BinaryExpr {
 				left: Box::new(Expr::Binary(BinaryExpr {
 					left: Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
 						value: 1,
 					})),
+					position: 0,
 					operator: BinaryOperator::LessThan,
 					right: Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
 						value: 2,
 					})),
 				})),
 				operator: BinaryOperator::Equal,
+				position: 0,
 				right: Box::new(Expr::Boolean(BooleanLiteral {
+					position: 0,
 					value: true,
 				})),
 			})
@@ -672,11 +714,13 @@ mod tests {
 				statements: vec![
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Text,
-						is_const: true,
 						initial_value: Some(Expr::Text(TextLiteral {
+							position: 0,
 							value: String::from("Tablo"),
 						})),
+						is_const: true,
 						name: String::from("name"),
+						position: 0,
 					}),
 				],
 				result: None,
@@ -689,6 +733,7 @@ mod tests {
 		assert_eq!(
 			parse(".5"),
 			Expr::Decimal(DecimalLiteral {
+				position: 0,
 				value: Decimal::from_literal(".5").unwrap(),
 			})
 		);
@@ -702,23 +747,29 @@ mod tests {
 				statements: vec![
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Int,
-						is_const: false,
 						initial_value: Some(Expr::Integer(IntegerLiteral {
+							position: 0,
 							value: 1,
 						})),
+						is_const: false,
 						name: String::from("x"),
+						position: 0,
 					}),
 					Statement::Expression(Expr::Assignment(AssignmentExpr {
 						operator: AssignmentOperator::AddAssign,
+						position: 0,
 						target: IdentifierExpr {
+							position: 0,
 							name: String::from("x"),
 						},
 						value: Box::new(Expr::Integer(IntegerLiteral {
+							position: 0,
 							value: 2,
 						})),
 					})),
 				],
 				result: Some(Expr::Identifier(IdentifierExpr {
+					position: 0,
 					name: String::from("x"),
 				})),
 			}
@@ -732,15 +783,20 @@ mod tests {
 			Expr::Binary(BinaryExpr {
 				left: Box::new(Expr::Binary(BinaryExpr {
 					left: Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
 						value: 1,
 					})),
 					operator: BinaryOperator::Add,
+					position: 0,
 					right: Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
 						value: 2,
 					})),
 				})),
 				operator: BinaryOperator::Multiply,
+				position: 0,
 				right: Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
 					value: 3,
 				})),
 			})
@@ -751,7 +807,7 @@ mod tests {
 	fn parses_integer_literal() {
 		assert_eq!(
 			parse("42"),
-			Expr::Integer(IntegerLiteral { value: 42 })
+			Expr::Integer(IntegerLiteral { position: 0, value: 42 })
 		);
 	}
 
@@ -762,15 +818,20 @@ mod tests {
 			Expr::Binary(BinaryExpr {
 				left: Box::new(Expr::Binary(BinaryExpr {
 					left: Box::new(Expr::Text(TextLiteral {
+						position: 0,
 						value: String::from("hello "),
 					})),
 					operator: BinaryOperator::Add,
+					position: 0,
 					right: Box::new(Expr::Identifier(IdentifierExpr {
 						name: String::from("name"),
+						position: 0,
 					})),
 				})),
 				operator: BinaryOperator::Add,
+				position: 0,
 				right: Box::new(Expr::Text(TextLiteral {
+					position: 0,
 					value: String::from("!"),
 				})),
 			})
@@ -784,15 +845,20 @@ mod tests {
 			Expr::Binary(BinaryExpr {
 				left: Box::new(Expr::Binary(BinaryExpr {
 					left: Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
 						value: 1,
 					})),
 					operator: BinaryOperator::Add,
+					position: 0,
 					right: Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
 						value: 2,
 					})),
 				})),
 				operator: BinaryOperator::Add,
+				position: 0,
 				right: Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
 					value: 3,
 				})),
 			})
@@ -806,15 +872,20 @@ mod tests {
 			Expr::Binary(BinaryExpr {
 				left: Box::new(Expr::Binary(BinaryExpr {
 					left: Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
 						value: 9,
 					})),
 					operator: BinaryOperator::Subtract,
+					position: 0,
 					right: Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
 						value: 3,
 					})),
 				})),
 				operator: BinaryOperator::Subtract,
+				position: 0,
 				right: Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
 					value: 1,
 				})),
 			})
@@ -827,15 +898,20 @@ mod tests {
 			parse("true or false and true"),
 			Expr::Binary(BinaryExpr {
 				left: Box::new(Expr::Boolean(BooleanLiteral {
+					position: 0,
 					value: true,
 				})),
 				operator: BinaryOperator::Or,
+				position: 0,
 				right: Box::new(Expr::Binary(BinaryExpr {
 					left: Box::new(Expr::Boolean(BooleanLiteral {
+						position: 0,
 						value: false,
 					})),
 					operator: BinaryOperator::And,
+					position: 0,
 					right: Box::new(Expr::Boolean(BooleanLiteral {
+						position: 0,
 						value: true,
 					})),
 				})),
@@ -849,20 +925,27 @@ mod tests {
 			parse("true or false xor true and false"),
 			Expr::Binary(BinaryExpr {
 				left: Box::new(Expr::Boolean(BooleanLiteral {
+					position: 0,
 					value: true,
 				})),
 				operator: BinaryOperator::Or,
+				position: 0,
 				right: Box::new(Expr::Binary(BinaryExpr {
 					left: Box::new(Expr::Boolean(BooleanLiteral {
+						position: 0,
 						value: false,
 					})),
 					operator: BinaryOperator::Xor,
+					position: 0,
 					right: Box::new(Expr::Binary(BinaryExpr {
 						left: Box::new(Expr::Boolean(BooleanLiteral {
+							position: 0,
 							value: true,
 						})),
 						operator: BinaryOperator::And,
+						position: 0,
 						right: Box::new(Expr::Boolean(BooleanLiteral {
+							position: 0,
 							value: false,
 						})),
 					})),
@@ -877,15 +960,20 @@ mod tests {
 			parse("1 + 2 * 3"),
 			Expr::Binary(BinaryExpr {
 				left: Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
 					value: 1,
 				})),
 				operator: BinaryOperator::Add,
+				position: 0,
 				right: Box::new(Expr::Binary(BinaryExpr {
 					left: Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
 						value: 2,
 					})),
 					operator: BinaryOperator::Multiply,
+					position: 0,
 					right: Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
 						value: 3,
 					})),
 				})),
@@ -899,9 +987,11 @@ mod tests {
 			parse("not false"),
 			Expr::Unary(UnaryExpr {
 				operand: Box::new(Expr::Boolean(BooleanLiteral {
+					position: 0,
 					value: false,
 				})),
 				operator: UnaryOperator::Not,
+				position: 0,
 			})
 		);
 	}
@@ -914,28 +1004,35 @@ mod tests {
 				statements: vec![
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Int,
-						is_const: false,
 						initial_value: Some(Expr::Integer(IntegerLiteral {
+							position: 0,
 							value: 1,
 						})),
+						is_const: false,
 						name: String::from("x"),
+						position: 0,
 					}),
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Int,
-						is_const: false,
 						initial_value: Some(Expr::Integer(IntegerLiteral {
+							position: 0,
 							value: 2,
 						})),
+						is_const: false,
 						name: String::from("y"),
+						position: 0,
 					}),
 				],
 				result: Some(Expr::Binary(BinaryExpr {
 					left: Box::new(Expr::Identifier(IdentifierExpr {
 						name: String::from("x"),
+						position: 0,
 					})),
 					operator: BinaryOperator::Add,
+					position: 0,
 					right: Box::new(Expr::Identifier(IdentifierExpr {
 						name: String::from("y"),
+						position: 0,
 					})),
 				})),
 			}
@@ -949,15 +1046,20 @@ mod tests {
 			Expr::Binary(BinaryExpr {
 				left: Box::new(Expr::Binary(BinaryExpr {
 					left: Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
 						value: 1,
 					})),
 					operator: BinaryOperator::Add,
+					position: 0,
 					right: Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
 						value: 2,
 					})),
 				})),
 				operator: BinaryOperator::LessThan,
+				position: 0,
 				right: Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
 					value: 4,
 				})),
 			})
@@ -969,6 +1071,7 @@ mod tests {
 		assert_eq!(
 			parse("'hello'"),
 			Expr::Text(TextLiteral {
+				position: 0,
 				value: String::from("hello"),
 			})
 		);
@@ -982,11 +1085,13 @@ mod tests {
 				statements: vec![
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Text,
-						is_const: false,
 						initial_value: Some(Expr::Text(TextLiteral {
+							position: 0,
 							value: String::from("Tablo"),
 						})),
+						is_const: false,
 						name: String::from("name"),
+						position: 0,
 					}),
 				],
 				result: None,
@@ -1000,9 +1105,11 @@ mod tests {
 			parse("-42"),
 			Expr::Unary(UnaryExpr {
 				operand: Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
 					value: 42,
 				})),
 				operator: UnaryOperator::Negate,
+				position: 0,
 			})
 		);
 	}
@@ -1014,12 +1121,16 @@ mod tests {
 			Expr::Binary(BinaryExpr {
 				left: Box::new(Expr::Unary(UnaryExpr {
 					operand: Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
 						value: 2,
 					})),
 					operator: UnaryOperator::Negate,
+					position: 0,
 				})),
 				operator: BinaryOperator::Multiply,
+				position: 0,
 				right: Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
 					value: 3,
 				})),
 			})
@@ -1034,9 +1145,10 @@ mod tests {
 				statements: vec![
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Int,
-						is_const: false,
 						initial_value: None,
+						is_const: false,
 						name: String::from("x"),
+						position: 0,
 					}),
 				],
 				result: None,
