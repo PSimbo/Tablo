@@ -160,6 +160,16 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_out_of_scope_variable_source_text() {
+		let error = run("{ var x: int = 1; }\nx").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Variable `x` is not declared in this scope."),
+			position: 20,
+		}));
+	}
+
+	#[test]
 	fn rejects_wrong_type_in_assignment_source_text() {
 		let error = run("var x: int = 5;\nx = 'hello'").unwrap_err();
 
@@ -224,6 +234,13 @@ mod tests {
 		let result = run("const x: int = 5;\nx").unwrap();
 
 		assert_eq!(result, Some(Value::Integer(5)));
+	}
+
+	#[test]
+	fn runs_block_scope_with_shadowing() {
+		let result = run("var x: int = 1;\n{\n  var x: int = 2;\n  x += 3;\n}\nx").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
 	}
 
 	#[test]

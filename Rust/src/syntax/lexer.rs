@@ -172,6 +172,7 @@ impl Lexer {
 			}
 			'%' => TokenKind::Percent,
 			':' => TokenKind::Colon,
+			'{' => TokenKind::LeftBrace,
 			';' => TokenKind::Semicolon,
 			'(' => TokenKind::LeftParenthesis,
 			')' => TokenKind::RightParenthesis,
@@ -186,6 +187,7 @@ impl Lexer {
 					start,
 				}));
 			}
+			'}' => TokenKind::RightBrace,
 			'!' if self.peek_next_char() == Some('=') => {
 				self.advance_char();
 				self.advance_char();

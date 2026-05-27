@@ -4,6 +4,7 @@ use crate::ast::AssignmentExpr;
 use crate::ast::AssignmentOperator;
 use crate::ast::BinaryExpr;
 use crate::ast::BinaryOperator;
+use crate::ast::BlockStatement;
 use crate::ast::BooleanLiteral;
 use crate::ast::DataType;
 use crate::ast::DecimalLiteral;
@@ -26,8 +27,9 @@ pub struct CompileError {
 
 #[derive(Default)]
 pub struct Compiler {
-	locals: BTreeMap<String, Local>,
+	locals: BTreeMap<String, Vec<Local>>,
 	next_local_slot: u32,
+	scope_stack: Vec<Vec<String>>,
 }
 
 #[derive(Clone, Copy)]
@@ -44,10 +46,31 @@ impl Compiler {
 		Program::new(instructions)
 	}
 
+	pub fn compile_program(&mut self, program: &AstProgram) -> Result<Program, CompileError> {
+		self.locals.clear();
+		self.next_local_slot = 0;
+		self.scope_stack.clear();
+
+		let mut instructions = Vec::new();
+		self.enter_scope();
+
+		for statement in &program.statements {
+			self.compile_statement(statement, &mut instructions)?;
+		}
+
+		if let Some(result) = &program.result {
+			self.compile_into_checked(result, &mut instructions)?;
+		}
+
+		self.exit_scope();
+		Ok(Program::new(instructions))
+	}
+
 	pub fn new() -> Self {
 		Self {
 			locals: BTreeMap::new(),
 			next_local_slot: 0,
+			scope_stack: Vec::new(),
 		}
 	}
 
@@ -124,7 +147,7 @@ impl Compiler {
 
 		match expression {
 			Expr::Assignment(AssignmentExpr { operator, target, value, .. }) => {
-				let slot = self.locals.get(&target.name)
+				let slot = self.lookup_local(&target.name)
 					.map(|local| local.slot)
 					.unwrap_or_else(|| panic!("Identifier `{}` must be declared before use.", target.name));
 
@@ -190,7 +213,7 @@ impl Compiler {
 				instructions.push(Instruction::PushDecimal(value.clone()));
 			}
 			Expr::Identifier(IdentifierExpr { name, .. }) => {
-				let slot = self.locals.get(name)
+				let slot = self.lookup_local(name)
 					.map(|local| local.slot)
 					.unwrap_or_else(|| panic!("Identifier `{name}` must be declared before use."));
 				instructions.push(Instruction::LoadLocal(slot));
@@ -215,7 +238,7 @@ impl Compiler {
 	fn compile_into_checked(&mut self, expression: &Expr, instructions: &mut Vec<Instruction>) -> Result<(), CompileError> {
 		match expression {
 			Expr::Assignment(AssignmentExpr { operator, target, value, .. }) => {
-				let local = self.locals.get(&target.name).copied().ok_or(self.compile_error(
+				let local = self.lookup_local(&target.name).ok_or(self.compile_error(
 					target.position,
 					format!("Variable `{}` is not declared in this scope.", target.name),
 				))?;
@@ -276,7 +299,7 @@ impl Compiler {
 				Ok(())
 			}
 			Expr::Identifier(IdentifierExpr { name, .. }) => {
-				let slot = self.locals.get(name).map(|local| local.slot).ok_or(self.compile_error(
+				let slot = self.lookup_local(name).map(|local| local.slot).ok_or(self.compile_error(
 					expression.position(),
 					format!("Variable `{name}` is not declared in this scope."),
 				))?;
@@ -329,32 +352,25 @@ impl Compiler {
 		}
 	}
 
-	pub fn compile_program(&mut self, program: &AstProgram) -> Result<Program, CompileError> {
-		self.locals.clear();
-		self.next_local_slot = 0;
-
-		let mut instructions = Vec::new();
-
-		for statement in &program.statements {
-			self.compile_statement(statement, &mut instructions)?;
-		}
-
-		if let Some(result) = &program.result {
-			self.compile_into_checked(result, &mut instructions)?;
-		}
-
-		Ok(Program::new(instructions))
-	}
-
 	fn compile_statement(&mut self, statement: &Statement, instructions: &mut Vec<Instruction>) -> Result<(), CompileError> {
 		match statement {
+			Statement::Block(BlockStatement { statements, .. }) => {
+				self.enter_scope();
+
+				for statement in statements {
+					self.compile_statement(statement, instructions)?;
+				}
+
+				self.exit_scope();
+				Ok(())
+			}
 			Statement::Expression(expression) => {
 				self.compile_into_checked(expression, instructions)?;
 				instructions.push(Instruction::Pop);
 				Ok(())
 			}
 			Statement::VariableDeclaration(VariableDeclaration { data_type, initial_value, is_const, name, position }) => {
-				if self.locals.contains_key(name) {
+				if self.current_scope_contains(name) {
 					return Err(self.compile_error(
 						*position,
 						format!("Variable `{name}` is already declared in this scope."),
@@ -377,7 +393,7 @@ impl Compiler {
 				self.ensure_assignable(*data_type, initial_type, initial_value.position())?;
 				self.compile_into_checked(initial_value, instructions)?;
 				instructions.push(Instruction::StoreLocal(slot));
-				self.locals.insert(name.clone(), Local {
+				self.declare_local(name.clone(), Local {
 					data_type: *data_type,
 					is_const: *is_const,
 					slot,
@@ -388,12 +404,28 @@ impl Compiler {
 		}
 	}
 
+	fn current_scope_contains(&self, name: &str) -> bool {
+		let Some(scope) = self.scope_stack.last() else {
+			return false;
+		};
+
+		scope.iter().any(|declared_name| declared_name == name)
+	}
+
 	fn data_type_name(&self, data_type: DataType) -> &'static str {
 		match data_type {
 			DataType::Bool => "bool",
 			DataType::Dec => "dec",
 			DataType::Int => "int",
 			DataType::Text => "text",
+		}
+	}
+
+	fn declare_local(&mut self, name: String, local: Local) {
+		self.locals.entry(name.clone()).or_default().push(local);
+
+		if let Some(scope) = self.scope_stack.last_mut() {
+			scope.push(name);
 		}
 	}
 
@@ -412,10 +444,34 @@ impl Compiler {
 		))
 	}
 
+	fn enter_scope(&mut self) {
+		self.scope_stack.push(Vec::new());
+	}
+
+	fn exit_scope(&mut self) {
+		let Some(scope) = self.scope_stack.pop() else {
+			return;
+		};
+
+		for name in scope.into_iter().rev() {
+			let should_remove = if let Some(locals) = self.locals.get_mut(&name) {
+				locals.pop();
+				locals.is_empty()
+			}
+			else {
+				false
+			};
+
+			if should_remove {
+				self.locals.remove(&name);
+			}
+		}
+	}
+
 	fn infer_expression_type(&self, expression: &Expr) -> Result<DataType, CompileError> {
 		match expression {
 			Expr::Assignment(AssignmentExpr { operator, target, value, .. }) => {
-				let local = self.locals.get(&target.name).copied().ok_or(self.compile_error(
+				let local = self.lookup_local(&target.name).ok_or(self.compile_error(
 					target.position,
 					format!("Variable `{}` is not declared in this scope.", target.name),
 				))?;
@@ -430,7 +486,7 @@ impl Compiler {
 			Expr::Boolean(_) => Ok(DataType::Bool),
 			Expr::Decimal(_) => Ok(DataType::Dec),
 			Expr::Identifier(IdentifierExpr { name, .. }) => {
-				self.locals.get(name).map(|local| local.data_type).ok_or(self.compile_error(
+				self.lookup_local(name).map(|local| local.data_type).ok_or(self.compile_error(
 					expression.position(),
 					format!("Variable `{name}` is not declared in this scope."),
 				))
@@ -470,6 +526,10 @@ impl Compiler {
 
 	fn is_numeric_type(&self, data_type: DataType) -> bool {
 		matches!(data_type, DataType::Dec | DataType::Int)
+	}
+
+	fn lookup_local(&self, name: &str) -> Option<Local> {
+		self.locals.get(name).and_then(|locals| locals.last()).copied()
 	}
 
 	fn numeric_result_type(&self, lhs: DataType, rhs: DataType, position: usize) -> Result<DataType, CompileError> {

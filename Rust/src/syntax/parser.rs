@@ -2,6 +2,7 @@ use crate::ast::AssignmentExpr;
 use crate::ast::AssignmentOperator;
 use crate::ast::BinaryExpr;
 use crate::ast::BinaryOperator;
+use crate::ast::BlockStatement;
 use crate::ast::BooleanLiteral;
 use crate::ast::DataType;
 use crate::ast::DecimalLiteral;
@@ -66,8 +67,8 @@ impl Parser {
 		loop {
 			match self.current() {
 				Some(token) if token.kind == TokenKind::EndOfFile => break,
-				Some(token) if matches!(token.kind, TokenKind::ConstKeyword | TokenKind::VarKeyword) => {
-					statements.push(self.parse_variable_declaration_statement()?);
+				Some(token) if matches!(token.kind, TokenKind::ConstKeyword | TokenKind::LeftBrace | TokenKind::VarKeyword) => {
+					statements.push(self.parse_statement()?);
 				}
 				Some(_) => {
 					let expression = self.parse_assignment_expression()?;
@@ -168,6 +169,38 @@ impl Parser {
 			position: operator_position,
 			target,
 			value: Box::new(value),
+		}))
+	}
+
+	fn parse_block_statement(&mut self) -> Result<Statement, ParseError> {
+		let start = self.expect_token(TokenKind::LeftBrace, "Expected `{` to start block.")?;
+		let mut statements = Vec::new();
+
+		loop {
+			match self.current() {
+				Some(token) if token.kind == TokenKind::EndOfFile => {
+					return Err(ParseError {
+						message: String::from("Expected `}` to close block."),
+						position: start.start,
+					});
+				}
+				Some(token) if token.kind == TokenKind::RightBrace => {
+					self.next();
+					break;
+				}
+				Some(_) => statements.push(self.parse_statement()?),
+				None => {
+					return Err(ParseError {
+						message: String::from("Expected `}` to close block."),
+						position: start.start,
+					});
+				}
+			}
+		}
+
+		Ok(Statement::Block(BlockStatement {
+			position: start.start,
+			statements,
 		}))
 	}
 
@@ -492,6 +525,16 @@ impl Parser {
 		Ok(expression)
 	}
 
+	fn parse_negation_expression_with_position(&mut self, position: usize) -> Result<Expr, ParseError> {
+		let operand = self.parse_expression_with_binding_power(BindingPower::Unary)?;
+
+		Ok(Expr::Unary(UnaryExpr {
+			operand: Box::new(operand),
+			operator: UnaryOperator::Negate,
+			position,
+		}))
+	}
+
 	fn parse_not_expression(&mut self, position: usize) -> Result<Expr, ParseError> {
 		let operand = self.parse_expression_with_binding_power(BindingPower::Unary)?;
 
@@ -529,21 +572,29 @@ impl Parser {
 		}
 	}
 
+	fn parse_statement(&mut self) -> Result<Statement, ParseError> {
+		match self.current() {
+			Some(token) if token.kind == TokenKind::LeftBrace => self.parse_block_statement(),
+			Some(token) if matches!(token.kind, TokenKind::ConstKeyword | TokenKind::VarKeyword) => {
+				self.parse_variable_declaration_statement()
+			}
+			Some(_) => {
+				let expression = self.parse_assignment_expression()?;
+				self.expect_token(TokenKind::Semicolon, "Expected `;` after expression statement.")?;
+				Ok(Statement::Expression(expression))
+			}
+			None => Err(ParseError {
+				message: String::from("Expected a statement."),
+				position: 0,
+			}),
+		}
+	}
+
 	fn parse_text_literal(&self, token: Token) -> Expr {
 		Expr::Text(TextLiteral {
 			position: token.start,
 			value: token.lexeme,
 		})
-	}
-
-	fn parse_negation_expression_with_position(&mut self, position: usize) -> Result<Expr, ParseError> {
-		let operand = self.parse_expression_with_binding_power(BindingPower::Unary)?;
-
-		Ok(Expr::Unary(UnaryExpr {
-			operand: Box::new(operand),
-			operator: UnaryOperator::Negate,
-			position,
-		}))
 	}
 
 	fn parse_variable_declaration_statement(&mut self) -> Result<Statement, ParseError> {
@@ -591,6 +642,7 @@ mod tests {
 	use crate::ast::BinaryExpr;
 	use crate::ast::BinaryOperator;
 	use crate::ast::BooleanLiteral;
+	use crate::ast::BlockStatement;
 	use crate::ast::DataType;
 	use crate::ast::DecimalLiteral;
 	use crate::ast::Expr;
@@ -646,6 +698,45 @@ mod tests {
 					})),
 				})),
 			})
+		);
+	}
+
+	#[test]
+	fn parses_block_statement() {
+		assert_eq!(
+			parse_program("{ var x: int = 1; x += 2; }"),
+			Program {
+				statements: vec![
+					Statement::Block(BlockStatement {
+						position: 0,
+						statements: vec![
+							Statement::VariableDeclaration(VariableDeclaration {
+								data_type: DataType::Int,
+								initial_value: Some(Expr::Integer(IntegerLiteral {
+									position: 0,
+									value: 1,
+								})),
+								is_const: false,
+								name: String::from("x"),
+								position: 0,
+							}),
+							Statement::Expression(Expr::Assignment(AssignmentExpr {
+								operator: AssignmentOperator::AddAssign,
+								position: 0,
+								target: IdentifierExpr {
+									position: 0,
+									name: String::from("x"),
+								},
+								value: Box::new(Expr::Integer(IntegerLiteral {
+									position: 0,
+									value: 2,
+								})),
+							})),
+						],
+					}),
+				],
+				result: None,
+			}
 		);
 	}
 

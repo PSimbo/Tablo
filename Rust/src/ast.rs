@@ -50,6 +50,7 @@ pub enum Expr {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Statement {
+	Block(BlockStatement),
 	Expression(Expr),
 	VariableDeclaration(VariableDeclaration),
 }
@@ -74,6 +75,12 @@ pub struct BinaryExpr {
 	pub operator: BinaryOperator,
 	pub position: usize,
 	pub right: Box<Expr>,
+}
+
+#[derive(Clone, Debug)]
+pub struct BlockStatement {
+	pub position: usize,
+	pub statements: Vec<Statement>,
 }
 
 #[derive(Clone, Debug)]
@@ -162,6 +169,14 @@ impl PartialEq for BinaryExpr {
 }
 
 impl Eq for BinaryExpr {}
+
+impl PartialEq for BlockStatement {
+	fn eq(&self, other: &Self) -> bool {
+		self.statements == other.statements
+	}
+}
+
+impl Eq for BlockStatement {}
 
 impl PartialEq for BooleanLiteral {
 	fn eq(&self, other: &Self) -> bool {

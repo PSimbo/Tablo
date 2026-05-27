@@ -22,6 +22,7 @@ pub enum TokenKind {
 	InterpolatedStringMiddle,
 	InterpolatedStringStart,
 	IntegerLiteral,
+	LeftBrace,
 	LeftParenthesis,
 	LessThan,
 	LessThanOrEqual,
