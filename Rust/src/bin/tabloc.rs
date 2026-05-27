@@ -25,8 +25,8 @@ fn main() {
 		}
 	};
 
-	if let Err(error) = compile(source, &output_path) {
-		eprintln!("{error}");
+	if let Err(error) = compile(source.as_str(), &output_path) {
+		eprintln!("{}", error.format_with_source(&source));
 		std::process::exit(1);
 	}
 }

@@ -46,6 +46,18 @@ impl Display for TabloError {
 	}
 }
 
+impl TabloError {
+	pub fn format_with_source(&self, source: &str) -> String {
+		let source = SourceText::new(source);
+
+		match self {
+			TabloError::Lex(error) => source.format_diagnostic("Lex error", error.position, &error.message),
+			TabloError::Parse(error) => source.format_diagnostic("Parse error", error.position, &error.message),
+			_ => self.to_string(),
+		}
+	}
+}
+
 pub fn compile(source: impl Into<String>, output_path: impl AsRef<Path>) -> Result<(), TabloError> {
 	let program = compile_to_program(source)?;
 	write_program_to_path(output_path, &program).map_err(TabloError::ObjectFile)
@@ -122,6 +134,17 @@ mod tests {
 			position: 2,
 			message: String::from("Unexpected character `?`."),
 		}));
+	}
+
+	#[test]
+	fn formats_source_error_with_line_and_column() {
+		let source = "1 + 2\n?";
+		let error = run(source).unwrap_err();
+
+		assert_eq!(
+			error.format_with_source(source),
+			"Lex error at line 2, column 1: Unexpected character `?`.\n  |\n2 | ?\n  | ^"
+		);
 	}
 
 	#[test]
