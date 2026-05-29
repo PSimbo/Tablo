@@ -350,6 +350,10 @@ impl ObjectFileLayout {
 			program.constant_pool().is_empty(),
 			"The current object file format does not yet serialize constant-pool entries."
 		);
+		debug_assert!(
+			program.debug_info().is_empty(),
+			"The current object file format does not yet serialize debug metadata."
+		);
 
 		Self {
 			sections: vec![
