@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use crate::bytecode::CodeBody;
 use crate::bytecode::Instruction;
 use crate::bytecode::Program;
 use crate::value::Decimal;
@@ -48,13 +49,7 @@ pub fn read_program(bytes: &[u8]) -> Result<Program, ObjectFileError> {
 
 	reader.expect_magic_bytes()?;
 	reader.expect_format_version()?;
-
-	let instruction_count = reader.read_u32()? as usize;
-	let mut instructions = Vec::with_capacity(instruction_count);
-
-	for _ in 0..instruction_count {
-		instructions.push(reader.read_instruction()?);
-	}
+	let code_body = reader.read_code_body()?;
 
 	if !reader.is_at_end() {
 		return Err(ObjectFileError {
@@ -63,7 +58,7 @@ pub fn read_program(bytes: &[u8]) -> Result<Program, ObjectFileError> {
 		});
 	}
 
-	Ok(Program::new(instructions))
+	Ok(Program::new(code_body.instructions))
 }
 
 pub fn read_program_from_path(path: impl AsRef<Path>) -> Result<Program, ObjectFileError> {
@@ -77,12 +72,22 @@ pub fn read_program_from_path(path: impl AsRef<Path>) -> Result<Program, ObjectF
 
 pub fn write_program(program: &Program) -> Vec<u8> {
 	let mut bytes = Vec::new();
+	debug_assert!(
+		program.constant_pool().is_empty(),
+		"The current object file format does not yet serialize constant-pool entries."
+	);
 
 	bytes.extend_from_slice(&MAGIC_BYTES);
 	bytes.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
-	bytes.extend_from_slice(&(program.instructions().len() as u32).to_le_bytes());
+	write_code_body(&mut bytes, &program.entry);
 
-	for instruction in program.instructions() {
+	bytes
+}
+
+fn write_code_body(bytes: &mut Vec<u8>, code_body: &CodeBody) {
+	bytes.extend_from_slice(&(code_body.instructions.len() as u32).to_le_bytes());
+
+	for instruction in &code_body.instructions {
 		match instruction {
 			Instruction::Add => bytes.push(OPCODE_ADD),
 			Instruction::And => bytes.push(OPCODE_AND),
@@ -138,8 +143,6 @@ pub fn write_program(program: &Program) -> Vec<u8> {
 			Instruction::Xor => bytes.push(OPCODE_XOR),
 		}
 	}
-
-	bytes
 }
 
 pub fn write_program_to_path(path: impl AsRef<Path>, program: &Program) -> Result<(), ObjectFileError> {
@@ -203,6 +206,17 @@ impl<'a> ObjectFileReader<'a> {
 				message: format!("Invalid Boolean value {value}."),
 			}),
 		}
+	}
+
+	fn read_code_body(&mut self) -> Result<CodeBody, ObjectFileError> {
+		let instruction_count = self.read_u32()? as usize;
+		let mut instructions = Vec::with_capacity(instruction_count);
+
+		for _ in 0..instruction_count {
+			instructions.push(self.read_instruction()?);
+		}
+
+		Ok(CodeBody::new(instructions))
 	}
 
 	fn read_decimal(&mut self) -> Result<Decimal, ObjectFileError> {
