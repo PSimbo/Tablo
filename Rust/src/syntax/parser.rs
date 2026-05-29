@@ -4,13 +4,17 @@ use crate::ast::BinaryExpr;
 use crate::ast::BinaryOperator;
 use crate::ast::BlockStatement;
 use crate::ast::BooleanLiteral;
+use crate::ast::CallExpr;
 use crate::ast::DataType;
 use crate::ast::DecimalLiteral;
 use crate::ast::Expr;
+use crate::ast::FunctionDeclaration;
+use crate::ast::FunctionParameter;
 use crate::ast::IdentifierExpr;
 use crate::ast::IfStatement;
 use crate::ast::IntegerLiteral;
 use crate::ast::Program;
+use crate::ast::ReturnStatement;
 use crate::ast::Statement;
 use crate::ast::TextLiteral;
 use crate::ast::UnaryExpr;
@@ -40,6 +44,7 @@ enum BindingPower {
 	Additive,
 	Multiplicative,
 	Unary,
+	Call,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -63,12 +68,16 @@ impl Parser {
 	}
 
 	pub fn parse_program(&mut self) -> Result<Program, ParseError> {
+		let mut functions = Vec::new();
 		let mut statements = Vec::new();
 		let mut result = None;
 
 		loop {
 			match self.current() {
 				Some(token) if token.kind == TokenKind::EndOfFile => break,
+				Some(token) if token.kind == TokenKind::FnKeyword => {
+					functions.push(self.parse_function_declaration()?);
+				}
 				Some(token) if matches!(token.kind, TokenKind::ConstKeyword | TokenKind::IfKeyword | TokenKind::LeftBrace | TokenKind::VarKeyword | TokenKind::WhileKeyword) => {
 					statements.push(self.parse_statement()?);
 				}
@@ -91,6 +100,7 @@ impl Parser {
 		self.expect_end_of_file()?;
 
 		Ok(Program {
+			functions,
 			result,
 			statements,
 		})
@@ -224,6 +234,51 @@ impl Parser {
 		}))
 	}
 
+	fn parse_call_expression(&mut self, callee: Expr, start: usize) -> Result<Expr, ParseError> {
+		let callee = match callee {
+			Expr::Identifier(identifier) => identifier,
+			_ => {
+				return Err(ParseError {
+					message: String::from("Function call target must be an identifier."),
+					position: start,
+				});
+			}
+		};
+
+		let mut arguments = Vec::new();
+
+		if !self.current().is_some_and(|token| token.kind == TokenKind::RightParenthesis) {
+			loop {
+				arguments.push(self.parse_assignment_expression()?);
+
+				match self.current() {
+					Some(token) if token.kind == TokenKind::Comma => {
+						self.next();
+					}
+					_ => break,
+				}
+			}
+		}
+
+		let closing = self.next().ok_or(ParseError {
+			message: String::from("Expected `)` to close function call."),
+			position: start,
+		})?;
+
+		if closing.kind != TokenKind::RightParenthesis {
+			return Err(ParseError {
+				message: format!("Expected `)` to close function call, found `{}`.", closing.lexeme),
+				position: closing.start,
+			});
+		}
+
+		Ok(Expr::Call(CallExpr {
+			arguments,
+			callee,
+			position: start,
+		}))
+	}
+
 	fn parse_data_type(&mut self) -> Result<DataType, ParseError> {
 		let token = self.next().ok_or(ParseError {
 			message: String::from("Expected a data type."),
@@ -235,6 +290,7 @@ impl Parser {
 			TokenKind::DecKeyword => Ok(DataType::Dec),
 			TokenKind::IntKeyword => Ok(DataType::Int),
 			TokenKind::TextKeyword => Ok(DataType::Text),
+			TokenKind::VoidKeyword => Ok(DataType::Void),
 			_ => Err(ParseError {
 				message: format!("Expected a supported data type, found `{}`.", token.lexeme),
 				position: token.start,
@@ -267,6 +323,7 @@ impl Parser {
 				TokenKind::ForwardSlash => BindingPower::Multiplicative,
 				TokenKind::GreaterThan => BindingPower::Comparison,
 				TokenKind::GreaterThanOrEqual => BindingPower::Comparison,
+				TokenKind::LeftParenthesis => BindingPower::Call,
 				TokenKind::LessThan => BindingPower::Comparison,
 				TokenKind::LessThanOrEqual => BindingPower::Comparison,
 				TokenKind::OrKeyword => BindingPower::LogicalOr,
@@ -285,6 +342,54 @@ impl Parser {
 		}
 
 		Ok(left)
+	}
+
+	fn parse_function_declaration(&mut self) -> Result<FunctionDeclaration, ParseError> {
+		let function_keyword = self.expect_token(TokenKind::FnKeyword, "Expected `fn` to start function declaration.")?;
+		let name = self.expect_token(TokenKind::Identifier, "Expected function name.")?;
+		self.expect_token(TokenKind::LeftParenthesis, "Expected `(` after function name.")?;
+
+		let mut parameters = Vec::new();
+
+		if !self.current().is_some_and(|token| token.kind == TokenKind::RightParenthesis) {
+			loop {
+				parameters.push(self.parse_function_parameter()?);
+
+				match self.current() {
+					Some(token) if token.kind == TokenKind::Comma => {
+						self.next();
+					}
+					_ => break,
+				}
+			}
+		}
+
+		self.expect_token(TokenKind::RightParenthesis, "Expected `)` after parameter list.")?;
+		let return_type = self.parse_data_type()?;
+		let body = match self.parse_block_statement()? {
+			Statement::Block(block) => block,
+			_ => unreachable!("Block parser must return a block statement."),
+		};
+
+		Ok(FunctionDeclaration {
+			body,
+			name: name.lexeme,
+			parameters,
+			position: function_keyword.start,
+			return_type,
+		})
+	}
+
+	fn parse_function_parameter(&mut self) -> Result<FunctionParameter, ParseError> {
+		let name = self.expect_token(TokenKind::Identifier, "Expected parameter name.")?;
+		self.expect_token(TokenKind::Colon, "Expected `:` after parameter name.")?;
+		let data_type = self.parse_data_type()?;
+
+		Ok(FunctionParameter {
+			data_type,
+			name: name.lexeme,
+			position: name.start,
+		})
 	}
 
 	fn parse_group_expression(&mut self, start: usize) -> Result<Expr, ParseError> {
@@ -433,6 +538,7 @@ impl Parser {
 					right: Box::new(right),
 				}))
 			}
+			TokenKind::LeftParenthesis => self.parse_call_expression(left, operator.start),
 			TokenKind::LessThan => {
 				let right = self.parse_expression_with_binding_power(binding_power)?;
 
@@ -614,10 +720,28 @@ impl Parser {
 		}
 	}
 
+	fn parse_return_statement(&mut self) -> Result<Statement, ParseError> {
+		let return_keyword = self.expect_token(TokenKind::ReturnKeyword, "Expected `return` to start return statement.")?;
+		let value = if self.current().is_some_and(|token| token.kind == TokenKind::Semicolon) {
+			None
+		}
+		else {
+			Some(self.parse_assignment_expression()?)
+		};
+
+		self.expect_token(TokenKind::Semicolon, "Expected `;` after return statement.")?;
+
+		Ok(Statement::Return(ReturnStatement {
+			position: return_keyword.start,
+			value,
+		}))
+	}
+
 	fn parse_statement(&mut self) -> Result<Statement, ParseError> {
 		match self.current() {
 			Some(token) if token.kind == TokenKind::IfKeyword => self.parse_if_statement(),
 			Some(token) if token.kind == TokenKind::LeftBrace => self.parse_block_statement(),
+			Some(token) if token.kind == TokenKind::ReturnKeyword => self.parse_return_statement(),
 			Some(token) if token.kind == TokenKind::WhileKeyword => self.parse_while_statement(),
 			Some(token) if matches!(token.kind, TokenKind::ConstKeyword | TokenKind::VarKeyword) => {
 				self.parse_variable_declaration_statement()
@@ -702,13 +826,17 @@ mod tests {
 	use crate::ast::BinaryOperator;
 	use crate::ast::BooleanLiteral;
 	use crate::ast::BlockStatement;
+	use crate::ast::CallExpr;
 	use crate::ast::DataType;
 	use crate::ast::DecimalLiteral;
 	use crate::ast::Expr;
+	use crate::ast::FunctionDeclaration;
+	use crate::ast::FunctionParameter;
 	use crate::ast::IdentifierExpr;
 	use crate::ast::IfStatement;
 	use crate::ast::IntegerLiteral;
 	use crate::ast::Program;
+	use crate::ast::ReturnStatement;
 	use crate::ast::Statement;
 	use crate::ast::TextLiteral;
 	use crate::ast::UnaryExpr;
@@ -720,6 +848,13 @@ mod tests {
 
 	use super::super::lexer::Lexer;
 	use super::Parser;
+
+	fn normalize_block(block: BlockStatement) -> BlockStatement {
+		BlockStatement {
+			position: 0,
+			statements: block.statements.into_iter().map(normalize_statement).collect(),
+		}
+	}
 
 	fn normalize_expr(expression: Expr) -> Expr {
 		match expression {
@@ -749,6 +884,15 @@ mod tests {
 				position: 0,
 				value,
 			}),
+			Expr::Call(CallExpr {
+				arguments,
+				callee,
+				..
+			}) => Expr::Call(CallExpr {
+				arguments: arguments.into_iter().map(normalize_expr).collect(),
+				callee: normalize_identifier(callee),
+				position: 0,
+			}),
 			Expr::Decimal(DecimalLiteral { value, .. }) => Expr::Decimal(DecimalLiteral {
 				position: 0,
 				value,
@@ -774,6 +918,24 @@ mod tests {
 		}
 	}
 
+	fn normalize_function_declaration(function: FunctionDeclaration) -> FunctionDeclaration {
+		FunctionDeclaration {
+			body: normalize_block(function.body),
+			name: function.name,
+			parameters: function.parameters.into_iter().map(normalize_function_parameter).collect(),
+			position: 0,
+			return_type: function.return_type,
+		}
+	}
+
+	fn normalize_function_parameter(parameter: FunctionParameter) -> FunctionParameter {
+		FunctionParameter {
+			data_type: parameter.data_type,
+			name: parameter.name,
+			position: 0,
+		}
+	}
+
 	fn normalize_identifier(identifier: IdentifierExpr) -> IdentifierExpr {
 		IdentifierExpr {
 			name: identifier.name,
@@ -783,6 +945,7 @@ mod tests {
 
 	fn normalize_program(program: Program) -> Program {
 		Program {
+			functions: program.functions.into_iter().map(normalize_function_declaration).collect(),
 			result: program.result.map(normalize_expr),
 			statements: program.statements.into_iter().map(normalize_statement).collect(),
 		}
@@ -793,17 +956,11 @@ mod tests {
 			Statement::Block(block) => Statement::Block(normalize_block(block)),
 			Statement::Expression(expression) => Statement::Expression(normalize_expr(expression)),
 			Statement::If(if_statement) => Statement::If(normalize_if_statement(if_statement)),
+			Statement::Return(return_statement) => Statement::Return(normalize_return_statement(return_statement)),
 			Statement::VariableDeclaration(declaration) => {
 				Statement::VariableDeclaration(normalize_variable_declaration(declaration))
 			}
 			Statement::While(while_statement) => Statement::While(normalize_while_statement(while_statement)),
-		}
-	}
-
-	fn normalize_block(block: BlockStatement) -> BlockStatement {
-		BlockStatement {
-			position: 0,
-			statements: block.statements.into_iter().map(normalize_statement).collect(),
 		}
 	}
 
@@ -813,6 +970,13 @@ mod tests {
 			else_branch: if_statement.else_branch.map(|branch| Box::new(normalize_statement(*branch))),
 			position: 0,
 			then_branch: normalize_block(if_statement.then_branch),
+		}
+	}
+
+	fn normalize_return_statement(return_statement: ReturnStatement) -> ReturnStatement {
+		ReturnStatement {
+			position: 0,
+			value: return_statement.value.map(normalize_expr),
 		}
 	}
 
@@ -880,6 +1044,7 @@ mod tests {
 		assert_eq!(
 			parse_program("{ var x: int = 1; x += 2; }"),
 			Program {
+				functions: vec![],
 				statements: vec![
 					Statement::Block(BlockStatement {
 						position: 0,
@@ -976,6 +1141,7 @@ mod tests {
 		assert_eq!(
 			parse_program("const name: text = 'Tablo';"),
 			Program {
+				functions: vec![],
 				statements: vec![
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Text,
@@ -1009,6 +1175,7 @@ mod tests {
 		assert_eq!(
 			parse_program("var x: int = 1;\nx += 2;\nx"),
 			Program {
+				functions: vec![],
 				statements: vec![
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Int,
@@ -1037,6 +1204,96 @@ mod tests {
 					position: 0,
 					name: String::from("x"),
 				})),
+			}
+		);
+	}
+
+	#[test]
+	fn parses_function_call_expression() {
+		assert_eq!(
+			parse("add(1, 2)"),
+			Expr::Call(CallExpr {
+				arguments: vec![
+					Expr::Integer(IntegerLiteral {
+						position: 0,
+						value: 1,
+					}),
+					Expr::Integer(IntegerLiteral {
+						position: 0,
+						value: 2,
+					}),
+				],
+				callee: IdentifierExpr {
+					name: String::from("add"),
+					position: 0,
+				},
+				position: 0,
+			})
+		);
+	}
+
+	#[test]
+	fn parses_function_declaration() {
+		assert_eq!(
+			parse_program("fn add(a: int, b: int) int { return a + b; }\nadd(1, 2)"),
+			Program {
+				functions: vec![
+					FunctionDeclaration {
+						body: BlockStatement {
+							position: 0,
+							statements: vec![
+								Statement::Return(ReturnStatement {
+									position: 0,
+									value: Some(Expr::Binary(BinaryExpr {
+										left: Box::new(Expr::Identifier(IdentifierExpr {
+											name: String::from("a"),
+											position: 0,
+										})),
+										operator: BinaryOperator::Add,
+										position: 0,
+										right: Box::new(Expr::Identifier(IdentifierExpr {
+											name: String::from("b"),
+											position: 0,
+										})),
+									})),
+								}),
+							],
+						},
+						name: String::from("add"),
+						parameters: vec![
+							FunctionParameter {
+								data_type: DataType::Int,
+								name: String::from("a"),
+								position: 0,
+							},
+							FunctionParameter {
+								data_type: DataType::Int,
+								name: String::from("b"),
+								position: 0,
+							},
+						],
+						position: 0,
+						return_type: DataType::Int,
+					},
+				],
+				result: Some(Expr::Call(CallExpr {
+					arguments: vec![
+						Expr::Integer(IntegerLiteral {
+							position: 0,
+							value: 1,
+						}),
+						Expr::Integer(IntegerLiteral {
+							position: 0,
+							value: 2,
+						}),
+					],
+					callee: IdentifierExpr {
+						name: String::from("add"),
+						position: 0,
+					},
+					position: 0,
+				})),
+				statements: vec![],
 			}
 		);
 	}
@@ -1073,6 +1330,7 @@ mod tests {
 		assert_eq!(
 			parse_program("if false { var x: int = 1; } else if true { var y: int = 2; }"),
 			Program {
+				functions: vec![],
 				statements: vec![
 					Statement::If(IfStatement {
 						condition: Expr::Boolean(BooleanLiteral {
@@ -1130,6 +1388,7 @@ mod tests {
 		assert_eq!(
 			parse_program("if true { var x: int = 1; } else { var x: int = 2; }"),
 			Program {
+				functions: vec![],
 				statements: vec![
 					Statement::If(IfStatement {
 						condition: Expr::Boolean(BooleanLiteral {
@@ -1179,6 +1438,7 @@ mod tests {
 		assert_eq!(
 			parse_program("if true { var x: int = 1; }"),
 			Program {
+				functions: vec![],
 				statements: vec![
 					Statement::If(IfStatement {
 						condition: Expr::Boolean(BooleanLiteral {
@@ -1407,6 +1667,7 @@ mod tests {
 		assert_eq!(
 			parse_program("var x: int = 1;\nvar y: int = 2;\nx + y"),
 			Program {
+				functions: vec![],
 				statements: vec![
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Int,
@@ -1488,6 +1749,7 @@ mod tests {
 		assert_eq!(
 			parse_program("var name: text = 'Tablo';"),
 			Program {
+				functions: vec![],
 				statements: vec![
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Text,
@@ -1548,6 +1810,7 @@ mod tests {
 		assert_eq!(
 			parse_program("var x: int;"),
 			Program {
+				functions: vec![],
 				statements: vec![
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Int,
@@ -1567,6 +1830,7 @@ mod tests {
 		assert_eq!(
 			parse_program("while x < 3 { x += 1; }"),
 			Program {
+				functions: vec![],
 				statements: vec![
 					Statement::While(WhileStatement {
 						body: BlockStatement {

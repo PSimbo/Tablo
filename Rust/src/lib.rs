@@ -141,6 +141,17 @@ mod tests {
 	}
 
 	#[test]
+	fn formats_missing_function_return_error_with_line_and_column() {
+		let source = "fn add(a: int, b: int) int {\n  a + b;\n}\nadd(1, 2)";
+		let error = run(source).unwrap_err();
+
+		assert_eq!(
+			error.format_with_source(source),
+			"Compile error at line 1, column 1: Function `add` must return a value of type `int` on all paths.\n  |\n1 | fn add(a: int, b: int) int {\n  | ^"
+		);
+	}
+
+	#[test]
 	fn formats_source_error_with_line_and_column() {
 		let source = "1 + 2\n?";
 		let error = run(source).unwrap_err();
@@ -291,6 +302,23 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_function_call_source_text() {
+		let result = run("fn add(a: int, b: int) int { return a + b; }\nadd(1, 2)").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
+	fn runs_function_object_file() {
+		let output_path = unique_test_output_path("runs_function_object_file");
+		compile("fn add(a: int, b: int) int { return a + b; }\nadd(1, 2)", &output_path).unwrap();
+		let result = run_file(&output_path).unwrap();
+		let _ = std::fs::remove_file(&output_path);
+
+		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
 	fn runs_if_else_if_source_text() {
 		let result = run("var x: int = 1;\nif false { x = 2; } else if true { x = 3; }\nx").unwrap();
 
@@ -411,6 +439,13 @@ mod tests {
 		let result = run("'hello'").unwrap();
 
 		assert_eq!(result, Some(Value::Text(String::from("hello"))));
+	}
+
+	#[test]
+	fn runs_void_function_as_expression_statement() {
+		let result = run("var x: int = 1;\nfn bump(value: int) void { return; }\nbump(x);\nx").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
 	}
 
 	#[test]

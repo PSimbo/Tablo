@@ -1,3 +1,5 @@
+use crate::bytecode::CodeBody;
+use crate::bytecode::CompiledFunction;
 use crate::bytecode::Program;
 use crate::bytecode::Instruction;
 use crate::value::Decimal;
@@ -11,9 +13,19 @@ enum ComparisonKind {
 	LessThanOrEqual,
 }
 
+struct CallFrame<'a> {
+	code_body: &'a CodeBody,
+	instruction_index: usize,
+	locals: Vec<Value>,
+}
+
+enum ExecutionOutcome {
+	Continue(Option<usize>),
+	Return(Option<Value>),
+}
+
 #[derive(Default)]
 pub struct VirtualMachine {
-	locals: Vec<Value>,
 	stack: Vec<Value>,
 }
 
@@ -26,172 +38,217 @@ pub struct VmError {
 impl VirtualMachine {
 	pub fn new() -> Self {
 		Self {
-			locals: Vec::new(),
 			stack: Vec::new(),
 		}
 	}
 
 	pub fn run(&mut self, program: &Program) -> Result<Option<Value>, VmError> {
 		self.stack.clear();
-		self.locals.clear();
-		let mut instruction_index = 0;
-		let instructions = program.instructions();
-
-		while instruction_index < instructions.len() {
-			let next_instruction_index = self.execute_instruction(&instructions[instruction_index], instruction_index)?;
-			instruction_index = next_instruction_index.unwrap_or(instruction_index + 1);
-		}
-
-		Ok(self.stack.pop())
+		self.run_code_body(program, &program.entry, Vec::new())
 	}
 
-	fn execute_instruction(&mut self, instruction: &Instruction, instruction_index: usize) -> Result<Option<usize>, VmError> {
+	fn run_code_body(
+		&mut self,
+		program: &Program,
+		code_body: &CodeBody,
+		locals: Vec<Value>
+	) -> Result<Option<Value>, VmError> {
+		let base_stack_len = self.stack.len();
+		let mut frame = CallFrame::new(code_body, locals);
+
+		while frame.instruction_index < frame.code_body.instructions.len() {
+			let outcome = self.execute_instruction(
+				program,
+				&frame.code_body.instructions[frame.instruction_index],
+				frame.instruction_index,
+				&mut frame.locals,
+			)?;
+
+			match outcome {
+				ExecutionOutcome::Continue(next_instruction_index) => {
+					frame.instruction_index = next_instruction_index.unwrap_or(frame.instruction_index + 1);
+				}
+				ExecutionOutcome::Return(result) => {
+					self.stack.truncate(base_stack_len);
+					return Ok(result);
+				}
+			}
+		}
+
+		let result = self.stack.pop();
+		self.stack.truncate(base_stack_len);
+		Ok(result)
+	}
+
+	fn execute_instruction(
+		&mut self,
+		program: &Program,
+		instruction: &Instruction,
+		instruction_index: usize,
+		locals: &mut Vec<Value>
+	) -> Result<ExecutionOutcome, VmError> {
 		match instruction {
 			Instruction::Add => {
 				let rhs = self.pop_value(instruction_index)?;
 				let lhs = self.pop_value(instruction_index)?;
 				self.stack.push(add_values(lhs, rhs, instruction_index)?);
-				Ok(None)
+				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::And => {
 				let rhs = self.pop_boolean(instruction_index)?;
 				let lhs = self.pop_boolean(instruction_index)?;
 				self.stack.push(Value::Boolean(lhs && rhs));
-				Ok(None)
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::Call(function_index, argument_count) => {
+				let function = program.functions().get(*function_index as usize).ok_or(VmError {
+					instruction_index,
+					message: format!("Function index {} does not exist.", function_index),
+				})?;
+				let arguments = self.pop_call_arguments(*argument_count as usize, instruction_index)?;
+				let result = self.run_function(program, function, arguments, instruction_index)?;
+
+				if let Some(result) = result {
+					self.stack.push(result);
+				}
+
+				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::Divide => {
 				let rhs = self.pop_numeric(instruction_index)?;
 				let lhs = self.pop_numeric(instruction_index)?;
 				self.stack.push(divide_values(lhs, rhs, instruction_index)?);
-				Ok(None)
+				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::Equal => {
 				let rhs = self.pop_value(instruction_index)?;
 				let lhs = self.pop_value(instruction_index)?;
 				self.stack.push(equals_value(lhs, rhs, instruction_index)?);
-				Ok(None)
+				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::GreaterThan => {
 				let rhs = self.pop_value(instruction_index)?;
 				let lhs = self.pop_value(instruction_index)?;
 				self.stack.push(compare_values(lhs, rhs, instruction_index, ComparisonKind::GreaterThan)?);
-				Ok(None)
+				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::GreaterThanOrEqual => {
 				let rhs = self.pop_value(instruction_index)?;
 				let lhs = self.pop_value(instruction_index)?;
 				self.stack.push(compare_values(lhs, rhs, instruction_index, ComparisonKind::GreaterThanOrEqual)?);
-				Ok(None)
+				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::Jump(target) => {
-				Ok(Some(*target as usize))
+				Ok(ExecutionOutcome::Continue(Some(*target as usize)))
 			}
 			Instruction::JumpIfFalse(target) => {
 				let value = self.pop_boolean(instruction_index)?;
 
 				if value {
-					Ok(None)
+					Ok(ExecutionOutcome::Continue(None))
 				}
 				else {
-					Ok(Some(*target as usize))
+					Ok(ExecutionOutcome::Continue(Some(*target as usize)))
 				}
 			}
 			Instruction::LessThan => {
 				let rhs = self.pop_value(instruction_index)?;
 				let lhs = self.pop_value(instruction_index)?;
 				self.stack.push(compare_values(lhs, rhs, instruction_index, ComparisonKind::LessThan)?);
-				Ok(None)
+				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::LessThanOrEqual => {
 				let rhs = self.pop_value(instruction_index)?;
 				let lhs = self.pop_value(instruction_index)?;
 				self.stack.push(compare_values(lhs, rhs, instruction_index, ComparisonKind::LessThanOrEqual)?);
-				Ok(None)
+				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::LoadLocal(slot) => {
-				let value = self.locals.get(*slot as usize).cloned().ok_or(VmError {
+				let value = locals.get(*slot as usize).cloned().ok_or(VmError {
 					instruction_index,
 					message: format!("Local slot {} has not been initialized.", slot),
 				})?;
 				self.stack.push(value);
-				Ok(None)
+				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::Modulo => {
 				let rhs = self.pop_numeric(instruction_index)?;
 				let lhs = self.pop_numeric(instruction_index)?;
 				self.stack.push(modulo_values(lhs, rhs, instruction_index)?);
-				Ok(None)
+				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::Multiply => {
 				let rhs = self.pop_numeric(instruction_index)?;
 				let lhs = self.pop_numeric(instruction_index)?;
 				self.stack.push(multiply_values(lhs, rhs, instruction_index)?);
-				Ok(None)
+				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::Negate => {
 				let value = self.pop_numeric(instruction_index)?;
 				self.stack.push(negate_value(value));
-				Ok(None)
+				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::Not => {
 				let value = self.pop_boolean(instruction_index)?;
 				self.stack.push(Value::Boolean(!value));
-				Ok(None)
+				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::NotEqual => {
 				let rhs = self.pop_value(instruction_index)?;
 				let lhs = self.pop_value(instruction_index)?;
 				self.stack.push(not_equals_value(lhs, rhs, instruction_index)?);
-				Ok(None)
+				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::Or => {
 				let rhs = self.pop_boolean(instruction_index)?;
 				let lhs = self.pop_boolean(instruction_index)?;
 				self.stack.push(Value::Boolean(lhs || rhs));
-				Ok(None)
+				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::Pop => {
 				self.pop_value(instruction_index)?;
-				Ok(None)
+				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::PushBoolean(value) => {
 				self.stack.push(Value::Boolean(*value));
-				Ok(None)
+				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::PushDecimal(value) => {
 				self.stack.push(Value::Decimal(value.clone()));
-				Ok(None)
+				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::PushInteger(value) => {
 				self.stack.push(Value::Integer(*value));
-				Ok(None)
+				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::PushText(value) => {
 				self.stack.push(Value::Text(value.clone()));
-				Ok(None)
+				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::Return => Ok(ExecutionOutcome::Return(Some(self.pop_value(instruction_index)?))),
+			Instruction::ReturnVoid => Ok(ExecutionOutcome::Return(None)),
 			Instruction::Subtract => {
 				let rhs = self.pop_numeric(instruction_index)?;
 				let lhs = self.pop_numeric(instruction_index)?;
 				self.stack.push(subtract_values(lhs, rhs, instruction_index)?);
-				Ok(None)
+				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::StoreLocal(slot) => {
 				let value = self.pop_value(instruction_index)?;
 				let slot = *slot as usize;
 
-				if self.locals.len() <= slot {
-					self.locals.resize(slot + 1, Value::Boolean(false));
+				if locals.len() <= slot {
+					locals.resize(slot + 1, Value::Boolean(false));
 				}
 
-				self.locals[slot] = value;
-				Ok(None)
+				locals[slot] = value;
+				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::Xor => {
 				let rhs = self.pop_boolean(instruction_index)?;
 				let lhs = self.pop_boolean(instruction_index)?;
 				self.stack.push(Value::Boolean(lhs ^ rhs));
-				Ok(None)
+				Ok(ExecutionOutcome::Continue(None))
 			}
 		}
 	}
@@ -209,6 +266,17 @@ impl VirtualMachine {
 				message: String::from("Expected a Boolean operand."),
 			}),
 		}
+	}
+
+	fn pop_call_arguments(&mut self, argument_count: usize, instruction_index: usize) -> Result<Vec<Value>, VmError> {
+		let mut arguments = Vec::with_capacity(argument_count);
+
+		for _ in 0..argument_count {
+			arguments.push(self.pop_value(instruction_index)?);
+		}
+
+		arguments.reverse();
+		Ok(arguments)
 	}
 
 	fn pop_numeric(&mut self, instruction_index: usize) -> Result<Value, VmError> {
@@ -232,6 +300,26 @@ impl VirtualMachine {
 			instruction_index,
 			message: String::from("Stack underflow while reading operand."),
 		})
+	}
+
+	fn run_function(
+		&mut self,
+		program: &Program,
+		function: &CompiledFunction,
+		arguments: Vec<Value>,
+		_: usize
+	) -> Result<Option<Value>, VmError> {
+		self.run_code_body(program, function.body(), arguments)
+	}
+}
+
+impl<'a> CallFrame<'a> {
+	fn new(code_body: &'a CodeBody, locals: Vec<Value>) -> Self {
+		Self {
+			code_body,
+			instruction_index: 0,
+			locals,
+		}
 	}
 }
 

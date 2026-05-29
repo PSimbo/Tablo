@@ -5,11 +5,15 @@ use crate::ast::AssignmentOperator;
 use crate::ast::BinaryExpr;
 use crate::ast::BinaryOperator;
 use crate::ast::BlockStatement;
+use crate::ast::CallExpr;
 use crate::ast::DataType;
 use crate::ast::Expr;
+use crate::ast::FunctionDeclaration;
+use crate::ast::FunctionParameter;
 use crate::ast::IdentifierExpr;
 use crate::ast::IfStatement;
 use crate::ast::Program;
+use crate::ast::ReturnStatement;
 use crate::ast::Statement;
 use crate::ast::UnaryExpr;
 use crate::ast::UnaryOperator;
@@ -24,6 +28,8 @@ use super::scope::ScopeStack;
 // separation between semantic validation and bytecode emission.
 #[derive(Default)]
 pub struct SemanticAnalyzer {
+	current_return_type: Option<DataType>,
+	functions: BTreeMap<String, FunctionSignature>,
 	locals: ScopeStack<LocalBinding>,
 	next_local_slot: u32,
 	semantic_program: SemanticProgram,
@@ -36,13 +42,30 @@ struct LocalBinding {
 	slot: u32,
 }
 
+#[derive(Clone)]
+struct FunctionSignature {
+	function_index: u32,
+	parameter_types: Vec<DataType>,
+	return_type: DataType,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SemanticProgram {
+	call_return_types: BTreeMap<usize, DataType>,
+	call_targets: BTreeMap<usize, u32>,
 	declaration_slots: BTreeMap<usize, u32>,
 	identifier_slots: BTreeMap<usize, u32>,
 }
 
 impl SemanticProgram {
+	pub fn call_return_type(&self, position: usize) -> Option<DataType> {
+		self.call_return_types.get(&position).copied()
+	}
+
+	pub fn call_target(&self, position: usize) -> Option<u32> {
+		self.call_targets.get(&position).copied()
+	}
+
 	pub fn declaration_slot(&self, position: usize) -> Option<u32> {
 		self.declaration_slots.get(&position).copied()
 	}
@@ -55,6 +78,8 @@ impl SemanticProgram {
 impl SemanticAnalyzer {
 	pub fn new() -> Self {
 		Self {
+			current_return_type: None,
+			functions: BTreeMap::new(),
 			locals: ScopeStack::default(),
 			next_local_slot: 0,
 			semantic_program: SemanticProgram::default(),
@@ -62,9 +87,18 @@ impl SemanticAnalyzer {
 	}
 
 	pub fn analyze_program(&mut self, program: &Program) -> Result<SemanticProgram, CompileError> {
+		self.current_return_type = None;
+		self.functions = BTreeMap::new();
 		self.locals = ScopeStack::default();
 		self.next_local_slot = 0;
 		self.semantic_program = SemanticProgram::default();
+
+		self.collect_function_signatures(&program.functions)?;
+
+		for function in &program.functions {
+			self.validate_function_declaration(function)?;
+		}
+
 		self.enter_scope();
 
 		for statement in &program.statements {
@@ -144,6 +178,31 @@ impl SemanticAnalyzer {
 		}
 	}
 
+	fn block_guarantees_return(&self, block: &BlockStatement) -> bool {
+		block.statements.iter().any(|statement| self.statement_guarantees_return(statement))
+	}
+
+	fn collect_function_signatures(&mut self, functions: &[FunctionDeclaration]) -> Result<(), CompileError> {
+		for (index, function) in functions.iter().enumerate() {
+			if self.functions.contains_key(&function.name) {
+				return Err(self.compile_error(
+					function.position,
+					format!("Function `{}` is already declared in this scope.", function.name),
+				));
+			}
+
+			let parameter_types = function.parameters.iter().map(|parameter| parameter.data_type).collect();
+
+			self.functions.insert(function.name.clone(), FunctionSignature {
+				parameter_types,
+				return_type: function.return_type,
+				function_index: index as u32,
+			});
+		}
+
+		Ok(())
+	}
+
 	fn compile_error(&self, position: usize, message: impl Into<String>) -> CompileError {
 		CompileError {
 			message: message.into(),
@@ -161,6 +220,7 @@ impl SemanticAnalyzer {
 			DataType::Dec => "dec",
 			DataType::Int => "int",
 			DataType::Text => "text",
+			DataType::Void => "void",
 		}
 	}
 
@@ -225,6 +285,33 @@ impl SemanticAnalyzer {
 				self.binary_result_type(*operator, left_type, right_type, expression.position())
 			}
 			Expr::Boolean(_) => Ok(DataType::Bool),
+			Expr::Call(CallExpr { arguments, callee, .. }) => {
+				let signature = self.functions.get(&callee.name).cloned().ok_or(self.compile_error(
+					callee.position,
+					format!("Function `{}` is not declared in this scope.", callee.name),
+				))?;
+
+				if arguments.len() != signature.parameter_types.len() {
+					return Err(self.compile_error(
+						expression.position(),
+						format!(
+							"Function `{}` expects {} argument(s), found {}.",
+							callee.name,
+							signature.parameter_types.len(),
+							arguments.len(),
+						),
+					));
+				}
+
+				for (argument, parameter_type) in arguments.iter().zip(signature.parameter_types.iter().copied()) {
+					let argument_type = self.infer_expression_type(argument)?;
+					self.ensure_assignable(parameter_type, argument_type, argument.position())?;
+				}
+
+				self.semantic_program.call_targets.insert(expression.position(), signature.function_index);
+				self.semantic_program.call_return_types.insert(expression.position(), signature.return_type);
+				Ok(signature.return_type)
+			}
 			Expr::Decimal(_) => Ok(DataType::Dec),
 			Expr::Identifier(IdentifierExpr { name, .. }) => {
 				let local = self.lookup_local(name).ok_or(self.compile_error(
@@ -360,6 +447,81 @@ impl SemanticAnalyzer {
 		))
 	}
 
+	fn statement_guarantees_return(&self, statement: &Statement) -> bool {
+		match statement {
+			Statement::Block(block) => self.block_guarantees_return(block),
+			Statement::If(if_statement) => {
+				self.block_guarantees_return(&if_statement.then_branch)
+					&& if_statement.else_branch.as_ref().is_some_and(|else_branch| self.statement_guarantees_return(else_branch))
+			}
+			Statement::Return(_) => true,
+			Statement::Expression(_) | Statement::VariableDeclaration(_) | Statement::While(_) => false,
+		}
+	}
+
+	fn validate_function_declaration(&mut self, function: &FunctionDeclaration) -> Result<(), CompileError> {
+		let saved_locals = std::mem::take(&mut self.locals);
+		let saved_next_local_slot = self.next_local_slot;
+		let saved_return_type = self.current_return_type;
+
+		self.locals = ScopeStack::default();
+		self.next_local_slot = 0;
+		self.current_return_type = Some(function.return_type);
+		self.enter_scope();
+
+		for parameter in &function.parameters {
+			self.validate_function_parameter(parameter)?;
+		}
+
+		self.validate_statement(&Statement::Block(function.body.clone()))?;
+
+		if function.return_type != DataType::Void && !self.block_guarantees_return(&function.body) {
+			return Err(self.compile_error(
+				function.position,
+				format!(
+					"Function `{}` must return a value of type `{}` on all paths.",
+					function.name,
+					self.data_type_name(function.return_type),
+				),
+			));
+		}
+
+		self.exit_scope();
+
+		self.locals = saved_locals;
+		self.next_local_slot = saved_next_local_slot;
+		self.current_return_type = saved_return_type;
+
+		Ok(())
+	}
+
+	fn validate_function_parameter(&mut self, parameter: &FunctionParameter) -> Result<(), CompileError> {
+		if parameter.data_type == DataType::Void {
+			return Err(self.compile_error(
+				parameter.position,
+				format!("Parameter `{}` cannot have type `void`.", parameter.name),
+			));
+		}
+
+		if self.current_scope_contains(&parameter.name) {
+			return Err(self.compile_error(
+				parameter.position,
+				format!("Parameter `{}` is already declared in this scope.", parameter.name),
+			));
+		}
+
+		let slot = self.next_local_slot;
+		self.next_local_slot += 1;
+		self.semantic_program.declaration_slots.insert(parameter.position, slot);
+		self.declare_local(parameter.name.clone(), LocalBinding {
+			data_type: parameter.data_type,
+			is_const: false,
+			slot,
+		});
+
+		Ok(())
+	}
+
 	fn validate_statement(&mut self, statement: &Statement) -> Result<(), CompileError> {
 		match statement {
 			Statement::Block(BlockStatement { statements, .. }) => {
@@ -399,7 +561,36 @@ impl SemanticAnalyzer {
 
 				Ok(())
 			}
+			Statement::Return(ReturnStatement { position, value }) => {
+				let return_type = self.current_return_type.ok_or(self.compile_error(
+					*position,
+					String::from("`return` may only be used inside a function body."),
+				))?;
+
+				match (return_type, value) {
+					(DataType::Void, None) => Ok(()),
+					(DataType::Void, Some(value)) => Err(self.compile_error(
+						value.position(),
+						String::from("A `void` function cannot return a value."),
+					)),
+					(expected_type, Some(value)) => {
+						let value_type = self.infer_expression_type(value)?;
+						self.ensure_assignable(expected_type, value_type, value.position())
+					}
+					(expected_type, None) => Err(self.compile_error(
+						*position,
+						format!("Function must return a value of type `{}`.", self.data_type_name(expected_type)),
+					)),
+				}
+			}
 			Statement::VariableDeclaration(VariableDeclaration { data_type, initial_value, is_const, name, position }) => {
+				if *data_type == DataType::Void {
+					return Err(self.compile_error(
+						*position,
+						format!("Variable `{name}` cannot have type `void`."),
+					));
+				}
+
 				if self.current_scope_contains(name) {
 					return Err(self.compile_error(
 						*position,

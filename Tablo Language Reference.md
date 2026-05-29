@@ -973,7 +973,7 @@ Any function may be called with a mix of positional arguments, named arguments, 
 * Any omitted parameter must either be nullable or have a default value.
 
 ~~~
-fn Name(<Positional Args>, <Named Args>, <Varargs>): void {}
+fn Name(<Positional Args>, <Named Args>, <Varargs>) void {}
 ~~~
 
 To specify that a function accepts a variable number of arguments ("varargs"), the `...` syntax is used to mark the "varargs" argument. If present, this parameter must be the final parameter in the parameter list, must have an array type, and may not define a default value. The "varargs" argument may be provided as a named argument but only if the value is passed as a single array of the appropriate type.

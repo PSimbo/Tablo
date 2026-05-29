@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use crate::bytecode::CodeBody;
+use crate::bytecode::CompiledFunction;
 use crate::bytecode::ConstantPool;
 use crate::bytecode::Instruction;
 use crate::bytecode::Program;
@@ -38,6 +39,9 @@ const OPCODE_OR: u8 = 22;
 const OPCODE_XOR: u8 = 23;
 const OPCODE_POP: u8 = 24;
 const OPCODE_PUSH_TEXT: u8 = 25;
+const OPCODE_CALL: u8 = 26;
+const OPCODE_RETURN: u8 = 27;
+const OPCODE_RETURN_VOID: u8 = 28;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectFileError {
@@ -55,6 +59,7 @@ struct ObjectFileLayout {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ObjectFileSection {
+	Function(CompiledFunction),
 	EntryCode(CodeBody),
 }
 
@@ -107,6 +112,11 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 	match instruction {
 		Instruction::Add => bytes.push(OPCODE_ADD),
 		Instruction::And => bytes.push(OPCODE_AND),
+		Instruction::Call(function_index, argument_count) => {
+			bytes.push(OPCODE_CALL);
+			bytes.extend_from_slice(&function_index.to_le_bytes());
+			bytes.extend_from_slice(&argument_count.to_le_bytes());
+		}
 		Instruction::Divide => bytes.push(OPCODE_DIVIDE),
 		Instruction::Equal => bytes.push(OPCODE_EQUAL),
 		Instruction::GreaterThan => bytes.push(OPCODE_GREATER_THAN),
@@ -151,6 +161,8 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
 			bytes.extend_from_slice(value.as_bytes());
 		}
+		Instruction::Return => bytes.push(OPCODE_RETURN),
+		Instruction::ReturnVoid => bytes.push(OPCODE_RETURN_VOID),
 		Instruction::StoreLocal(slot) => {
 			bytes.push(OPCODE_STORE_LOCAL);
 			bytes.extend_from_slice(&slot.to_le_bytes());
@@ -280,6 +292,7 @@ impl<'a> ObjectFileReader<'a> {
 		match opcode {
 			OPCODE_ADD => Ok(Instruction::Add),
 			OPCODE_AND => Ok(Instruction::And),
+			OPCODE_CALL => Ok(Instruction::Call(self.read_u32()?, self.read_u32()?)),
 			OPCODE_DIVIDE => Ok(Instruction::Divide),
 			OPCODE_EQUAL => Ok(Instruction::Equal),
 			OPCODE_GREATER_THAN => Ok(Instruction::GreaterThan),
@@ -300,6 +313,8 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_PUSH_DECIMAL => Ok(Instruction::PushDecimal(self.read_decimal()?)),
 			OPCODE_PUSH_INTEGER => Ok(Instruction::PushInteger(self.read_i64()?)),
 			OPCODE_PUSH_TEXT => Ok(Instruction::PushText(self.read_string()?)),
+			OPCODE_RETURN => Ok(Instruction::Return),
+			OPCODE_RETURN_VOID => Ok(Instruction::ReturnVoid),
 			OPCODE_STORE_LOCAL => Ok(Instruction::StoreLocal(self.read_u32()?)),
 			OPCODE_SUBTRACT => Ok(Instruction::Subtract),
 			OPCODE_XOR => Ok(Instruction::Xor),
@@ -311,10 +326,20 @@ impl<'a> ObjectFileReader<'a> {
 	}
 
 	fn read_layout(&mut self) -> Result<ObjectFileLayout, ObjectFileError> {
+		let function_count = self.read_u32()? as usize;
+		let mut sections = Vec::with_capacity(function_count + 1);
+
+		for index in 0..function_count {
+			sections.push(ObjectFileSection::Function(CompiledFunction::new(
+				Some(format!("function_{index}")),
+				self.read_code_body()?,
+			)));
+		}
+
+		sections.push(ObjectFileSection::EntryCode(self.read_code_body()?));
+
 		Ok(ObjectFileLayout {
-			sections: vec![
-				ObjectFileSection::EntryCode(self.read_code_body()?),
-			],
+			sections,
 		})
 	}
 
@@ -355,18 +380,26 @@ impl ObjectFileLayout {
 			"The current object file format does not yet serialize debug metadata."
 		);
 
-		Self {
-			sections: vec![
-				ObjectFileSection::EntryCode(program.entry.clone()),
-			],
+		let mut sections = Vec::with_capacity(program.functions().len() + 1);
+
+		for function in program.functions() {
+			sections.push(ObjectFileSection::Function(function.clone()));
 		}
+
+		sections.push(ObjectFileSection::EntryCode(program.entry.clone()));
+
+		Self { sections }
 	}
 
 	fn into_program(self) -> Result<Program, ObjectFileError> {
 		let mut entry_code = None;
+		let mut functions = Vec::new();
 
 		for section in self.sections {
 			match section {
+				ObjectFileSection::Function(function) => {
+					functions.push(function);
+				}
 				ObjectFileSection::EntryCode(code_body) => {
 					if entry_code.is_some() {
 						return Err(ObjectFileError {
@@ -385,12 +418,18 @@ impl ObjectFileLayout {
 			message: String::from("Object file does not contain an entry code section."),
 		})?;
 
-		Ok(Program::from_parts(ConstantPool::default(), entry_code))
+		Ok(Program::from_parts_with_functions(ConstantPool::default(), entry_code, functions))
 	}
 
 	fn write_to(&self, bytes: &mut Vec<u8>) {
+		let function_count = self.sections.iter()
+			.filter(|section| matches!(section, ObjectFileSection::Function(_)))
+			.count() as u32;
+		bytes.extend_from_slice(&function_count.to_le_bytes());
+
 		for section in &self.sections {
 			match section {
+				ObjectFileSection::Function(function) => write_code_body(bytes, function.body()),
 				ObjectFileSection::EntryCode(code_body) => write_code_body(bytes, code_body),
 			}
 		}
@@ -399,6 +438,9 @@ impl ObjectFileLayout {
 
 #[cfg(test)]
 mod tests {
+	use crate::bytecode::CodeBody;
+	use crate::bytecode::CompiledFunction;
+	use crate::bytecode::ConstantPool;
 	use crate::bytecode::Instruction;
 	use crate::bytecode::Program;
 
@@ -419,13 +461,13 @@ mod tests {
 	#[test]
 	fn rejects_unknown_opcode() {
 		let mut bytes = write_program(&Program::new(Vec::new()));
-		bytes[6..10].copy_from_slice(&1u32.to_le_bytes());
+		bytes[10..14].copy_from_slice(&1u32.to_le_bytes());
 		bytes.push(255);
 
 		let error = read_program(&bytes).unwrap_err();
 
 		assert_eq!(error, ObjectFileError {
-			offset: 10,
+			offset: 14,
 			message: String::from("Unknown opcode 255."),
 		});
 	}
@@ -468,6 +510,52 @@ mod tests {
 		let decoded = read_program(&bytes).unwrap();
 
 		assert_eq!(decoded, program);
+	}
+
+	#[test]
+	fn round_trips_program_bytes_with_compiled_function() {
+		let program = Program::from_parts_with_functions(
+			ConstantPool::default(),
+			CodeBody::new(vec![
+				Instruction::PushInteger(1),
+				Instruction::PushInteger(2),
+				Instruction::Call(0, 2),
+			]),
+			vec![
+				CompiledFunction::new(
+					Some(String::from("add")),
+					CodeBody::new(vec![
+						Instruction::LoadLocal(0),
+						Instruction::LoadLocal(1),
+						Instruction::Add,
+						Instruction::Return,
+					]),
+				),
+			],
+		);
+
+		let bytes = write_program(&program);
+		let decoded = read_program(&bytes).unwrap();
+
+		assert_eq!(decoded, Program::from_parts_with_functions(
+			ConstantPool::default(),
+			CodeBody::new(vec![
+				Instruction::PushInteger(1),
+				Instruction::PushInteger(2),
+				Instruction::Call(0, 2),
+			]),
+			vec![
+				CompiledFunction::new(
+					Some(String::from("function_0")),
+					CodeBody::new(vec![
+						Instruction::LoadLocal(0),
+						Instruction::LoadLocal(1),
+						Instruction::Add,
+						Instruction::Return,
+					]),
+				),
+			],
+		));
 	}
 
 	#[test]

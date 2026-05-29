@@ -17,6 +17,7 @@ pub enum Constant {
 pub enum Instruction {
 	Add,
 	And,
+	Call(u32, u32),
 	Divide,
 	Equal,
 	GreaterThan,
@@ -37,6 +38,8 @@ pub enum Instruction {
 	PushDecimal(Decimal),
 	PushInteger(i64),
 	PushText(String),
+	Return,
+	ReturnVoid,
 	StoreLocal(u32),
 	Subtract,
 	Xor,
@@ -52,6 +55,12 @@ pub struct CodeBodyDebugInfo {
 	body_name: Option<String>,
 	instruction_positions: Vec<usize>,
 	source_file_index: Option<u32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompiledFunction {
+	body: CodeBody,
+	name: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -72,6 +81,7 @@ pub struct DebugInfo {
 pub struct Program {
 	constants: ConstantPool,
 	debug: DebugInfo,
+	functions: Vec<CompiledFunction>,
 	pub entry: CodeBody,
 }
 
@@ -85,6 +95,23 @@ impl CodeBody {
 		Self {
 			instructions,
 		}
+	}
+}
+
+impl CompiledFunction {
+	pub fn new(name: Option<String>, body: CodeBody) -> Self {
+		Self {
+			body,
+			name,
+		}
+	}
+
+	pub fn body(&self) -> &CodeBody {
+		&self.body
+	}
+
+	pub fn name(&self) -> Option<&str> {
+		self.name.as_deref()
 	}
 }
 
@@ -124,13 +151,27 @@ impl Program {
 	}
 
 	pub fn from_parts(constants: ConstantPool, entry: CodeBody) -> Self {
-		Self::from_parts_with_debug(constants, entry, DebugInfo::default())
+		Self::from_parts_with_functions_and_debug(constants, entry, Vec::new(), DebugInfo::default())
 	}
 
 	pub fn from_parts_with_debug(constants: ConstantPool, entry: CodeBody, debug: DebugInfo) -> Self {
+		Self::from_parts_with_functions_and_debug(constants, entry, Vec::new(), debug)
+	}
+
+	pub fn from_parts_with_functions(constants: ConstantPool, entry: CodeBody, functions: Vec<CompiledFunction>) -> Self {
+		Self::from_parts_with_functions_and_debug(constants, entry, functions, DebugInfo::default())
+	}
+
+	pub fn from_parts_with_functions_and_debug(
+		constants: ConstantPool,
+		entry: CodeBody,
+		functions: Vec<CompiledFunction>,
+		debug: DebugInfo
+	) -> Self {
 		Self {
 			constants,
 			debug,
+			functions,
 			entry,
 		}
 	}
@@ -143,6 +184,10 @@ impl Program {
 		&self.debug
 	}
 
+	pub fn functions(&self) -> &[CompiledFunction] {
+		&self.functions
+	}
+
 	pub fn instructions(&self) -> &[Instruction] {
 		&self.entry.instructions
 	}
@@ -153,5 +198,32 @@ impl Default for ConstantPool {
 		Self {
 			entries: Vec::new(),
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::CodeBody;
+	use super::CompiledFunction;
+	use super::ConstantPool;
+	use super::Instruction;
+	use super::Program;
+
+	#[test]
+	fn retains_compiled_functions_alongside_entry_code() {
+		let entry = CodeBody::new(vec![
+			Instruction::PushInteger(1),
+		]);
+		let helper = CompiledFunction::new(
+			Some(String::from("helper")),
+			CodeBody::new(vec![
+				Instruction::PushInteger(2),
+			]),
+		);
+
+		let program = Program::from_parts_with_functions(ConstantPool::default(), entry.clone(), vec![helper.clone()]);
+
+		assert_eq!(program.entry, entry);
+		assert_eq!(program.functions(), &[helper]);
 	}
 }

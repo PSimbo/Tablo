@@ -172,6 +172,7 @@ impl Lexer {
 			}
 			'%' => TokenKind::Percent,
 			':' => TokenKind::Colon,
+			',' => TokenKind::Comma,
 			'{' => TokenKind::LeftBrace,
 			';' => TokenKind::Semicolon,
 			'(' => TokenKind::LeftParenthesis,
@@ -309,13 +310,16 @@ impl Lexer {
 			"dec" => TokenKind::DecKeyword,
 			"else" => TokenKind::ElseKeyword,
 			"false" => TokenKind::FalseKeyword,
+			"fn" => TokenKind::FnKeyword,
 			"if" => TokenKind::IfKeyword,
 			"int" => TokenKind::IntKeyword,
 			"not" => TokenKind::NotKeyword,
 			"or" => TokenKind::OrKeyword,
+			"return" => TokenKind::ReturnKeyword,
 			"text" => TokenKind::TextKeyword,
 			"true" => TokenKind::TrueKeyword,
 			"var" => TokenKind::VarKeyword,
+			"void" => TokenKind::VoidKeyword,
 			"while" => TokenKind::WhileKeyword,
 			"xor" => TokenKind::XorKeyword,
 			_ => TokenKind::Identifier,
@@ -695,28 +699,31 @@ mod tests {
 
 	#[test]
 	fn tokenizes_boolean_literals() {
-		let mut lexer = Lexer::new(SourceText::new("true false and else if or not while xor bool const dec int text var"));
+		let mut lexer = Lexer::new(SourceText::new("true false and else fn if or not return void while xor bool const dec int text var"));
 		let tokens = lexer.tokenize().unwrap();
 
-		assert_eq!(tokens.len(), 16);
+		assert_eq!(tokens.len(), 19);
 		assert_eq!(tokens[0].kind, TokenKind::TrueKeyword);
 		assert_eq!(tokens[0].lexeme, "true");
 		assert_eq!(tokens[1].kind, TokenKind::FalseKeyword);
 		assert_eq!(tokens[1].lexeme, "false");
 		assert_eq!(tokens[2].kind, TokenKind::AndKeyword);
 		assert_eq!(tokens[3].kind, TokenKind::ElseKeyword);
-		assert_eq!(tokens[4].kind, TokenKind::IfKeyword);
-		assert_eq!(tokens[5].kind, TokenKind::OrKeyword);
-		assert_eq!(tokens[6].kind, TokenKind::NotKeyword);
-		assert_eq!(tokens[7].kind, TokenKind::WhileKeyword);
-		assert_eq!(tokens[8].kind, TokenKind::XorKeyword);
-		assert_eq!(tokens[9].kind, TokenKind::BoolKeyword);
-		assert_eq!(tokens[10].kind, TokenKind::ConstKeyword);
-		assert_eq!(tokens[11].kind, TokenKind::DecKeyword);
-		assert_eq!(tokens[12].kind, TokenKind::IntKeyword);
-		assert_eq!(tokens[13].kind, TokenKind::TextKeyword);
-		assert_eq!(tokens[14].kind, TokenKind::VarKeyword);
-		assert_eq!(tokens[15].kind, TokenKind::EndOfFile);
+		assert_eq!(tokens[4].kind, TokenKind::FnKeyword);
+		assert_eq!(tokens[5].kind, TokenKind::IfKeyword);
+		assert_eq!(tokens[6].kind, TokenKind::OrKeyword);
+		assert_eq!(tokens[7].kind, TokenKind::NotKeyword);
+		assert_eq!(tokens[8].kind, TokenKind::ReturnKeyword);
+		assert_eq!(tokens[9].kind, TokenKind::VoidKeyword);
+		assert_eq!(tokens[10].kind, TokenKind::WhileKeyword);
+		assert_eq!(tokens[11].kind, TokenKind::XorKeyword);
+		assert_eq!(tokens[12].kind, TokenKind::BoolKeyword);
+		assert_eq!(tokens[13].kind, TokenKind::ConstKeyword);
+		assert_eq!(tokens[14].kind, TokenKind::DecKeyword);
+		assert_eq!(tokens[15].kind, TokenKind::IntKeyword);
+		assert_eq!(tokens[16].kind, TokenKind::TextKeyword);
+		assert_eq!(tokens[17].kind, TokenKind::VarKeyword);
+		assert_eq!(tokens[18].kind, TokenKind::EndOfFile);
 	}
 
 	#[test]
@@ -731,6 +738,18 @@ mod tests {
 		assert_eq!(tokens[2].kind, TokenKind::DecimalLiteral);
 		assert_eq!(tokens[2].lexeme, ".5");
 		assert_eq!(tokens[3].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
+	fn tokenizes_function_signature_punctuation() {
+		let mut lexer = Lexer::new(SourceText::new("fn add(a: int, b: int) int { return a; }"));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens[0].kind, TokenKind::FnKeyword);
+		assert_eq!(tokens[4].kind, TokenKind::Colon);
+		assert_eq!(tokens[6].kind, TokenKind::Comma);
+		assert_eq!(tokens[8].kind, TokenKind::Colon);
+		assert_eq!(tokens[13].kind, TokenKind::ReturnKeyword);
 	}
 
 	#[test]

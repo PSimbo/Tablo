@@ -34,6 +34,7 @@ pub enum DataType {
 	Dec,
 	Int,
 	Text,
+	Void,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,6 +42,7 @@ pub enum Expr {
 	Assignment(AssignmentExpr),
 	Binary(BinaryExpr),
 	Boolean(BooleanLiteral),
+	Call(CallExpr),
 	Decimal(DecimalLiteral),
 	Identifier(IdentifierExpr),
 	Integer(IntegerLiteral),
@@ -53,6 +55,7 @@ pub enum Statement {
 	Block(BlockStatement),
 	Expression(Expr),
 	If(IfStatement),
+	Return(ReturnStatement),
 	VariableDeclaration(VariableDeclaration),
 	While(WhileStatement),
 }
@@ -92,9 +95,32 @@ pub struct BooleanLiteral {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CallExpr {
+	pub arguments: Vec<Expr>,
+	pub callee: IdentifierExpr,
+	pub position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DecimalLiteral {
 	pub position: usize,
 	pub value: Decimal,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FunctionDeclaration {
+	pub body: BlockStatement,
+	pub name: String,
+	pub parameters: Vec<FunctionParameter>,
+	pub position: usize,
+	pub return_type: DataType,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FunctionParameter {
+	pub data_type: DataType,
+	pub name: String,
+	pub position: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -119,8 +145,15 @@ pub struct IntegerLiteral {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Program {
+	pub functions: Vec<FunctionDeclaration>,
 	pub result: Option<Expr>,
 	pub statements: Vec<Statement>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReturnStatement {
+	pub position: usize,
+	pub value: Option<Expr>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -158,6 +191,7 @@ impl Expr {
 			Expr::Assignment(expression) => expression.position,
 			Expr::Binary(expression) => expression.position,
 			Expr::Boolean(expression) => expression.position,
+			Expr::Call(expression) => expression.position,
 			Expr::Decimal(expression) => expression.position,
 			Expr::Identifier(expression) => expression.position,
 			Expr::Integer(expression) => expression.position,

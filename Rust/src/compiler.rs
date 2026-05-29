@@ -6,16 +6,21 @@ use crate::ast::AssignmentExpr;
 use crate::ast::AssignmentOperator;
 use crate::ast::BlockStatement;
 use crate::ast::BooleanLiteral;
+use crate::ast::CallExpr;
 use crate::ast::DecimalLiteral;
 use crate::ast::Expr;
+use crate::ast::FunctionDeclaration;
 use crate::ast::IdentifierExpr;
 use crate::ast::IfStatement;
 use crate::ast::Program as AstProgram;
+use crate::ast::ReturnStatement;
 use crate::ast::Statement;
 use crate::ast::TextLiteral;
 use crate::ast::UnaryExpr;
 use crate::ast::VariableDeclaration;
 use crate::ast::WhileStatement;
+use crate::bytecode::CodeBody;
+use crate::bytecode::CompiledFunction;
 use crate::bytecode::Instruction;
 use crate::bytecode::Program;
 use crate::semantic::analyzer::SemanticAnalyzer;
@@ -82,6 +87,11 @@ impl Compiler {
 
 	pub fn compile_program(&mut self, program: &AstProgram) -> Result<Program, CompileError> {
 		let semantic_program = SemanticAnalyzer::new().analyze_program(program)?;
+		let mut functions = Vec::with_capacity(program.functions.len());
+
+		for function in &program.functions {
+			functions.push(self.compile_function(function, &semantic_program)?);
+		}
 
 		let mut instructions = Vec::new();
 
@@ -93,18 +103,15 @@ impl Compiler {
 			self.compile_into(result, &semantic_program, &mut instructions);
 		}
 
-		Ok(Program::new(instructions))
+		Ok(Program::from_parts_with_functions(
+			crate::bytecode::ConstantPool::default(),
+			CodeBody::new(instructions),
+			functions,
+		))
 	}
 
 	pub fn new() -> Self {
 		Self
-	}
-
-	fn compile_error(&self, position: usize, message: impl Into<String>) -> CompileError {
-		CompileError {
-			message: message.into(),
-			position,
-		}
 	}
 
 	fn compile_assignment(&mut self, slot: u32, operator: AssignmentOperator, value: &Expr, semantic_program: &SemanticProgram, instructions: &mut Vec<Instruction>) {
@@ -119,6 +126,23 @@ impl Compiler {
 
 		instructions.push(Instruction::StoreLocal(slot));
 		instructions.push(Instruction::LoadLocal(slot));
+	}
+
+	fn compile_error(&self, position: usize, message: impl Into<String>) -> CompileError {
+		CompileError {
+			message: message.into(),
+			position,
+		}
+	}
+
+	fn compile_function(&mut self, function: &FunctionDeclaration, semantic_program: &SemanticProgram) -> Result<CompiledFunction, CompileError> {
+		let mut instructions = Vec::new();
+		self.compile_statement(&Statement::Block(function.body.clone()), semantic_program, &mut instructions)?;
+
+		Ok(CompiledFunction::new(
+			Some(function.name.clone()),
+			CodeBody::new(instructions),
+		))
 	}
 
 	fn compile_into(&mut self, expression: &Expr, semantic_program: &SemanticProgram, instructions: &mut Vec<Instruction>) {
@@ -137,6 +161,16 @@ impl Compiler {
 			}
 			Expr::Boolean(BooleanLiteral { value, .. }) => {
 				instructions.push(Instruction::PushBoolean(*value));
+			}
+			Expr::Call(CallExpr { arguments, .. }) => {
+				let function_index = semantic_program.call_target(expression.position())
+					.unwrap_or_else(|| panic!("Missing function target for call expression."));
+
+				for argument in arguments {
+					self.compile_into(argument, semantic_program, instructions);
+				}
+
+				instructions.push(Instruction::Call(function_index, arguments.len() as u32));
 			}
 			Expr::Decimal(DecimalLiteral { value, .. }) => {
 				instructions.push(Instruction::PushDecimal(value.clone()));
@@ -170,7 +204,11 @@ impl Compiler {
 			}
 			Statement::Expression(expression) => {
 				self.compile_into(expression, semantic_program, instructions);
-				instructions.push(Instruction::Pop);
+
+				if expression_produces_runtime_value(expression, semantic_program) {
+					instructions.push(Instruction::Pop);
+				}
+
 				Ok(())
 			}
 			Statement::If(IfStatement {
@@ -199,6 +237,17 @@ impl Compiler {
 				else {
 					let end_target = instructions.len() as u32;
 					instructions[jump_if_false_index] = Instruction::JumpIfFalse(end_target);
+				}
+
+				Ok(())
+			}
+			Statement::Return(ReturnStatement { value, .. }) => {
+				if let Some(value) = value {
+					self.compile_into(value, semantic_program, instructions);
+					instructions.push(Instruction::Return);
+				}
+				else {
+					instructions.push(Instruction::ReturnVoid);
 				}
 
 				Ok(())
@@ -242,6 +291,13 @@ impl Compiler {
 				Ok(())
 			}
 		}
+	}
+}
+
+fn expression_produces_runtime_value(expression: &Expr, semantic_program: &SemanticProgram) -> bool {
+	match expression {
+		Expr::Call(call) => semantic_program.call_return_type(call.position) != Some(crate::ast::DataType::Void),
+		_ => true,
 	}
 }
 
@@ -322,6 +378,7 @@ mod tests {
 	#[test]
 	fn compiles_compound_assignment_expression() {
 		let program = AstProgram {
+			functions: vec![],
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
@@ -364,6 +421,7 @@ mod tests {
 	#[test]
 	fn compiles_const_declaration() {
 		let program = AstProgram {
+			functions: vec![],
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
@@ -432,6 +490,7 @@ mod tests {
 	#[test]
 	fn compiles_expression_statement_to_pop_its_result() {
 		let program = AstProgram {
+			functions: vec![],
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
@@ -480,6 +539,7 @@ mod tests {
 	#[test]
 	fn compiles_if_else_statement() {
 		let program = AstProgram {
+			functions: vec![],
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
@@ -562,6 +622,7 @@ mod tests {
 	#[test]
 	fn compiles_if_without_else_statement() {
 		let program = AstProgram {
+			functions: vec![],
 			statements: vec![
 				Statement::If(IfStatement {
 					condition: Expr::Boolean(BooleanLiteral {
@@ -688,6 +749,7 @@ mod tests {
 	#[test]
 	fn compiles_program_with_variable_declarations() {
 		let program = AstProgram {
+			functions: vec![],
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
@@ -761,6 +823,7 @@ mod tests {
 	#[test]
 	fn compiles_while_statement() {
 		let program = AstProgram {
+			functions: vec![],
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
@@ -834,6 +897,7 @@ mod tests {
 	#[test]
 	fn rejects_assignment_to_const() {
 		let program = AstProgram {
+			functions: vec![],
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
@@ -868,6 +932,7 @@ mod tests {
 	#[test]
 	fn rejects_compound_assignment_when_result_type_changes() {
 		let program = AstProgram {
+			functions: vec![],
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
@@ -902,6 +967,7 @@ mod tests {
 	#[test]
 	fn rejects_non_boolean_if_condition() {
 		let program = AstProgram {
+			functions: vec![],
 			statements: vec![
 				Statement::If(IfStatement {
 					condition: Expr::Integer(IntegerLiteral {
@@ -928,6 +994,7 @@ mod tests {
 	#[test]
 	fn rejects_non_boolean_while_condition() {
 		let program = AstProgram {
+			functions: vec![],
 			statements: vec![
 				Statement::While(WhileStatement {
 					body: BlockStatement {
@@ -953,6 +1020,7 @@ mod tests {
 	#[test]
 	fn rejects_wrong_type_in_assignment() {
 		let program = AstProgram {
+			functions: vec![],
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
@@ -987,6 +1055,7 @@ mod tests {
 	#[test]
 	fn rejects_wrong_type_in_variable_initializer() {
 		let program = AstProgram {
+			functions: vec![],
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
