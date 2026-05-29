@@ -1,3 +1,8 @@
+// This module encodes and decodes the current `.tbo` object file format.
+// The format is still deliberately simple, but this is another likely split
+// point once the object file grows support for multiple sections and debug
+// metadata.
+
 use std::path::Path;
 
 use crate::bytecode::Instruction;

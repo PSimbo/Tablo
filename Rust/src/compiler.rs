@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+// The compiler currently performs both semantic checking and bytecode emission.
+// This file is a likely future split point once the language surface grows further.
 
 use crate::ast::AssignmentExpr;
 use crate::ast::AssignmentOperator;
@@ -19,6 +20,7 @@ use crate::ast::UnaryOperator;
 use crate::ast::VariableDeclaration;
 use crate::bytecode::Instruction;
 use crate::bytecode::Program;
+use crate::semantic::scope::ScopeStack;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompileError {
@@ -28,9 +30,8 @@ pub struct CompileError {
 
 #[derive(Default)]
 pub struct Compiler {
-	locals: BTreeMap<String, Vec<Local>>,
+	locals: ScopeStack<Local>,
 	next_local_slot: u32,
-	scope_stack: Vec<Vec<String>>,
 }
 
 #[derive(Clone, Copy)]
@@ -48,9 +49,8 @@ impl Compiler {
 	}
 
 	pub fn compile_program(&mut self, program: &AstProgram) -> Result<Program, CompileError> {
-		self.locals.clear();
+		self.locals = ScopeStack::default();
 		self.next_local_slot = 0;
-		self.scope_stack.clear();
 
 		let mut instructions = Vec::new();
 		self.enter_scope();
@@ -69,9 +69,8 @@ impl Compiler {
 
 	pub fn new() -> Self {
 		Self {
-			locals: BTreeMap::new(),
+			locals: ScopeStack::default(),
 			next_local_slot: 0,
-			scope_stack: Vec::new(),
 		}
 	}
 
@@ -445,11 +444,7 @@ impl Compiler {
 	}
 
 	fn current_scope_contains(&self, name: &str) -> bool {
-		let Some(scope) = self.scope_stack.last() else {
-			return false;
-		};
-
-		scope.iter().any(|declared_name| declared_name == name)
+		self.locals.contains_in_current_scope(name)
 	}
 
 	fn data_type_name(&self, data_type: DataType) -> &'static str {
@@ -462,11 +457,7 @@ impl Compiler {
 	}
 
 	fn declare_local(&mut self, name: String, local: Local) {
-		self.locals.entry(name.clone()).or_default().push(local);
-
-		if let Some(scope) = self.scope_stack.last_mut() {
-			scope.push(name);
-		}
+		self.locals.declare(name, local);
 	}
 
 	fn ensure_assignable(&self, target: DataType, value: DataType, position: usize) -> Result<(), CompileError> {
@@ -485,27 +476,11 @@ impl Compiler {
 	}
 
 	fn enter_scope(&mut self) {
-		self.scope_stack.push(Vec::new());
+		self.locals.enter_scope();
 	}
 
 	fn exit_scope(&mut self) {
-		let Some(scope) = self.scope_stack.pop() else {
-			return;
-		};
-
-		for name in scope.into_iter().rev() {
-			let should_remove = if let Some(locals) = self.locals.get_mut(&name) {
-				locals.pop();
-				locals.is_empty()
-			}
-			else {
-				false
-			};
-
-			if should_remove {
-				self.locals.remove(&name);
-			}
-		}
+		self.locals.exit_scope();
 	}
 
 	fn infer_expression_type(&self, expression: &Expr) -> Result<DataType, CompileError> {
@@ -569,7 +544,7 @@ impl Compiler {
 	}
 
 	fn lookup_local(&self, name: &str) -> Option<Local> {
-		self.locals.get(name).and_then(|locals| locals.last()).copied()
+		self.locals.lookup(name).copied()
 	}
 
 	fn numeric_result_type(&self, lhs: DataType, rhs: DataType, position: usize) -> Result<DataType, CompileError> {

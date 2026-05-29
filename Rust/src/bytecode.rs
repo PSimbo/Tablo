@@ -1,3 +1,8 @@
+// These types represent the current in-memory bytecode model used by both the
+// compiler and the VM. It is intentionally small today, but it will likely
+// grow into a richer structure once functions, sections, and debug metadata
+// are introduced.
+
 use crate::value::Decimal;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
