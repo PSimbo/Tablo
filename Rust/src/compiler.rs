@@ -4,7 +4,6 @@
 
 use crate::ast::AssignmentExpr;
 use crate::ast::AssignmentOperator;
-use crate::ast::BinaryOperator;
 use crate::ast::BlockStatement;
 use crate::ast::BooleanLiteral;
 use crate::ast::DecimalLiteral;
@@ -15,7 +14,6 @@ use crate::ast::Program as AstProgram;
 use crate::ast::Statement;
 use crate::ast::TextLiteral;
 use crate::ast::UnaryExpr;
-use crate::ast::UnaryOperator;
 use crate::ast::VariableDeclaration;
 use crate::bytecode::Instruction;
 use crate::bytecode::Program;
@@ -30,6 +28,49 @@ pub struct CompileError {
 
 #[derive(Default)]
 pub struct Compiler;
+
+impl AssignmentOperator {
+	fn compound_instruction(self) -> Option<Instruction> {
+		match self {
+			AssignmentOperator::Assign => None,
+			AssignmentOperator::AddAssign => Some(Instruction::Add),
+			AssignmentOperator::DivideAssign => Some(Instruction::Divide),
+			AssignmentOperator::ModuloAssign => Some(Instruction::Modulo),
+			AssignmentOperator::MultiplyAssign => Some(Instruction::Multiply),
+			AssignmentOperator::SubtractAssign => Some(Instruction::Subtract),
+		}
+	}
+}
+
+impl crate::ast::BinaryOperator {
+	fn instruction(self) -> Instruction {
+		match self {
+			crate::ast::BinaryOperator::Add => Instruction::Add,
+			crate::ast::BinaryOperator::And => Instruction::And,
+			crate::ast::BinaryOperator::Divide => Instruction::Divide,
+			crate::ast::BinaryOperator::Equal => Instruction::Equal,
+			crate::ast::BinaryOperator::GreaterThan => Instruction::GreaterThan,
+			crate::ast::BinaryOperator::GreaterThanOrEqual => Instruction::GreaterThanOrEqual,
+			crate::ast::BinaryOperator::LessThan => Instruction::LessThan,
+			crate::ast::BinaryOperator::LessThanOrEqual => Instruction::LessThanOrEqual,
+			crate::ast::BinaryOperator::Modulo => Instruction::Modulo,
+			crate::ast::BinaryOperator::Multiply => Instruction::Multiply,
+			crate::ast::BinaryOperator::NotEqual => Instruction::NotEqual,
+			crate::ast::BinaryOperator::Or => Instruction::Or,
+			crate::ast::BinaryOperator::Subtract => Instruction::Subtract,
+			crate::ast::BinaryOperator::Xor => Instruction::Xor,
+		}
+	}
+}
+
+impl crate::ast::UnaryOperator {
+	fn instruction(self) -> Instruction {
+		match self {
+			crate::ast::UnaryOperator::Negate => Instruction::Negate,
+			crate::ast::UnaryOperator::Not => Instruction::Not,
+		}
+	}
+}
 
 impl Compiler {
 	pub fn compile_expression(&mut self, expression: &Expr) -> Program {
@@ -65,6 +106,20 @@ impl Compiler {
 		}
 	}
 
+	fn compile_assignment(&mut self, slot: u32, operator: AssignmentOperator, value: &Expr, semantic_program: &SemanticProgram, instructions: &mut Vec<Instruction>) {
+		if let Some(instruction) = operator.compound_instruction() {
+			instructions.push(Instruction::LoadLocal(slot));
+			self.compile_into(value, semantic_program, instructions);
+			instructions.push(instruction);
+		}
+		else {
+			self.compile_into(value, semantic_program, instructions);
+		}
+
+		instructions.push(Instruction::StoreLocal(slot));
+		instructions.push(Instruction::LoadLocal(slot));
+	}
+
 	fn compile_into(&mut self, expression: &Expr, semantic_program: &SemanticProgram, instructions: &mut Vec<Instruction>) {
 		let _ = self;
 
@@ -72,61 +127,12 @@ impl Compiler {
 			Expr::Assignment(AssignmentExpr { operator, target, value, .. }) => {
 				let slot = semantic_program.identifier_slot(target.position)
 					.unwrap_or_else(|| panic!("Missing slot for identifier `{}`.", target.name));
-
-				match operator {
-					AssignmentOperator::AddAssign => {
-						instructions.push(Instruction::LoadLocal(slot));
-						self.compile_into(value, semantic_program, instructions);
-						instructions.push(Instruction::Add);
-					}
-					AssignmentOperator::Assign => {
-						self.compile_into(value, semantic_program, instructions);
-					}
-					AssignmentOperator::DivideAssign => {
-						instructions.push(Instruction::LoadLocal(slot));
-						self.compile_into(value, semantic_program, instructions);
-						instructions.push(Instruction::Divide);
-					}
-					AssignmentOperator::ModuloAssign => {
-						instructions.push(Instruction::LoadLocal(slot));
-						self.compile_into(value, semantic_program, instructions);
-						instructions.push(Instruction::Modulo);
-					}
-					AssignmentOperator::MultiplyAssign => {
-						instructions.push(Instruction::LoadLocal(slot));
-						self.compile_into(value, semantic_program, instructions);
-						instructions.push(Instruction::Multiply);
-					}
-					AssignmentOperator::SubtractAssign => {
-						instructions.push(Instruction::LoadLocal(slot));
-						self.compile_into(value, semantic_program, instructions);
-						instructions.push(Instruction::Subtract);
-					}
-				}
-
-				instructions.push(Instruction::StoreLocal(slot));
-				instructions.push(Instruction::LoadLocal(slot));
+				self.compile_assignment(slot, *operator, value, semantic_program, instructions);
 			}
 			Expr::Binary(binary) => {
 				self.compile_into(&binary.left, semantic_program, instructions);
 				self.compile_into(&binary.right, semantic_program, instructions);
-
-				match binary.operator {
-					BinaryOperator::Add => instructions.push(Instruction::Add),
-					BinaryOperator::And => instructions.push(Instruction::And),
-					BinaryOperator::Divide => instructions.push(Instruction::Divide),
-					BinaryOperator::Equal => instructions.push(Instruction::Equal),
-					BinaryOperator::GreaterThan => instructions.push(Instruction::GreaterThan),
-					BinaryOperator::GreaterThanOrEqual => instructions.push(Instruction::GreaterThanOrEqual),
-					BinaryOperator::LessThan => instructions.push(Instruction::LessThan),
-					BinaryOperator::LessThanOrEqual => instructions.push(Instruction::LessThanOrEqual),
-					BinaryOperator::Modulo => instructions.push(Instruction::Modulo),
-					BinaryOperator::Multiply => instructions.push(Instruction::Multiply),
-					BinaryOperator::NotEqual => instructions.push(Instruction::NotEqual),
-					BinaryOperator::Or => instructions.push(Instruction::Or),
-					BinaryOperator::Subtract => instructions.push(Instruction::Subtract),
-					BinaryOperator::Xor => instructions.push(Instruction::Xor),
-				}
+				instructions.push(binary.operator.instruction());
 			}
 			Expr::Boolean(BooleanLiteral { value, .. }) => {
 				instructions.push(Instruction::PushBoolean(*value));
@@ -147,11 +153,7 @@ impl Compiler {
 			}
 			Expr::Unary(UnaryExpr { operand, operator, .. }) => {
 				self.compile_into(operand, semantic_program, instructions);
-
-				match operator {
-					UnaryOperator::Negate => instructions.push(Instruction::Negate),
-					UnaryOperator::Not => instructions.push(Instruction::Not),
-				}
+				instructions.push(operator.instruction());
 			}
 		}
 	}
