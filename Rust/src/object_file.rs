@@ -12,23 +12,25 @@ const OPCODE_DIVIDE: u8 = 3;
 const OPCODE_EQUAL: u8 = 4;
 const OPCODE_GREATER_THAN: u8 = 5;
 const OPCODE_GREATER_THAN_OR_EQUAL: u8 = 6;
-const OPCODE_LESS_THAN: u8 = 7;
-const OPCODE_LESS_THAN_OR_EQUAL: u8 = 8;
-const OPCODE_LOAD_LOCAL: u8 = 9;
-const OPCODE_MODULO: u8 = 10;
-const OPCODE_MULTIPLY: u8 = 11;
-const OPCODE_PUSH_BOOLEAN: u8 = 12;
-const OPCODE_PUSH_DECIMAL: u8 = 13;
-const OPCODE_PUSH_INTEGER: u8 = 14;
-const OPCODE_STORE_LOCAL: u8 = 15;
-const OPCODE_SUBTRACT: u8 = 16;
-const OPCODE_NEGATE: u8 = 17;
-const OPCODE_NOT_EQUAL: u8 = 18;
-const OPCODE_NOT: u8 = 19;
-const OPCODE_OR: u8 = 20;
-const OPCODE_XOR: u8 = 21;
-const OPCODE_POP: u8 = 22;
-const OPCODE_PUSH_TEXT: u8 = 23;
+const OPCODE_JUMP: u8 = 7;
+const OPCODE_JUMP_IF_FALSE: u8 = 8;
+const OPCODE_LESS_THAN: u8 = 9;
+const OPCODE_LESS_THAN_OR_EQUAL: u8 = 10;
+const OPCODE_LOAD_LOCAL: u8 = 11;
+const OPCODE_MODULO: u8 = 12;
+const OPCODE_MULTIPLY: u8 = 13;
+const OPCODE_PUSH_BOOLEAN: u8 = 14;
+const OPCODE_PUSH_DECIMAL: u8 = 15;
+const OPCODE_PUSH_INTEGER: u8 = 16;
+const OPCODE_STORE_LOCAL: u8 = 17;
+const OPCODE_SUBTRACT: u8 = 18;
+const OPCODE_NEGATE: u8 = 19;
+const OPCODE_NOT_EQUAL: u8 = 20;
+const OPCODE_NOT: u8 = 21;
+const OPCODE_OR: u8 = 22;
+const OPCODE_XOR: u8 = 23;
+const OPCODE_POP: u8 = 24;
+const OPCODE_PUSH_TEXT: u8 = 25;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectFileError {
@@ -83,6 +85,14 @@ pub fn write_program(program: &Program) -> Vec<u8> {
 			Instruction::Equal => bytes.push(OPCODE_EQUAL),
 			Instruction::GreaterThan => bytes.push(OPCODE_GREATER_THAN),
 			Instruction::GreaterThanOrEqual => bytes.push(OPCODE_GREATER_THAN_OR_EQUAL),
+			Instruction::Jump(target) => {
+				bytes.push(OPCODE_JUMP);
+				bytes.extend_from_slice(&target.to_le_bytes());
+			}
+			Instruction::JumpIfFalse(target) => {
+				bytes.push(OPCODE_JUMP_IF_FALSE);
+				bytes.extend_from_slice(&target.to_le_bytes());
+			}
 			Instruction::LessThan => bytes.push(OPCODE_LESS_THAN),
 			Instruction::LessThanOrEqual => bytes.push(OPCODE_LESS_THAN_OR_EQUAL),
 			Instruction::LoadLocal(slot) => {
@@ -236,6 +246,8 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_EQUAL => Ok(Instruction::Equal),
 			OPCODE_GREATER_THAN => Ok(Instruction::GreaterThan),
 			OPCODE_GREATER_THAN_OR_EQUAL => Ok(Instruction::GreaterThanOrEqual),
+			OPCODE_JUMP => Ok(Instruction::Jump(self.read_u32()?)),
+			OPCODE_JUMP_IF_FALSE => Ok(Instruction::JumpIfFalse(self.read_u32()?)),
 			OPCODE_LESS_THAN => Ok(Instruction::LessThan),
 			OPCODE_LESS_THAN_OR_EQUAL => Ok(Instruction::LessThanOrEqual),
 			OPCODE_LOAD_LOCAL => Ok(Instruction::LoadLocal(self.read_u32()?)),

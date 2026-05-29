@@ -543,7 +543,11 @@ Anonymous scopes are particularly useful for controlling the lifetime of mutable
 If Statements
 -------------
 
-Tablo supports if statements. There is no need to enclose the condition in parentheses.
+Tablo supports `if` statements. There is no need to enclose the condition in parentheses.
+
+The condition expression must evaluate to a `bool` value.
+
+Each branch body must be a block enclosed between `{` and `}`. An `else` branch may either introduce its own block or be followed immediately by another `if` statement to form an `else if` chain.
 
 ~~~
 var allowAnyDates: bool = true;
@@ -1369,9 +1373,10 @@ statement = block | blockStatement | simpleStatement
 block = `{` { statement } `}`
 
 blockStatement = forStatement | ifStatement | whileStatement
-simpleStatement = expression | returnStatement | variableDeclaration `;`
+simpleStatement = ( expression | returnStatement | variableDeclaration ) `;`
 variableDeclaration = ( `const` | `var` ) identifier `:` dataType [ `=` expression ]
 returnStatement = `return` [ expression ]
+ifStatement = `if` expression block [ `else` ( block | ifStatement ) ]
 dataType = unquotedIdentifier | arrayType
 arrayType = dataType `[` integerLiteral `]`
 

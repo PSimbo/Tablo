@@ -307,7 +307,9 @@ impl Lexer {
 			"bool" => TokenKind::BoolKeyword,
 			"const" => TokenKind::ConstKeyword,
 			"dec" => TokenKind::DecKeyword,
+			"else" => TokenKind::ElseKeyword,
 			"false" => TokenKind::FalseKeyword,
+			"if" => TokenKind::IfKeyword,
 			"int" => TokenKind::IntKeyword,
 			"not" => TokenKind::NotKeyword,
 			"or" => TokenKind::OrKeyword,
@@ -692,25 +694,27 @@ mod tests {
 
 	#[test]
 	fn tokenizes_boolean_literals() {
-		let mut lexer = Lexer::new(SourceText::new("true false and or not xor bool const dec int text var"));
+		let mut lexer = Lexer::new(SourceText::new("true false and else if or not xor bool const dec int text var"));
 		let tokens = lexer.tokenize().unwrap();
 
-		assert_eq!(tokens.len(), 13);
+		assert_eq!(tokens.len(), 15);
 		assert_eq!(tokens[0].kind, TokenKind::TrueKeyword);
 		assert_eq!(tokens[0].lexeme, "true");
 		assert_eq!(tokens[1].kind, TokenKind::FalseKeyword);
 		assert_eq!(tokens[1].lexeme, "false");
 		assert_eq!(tokens[2].kind, TokenKind::AndKeyword);
-		assert_eq!(tokens[3].kind, TokenKind::OrKeyword);
-		assert_eq!(tokens[4].kind, TokenKind::NotKeyword);
-		assert_eq!(tokens[5].kind, TokenKind::XorKeyword);
-		assert_eq!(tokens[6].kind, TokenKind::BoolKeyword);
-		assert_eq!(tokens[7].kind, TokenKind::ConstKeyword);
-		assert_eq!(tokens[8].kind, TokenKind::DecKeyword);
-		assert_eq!(tokens[9].kind, TokenKind::IntKeyword);
-		assert_eq!(tokens[10].kind, TokenKind::TextKeyword);
-		assert_eq!(tokens[11].kind, TokenKind::VarKeyword);
-		assert_eq!(tokens[12].kind, TokenKind::EndOfFile);
+		assert_eq!(tokens[3].kind, TokenKind::ElseKeyword);
+		assert_eq!(tokens[4].kind, TokenKind::IfKeyword);
+		assert_eq!(tokens[5].kind, TokenKind::OrKeyword);
+		assert_eq!(tokens[6].kind, TokenKind::NotKeyword);
+		assert_eq!(tokens[7].kind, TokenKind::XorKeyword);
+		assert_eq!(tokens[8].kind, TokenKind::BoolKeyword);
+		assert_eq!(tokens[9].kind, TokenKind::ConstKeyword);
+		assert_eq!(tokens[10].kind, TokenKind::DecKeyword);
+		assert_eq!(tokens[11].kind, TokenKind::IntKeyword);
+		assert_eq!(tokens[12].kind, TokenKind::TextKeyword);
+		assert_eq!(tokens[13].kind, TokenKind::VarKeyword);
+		assert_eq!(tokens[14].kind, TokenKind::EndOfFile);
 	}
 
 	#[test]

@@ -10,6 +10,7 @@ use crate::ast::DataType;
 use crate::ast::DecimalLiteral;
 use crate::ast::Expr;
 use crate::ast::IdentifierExpr;
+use crate::ast::IfStatement;
 use crate::ast::Program as AstProgram;
 use crate::ast::Statement;
 use crate::ast::TextLiteral;
@@ -369,6 +370,45 @@ impl Compiler {
 				instructions.push(Instruction::Pop);
 				Ok(())
 			}
+			Statement::If(IfStatement {
+				condition,
+				else_branch,
+				position,
+				then_branch,
+			}) => {
+				let condition_type = self.infer_expression_type(condition)?;
+
+				if condition_type != DataType::Bool {
+					return Err(self.compile_error(
+						condition.position().max(*position),
+						format!("`if` condition must be of type `bool`, found `{}`.", self.data_type_name(condition_type)),
+					));
+				}
+
+				self.compile_into_checked(condition, instructions)?;
+				let jump_if_false_index = instructions.len();
+				instructions.push(Instruction::JumpIfFalse(0));
+
+				self.compile_statement(&Statement::Block(then_branch.clone()), instructions)?;
+
+				if let Some(else_branch) = else_branch {
+					let jump_to_end_index = instructions.len();
+					instructions.push(Instruction::Jump(0));
+
+					let else_target = instructions.len() as u32;
+					instructions[jump_if_false_index] = Instruction::JumpIfFalse(else_target);
+					self.compile_statement(else_branch, instructions)?;
+
+					let end_target = instructions.len() as u32;
+					instructions[jump_to_end_index] = Instruction::Jump(end_target);
+				}
+				else {
+					let end_target = instructions.len() as u32;
+					instructions[jump_if_false_index] = Instruction::JumpIfFalse(end_target);
+				}
+
+				Ok(())
+			}
 			Statement::VariableDeclaration(VariableDeclaration { data_type, initial_value, is_const, name, position }) => {
 				if self.current_scope_contains(name) {
 					return Err(self.compile_error(
@@ -624,11 +664,13 @@ mod tests {
 	use crate::ast::AssignmentOperator;
 	use crate::ast::BinaryExpr;
 	use crate::ast::BinaryOperator;
+	use crate::ast::BlockStatement;
 	use crate::ast::BooleanLiteral;
 	use crate::ast::DataType;
 	use crate::ast::DecimalLiteral;
 	use crate::ast::Expr;
 	use crate::ast::IdentifierExpr;
+	use crate::ast::IfStatement;
 	use crate::ast::IntegerLiteral;
 	use crate::ast::Program as AstProgram;
 	use crate::ast::Statement;
@@ -814,6 +856,123 @@ mod tests {
 			Instruction::LoadLocal(0),
 			Instruction::Pop,
 			Instruction::LoadLocal(0),
+		]);
+	}
+
+	#[test]
+	fn compiles_if_else_statement() {
+		let program = AstProgram {
+			statements: vec![
+				Statement::VariableDeclaration(VariableDeclaration {
+					data_type: DataType::Int,
+					initial_value: Some(Expr::Integer(IntegerLiteral {
+						position: 0,
+						value: 1,
+					})),
+					is_const: false,
+					name: String::from("x"),
+					position: 0,
+				}),
+				Statement::If(IfStatement {
+					condition: Expr::Boolean(BooleanLiteral {
+						position: 0,
+						value: false,
+					}),
+					else_branch: Some(Box::new(Statement::Block(BlockStatement {
+						position: 0,
+						statements: vec![
+							Statement::Expression(Expr::Assignment(AssignmentExpr {
+								operator: AssignmentOperator::Assign,
+								position: 0,
+								target: IdentifierExpr {
+									name: String::from("x"),
+									position: 0,
+								},
+								value: Box::new(Expr::Integer(IntegerLiteral {
+									position: 0,
+									value: 3,
+								})),
+							})),
+						],
+					}))),
+					position: 0,
+					then_branch: BlockStatement {
+						position: 0,
+						statements: vec![
+							Statement::Expression(Expr::Assignment(AssignmentExpr {
+								operator: AssignmentOperator::Assign,
+								position: 0,
+								target: IdentifierExpr {
+									name: String::from("x"),
+									position: 0,
+								},
+								value: Box::new(Expr::Integer(IntegerLiteral {
+									position: 0,
+									value: 2,
+								})),
+							})),
+						],
+					},
+				}),
+			],
+			result: Some(Expr::Identifier(IdentifierExpr {
+				name: String::from("x"),
+				position: 0,
+			})),
+		};
+
+		let bytecode = Compiler::new().compile_program(&program).unwrap();
+
+		assert_eq!(bytecode.instructions, vec![
+			Instruction::PushInteger(1),
+			Instruction::StoreLocal(0),
+			Instruction::PushBoolean(false),
+			Instruction::JumpIfFalse(9),
+			Instruction::PushInteger(2),
+			Instruction::StoreLocal(0),
+			Instruction::LoadLocal(0),
+			Instruction::Pop,
+			Instruction::Jump(13),
+			Instruction::PushInteger(3),
+			Instruction::StoreLocal(0),
+			Instruction::LoadLocal(0),
+			Instruction::Pop,
+			Instruction::LoadLocal(0),
+		]);
+	}
+
+	#[test]
+	fn compiles_if_without_else_statement() {
+		let program = AstProgram {
+			statements: vec![
+				Statement::If(IfStatement {
+					condition: Expr::Boolean(BooleanLiteral {
+						position: 0,
+						value: true,
+					}),
+					else_branch: None,
+					position: 0,
+					then_branch: BlockStatement {
+						position: 0,
+						statements: vec![
+							Statement::Expression(Expr::Integer(IntegerLiteral {
+								position: 0,
+								value: 1,
+							})),
+						],
+					},
+				}),
+			],
+			result: None,
+		};
+
+		let bytecode = Compiler::new().compile_program(&program).unwrap();
+
+		assert_eq!(bytecode.instructions, vec![
+			Instruction::PushBoolean(true),
+			Instruction::JumpIfFalse(4),
+			Instruction::PushInteger(1),
+			Instruction::Pop,
 		]);
 	}
 
@@ -1077,6 +1236,32 @@ mod tests {
 		let error = Compiler::new().compile_program(&program).unwrap_err();
 
 		assert_eq!(error.message, "Cannot assign a value of type `dec` to a variable of type `int`.");
+	}
+
+	#[test]
+	fn rejects_non_boolean_if_condition() {
+		let program = AstProgram {
+			statements: vec![
+				Statement::If(IfStatement {
+					condition: Expr::Integer(IntegerLiteral {
+						position: 3,
+						value: 1,
+					}),
+					else_branch: None,
+					position: 0,
+					then_branch: BlockStatement {
+						position: 0,
+						statements: Vec::new(),
+					},
+				}),
+			],
+			result: None,
+		};
+
+		let error = Compiler::new().compile_program(&program).unwrap_err();
+
+		assert_eq!(error.message, "`if` condition must be of type `bool`, found `int`.");
+		assert_eq!(error.position, 3);
 	}
 
 	#[test]

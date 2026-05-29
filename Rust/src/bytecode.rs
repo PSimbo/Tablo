@@ -8,6 +8,8 @@ pub enum Instruction {
 	Equal,
 	GreaterThan,
 	GreaterThanOrEqual,
+	Jump(u32),
+	JumpIfFalse(u32),
 	LessThan,
 	LessThanOrEqual,
 	LoadLocal(u32),

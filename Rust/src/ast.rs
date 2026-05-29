@@ -52,6 +52,7 @@ pub enum Expr {
 pub enum Statement {
 	Block(BlockStatement),
 	Expression(Expr),
+	If(IfStatement),
 	VariableDeclaration(VariableDeclaration),
 }
 
@@ -99,6 +100,14 @@ pub struct DecimalLiteral {
 pub struct IdentifierExpr {
 	pub name: String,
 	pub position: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct IfStatement {
+	pub condition: Expr,
+	pub else_branch: Option<Box<Statement>>,
+	pub position: usize,
+	pub then_branch: BlockStatement,
 }
 
 #[derive(Clone, Debug)]
@@ -201,6 +210,16 @@ impl PartialEq for IdentifierExpr {
 }
 
 impl Eq for IdentifierExpr {}
+
+impl PartialEq for IfStatement {
+	fn eq(&self, other: &Self) -> bool {
+		self.condition == other.condition
+			&& self.else_branch == other.else_branch
+			&& self.then_branch == other.then_branch
+	}
+}
+
+impl Eq for IfStatement {}
 
 impl PartialEq for IntegerLiteral {
 	fn eq(&self, other: &Self) -> bool {

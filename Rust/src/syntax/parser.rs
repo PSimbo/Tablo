@@ -8,6 +8,7 @@ use crate::ast::DataType;
 use crate::ast::DecimalLiteral;
 use crate::ast::Expr;
 use crate::ast::IdentifierExpr;
+use crate::ast::IfStatement;
 use crate::ast::IntegerLiteral;
 use crate::ast::Program;
 use crate::ast::Statement;
@@ -67,7 +68,7 @@ impl Parser {
 		loop {
 			match self.current() {
 				Some(token) if token.kind == TokenKind::EndOfFile => break,
-				Some(token) if matches!(token.kind, TokenKind::ConstKeyword | TokenKind::LeftBrace | TokenKind::VarKeyword) => {
+				Some(token) if matches!(token.kind, TokenKind::ConstKeyword | TokenKind::IfKeyword | TokenKind::LeftBrace | TokenKind::VarKeyword) => {
 					statements.push(self.parse_statement()?);
 				}
 				Some(_) => {
@@ -307,6 +308,46 @@ impl Parser {
 			name: token.lexeme,
 			position: token.start,
 		})
+	}
+
+	fn parse_if_statement(&mut self) -> Result<Statement, ParseError> {
+		let if_keyword = self.expect_token(TokenKind::IfKeyword, "Expected `if` to start if statement.")?;
+		let condition = self.parse_assignment_expression()?;
+		let then_branch = match self.parse_block_statement()? {
+			Statement::Block(block) => block,
+			_ => unreachable!("Block parser must return a block statement."),
+		};
+
+		let else_branch = if self.current().is_some_and(|token| token.kind == TokenKind::ElseKeyword) {
+			self.next();
+
+			Some(Box::new(match self.current() {
+				Some(token) if token.kind == TokenKind::IfKeyword => self.parse_if_statement()?,
+				Some(token) if token.kind == TokenKind::LeftBrace => self.parse_block_statement()?,
+				Some(token) => {
+					return Err(ParseError {
+						message: format!("Expected `if` or `{{` after `else`, found `{}`.", token.lexeme),
+						position: token.start,
+					});
+				}
+				None => {
+					return Err(ParseError {
+						message: String::from("Expected `if` or `{` after `else`."),
+						position: if_keyword.start,
+					});
+				}
+			}))
+		}
+		else {
+			None
+		};
+
+		Ok(Statement::If(IfStatement {
+			condition,
+			else_branch,
+			position: if_keyword.start,
+			then_branch,
+		}))
 	}
 
 	fn parse_infix(&mut self, left: Expr, operator: Token, binding_power: BindingPower) -> Result<Expr, ParseError> {
@@ -574,6 +615,7 @@ impl Parser {
 
 	fn parse_statement(&mut self) -> Result<Statement, ParseError> {
 		match self.current() {
+			Some(token) if token.kind == TokenKind::IfKeyword => self.parse_if_statement(),
 			Some(token) if token.kind == TokenKind::LeftBrace => self.parse_block_statement(),
 			Some(token) if matches!(token.kind, TokenKind::ConstKeyword | TokenKind::VarKeyword) => {
 				self.parse_variable_declaration_statement()
@@ -647,6 +689,7 @@ mod tests {
 	use crate::ast::DecimalLiteral;
 	use crate::ast::Expr;
 	use crate::ast::IdentifierExpr;
+	use crate::ast::IfStatement;
 	use crate::ast::IntegerLiteral;
 	use crate::ast::Program;
 	use crate::ast::Statement;
@@ -891,6 +934,147 @@ mod tests {
 					value: 3,
 				})),
 			})
+		);
+	}
+
+	#[test]
+	fn parses_if_else_if_statement() {
+		assert_eq!(
+			parse_program("if false { var x: int = 1; } else if true { var y: int = 2; }"),
+			Program {
+				statements: vec![
+					Statement::If(IfStatement {
+						condition: Expr::Boolean(BooleanLiteral {
+							position: 0,
+							value: false,
+						}),
+						else_branch: Some(Box::new(Statement::If(IfStatement {
+							condition: Expr::Boolean(BooleanLiteral {
+								position: 0,
+								value: true,
+							}),
+							else_branch: None,
+							position: 0,
+							then_branch: BlockStatement {
+								position: 0,
+								statements: vec![
+									Statement::VariableDeclaration(VariableDeclaration {
+										data_type: DataType::Int,
+										initial_value: Some(Expr::Integer(IntegerLiteral {
+											position: 0,
+											value: 2,
+										})),
+										is_const: false,
+										name: String::from("y"),
+										position: 0,
+									}),
+								],
+							},
+						}))),
+						position: 0,
+						then_branch: BlockStatement {
+							position: 0,
+							statements: vec![
+								Statement::VariableDeclaration(VariableDeclaration {
+									data_type: DataType::Int,
+									initial_value: Some(Expr::Integer(IntegerLiteral {
+										position: 0,
+										value: 1,
+									})),
+									is_const: false,
+									name: String::from("x"),
+									position: 0,
+								}),
+							],
+						},
+					}),
+				],
+				result: None,
+			}
+		);
+	}
+
+	#[test]
+	fn parses_if_else_statement() {
+		assert_eq!(
+			parse_program("if true { var x: int = 1; } else { var x: int = 2; }"),
+			Program {
+				statements: vec![
+					Statement::If(IfStatement {
+						condition: Expr::Boolean(BooleanLiteral {
+							position: 0,
+							value: true,
+						}),
+						else_branch: Some(Box::new(Statement::Block(BlockStatement {
+							position: 0,
+							statements: vec![
+								Statement::VariableDeclaration(VariableDeclaration {
+									data_type: DataType::Int,
+									initial_value: Some(Expr::Integer(IntegerLiteral {
+										position: 0,
+										value: 2,
+									})),
+									is_const: false,
+									name: String::from("x"),
+									position: 0,
+								}),
+							],
+						}))),
+						position: 0,
+						then_branch: BlockStatement {
+							position: 0,
+							statements: vec![
+								Statement::VariableDeclaration(VariableDeclaration {
+									data_type: DataType::Int,
+									initial_value: Some(Expr::Integer(IntegerLiteral {
+										position: 0,
+										value: 1,
+									})),
+									is_const: false,
+									name: String::from("x"),
+									position: 0,
+								}),
+							],
+						},
+					}),
+				],
+				result: None,
+			}
+		);
+	}
+
+	#[test]
+	fn parses_if_statement() {
+		assert_eq!(
+			parse_program("if true { var x: int = 1; }"),
+			Program {
+				statements: vec![
+					Statement::If(IfStatement {
+						condition: Expr::Boolean(BooleanLiteral {
+							position: 0,
+							value: true,
+						}),
+						else_branch: None,
+						position: 0,
+						then_branch: BlockStatement {
+							position: 0,
+							statements: vec![
+								Statement::VariableDeclaration(VariableDeclaration {
+									data_type: DataType::Int,
+									initial_value: Some(Expr::Integer(IntegerLiteral {
+										position: 0,
+										value: 1,
+									})),
+									is_const: false,
+									name: String::from("x"),
+									position: 0,
+								}),
+							],
+						},
+					}),
+				],
+				result: None,
+			}
 		);
 	}
 
@@ -1245,6 +1429,17 @@ mod tests {
 				result: None,
 			}
 		);
+	}
+
+	#[test]
+	fn rejects_else_without_block_or_if() {
+		let mut lexer = Lexer::new(SourceText::new("if true { } else true"));
+		let tokens = lexer.tokenize().unwrap();
+		let mut parser = Parser::new(tokens);
+		let error = parser.parse_program().unwrap_err();
+
+		assert_eq!(error.message, "Expected `if` or `{` after `else`, found `true`.");
+		assert_eq!(error.position, 17);
 	}
 
 	#[test]

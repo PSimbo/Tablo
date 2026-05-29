@@ -129,6 +129,17 @@ mod tests {
 	}
 
 	#[test]
+	fn formats_if_condition_compile_error_with_line_and_column() {
+		let source = "if 1 {\n}\n";
+		let error = run(source).unwrap_err();
+
+		assert_eq!(
+			error.format_with_source(source),
+			"Compile error at line 1, column 4: `if` condition must be of type `bool`, found `int`.\n  |\n1 | if 1 {\n  |    ^"
+		);
+	}
+
+	#[test]
 	fn formats_source_error_with_line_and_column() {
 		let source = "1 + 2\n?";
 		let error = run(source).unwrap_err();
@@ -265,6 +276,27 @@ mod tests {
 		let result = run("2 == 2.0").unwrap();
 
 		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
+	fn runs_if_else_if_source_text() {
+		let result = run("var x: int = 1;\nif false { x = 2; } else if true { x = 3; }\nx").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
+	fn runs_if_else_source_text() {
+		let result = run("var x: int = 1;\nif false { x = 2; } else { x = 3; }\nx").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
+	fn runs_if_source_text() {
+		let result = run("var x: int = 1;\nif true { x = 2; }\nx").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(2)));
 	}
 
 	#[test]

@@ -34,63 +34,78 @@ impl VirtualMachine {
 	pub fn run(&mut self, program: &Program) -> Result<Option<Value>, VmError> {
 		self.stack.clear();
 		self.locals.clear();
+		let mut instruction_index = 0;
 
-		for (instruction_index, instruction) in program.instructions.iter().enumerate() {
-			self.execute_instruction(instruction, instruction_index)?;
+		while instruction_index < program.instructions.len() {
+			let next_instruction_index = self.execute_instruction(&program.instructions[instruction_index], instruction_index)?;
+			instruction_index = next_instruction_index.unwrap_or(instruction_index + 1);
 		}
 
 		Ok(self.stack.pop())
 	}
 
-	fn execute_instruction(&mut self, instruction: &Instruction, instruction_index: usize) -> Result<(), VmError> {
+	fn execute_instruction(&mut self, instruction: &Instruction, instruction_index: usize) -> Result<Option<usize>, VmError> {
 		match instruction {
 			Instruction::Add => {
 				let rhs = self.pop_value(instruction_index)?;
 				let lhs = self.pop_value(instruction_index)?;
 				self.stack.push(add_values(lhs, rhs, instruction_index)?);
-				Ok(())
+				Ok(None)
 			}
 			Instruction::And => {
 				let rhs = self.pop_boolean(instruction_index)?;
 				let lhs = self.pop_boolean(instruction_index)?;
 				self.stack.push(Value::Boolean(lhs && rhs));
-				Ok(())
+				Ok(None)
 			}
 			Instruction::Divide => {
 				let rhs = self.pop_numeric(instruction_index)?;
 				let lhs = self.pop_numeric(instruction_index)?;
 				self.stack.push(divide_values(lhs, rhs, instruction_index)?);
-				Ok(())
+				Ok(None)
 			}
 			Instruction::Equal => {
 				let rhs = self.pop_value(instruction_index)?;
 				let lhs = self.pop_value(instruction_index)?;
 				self.stack.push(equals_value(lhs, rhs, instruction_index)?);
-				Ok(())
+				Ok(None)
 			}
 			Instruction::GreaterThan => {
 				let rhs = self.pop_value(instruction_index)?;
 				let lhs = self.pop_value(instruction_index)?;
 				self.stack.push(compare_values(lhs, rhs, instruction_index, ComparisonKind::GreaterThan)?);
-				Ok(())
+				Ok(None)
 			}
 			Instruction::GreaterThanOrEqual => {
 				let rhs = self.pop_value(instruction_index)?;
 				let lhs = self.pop_value(instruction_index)?;
 				self.stack.push(compare_values(lhs, rhs, instruction_index, ComparisonKind::GreaterThanOrEqual)?);
-				Ok(())
+				Ok(None)
+			}
+			Instruction::Jump(target) => {
+				Ok(Some(*target as usize))
+			}
+			Instruction::JumpIfFalse(target) => {
+				let value = self.pop_boolean(instruction_index)?;
+
+				if value {
+					Ok(None)
+				}
+				else {
+					Ok(Some(*target as usize))
+				}
 			}
 			Instruction::LessThan => {
 				let rhs = self.pop_value(instruction_index)?;
 				let lhs = self.pop_value(instruction_index)?;
 				self.stack.push(compare_values(lhs, rhs, instruction_index, ComparisonKind::LessThan)?);
-				Ok(())
+				Ok(None)
 			}
 			Instruction::LessThanOrEqual => {
 				let rhs = self.pop_value(instruction_index)?;
 				let lhs = self.pop_value(instruction_index)?;
 				self.stack.push(compare_values(lhs, rhs, instruction_index, ComparisonKind::LessThanOrEqual)?);
-				Ok(())
+				Ok(None)
 			}
 			Instruction::LoadLocal(slot) => {
 				let value = self.locals.get(*slot as usize).cloned().ok_or(VmError {
@@ -98,67 +113,67 @@ impl VirtualMachine {
 					message: format!("Local slot {} has not been initialized.", slot),
 				})?;
 				self.stack.push(value);
-				Ok(())
+				Ok(None)
 			}
 			Instruction::Modulo => {
 				let rhs = self.pop_numeric(instruction_index)?;
 				let lhs = self.pop_numeric(instruction_index)?;
 				self.stack.push(modulo_values(lhs, rhs, instruction_index)?);
-				Ok(())
+				Ok(None)
 			}
 			Instruction::Multiply => {
 				let rhs = self.pop_numeric(instruction_index)?;
 				let lhs = self.pop_numeric(instruction_index)?;
 				self.stack.push(multiply_values(lhs, rhs, instruction_index)?);
-				Ok(())
+				Ok(None)
 			}
 			Instruction::Negate => {
 				let value = self.pop_numeric(instruction_index)?;
 				self.stack.push(negate_value(value));
-				Ok(())
+				Ok(None)
 			}
 			Instruction::Not => {
 				let value = self.pop_boolean(instruction_index)?;
 				self.stack.push(Value::Boolean(!value));
-				Ok(())
+				Ok(None)
 			}
 			Instruction::NotEqual => {
 				let rhs = self.pop_value(instruction_index)?;
 				let lhs = self.pop_value(instruction_index)?;
 				self.stack.push(not_equals_value(lhs, rhs, instruction_index)?);
-				Ok(())
+				Ok(None)
 			}
 			Instruction::Or => {
 				let rhs = self.pop_boolean(instruction_index)?;
 				let lhs = self.pop_boolean(instruction_index)?;
 				self.stack.push(Value::Boolean(lhs || rhs));
-				Ok(())
+				Ok(None)
 			}
 			Instruction::Pop => {
 				self.pop_value(instruction_index)?;
-				Ok(())
+				Ok(None)
 			}
 			Instruction::PushBoolean(value) => {
 				self.stack.push(Value::Boolean(*value));
-				Ok(())
+				Ok(None)
 			}
 			Instruction::PushDecimal(value) => {
 				self.stack.push(Value::Decimal(value.clone()));
-				Ok(())
+				Ok(None)
 			}
 			Instruction::PushInteger(value) => {
 				self.stack.push(Value::Integer(*value));
-				Ok(())
+				Ok(None)
 			}
 			Instruction::PushText(value) => {
 				self.stack.push(Value::Text(value.clone()));
-				Ok(())
+				Ok(None)
 			}
 			Instruction::Subtract => {
 				let rhs = self.pop_numeric(instruction_index)?;
 				let lhs = self.pop_numeric(instruction_index)?;
 				self.stack.push(subtract_values(lhs, rhs, instruction_index)?);
-				Ok(())
+				Ok(None)
 			}
 			Instruction::StoreLocal(slot) => {
 				let value = self.pop_value(instruction_index)?;
@@ -169,13 +184,13 @@ impl VirtualMachine {
 				}
 
 				self.locals[slot] = value;
-				Ok(())
+				Ok(None)
 			}
 			Instruction::Xor => {
 				let rhs = self.pop_boolean(instruction_index)?;
 				let lhs = self.pop_boolean(instruction_index)?;
 				self.stack.push(Value::Boolean(lhs ^ rhs));
-				Ok(())
+				Ok(None)
 			}
 		}
 	}
@@ -598,6 +613,34 @@ mod tests {
 		let result = VirtualMachine::new().run(&program).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(42)));
+	}
+
+	#[test]
+	fn runs_jump_if_false_program() {
+		let program = Program::new(vec![
+			Instruction::PushBoolean(false),
+			Instruction::JumpIfFalse(4),
+			Instruction::PushInteger(1),
+			Instruction::Jump(5),
+			Instruction::PushInteger(2),
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(2)));
+	}
+
+	#[test]
+	fn runs_jump_program() {
+		let program = Program::new(vec![
+			Instruction::Jump(2),
+			Instruction::PushInteger(1),
+			Instruction::PushInteger(2),
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(2)));
 	}
 
 	#[test]
