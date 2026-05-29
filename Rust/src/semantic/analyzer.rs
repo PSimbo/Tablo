@@ -14,6 +14,7 @@ use crate::ast::Statement;
 use crate::ast::UnaryExpr;
 use crate::ast::UnaryOperator;
 use crate::ast::VariableDeclaration;
+use crate::ast::WhileStatement;
 use crate::compiler::CompileError;
 
 use super::scope::ScopeStack;
@@ -426,6 +427,23 @@ impl SemanticAnalyzer {
 					slot,
 				});
 
+				Ok(())
+			}
+			Statement::While(WhileStatement {
+				body,
+				condition,
+				position,
+			}) => {
+				let condition_type = self.infer_expression_type(condition)?;
+
+				if condition_type != DataType::Bool {
+					return Err(self.compile_error(
+						condition.position().max(*position),
+						format!("`while` condition must be of type `bool`, found `{}`.", self.data_type_name(condition_type)),
+					));
+				}
+
+				self.validate_statement(&Statement::Block(body.clone()))?;
 				Ok(())
 			}
 		}

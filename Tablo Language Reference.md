@@ -564,6 +564,23 @@ else {
 }
 ~~~
 
+While Statements
+----------------
+
+Tablo supports `while` statements. There is no need to enclose the condition in parentheses.
+
+The condition expression must evaluate to a `bool` value.
+
+The loop body must be a block enclosed between `{` and `}`.
+
+~~~
+var i: int = 0;
+
+while i < 10 {
+  i += 1;
+}
+~~~
+
 For Loops
 ---------
 
@@ -1377,6 +1394,7 @@ simpleStatement = ( expression | returnStatement | variableDeclaration ) `;`
 variableDeclaration = ( `const` | `var` ) identifier `:` dataType [ `=` expression ]
 returnStatement = `return` [ expression ]
 ifStatement = `if` expression block [ `else` ( block | ifStatement ) ]
+whileStatement = `while` expression block
 dataType = unquotedIdentifier | arrayType
 arrayType = dataType `[` integerLiteral `]`
 

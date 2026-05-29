@@ -152,6 +152,17 @@ mod tests {
 	}
 
 	#[test]
+	fn formats_while_condition_compile_error_with_line_and_column() {
+		let source = "while 1 {\n}\n";
+		let error = run(source).unwrap_err();
+
+		assert_eq!(
+			error.format_with_source(source),
+			"Compile error at line 1, column 7: `while` condition must be of type `bool`, found `int`.\n  |\n1 | while 1 {\n  |       ^"
+		);
+	}
+
+	#[test]
 	fn rejects_39_digit_decimal_source_text() {
 		let error = run("3.14159265358979323846264338327950288415").unwrap_err();
 
@@ -400,6 +411,13 @@ mod tests {
 		let result = run("'hello'").unwrap();
 
 		assert_eq!(result, Some(Value::Text(String::from("hello"))));
+	}
+
+	#[test]
+	fn runs_while_source_text() {
+		let result = run("var x: int = 0;\nwhile x < 3 { x += 1; }\nx").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(3)));
 	}
 
 	#[test]

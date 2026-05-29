@@ -15,6 +15,7 @@ use crate::ast::Statement;
 use crate::ast::TextLiteral;
 use crate::ast::UnaryExpr;
 use crate::ast::VariableDeclaration;
+use crate::ast::WhileStatement;
 use crate::bytecode::Instruction;
 use crate::bytecode::Program;
 use crate::semantic::analyzer::SemanticAnalyzer;
@@ -222,6 +223,24 @@ impl Compiler {
 
 				Ok(())
 			}
+			Statement::While(WhileStatement {
+				body,
+				condition,
+				..
+			}) => {
+				let loop_start = instructions.len() as u32;
+				self.compile_into(condition, semantic_program, instructions);
+				let jump_if_false_index = instructions.len();
+				instructions.push(Instruction::JumpIfFalse(0));
+
+				self.compile_statement(&Statement::Block(body.clone()), semantic_program, instructions)?;
+				instructions.push(Instruction::Jump(loop_start));
+
+				let loop_end = instructions.len() as u32;
+				instructions[jump_if_false_index] = Instruction::JumpIfFalse(loop_end);
+
+				Ok(())
+			}
 		}
 	}
 }
@@ -246,6 +265,7 @@ mod tests {
 	use crate::ast::UnaryExpr;
 	use crate::ast::UnaryOperator;
 	use crate::ast::VariableDeclaration;
+	use crate::ast::WhileStatement;
 	use crate::bytecode::Instruction;
 	use crate::value::Decimal;
 
@@ -336,6 +356,36 @@ mod tests {
 			Instruction::LoadLocal(0),
 			Instruction::PushInteger(3),
 			Instruction::Add,
+			Instruction::StoreLocal(0),
+			Instruction::LoadLocal(0),
+		]);
+	}
+
+	#[test]
+	fn compiles_const_declaration() {
+		let program = AstProgram {
+			statements: vec![
+				Statement::VariableDeclaration(VariableDeclaration {
+					data_type: DataType::Int,
+					initial_value: Some(Expr::Integer(IntegerLiteral {
+						position: 0,
+						value: 5,
+					})),
+					is_const: true,
+					name: String::from("x"),
+					position: 0,
+				}),
+			],
+			result: Some(Expr::Identifier(IdentifierExpr {
+				name: String::from("x"),
+				position: 0,
+			})),
+		};
+
+		let bytecode = Compiler::new().compile_program(&program).unwrap();
+
+		assert_eq!(bytecode.entry.instructions, vec![
+			Instruction::PushInteger(5),
 			Instruction::StoreLocal(0),
 			Instruction::LoadLocal(0),
 		]);
@@ -709,17 +759,49 @@ mod tests {
 	}
 
 	#[test]
-	fn compiles_const_declaration() {
+	fn compiles_while_statement() {
 		let program = AstProgram {
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
 					initial_value: Some(Expr::Integer(IntegerLiteral {
 						position: 0,
-						value: 5,
+						value: 0,
 					})),
-					is_const: true,
+					is_const: false,
 					name: String::from("x"),
+					position: 0,
+				}),
+				Statement::While(WhileStatement {
+					body: BlockStatement {
+						position: 0,
+						statements: vec![
+							Statement::Expression(Expr::Assignment(AssignmentExpr {
+								operator: AssignmentOperator::AddAssign,
+								position: 0,
+								target: IdentifierExpr {
+									name: String::from("x"),
+									position: 0,
+								},
+								value: Box::new(Expr::Integer(IntegerLiteral {
+									position: 0,
+									value: 1,
+								})),
+							})),
+						],
+					},
+					condition: Expr::Binary(BinaryExpr {
+						left: Box::new(Expr::Identifier(IdentifierExpr {
+							name: String::from("x"),
+							position: 0,
+						})),
+						operator: BinaryOperator::LessThan,
+						position: 0,
+						right: Box::new(Expr::Integer(IntegerLiteral {
+							position: 0,
+							value: 3,
+						})),
+					}),
 					position: 0,
 				}),
 			],
@@ -732,8 +814,19 @@ mod tests {
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
 
 		assert_eq!(bytecode.entry.instructions, vec![
-			Instruction::PushInteger(5),
+			Instruction::PushInteger(0),
 			Instruction::StoreLocal(0),
+			Instruction::LoadLocal(0),
+			Instruction::PushInteger(3),
+			Instruction::LessThan,
+			Instruction::JumpIfFalse(13),
+			Instruction::LoadLocal(0),
+			Instruction::PushInteger(1),
+			Instruction::Add,
+			Instruction::StoreLocal(0),
+			Instruction::LoadLocal(0),
+			Instruction::Pop,
+			Instruction::Jump(2),
 			Instruction::LoadLocal(0),
 		]);
 	}
@@ -830,6 +923,31 @@ mod tests {
 
 		assert_eq!(error.message, "`if` condition must be of type `bool`, found `int`.");
 		assert_eq!(error.position, 3);
+	}
+
+	#[test]
+	fn rejects_non_boolean_while_condition() {
+		let program = AstProgram {
+			statements: vec![
+				Statement::While(WhileStatement {
+					body: BlockStatement {
+						position: 0,
+						statements: Vec::new(),
+					},
+					condition: Expr::Integer(IntegerLiteral {
+						position: 6,
+						value: 1,
+					}),
+					position: 0,
+				}),
+			],
+			result: None,
+		};
+
+		let error = Compiler::new().compile_program(&program).unwrap_err();
+
+		assert_eq!(error.message, "`while` condition must be of type `bool`, found `int`.");
+		assert_eq!(error.position, 6);
 	}
 
 	#[test]

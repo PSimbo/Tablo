@@ -54,6 +54,7 @@ pub enum Statement {
 	Expression(Expr),
 	If(IfStatement),
 	VariableDeclaration(VariableDeclaration),
+	While(WhileStatement),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -141,6 +142,13 @@ pub struct VariableDeclaration {
 	pub is_const: bool,
 	pub initial_value: Option<Expr>,
 	pub name: String,
+	pub position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WhileStatement {
+	pub body: BlockStatement,
+	pub condition: Expr,
 	pub position: usize,
 }
 

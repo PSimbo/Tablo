@@ -16,6 +16,7 @@ use crate::ast::TextLiteral;
 use crate::ast::UnaryExpr;
 use crate::ast::UnaryOperator;
 use crate::ast::VariableDeclaration;
+use crate::ast::WhileStatement;
 use crate::value::Decimal;
 
 use super::token::Token;
@@ -68,7 +69,7 @@ impl Parser {
 		loop {
 			match self.current() {
 				Some(token) if token.kind == TokenKind::EndOfFile => break,
-				Some(token) if matches!(token.kind, TokenKind::ConstKeyword | TokenKind::IfKeyword | TokenKind::LeftBrace | TokenKind::VarKeyword) => {
+				Some(token) if matches!(token.kind, TokenKind::ConstKeyword | TokenKind::IfKeyword | TokenKind::LeftBrace | TokenKind::VarKeyword | TokenKind::WhileKeyword) => {
 					statements.push(self.parse_statement()?);
 				}
 				Some(_) => {
@@ -617,6 +618,7 @@ impl Parser {
 		match self.current() {
 			Some(token) if token.kind == TokenKind::IfKeyword => self.parse_if_statement(),
 			Some(token) if token.kind == TokenKind::LeftBrace => self.parse_block_statement(),
+			Some(token) if token.kind == TokenKind::WhileKeyword => self.parse_while_statement(),
 			Some(token) if matches!(token.kind, TokenKind::ConstKeyword | TokenKind::VarKeyword) => {
 				self.parse_variable_declaration_statement()
 			}
@@ -675,6 +677,21 @@ impl Parser {
 			position: declaration_keyword.start,
 		}))
 	}
+
+	fn parse_while_statement(&mut self) -> Result<Statement, ParseError> {
+		let while_keyword = self.expect_token(TokenKind::WhileKeyword, "Expected `while` to start while statement.")?;
+		let condition = self.parse_assignment_expression()?;
+		let body = match self.parse_block_statement()? {
+			Statement::Block(block) => block,
+			_ => unreachable!("Block parser must return a block statement."),
+		};
+
+		Ok(Statement::While(WhileStatement {
+			body,
+			condition,
+			position: while_keyword.start,
+		}))
+	}
 }
 
 #[cfg(test)]
@@ -697,6 +714,7 @@ mod tests {
 	use crate::ast::UnaryExpr;
 	use crate::ast::UnaryOperator;
 	use crate::ast::VariableDeclaration;
+	use crate::ast::WhileStatement;
 	use crate::source::SourceText;
 	use crate::value::Decimal;
 
@@ -778,6 +796,7 @@ mod tests {
 			Statement::VariableDeclaration(declaration) => {
 				Statement::VariableDeclaration(normalize_variable_declaration(declaration))
 			}
+			Statement::While(while_statement) => Statement::While(normalize_while_statement(while_statement)),
 		}
 	}
 
@@ -803,6 +822,14 @@ mod tests {
 			is_const: declaration.is_const,
 			initial_value: declaration.initial_value.map(normalize_expr),
 			name: declaration.name,
+			position: 0,
+		}
+	}
+
+	fn normalize_while_statement(while_statement: WhileStatement) -> WhileStatement {
+		WhileStatement {
+			body: normalize_block(while_statement.body),
+			condition: normalize_expr(while_statement.condition),
 			position: 0,
 		}
 	}
@@ -1527,6 +1554,50 @@ mod tests {
 						initial_value: None,
 						is_const: false,
 						name: String::from("x"),
+						position: 0,
+					}),
+				],
+				result: None,
+			}
+		);
+	}
+
+	#[test]
+	fn parses_while_statement() {
+		assert_eq!(
+			parse_program("while x < 3 { x += 1; }"),
+			Program {
+				statements: vec![
+					Statement::While(WhileStatement {
+						body: BlockStatement {
+							position: 0,
+							statements: vec![
+								Statement::Expression(Expr::Assignment(AssignmentExpr {
+									operator: AssignmentOperator::AddAssign,
+									position: 0,
+									target: IdentifierExpr {
+										name: String::from("x"),
+										position: 0,
+									},
+									value: Box::new(Expr::Integer(IntegerLiteral {
+										position: 0,
+										value: 1,
+									})),
+								})),
+							],
+						},
+						condition: Expr::Binary(BinaryExpr {
+							left: Box::new(Expr::Identifier(IdentifierExpr {
+								name: String::from("x"),
+								position: 0,
+							})),
+							operator: BinaryOperator::LessThan,
+							position: 0,
+							right: Box::new(Expr::Integer(IntegerLiteral {
+								position: 0,
+								value: 3,
+							})),
+						}),
 						position: 0,
 					}),
 				],
