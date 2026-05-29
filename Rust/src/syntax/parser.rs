@@ -703,18 +703,122 @@ mod tests {
 	use super::super::lexer::Lexer;
 	use super::Parser;
 
+	fn normalize_expr(expression: Expr) -> Expr {
+		match expression {
+			Expr::Assignment(AssignmentExpr {
+				operator,
+				target,
+				value,
+				..
+			}) => Expr::Assignment(AssignmentExpr {
+				operator,
+				position: 0,
+				target: normalize_identifier(target),
+				value: Box::new(normalize_expr(*value)),
+			}),
+			Expr::Binary(BinaryExpr {
+				left,
+				operator,
+				right,
+				..
+			}) => Expr::Binary(BinaryExpr {
+				left: Box::new(normalize_expr(*left)),
+				operator,
+				position: 0,
+				right: Box::new(normalize_expr(*right)),
+			}),
+			Expr::Boolean(BooleanLiteral { value, .. }) => Expr::Boolean(BooleanLiteral {
+				position: 0,
+				value,
+			}),
+			Expr::Decimal(DecimalLiteral { value, .. }) => Expr::Decimal(DecimalLiteral {
+				position: 0,
+				value,
+			}),
+			Expr::Identifier(identifier) => Expr::Identifier(normalize_identifier(identifier)),
+			Expr::Integer(IntegerLiteral { value, .. }) => Expr::Integer(IntegerLiteral {
+				position: 0,
+				value,
+			}),
+			Expr::Text(TextLiteral { value, .. }) => Expr::Text(TextLiteral {
+				position: 0,
+				value,
+			}),
+			Expr::Unary(UnaryExpr {
+				operand,
+				operator,
+				..
+			}) => Expr::Unary(UnaryExpr {
+				operand: Box::new(normalize_expr(*operand)),
+				operator,
+				position: 0,
+			}),
+		}
+	}
+
+	fn normalize_identifier(identifier: IdentifierExpr) -> IdentifierExpr {
+		IdentifierExpr {
+			name: identifier.name,
+			position: 0,
+		}
+	}
+
+	fn normalize_program(program: Program) -> Program {
+		Program {
+			result: program.result.map(normalize_expr),
+			statements: program.statements.into_iter().map(normalize_statement).collect(),
+		}
+	}
+
+	fn normalize_statement(statement: Statement) -> Statement {
+		match statement {
+			Statement::Block(block) => Statement::Block(normalize_block(block)),
+			Statement::Expression(expression) => Statement::Expression(normalize_expr(expression)),
+			Statement::If(if_statement) => Statement::If(normalize_if_statement(if_statement)),
+			Statement::VariableDeclaration(declaration) => {
+				Statement::VariableDeclaration(normalize_variable_declaration(declaration))
+			}
+		}
+	}
+
+	fn normalize_block(block: BlockStatement) -> BlockStatement {
+		BlockStatement {
+			position: 0,
+			statements: block.statements.into_iter().map(normalize_statement).collect(),
+		}
+	}
+
+	fn normalize_if_statement(if_statement: IfStatement) -> IfStatement {
+		IfStatement {
+			condition: normalize_expr(if_statement.condition),
+			else_branch: if_statement.else_branch.map(|branch| Box::new(normalize_statement(*branch))),
+			position: 0,
+			then_branch: normalize_block(if_statement.then_branch),
+		}
+	}
+
+	fn normalize_variable_declaration(declaration: VariableDeclaration) -> VariableDeclaration {
+		VariableDeclaration {
+			data_type: declaration.data_type,
+			is_const: declaration.is_const,
+			initial_value: declaration.initial_value.map(normalize_expr),
+			name: declaration.name,
+			position: 0,
+		}
+	}
+
 	fn parse(source: &str) -> Expr {
 		let mut lexer = Lexer::new(SourceText::new(source));
 		let tokens = lexer.tokenize().unwrap();
 		let mut parser = Parser::new(tokens);
-		parser.parse_expression().unwrap()
+		normalize_expr(parser.parse_expression().unwrap())
 	}
 
 	fn parse_program(source: &str) -> Program {
 		let mut lexer = Lexer::new(SourceText::new(source));
 		let tokens = lexer.tokenize().unwrap();
 		let mut parser = Parser::new(tokens);
-		parser.parse_program().unwrap()
+		normalize_program(parser.parse_program().unwrap())
 	}
 
 	#[test]
