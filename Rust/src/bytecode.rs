@@ -67,6 +67,12 @@ impl CodeBody {
 }
 
 impl ConstantPool {
+	pub fn new(entries: Vec<Constant>) -> Self {
+		Self {
+			entries,
+		}
+	}
+
 	pub fn entries(&self) -> &[Constant] {
 		&self.entries
 	}
@@ -78,9 +84,13 @@ impl ConstantPool {
 
 impl Program {
 	pub fn new(instructions: Vec<Instruction>) -> Self {
+		Self::from_parts(ConstantPool::default(), CodeBody::new(instructions))
+	}
+
+	pub fn from_parts(constants: ConstantPool, entry: CodeBody) -> Self {
 		Self {
-			constants: ConstantPool::default(),
-			entry: CodeBody::new(instructions),
+			constants,
+			entry,
 		}
 	}
 

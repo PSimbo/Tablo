@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use crate::bytecode::CodeBody;
+use crate::bytecode::ConstantPool;
 use crate::bytecode::Instruction;
 use crate::bytecode::Program;
 use crate::value::Decimal;
@@ -44,12 +45,25 @@ pub struct ObjectFileError {
 	pub message: String,
 }
 
+// The on-disk format is still effectively "header plus one entry code body",
+// but representing it as a layout with sections now gives us a much cleaner
+// path toward additional code bodies and embedded debug metadata later on.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ObjectFileLayout {
+	sections: Vec<ObjectFileSection>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ObjectFileSection {
+	EntryCode(CodeBody),
+}
+
 pub fn read_program(bytes: &[u8]) -> Result<Program, ObjectFileError> {
 	let mut reader = ObjectFileReader::new(bytes);
 
 	reader.expect_magic_bytes()?;
 	reader.expect_format_version()?;
-	let code_body = reader.read_code_body()?;
+	let layout = reader.read_layout()?;
 
 	if !reader.is_at_end() {
 		return Err(ObjectFileError {
@@ -58,7 +72,7 @@ pub fn read_program(bytes: &[u8]) -> Result<Program, ObjectFileError> {
 		});
 	}
 
-	Ok(Program::new(code_body.instructions))
+	layout.into_program()
 }
 
 pub fn read_program_from_path(path: impl AsRef<Path>) -> Result<Program, ObjectFileError> {
@@ -72,14 +86,11 @@ pub fn read_program_from_path(path: impl AsRef<Path>) -> Result<Program, ObjectF
 
 pub fn write_program(program: &Program) -> Vec<u8> {
 	let mut bytes = Vec::new();
-	debug_assert!(
-		program.constant_pool().is_empty(),
-		"The current object file format does not yet serialize constant-pool entries."
-	);
+	let layout = ObjectFileLayout::from_program(program);
 
 	bytes.extend_from_slice(&MAGIC_BYTES);
 	bytes.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
-	write_code_body(&mut bytes, &program.entry);
+	layout.write_to(&mut bytes);
 
 	bytes
 }
@@ -88,60 +99,64 @@ fn write_code_body(bytes: &mut Vec<u8>, code_body: &CodeBody) {
 	bytes.extend_from_slice(&(code_body.instructions.len() as u32).to_le_bytes());
 
 	for instruction in &code_body.instructions {
-		match instruction {
-			Instruction::Add => bytes.push(OPCODE_ADD),
-			Instruction::And => bytes.push(OPCODE_AND),
-			Instruction::Divide => bytes.push(OPCODE_DIVIDE),
-			Instruction::Equal => bytes.push(OPCODE_EQUAL),
-			Instruction::GreaterThan => bytes.push(OPCODE_GREATER_THAN),
-			Instruction::GreaterThanOrEqual => bytes.push(OPCODE_GREATER_THAN_OR_EQUAL),
-			Instruction::Jump(target) => {
-				bytes.push(OPCODE_JUMP);
-				bytes.extend_from_slice(&target.to_le_bytes());
-			}
-			Instruction::JumpIfFalse(target) => {
-				bytes.push(OPCODE_JUMP_IF_FALSE);
-				bytes.extend_from_slice(&target.to_le_bytes());
-			}
-			Instruction::LessThan => bytes.push(OPCODE_LESS_THAN),
-			Instruction::LessThanOrEqual => bytes.push(OPCODE_LESS_THAN_OR_EQUAL),
-			Instruction::LoadLocal(slot) => {
-				bytes.push(OPCODE_LOAD_LOCAL);
-				bytes.extend_from_slice(&slot.to_le_bytes());
-			}
-			Instruction::Modulo => bytes.push(OPCODE_MODULO),
-			Instruction::Multiply => bytes.push(OPCODE_MULTIPLY),
-			Instruction::Negate => bytes.push(OPCODE_NEGATE),
-			Instruction::Not => bytes.push(OPCODE_NOT),
-			Instruction::NotEqual => bytes.push(OPCODE_NOT_EQUAL),
-			Instruction::Or => bytes.push(OPCODE_OR),
-			Instruction::Pop => bytes.push(OPCODE_POP),
-			Instruction::PushBoolean(value) => {
-				bytes.push(OPCODE_PUSH_BOOLEAN);
-				bytes.push(u8::from(*value));
-			}
-			Instruction::PushDecimal(value) => {
-				bytes.push(OPCODE_PUSH_DECIMAL);
-				bytes.extend_from_slice(&value.coefficient.to_le_bytes());
-				bytes.push(value.precision);
-				bytes.push(value.scale);
-			}
-			Instruction::PushInteger(value) => {
-				bytes.push(OPCODE_PUSH_INTEGER);
-				bytes.extend_from_slice(&value.to_le_bytes());
-			}
-			Instruction::PushText(value) => {
-				bytes.push(OPCODE_PUSH_TEXT);
-				bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
-				bytes.extend_from_slice(value.as_bytes());
-			}
-			Instruction::StoreLocal(slot) => {
-				bytes.push(OPCODE_STORE_LOCAL);
-				bytes.extend_from_slice(&slot.to_le_bytes());
-			}
-			Instruction::Subtract => bytes.push(OPCODE_SUBTRACT),
-			Instruction::Xor => bytes.push(OPCODE_XOR),
+		write_instruction(bytes, instruction);
+	}
+}
+
+fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
+	match instruction {
+		Instruction::Add => bytes.push(OPCODE_ADD),
+		Instruction::And => bytes.push(OPCODE_AND),
+		Instruction::Divide => bytes.push(OPCODE_DIVIDE),
+		Instruction::Equal => bytes.push(OPCODE_EQUAL),
+		Instruction::GreaterThan => bytes.push(OPCODE_GREATER_THAN),
+		Instruction::GreaterThanOrEqual => bytes.push(OPCODE_GREATER_THAN_OR_EQUAL),
+		Instruction::Jump(target) => {
+			bytes.push(OPCODE_JUMP);
+			bytes.extend_from_slice(&target.to_le_bytes());
 		}
+		Instruction::JumpIfFalse(target) => {
+			bytes.push(OPCODE_JUMP_IF_FALSE);
+			bytes.extend_from_slice(&target.to_le_bytes());
+		}
+		Instruction::LessThan => bytes.push(OPCODE_LESS_THAN),
+		Instruction::LessThanOrEqual => bytes.push(OPCODE_LESS_THAN_OR_EQUAL),
+		Instruction::LoadLocal(slot) => {
+			bytes.push(OPCODE_LOAD_LOCAL);
+			bytes.extend_from_slice(&slot.to_le_bytes());
+		}
+		Instruction::Modulo => bytes.push(OPCODE_MODULO),
+		Instruction::Multiply => bytes.push(OPCODE_MULTIPLY),
+		Instruction::Negate => bytes.push(OPCODE_NEGATE),
+		Instruction::Not => bytes.push(OPCODE_NOT),
+		Instruction::NotEqual => bytes.push(OPCODE_NOT_EQUAL),
+		Instruction::Or => bytes.push(OPCODE_OR),
+		Instruction::Pop => bytes.push(OPCODE_POP),
+		Instruction::PushBoolean(value) => {
+			bytes.push(OPCODE_PUSH_BOOLEAN);
+			bytes.push(u8::from(*value));
+		}
+		Instruction::PushDecimal(value) => {
+			bytes.push(OPCODE_PUSH_DECIMAL);
+			bytes.extend_from_slice(&value.coefficient.to_le_bytes());
+			bytes.push(value.precision);
+			bytes.push(value.scale);
+		}
+		Instruction::PushInteger(value) => {
+			bytes.push(OPCODE_PUSH_INTEGER);
+			bytes.extend_from_slice(&value.to_le_bytes());
+		}
+		Instruction::PushText(value) => {
+			bytes.push(OPCODE_PUSH_TEXT);
+			bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(value.as_bytes());
+		}
+		Instruction::StoreLocal(slot) => {
+			bytes.push(OPCODE_STORE_LOCAL);
+			bytes.extend_from_slice(&slot.to_le_bytes());
+		}
+		Instruction::Subtract => bytes.push(OPCODE_SUBTRACT),
+		Instruction::Xor => bytes.push(OPCODE_XOR),
 	}
 }
 
@@ -258,6 +273,10 @@ impl<'a> ObjectFileReader<'a> {
 		let opcode_offset = self.offset;
 		let opcode = self.read_u8()?;
 
+		self.read_instruction_payload(opcode, opcode_offset)
+	}
+
+	fn read_instruction_payload(&mut self, opcode: u8, opcode_offset: usize) -> Result<Instruction, ObjectFileError> {
 		match opcode {
 			OPCODE_ADD => Ok(Instruction::Add),
 			OPCODE_AND => Ok(Instruction::And),
@@ -291,6 +310,14 @@ impl<'a> ObjectFileReader<'a> {
 		}
 	}
 
+	fn read_layout(&mut self) -> Result<ObjectFileLayout, ObjectFileError> {
+		Ok(ObjectFileLayout {
+			sections: vec![
+				ObjectFileSection::EntryCode(self.read_code_body()?),
+			],
+		})
+	}
+
 	fn read_string(&mut self) -> Result<String, ObjectFileError> {
 		let len = self.read_u32()? as usize;
 		let bytes = self.read_exact(len)?;
@@ -314,6 +341,55 @@ impl<'a> ObjectFileReader<'a> {
 		let mut bytes = [0; 4];
 		bytes.copy_from_slice(self.read_exact(4)?);
 		Ok(u32::from_le_bytes(bytes))
+	}
+}
+
+impl ObjectFileLayout {
+	fn from_program(program: &Program) -> Self {
+		debug_assert!(
+			program.constant_pool().is_empty(),
+			"The current object file format does not yet serialize constant-pool entries."
+		);
+
+		Self {
+			sections: vec![
+				ObjectFileSection::EntryCode(program.entry.clone()),
+			],
+		}
+	}
+
+	fn into_program(self) -> Result<Program, ObjectFileError> {
+		let mut entry_code = None;
+
+		for section in self.sections {
+			match section {
+				ObjectFileSection::EntryCode(code_body) => {
+					if entry_code.is_some() {
+						return Err(ObjectFileError {
+							offset: 0,
+							message: String::from("Object file contains more than one entry code section."),
+						});
+					}
+
+					entry_code = Some(code_body);
+				}
+			}
+		}
+
+		let entry_code = entry_code.ok_or(ObjectFileError {
+			offset: 0,
+			message: String::from("Object file does not contain an entry code section."),
+		})?;
+
+		Ok(Program::from_parts(ConstantPool::default(), entry_code))
+	}
+
+	fn write_to(&self, bytes: &mut Vec<u8>) {
+		for section in &self.sections {
+			match section {
+				ObjectFileSection::EntryCode(code_body) => write_code_body(bytes, code_body),
+			}
+		}
 	}
 }
 
