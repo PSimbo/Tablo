@@ -35,9 +35,10 @@ impl VirtualMachine {
 		self.stack.clear();
 		self.locals.clear();
 		let mut instruction_index = 0;
+		let instructions = program.instructions();
 
-		while instruction_index < program.instructions.len() {
-			let next_instruction_index = self.execute_instruction(&program.instructions[instruction_index], instruction_index)?;
+		while instruction_index < instructions.len() {
+			let next_instruction_index = self.execute_instruction(&instructions[instruction_index], instruction_index)?;
 			instruction_index = next_instruction_index.unwrap_or(instruction_index + 1);
 		}
 

@@ -35,14 +35,31 @@ pub enum Instruction {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Program {
+pub struct CodeBody {
 	pub instructions: Vec<Instruction>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Program {
+	pub entry: CodeBody,
+}
+
+impl CodeBody {
+	pub fn new(instructions: Vec<Instruction>) -> Self {
+		Self {
+			instructions,
+		}
+	}
 }
 
 impl Program {
 	pub fn new(instructions: Vec<Instruction>) -> Self {
 		Self {
-			instructions,
+			entry: CodeBody::new(instructions),
 		}
+	}
+
+	pub fn instructions(&self) -> &[Instruction] {
+		&self.entry.instructions
 	}
 }

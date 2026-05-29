@@ -111,7 +111,7 @@ mod tests {
 		let program = read_program_from_path(&output_path).unwrap();
 		let _ = std::fs::remove_file(&output_path);
 
-		assert_eq!(program.instructions, vec![
+		assert_eq!(program.entry.instructions, vec![
 			Instruction::PushInteger(1),
 			Instruction::PushInteger(2),
 			Instruction::Add,

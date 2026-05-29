@@ -276,7 +276,7 @@ mod tests {
 
 		let program = Compiler::new().compile_expression(&expression);
 
-		assert_eq!(program.instructions, vec![
+		assert_eq!(program.entry.instructions, vec![
 			Instruction::PushInteger(1),
 			Instruction::PushInteger(2),
 			Instruction::PushInteger(3),
@@ -294,7 +294,7 @@ mod tests {
 
 		let program = Compiler::new().compile_expression(&expression);
 
-		assert_eq!(program.instructions, vec![
+		assert_eq!(program.entry.instructions, vec![
 			Instruction::PushBoolean(true),
 		]);
 	}
@@ -330,7 +330,7 @@ mod tests {
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
 
-		assert_eq!(bytecode.instructions, vec![
+		assert_eq!(bytecode.entry.instructions, vec![
 			Instruction::PushInteger(5),
 			Instruction::StoreLocal(0),
 			Instruction::LoadLocal(0),
@@ -350,7 +350,7 @@ mod tests {
 
 		let program = Compiler::new().compile_expression(&expression);
 
-		assert_eq!(program.instructions, vec![
+		assert_eq!(program.entry.instructions, vec![
 			Instruction::PushDecimal(Decimal::from_literal("1.25").unwrap()),
 		]);
 	}
@@ -372,7 +372,7 @@ mod tests {
 
 		let program = Compiler::new().compile_expression(&expression);
 
-		assert_eq!(program.instructions, vec![
+		assert_eq!(program.entry.instructions, vec![
 			Instruction::PushBoolean(true),
 			Instruction::PushBoolean(false),
 			Instruction::Equal,
@@ -414,7 +414,7 @@ mod tests {
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
 
-		assert_eq!(bytecode.instructions, vec![
+		assert_eq!(bytecode.entry.instructions, vec![
 			Instruction::PushInteger(5),
 			Instruction::StoreLocal(0),
 			Instruction::LoadLocal(0),
@@ -491,7 +491,7 @@ mod tests {
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
 
-		assert_eq!(bytecode.instructions, vec![
+		assert_eq!(bytecode.entry.instructions, vec![
 			Instruction::PushInteger(1),
 			Instruction::StoreLocal(0),
 			Instruction::PushBoolean(false),
@@ -536,7 +536,7 @@ mod tests {
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
 
-		assert_eq!(bytecode.instructions, vec![
+		assert_eq!(bytecode.entry.instructions, vec![
 			Instruction::PushBoolean(true),
 			Instruction::JumpIfFalse(4),
 			Instruction::PushInteger(1),
@@ -553,7 +553,7 @@ mod tests {
 
 		let program = Compiler::new().compile_expression(&expression);
 
-		assert_eq!(program.instructions, vec![
+		assert_eq!(program.entry.instructions, vec![
 			Instruction::PushInteger(42),
 		]);
 	}
@@ -571,7 +571,7 @@ mod tests {
 
 		let program = Compiler::new().compile_expression(&expression);
 
-		assert_eq!(program.instructions, vec![
+		assert_eq!(program.entry.instructions, vec![
 			Instruction::PushBoolean(false),
 			Instruction::Not,
 		]);
@@ -594,7 +594,7 @@ mod tests {
 
 		let program = Compiler::new().compile_expression(&expression);
 
-		assert_eq!(program.instructions, vec![
+		assert_eq!(program.entry.instructions, vec![
 			Instruction::PushBoolean(true),
 			Instruction::PushBoolean(false),
 			Instruction::Xor,
@@ -626,7 +626,7 @@ mod tests {
 
 		let program = Compiler::new().compile_expression(&expression);
 
-		assert_eq!(program.instructions, vec![
+		assert_eq!(program.entry.instructions, vec![
 			Instruction::PushInteger(9),
 			Instruction::PushInteger(4),
 			Instruction::PushInteger(2),
@@ -666,7 +666,7 @@ mod tests {
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
 
-		assert_eq!(bytecode.instructions, vec![
+		assert_eq!(bytecode.entry.instructions, vec![
 			Instruction::PushInteger(1),
 			Instruction::StoreLocal(0),
 			Instruction::LoadLocal(0),
@@ -684,7 +684,7 @@ mod tests {
 
 		let program = Compiler::new().compile_expression(&expression);
 
-		assert_eq!(program.instructions, vec![
+		assert_eq!(program.entry.instructions, vec![
 			Instruction::PushText(String::from("hello")),
 		]);
 	}
@@ -702,7 +702,7 @@ mod tests {
 
 		let program = Compiler::new().compile_expression(&expression);
 
-		assert_eq!(program.instructions, vec![
+		assert_eq!(program.entry.instructions, vec![
 			Instruction::PushInteger(42),
 			Instruction::Negate,
 		]);
@@ -731,7 +731,7 @@ mod tests {
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
 
-		assert_eq!(bytecode.instructions, vec![
+		assert_eq!(bytecode.entry.instructions, vec![
 			Instruction::PushInteger(5),
 			Instruction::StoreLocal(0),
 			Instruction::LoadLocal(0),

@@ -80,9 +80,9 @@ pub fn write_program(program: &Program) -> Vec<u8> {
 
 	bytes.extend_from_slice(&MAGIC_BYTES);
 	bytes.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
-	bytes.extend_from_slice(&(program.instructions.len() as u32).to_le_bytes());
+	bytes.extend_from_slice(&(program.instructions().len() as u32).to_le_bytes());
 
-	for instruction in &program.instructions {
+	for instruction in program.instructions() {
 		match instruction {
 			Instruction::Add => bytes.push(OPCODE_ADD),
 			Instruction::And => bytes.push(OPCODE_AND),
