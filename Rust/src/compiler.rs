@@ -20,7 +20,7 @@ use crate::ast::VariableDeclaration;
 use crate::bytecode::Instruction;
 use crate::bytecode::Program;
 use crate::semantic::analyzer::SemanticAnalyzer;
-use crate::semantic::scope::ScopeStack;
+use crate::semantic::analyzer::SemanticProgram;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompileError {
@@ -29,49 +29,33 @@ pub struct CompileError {
 }
 
 #[derive(Default)]
-pub struct Compiler {
-	locals: ScopeStack<Local>,
-	next_local_slot: u32,
-}
-
-#[derive(Clone, Copy)]
-struct Local {
-	slot: u32,
-}
+pub struct Compiler;
 
 impl Compiler {
 	pub fn compile_expression(&mut self, expression: &Expr) -> Program {
 		let mut instructions = Vec::new();
-		self.compile_into(expression, &mut instructions);
+		self.compile_into(expression, &SemanticProgram::default(), &mut instructions);
 		Program::new(instructions)
 	}
 
 	pub fn compile_program(&mut self, program: &AstProgram) -> Result<Program, CompileError> {
-		SemanticAnalyzer::new().validate_program(program)?;
-
-		self.locals = ScopeStack::default();
-		self.next_local_slot = 0;
+		let semantic_program = SemanticAnalyzer::new().analyze_program(program)?;
 
 		let mut instructions = Vec::new();
-		self.enter_scope();
 
 		for statement in &program.statements {
-			self.compile_statement(statement, &mut instructions)?;
+			self.compile_statement(statement, &semantic_program, &mut instructions)?;
 		}
 
 		if let Some(result) = &program.result {
-			self.compile_into(result, &mut instructions);
+			self.compile_into(result, &semantic_program, &mut instructions);
 		}
 
-		self.exit_scope();
 		Ok(Program::new(instructions))
 	}
 
 	pub fn new() -> Self {
-		Self {
-			locals: ScopeStack::default(),
-			next_local_slot: 0,
-		}
+		Self
 	}
 
 	fn compile_error(&self, position: usize, message: impl Into<String>) -> CompileError {
@@ -81,42 +65,41 @@ impl Compiler {
 		}
 	}
 
-	fn compile_into(&mut self, expression: &Expr, instructions: &mut Vec<Instruction>) {
+	fn compile_into(&mut self, expression: &Expr, semantic_program: &SemanticProgram, instructions: &mut Vec<Instruction>) {
 		let _ = self;
 
 		match expression {
 			Expr::Assignment(AssignmentExpr { operator, target, value, .. }) => {
-				let slot = self.lookup_local(&target.name)
-					.map(|local| local.slot)
-					.unwrap_or_else(|| panic!("Identifier `{}` must be declared before use.", target.name));
+				let slot = semantic_program.identifier_slot(target.position)
+					.unwrap_or_else(|| panic!("Missing slot for identifier `{}`.", target.name));
 
 				match operator {
 					AssignmentOperator::AddAssign => {
 						instructions.push(Instruction::LoadLocal(slot));
-						self.compile_into(value, instructions);
+						self.compile_into(value, semantic_program, instructions);
 						instructions.push(Instruction::Add);
 					}
 					AssignmentOperator::Assign => {
-						self.compile_into(value, instructions);
+						self.compile_into(value, semantic_program, instructions);
 					}
 					AssignmentOperator::DivideAssign => {
 						instructions.push(Instruction::LoadLocal(slot));
-						self.compile_into(value, instructions);
+						self.compile_into(value, semantic_program, instructions);
 						instructions.push(Instruction::Divide);
 					}
 					AssignmentOperator::ModuloAssign => {
 						instructions.push(Instruction::LoadLocal(slot));
-						self.compile_into(value, instructions);
+						self.compile_into(value, semantic_program, instructions);
 						instructions.push(Instruction::Modulo);
 					}
 					AssignmentOperator::MultiplyAssign => {
 						instructions.push(Instruction::LoadLocal(slot));
-						self.compile_into(value, instructions);
+						self.compile_into(value, semantic_program, instructions);
 						instructions.push(Instruction::Multiply);
 					}
 					AssignmentOperator::SubtractAssign => {
 						instructions.push(Instruction::LoadLocal(slot));
-						self.compile_into(value, instructions);
+						self.compile_into(value, semantic_program, instructions);
 						instructions.push(Instruction::Subtract);
 					}
 				}
@@ -125,8 +108,8 @@ impl Compiler {
 				instructions.push(Instruction::LoadLocal(slot));
 			}
 			Expr::Binary(binary) => {
-				self.compile_into(&binary.left, instructions);
-				self.compile_into(&binary.right, instructions);
+				self.compile_into(&binary.left, semantic_program, instructions);
+				self.compile_into(&binary.right, semantic_program, instructions);
 
 				match binary.operator {
 					BinaryOperator::Add => instructions.push(Instruction::Add),
@@ -152,9 +135,8 @@ impl Compiler {
 				instructions.push(Instruction::PushDecimal(value.clone()));
 			}
 			Expr::Identifier(IdentifierExpr { name, .. }) => {
-				let slot = self.lookup_local(name)
-					.map(|local| local.slot)
-					.unwrap_or_else(|| panic!("Identifier `{name}` must be declared before use."));
+				let slot = semantic_program.identifier_slot(expression.position())
+					.unwrap_or_else(|| panic!("Missing slot for identifier `{name}`."));
 				instructions.push(Instruction::LoadLocal(slot));
 			}
 			Expr::Integer(integer) => {
@@ -164,7 +146,7 @@ impl Compiler {
 				instructions.push(Instruction::PushText(value.clone()));
 			}
 			Expr::Unary(UnaryExpr { operand, operator, .. }) => {
-				self.compile_into(operand, instructions);
+				self.compile_into(operand, semantic_program, instructions);
 
 				match operator {
 					UnaryOperator::Negate => instructions.push(Instruction::Negate),
@@ -174,20 +156,17 @@ impl Compiler {
 		}
 	}
 
-	fn compile_statement(&mut self, statement: &Statement, instructions: &mut Vec<Instruction>) -> Result<(), CompileError> {
+	fn compile_statement(&mut self, statement: &Statement, semantic_program: &SemanticProgram, instructions: &mut Vec<Instruction>) -> Result<(), CompileError> {
 		match statement {
 			Statement::Block(BlockStatement { statements, .. }) => {
-				self.enter_scope();
-
 				for statement in statements {
-					self.compile_statement(statement, instructions)?;
+					self.compile_statement(statement, semantic_program, instructions)?;
 				}
 
-				self.exit_scope();
 				Ok(())
 			}
 			Statement::Expression(expression) => {
-				self.compile_into(expression, instructions);
+				self.compile_into(expression, semantic_program, instructions);
 				instructions.push(Instruction::Pop);
 				Ok(())
 			}
@@ -197,11 +176,11 @@ impl Compiler {
 				then_branch,
 				..
 			}) => {
-				self.compile_into(condition, instructions);
+				self.compile_into(condition, semantic_program, instructions);
 				let jump_if_false_index = instructions.len();
 				instructions.push(Instruction::JumpIfFalse(0));
 
-				self.compile_statement(&Statement::Block(then_branch.clone()), instructions)?;
+				self.compile_statement(&Statement::Block(then_branch.clone()), semantic_program, instructions)?;
 
 				if let Some(else_branch) = else_branch {
 					let jump_to_end_index = instructions.len();
@@ -209,7 +188,7 @@ impl Compiler {
 
 					let else_target = instructions.len() as u32;
 					instructions[jump_if_false_index] = Instruction::JumpIfFalse(else_target);
-					self.compile_statement(else_branch, instructions)?;
+					self.compile_statement(else_branch, semantic_program, instructions)?;
 
 					let end_target = instructions.len() as u32;
 					instructions[jump_to_end_index] = Instruction::Jump(end_target);
@@ -222,8 +201,10 @@ impl Compiler {
 				Ok(())
 			}
 			Statement::VariableDeclaration(VariableDeclaration { data_type: _, initial_value, is_const, name, position }) => {
-				let slot = self.next_local_slot;
-				self.next_local_slot += 1;
+				let slot = semantic_program.declaration_slot(*position).ok_or(self.compile_error(
+					*position,
+					format!("Missing slot for variable declaration `{name}`."),
+				))?;
 
 				let initial_value = initial_value.as_ref().ok_or(self.compile_error(
 					*position,
@@ -234,31 +215,12 @@ impl Compiler {
 						format!("Variable `{name}` must currently have an initializer.")
 					},
 				))?;
-				self.compile_into(initial_value, instructions);
+				self.compile_into(initial_value, semantic_program, instructions);
 				instructions.push(Instruction::StoreLocal(slot));
-				self.declare_local(name.clone(), Local {
-					slot,
-				});
 
 				Ok(())
 			}
 		}
-	}
-
-	fn declare_local(&mut self, name: String, local: Local) {
-		self.locals.declare(name, local);
-	}
-
-	fn enter_scope(&mut self) {
-		self.locals.enter_scope();
-	}
-
-	fn exit_scope(&mut self) {
-		self.locals.exit_scope();
-	}
-
-	fn lookup_local(&self, name: &str) -> Option<Local> {
-		self.locals.lookup(name).copied()
 	}
 }
 

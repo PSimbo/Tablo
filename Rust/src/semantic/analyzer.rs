@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::ast::AssignmentExpr;
 use crate::ast::AssignmentOperator;
 use crate::ast::BinaryExpr;
@@ -22,23 +24,46 @@ use super::scope::ScopeStack;
 #[derive(Default)]
 pub struct SemanticAnalyzer {
 	locals: ScopeStack<LocalBinding>,
+	next_local_slot: u32,
+	semantic_program: SemanticProgram,
 }
 
 #[derive(Clone, Copy)]
 struct LocalBinding {
 	data_type: DataType,
 	is_const: bool,
+	slot: u32,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SemanticProgram {
+	declaration_slots: BTreeMap<usize, u32>,
+	identifier_slots: BTreeMap<usize, u32>,
+}
+
+impl SemanticProgram {
+	pub fn declaration_slot(&self, position: usize) -> Option<u32> {
+		self.declaration_slots.get(&position).copied()
+	}
+
+	pub fn identifier_slot(&self, position: usize) -> Option<u32> {
+		self.identifier_slots.get(&position).copied()
+	}
 }
 
 impl SemanticAnalyzer {
 	pub fn new() -> Self {
 		Self {
 			locals: ScopeStack::default(),
+			next_local_slot: 0,
+			semantic_program: SemanticProgram::default(),
 		}
 	}
 
-	pub fn validate_program(&mut self, program: &Program) -> Result<(), CompileError> {
+	pub fn analyze_program(&mut self, program: &Program) -> Result<SemanticProgram, CompileError> {
 		self.locals = ScopeStack::default();
+		self.next_local_slot = 0;
+		self.semantic_program = SemanticProgram::default();
 		self.enter_scope();
 
 		for statement in &program.statements {
@@ -50,7 +75,11 @@ impl SemanticAnalyzer {
 		}
 
 		self.exit_scope();
-		Ok(())
+		Ok(self.semantic_program.clone())
+	}
+
+	pub fn validate_program(&mut self, program: &Program) -> Result<(), CompileError> {
+		self.analyze_program(program).map(|_| ())
 	}
 
 	fn assignment_result_type(&self, operator: AssignmentOperator, target: DataType, value: DataType, position: usize) -> Result<DataType, CompileError> {
@@ -161,13 +190,14 @@ impl SemanticAnalyzer {
 		self.locals.exit_scope();
 	}
 
-	fn infer_expression_type(&self, expression: &Expr) -> Result<DataType, CompileError> {
+	fn infer_expression_type(&mut self, expression: &Expr) -> Result<DataType, CompileError> {
 		match expression {
 			Expr::Assignment(AssignmentExpr { operator, target, value, .. }) => {
 				let local = self.lookup_local(&target.name).ok_or(self.compile_error(
 					target.position,
 					format!("Variable `{}` is not declared in this scope.", target.name),
 				))?;
+				self.semantic_program.identifier_slots.insert(target.position, local.slot);
 
 				if local.is_const {
 					let operation = match operator {
@@ -196,10 +226,12 @@ impl SemanticAnalyzer {
 			Expr::Boolean(_) => Ok(DataType::Bool),
 			Expr::Decimal(_) => Ok(DataType::Dec),
 			Expr::Identifier(IdentifierExpr { name, .. }) => {
-				self.lookup_local(name).map(|local| local.data_type).ok_or(self.compile_error(
+				let local = self.lookup_local(name).ok_or(self.compile_error(
 					expression.position(),
 					format!("Variable `{name}` is not declared in this scope."),
-				))
+				))?;
+				self.semantic_program.identifier_slots.insert(expression.position(), local.slot);
+				Ok(local.data_type)
 			}
 			Expr::Integer(_) => Ok(DataType::Int),
 			Expr::Text(_) => Ok(DataType::Text),
@@ -385,9 +417,13 @@ impl SemanticAnalyzer {
 				))?;
 				let initial_type = self.infer_expression_type(initial_value)?;
 				self.ensure_assignable(*data_type, initial_type, initial_value.position())?;
+				let slot = self.next_local_slot;
+				self.next_local_slot += 1;
+				self.semantic_program.declaration_slots.insert(*position, slot);
 				self.declare_local(name.clone(), LocalBinding {
 					data_type: *data_type,
 					is_const: *is_const,
+					slot,
 				});
 
 				Ok(())
