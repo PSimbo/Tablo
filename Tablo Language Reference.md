@@ -526,9 +526,11 @@ Scopes in Tablo are lexical. A variable or function is valid only within the sco
 
 Both variables and functions may be declared either at file scope or within any nested scope.
 
-If a variable within a nested scope matches the name of a variable in an outer scope then the variable in the nested scoped "shadows" the variable in the outer scope. Until the end of the nested scope, references to the variable will resolve to that scope's variable. After the nested scope ends, references to the variable will once again resolve to the outer scope's variable.
+If a variable within a nested scope matches the name of a variable in an outer scope then the variable in the nested scope "shadows" the variable in the outer scope. Until the end of the nested scope, references to the variable will resolve to that scope's variable. After the nested scope ends, references to the variable will once again resolve to the outer scope's variable.
 
-Within a given scope, a function may be called before its declaration appears in the source code. Functions do not need to be forward-declared and Tablo provides no syntax for doing so.
+The same shadowing rules apply to functions. If a function declared in a nested scope has the same name as a function visible from an outer scope then, within the nested scope, unqualified calls to that name resolve to the nested function.
+
+Within a given scope, a function may be called before its declaration appears in the source code. Functions do not need to be forward-declared and Tablo provides no syntax for doing so. This rule applies equally to file-scope functions and to functions declared within a nested scope. A nested function is therefore visible throughout the entire scope in which it is declared as well as within any deeper nested scopes.
 
 Anonymous scopes are supported and are created using a bare block:
 
@@ -954,6 +956,23 @@ var ts: timestamp! = timestamp(post.date, post.time);
 Arguments may be passed positionally or by name.
 
 Functions may be defined both at file scope and nested within other scopes. Only functions defined at file scope may be marked as `pub`.
+
+Nested functions use normal lexical scope rules. A nested function may reference parameters, variables, and functions that are visible from the enclosing scope at the point where the nested function is declared. If a name is declared again within the nested function body, that inner declaration shadows the outer one in the usual way.
+
+A `return` statement always exits the innermost enclosing function body. A `return` within a nested function therefore returns from the nested function only and does not cause the enclosing function to return.
+
+~~~
+fn FormatPostSummary(post: ForumPost) text {
+  fn AppendLine(prefix: text, value: text) text {
+    return prefix + value + '\n';
+  }
+
+  return AppendLine('Title: ', post.title)
+       + AppendLine('Author: ', post.authorName);
+}
+~~~
+
+In the example above, `AppendLine()` is visible only within `FormatPostSummary()` and any scopes nested within that function body. It may be called before or after its declaration within that scope, but it may not be referenced outside the body of `FormatPostSummary()`.
 
 ### Function Parameters
 
