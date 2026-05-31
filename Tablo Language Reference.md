@@ -320,6 +320,8 @@ If a case-insensitive text equality comparison is required, the expected approac
 
 Decimal values may be compared with other decimal values. Decimal values may also be compared with integer values as the integer will be automatically converted to a decimal as per the "Automatic Type Conversions" section below.
 
+Arrays may be compared for equality using `==` and `!=`. Two arrays are equal if and only if they have the same length and each element is equal to the corresponding element in the other array.
+
 ### Comparison Operators
 
 The `>`, `>=`, `<`, and `<=` operators are used to compare the ordering of two values. Operands must be numeric, date/time, or `text`.
@@ -348,7 +350,7 @@ The `xor` operator evaluates to the result of a logical XOR of the two operands.
 
 ### Mathematical Operators
 
-The `+` operator evaluates to the sum of its operands. In the case of strings, it is used for concatenation. Operands must be numeric, date/time, or `text`. The operands may be dissimilar if both types are numeric.
+The `+` operator evaluates to the sum of its operands. In the case of strings, it is used for concatenation. It may also be used to concatenate two arrays of compatible element type. Operands must therefore be numeric, date/time, `text`, or arrays. The operands may be dissimilar if both types are numeric or if both are arrays whose element types are compatible under the normal array element typing rules.
 
 The `-` operator evaluates to the difference of its operands. As a unary perfix operator, it evaluates to the numeric negation of its operand. Operands must be numeric or date/time. The operands may be dissimilar if both types are numeric.
 
@@ -371,6 +373,8 @@ The `*=` operator evaluates the product of its operands and assigns the result t
 The `/=` operator evaluates the quotient of its operands and assigns the result to the left operand.
 
 The `%=` operator evaluates the modulus of its operands and assigns the result to the left operand.
+
+When the left operand is an indexed array element, the assignment modifies that element in place. Array element assignment may refer to an existing element or to the next index after the current last element, in which case the array grows by one element. Any other out-of-bounds array assignment results in a runtime error.
 
 ### Column Access Operator
 
@@ -480,13 +484,49 @@ var addr1: text = locData.addressLines.line1;
 Arrays
 ------
 
-Tablo supports simple 1D arrays. For database backends that do not support arrays (i.e. anything except PostgreSQL), arrays may be used but no attempt is made to add support for assigning array values to database fields.
+Tablo supports simple 1D arrays. Arrays may always be declared and used in ordinary Tablo code regardless of the capabilities of the database backend.
+
+When assigning an array value to a database field, the target field must itself be an array field with a compatible element type. Tablo does not automatically coerce arrays to non-array database field types.
+
+For database backends that do not support array fields, or when the target database field has some other non-array type, the programmer must convert the array to some other valid representation before assignment, such as a comma-separated `text` value or a JSON/object representation as appropriate for the application.
 
 ~~~
 var array1d: [int] = [1, 2, 4, 8];
 ~~~
 
-Arrays are indexed with integer values where the and index of 1 corresponds to the first element in the array (i.e. one-based indexing is used).
+Array literals are written using `[` and `]` with comma-separated element expressions.
+
+Arrays are indexed using the syntax `arrayExpr[indexExpr]`. Indices must be of type `int`. Tablo uses one-based indexing, so an index of 1 refers to the first element in the array.
+
+If an array is read using an index that is outside its valid bounds, a runtime error is raised.
+
+Array elements may be assigned using ordinary assignment and compound assignment operators:
+
+~~~
+var xs: [int]! = [1, 2, 3];
+xs[2] = 5;
+xs[3] += 10;
+~~~
+
+If an array element assignment uses an index of exactly one greater than the array's current length, the array is automatically grown to accommodate the new value. Sparse arrays are not supported, so any larger out-of-bounds index results in a runtime error.
+
+The length of an array may be obtained using the built-in `len(...)` function.
+
+The default value of a nullable array is `null`. Non-null arrays default to the empty array `[]`.
+
+Arrays use copy-on-write semantics when passed to functions or otherwise assigned by value. In other words, array values may be shared internally until one of the aliases is mutated, at which point a private copy is created for the write.
+
+~~~
+fn BumpFirst(values: [int]!) [int]! {
+  values[1] += 1;
+  return values;
+}
+
+var a: [int]! = [1, 2, 3];
+var b: [int]! = BumpFirst(a);
+~~~
+
+In the example above, `a` remains `[1, 2, 3]` while `b` becomes `[2, 2, 3]`.
 
 At present, there is no support for multi-dimensional arrays.
 
@@ -1281,6 +1321,10 @@ Returns `true` when the current iteration of a grouped `for` loop is the last it
 
 It is valid to call `lastof()` only within the body of a grouped database `for` loop. It must not be used in query expressions. The arguments passed to `lastof()` must identify the first grouping level, the first two grouping levels, and so on, in the same order as the enclosing `group by` clause. Each argument must be either the simple field reference from the corresponding grouping expression or the alias assigned to that grouping expression.
 
+### `len(v: [any]!): int!`
+
+Returns the number of elements in the array `v`.
+
 ### `like(v: text!, pattern: text!): bool!`
 
 Returns `true` if `v` matches `pattern` according to Tablo's SQL-style wildcard matching rules. Otherwise returns `false`.
@@ -1404,30 +1448,41 @@ Production = <Components>
 ~~~
 
 ~~~
+program = { functionDeclaration | statement } [ expression ]
+
 statement = block | blockStatement | simpleStatement
 
 block = `{` { statement } `}`
 
 blockStatement = forStatement | ifStatement | whileStatement
 simpleStatement = ( expression | returnStatement | variableDeclaration ) `;`
+functionDeclaration = `fn` identifier `(` [ functionParameter { `,` functionParameter } ] `)` returnType block
+functionParameter = identifier `:` dataType
 variableDeclaration = ( `const` | `var` ) identifier `:` dataType [ `=` expression ]
 returnStatement = `return` [ expression ]
 ifStatement = `if` expression block [ `else` ( block | ifStatement ) ]
 whileStatement = `while` expression block
+returnType = dataType | `void`
 dataType = unquotedIdentifier | arrayType
-arrayType = dataType `[` integerLiteral `]`
+arrayType = `[` dataType `]`
 
-expression = ( expression assignmentOperator expression ) | logicalOr
+expression = assignment
+assignment = logicalOr [ assignmentOperator assignment ]
 groupExpression = `(` expression `)`
 logicalOr = logicalXor { `or` logicalXor }
 logicalXor = logicalAnd { `xor` logicalAnd }
 logicalAnd = equality { `and` equality }
 equality = comparison { equalityOperator comparison }
-comparison = factor { relationalOperator factor }
-factor = term { multiplicativeOperator term }
-term = unary { additiveOperator unary }
-unary = ( unaryOperator unary ) | literal
-literal = `null` | booleanLiteral | decimalLiteral | hexLiteral | integerLiteral | octalLiteral | stringLiteral | groupExpression | identifier
+comparison = additive { relationalOperator additive }
+additive = multiplicative { additiveOperator multiplicative }
+multiplicative = unary { multiplicativeOperator unary }
+unary = ( unaryOperator unary ) | postfix
+postfix = primary { callSuffix | indexSuffix }
+primary = literal | groupExpression | identifier
+literal = `null` | arrayLiteral | booleanLiteral | decimalLiteral | hexLiteral | integerLiteral | octalLiteral | stringLiteral
+arrayLiteral = `[` [ expression { `,` expression } ] `]`
+callSuffix = `(` [ expression { `,` expression } ] `)`
+indexSuffix = `[` expression `]`
 assignmentOperator = `=` | `+=` | `-=` | `*=` | `/=` | `%=`
 equalityOperator = `==` | `!=`
 relationalOperator = `>` | `>=` | `<` | `<=`
