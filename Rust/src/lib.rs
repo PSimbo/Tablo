@@ -414,6 +414,17 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_source_text_with_comments() {
+		let result = run(
+			"var x: int = 1; // ignore this until the block comment starts /* still ignored */\n\
+			 /* outer /* inner */ done */\n\
+			 x + 2",
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
 	fn runs_source_text_with_variable_declarations() {
 		let result = run("var x: int = 1;\nvar y: int = 2;\nx + y").unwrap();
 

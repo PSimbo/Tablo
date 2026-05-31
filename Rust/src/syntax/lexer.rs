@@ -50,7 +50,7 @@ impl Lexer {
 			return Ok(Some(self.lex_string_token(StringTokenMode::Continuation)?));
 		}
 
-		self.skip_whitespace();
+		self.skip_ignored_text()?;
 
 		if self.position >= self.source.as_str().len() {
 			if self.end_of_file {
@@ -474,6 +474,10 @@ impl Lexer {
 		chars.next()
 	}
 
+	fn peek_next_two_chars_are(&self, expected: &str) -> bool {
+		self.source.as_str()[self.position..].starts_with(expected)
+	}
+
 	fn scan_interpolation_end(&self, mut position: usize) -> Result<usize, LexError> {
 		while position < self.source.as_str().len() {
 			let next = self.source.as_str()[position..].chars().next().unwrap();
@@ -577,8 +581,71 @@ impl Lexer {
 		})
 	}
 
-	fn skip_whitespace(&mut self) {
-		while self.peek_char().is_some_and(char::is_whitespace) {
+	fn skip_ignored_text(&mut self) -> Result<(), LexError> {
+		loop {
+			let start = self.position;
+
+			while self.peek_char().is_some_and(char::is_whitespace) {
+				self.advance_char();
+			}
+
+			if self.peek_next_two_chars_are("//") {
+				self.advance_char();
+				self.advance_char();
+				self.skip_single_line_comment();
+				continue;
+			}
+
+			if self.peek_next_two_chars_are("/*") {
+				self.skip_multiline_comment()?;
+				continue;
+			}
+
+			if self.position == start {
+				return Ok(());
+			}
+		}
+	}
+
+	fn skip_multiline_comment(&mut self) -> Result<(), LexError> {
+		let start = self.position;
+		let mut depth = 0usize;
+
+		while self.position < self.source.as_str().len() {
+			if self.peek_next_two_chars_are("/*") {
+				self.advance_char();
+				self.advance_char();
+				depth += 1;
+				continue;
+			}
+
+			if self.peek_next_two_chars_are("*/") {
+				self.advance_char();
+				self.advance_char();
+				depth -= 1;
+
+				if depth == 0 {
+					return Ok(());
+				}
+
+				continue;
+			}
+
+			self.advance_char();
+		}
+
+		Err(LexError {
+			position: start,
+			message: String::from("Unterminated multi-line comment."),
+		})
+	}
+
+	fn skip_single_line_comment(&mut self) {
+		while let Some(next) = self.peek_char() {
+			if next == '\n' || self.peek_next_two_chars_are("/*") {
+				return;
+			}
+
 			self.advance_char();
 		}
 	}
@@ -957,5 +1024,61 @@ mod tests {
 
 		assert_eq!(tokens[2].kind, TokenKind::StringLiteral);
 		assert_eq!(tokens[2].lexeme, "    - Bar\n        - Baz\n");
+	}
+
+	#[test]
+	fn tokenizes_nested_multiline_comments() {
+		let mut lexer = Lexer::new(SourceText::new(
+			"var x: int = 1; /* outer /* inner */ still outer */ x",
+		));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens.len(), 9);
+		assert_eq!(tokens[0].kind, TokenKind::VarKeyword);
+		assert_eq!(tokens[1].kind, TokenKind::Identifier);
+		assert_eq!(tokens[2].kind, TokenKind::Colon);
+		assert_eq!(tokens[3].kind, TokenKind::IntKeyword);
+		assert_eq!(tokens[4].kind, TokenKind::Equal);
+		assert_eq!(tokens[5].kind, TokenKind::IntegerLiteral);
+		assert_eq!(tokens[6].kind, TokenKind::Semicolon);
+		assert_eq!(tokens[7].kind, TokenKind::Identifier);
+		assert_eq!(tokens[8].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
+	fn tokenizes_single_line_comments() {
+		let mut lexer = Lexer::new(SourceText::new(
+			"var x: int = 1; // ignore this\nx",
+		));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens.len(), 9);
+		assert_eq!(tokens[0].kind, TokenKind::VarKeyword);
+		assert_eq!(tokens[7].kind, TokenKind::Identifier);
+		assert_eq!(tokens[7].lexeme, "x");
+		assert_eq!(tokens[8].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
+	fn tokenizes_single_line_comment_until_multiline_comment_starts() {
+		let mut lexer = Lexer::new(SourceText::new(
+			"1 // ignored /* block */ + 2",
+		));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens.len(), 4);
+		assert_eq!(tokens[0].kind, TokenKind::IntegerLiteral);
+		assert_eq!(tokens[1].kind, TokenKind::Plus);
+		assert_eq!(tokens[2].kind, TokenKind::IntegerLiteral);
+		assert_eq!(tokens[3].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
+	fn rejects_unterminated_multiline_comment() {
+		let mut lexer = Lexer::new(SourceText::new("1 /* missing end"));
+		let error = lexer.tokenize().unwrap_err();
+
+		assert_eq!(error.position, 2);
+		assert_eq!(error.message, "Unterminated multi-line comment.");
 	}
 }
