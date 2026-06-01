@@ -197,14 +197,18 @@ impl Compiler {
 				instructions.push(Instruction::PushBoolean(*value));
 			}
 			Expr::Call(CallExpr { arguments, .. }) => {
-				let function_index = semantic_program.call_target(expression.position())
-					.unwrap_or_else(|| panic!("Missing function target for call expression."));
-
 				for argument in arguments {
 					self.compile_into(argument, semantic_program, instructions);
 				}
 
-				instructions.push(Instruction::Call(function_index, arguments.len() as u32));
+				if let Some(built_in) = semantic_program.built_in_call_target(expression.position()) {
+					instructions.push(Instruction::CallBuiltIn(built_in, arguments.len() as u32));
+				}
+				else {
+					let function_index = semantic_program.call_target(expression.position())
+						.unwrap_or_else(|| panic!("Missing function target for call expression."));
+					instructions.push(Instruction::Call(function_index, arguments.len() as u32));
+				}
 			}
 			Expr::Decimal(DecimalLiteral { value, .. }) => {
 				instructions.push(Instruction::PushDecimal(value.clone()));
@@ -342,6 +346,7 @@ fn expression_produces_runtime_value(expression: &Expr, semantic_program: &Seman
 
 #[cfg(test)]
 mod tests {
+	use crate::ast::ArrayLiteral;
 	use crate::ast::AssignmentExpr;
 	use crate::ast::AssignmentOperator;
 	use crate::ast::AssignmentTarget;
@@ -349,6 +354,7 @@ mod tests {
 	use crate::ast::BinaryOperator;
 	use crate::ast::BlockStatement;
 	use crate::ast::BooleanLiteral;
+	use crate::ast::CallExpr;
 	use crate::ast::DataType;
 	use crate::ast::DecimalLiteral;
 	use crate::ast::Expr;
@@ -412,6 +418,45 @@ mod tests {
 
 		assert_eq!(program.entry.instructions, vec![
 			Instruction::PushBoolean(true),
+		]);
+	}
+
+	#[test]
+	fn compiles_built_in_len_call() {
+		let program = AstProgram {
+			functions: vec![],
+			statements: vec![],
+			result: Some(Expr::Call(CallExpr {
+				arguments: vec![
+					Expr::Array(ArrayLiteral {
+						elements: vec![
+							Expr::Integer(IntegerLiteral {
+								position: 0,
+								value: 1,
+							}),
+							Expr::Integer(IntegerLiteral {
+								position: 0,
+								value: 2,
+							}),
+						],
+						position: 0,
+					}),
+				],
+				callee: IdentifierExpr {
+					name: String::from("len"),
+					position: 0,
+				},
+				position: 0,
+			})),
+		};
+
+		let bytecode = Compiler::new().compile_program(&program).unwrap();
+
+		assert_eq!(bytecode.entry.instructions, vec![
+			Instruction::PushInteger(1),
+			Instruction::PushInteger(2),
+			Instruction::MakeArray(2),
+			Instruction::CallBuiltIn(crate::builtins::BuiltInFunction::Len, 1),
 		]);
 	}
 

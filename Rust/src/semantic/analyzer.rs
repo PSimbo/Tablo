@@ -21,6 +21,7 @@ use crate::ast::UnaryExpr;
 use crate::ast::UnaryOperator;
 use crate::ast::VariableDeclaration;
 use crate::ast::WhileStatement;
+use crate::builtins::BuiltInFunction;
 use crate::compiler::CompileError;
 
 use super::scope::ScopeStack;
@@ -53,6 +54,7 @@ struct FunctionSignature {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SemanticProgram {
+	built_in_call_targets: BTreeMap<usize, BuiltInFunction>,
 	call_return_types: BTreeMap<usize, DataType>,
 	call_targets: BTreeMap<usize, u32>,
 	declaration_slots: BTreeMap<usize, u32>,
@@ -60,6 +62,10 @@ pub struct SemanticProgram {
 }
 
 impl SemanticProgram {
+	pub fn built_in_call_target(&self, position: usize) -> Option<BuiltInFunction> {
+		self.built_in_call_targets.get(&position).copied()
+	}
+
 	pub fn call_return_type(&self, position: usize) -> Option<DataType> {
 		self.call_return_types.get(&position).cloned()
 	}
@@ -329,6 +335,36 @@ impl SemanticAnalyzer {
 		}
 	}
 
+	fn infer_built_in_call_type(&mut self, built_in: BuiltInFunction, arguments: &[Expr], position: usize) -> Result<DataType, CompileError> {
+		if !built_in.supports_arity(arguments.len()) {
+			return Err(self.compile_error(
+				position,
+				format!(
+					"Built-in function `{}` expects 1 argument(s), found {}.",
+					built_in.name(),
+					arguments.len(),
+				),
+			));
+		}
+
+		let argument_types = arguments.iter()
+			.map(|argument| self.infer_expression_type(argument))
+			.collect::<Result<Vec<_>, _>>()?;
+
+		let return_type = built_in.return_type(&argument_types).ok_or(self.compile_error(
+			arguments.first().map_or(position, Expr::position),
+			format!(
+				"Built-in function `{}` does not accept an argument of type `{}`.",
+				built_in.name(),
+				self.data_type_name(argument_types.first().unwrap()),
+			),
+		))?;
+
+		self.semantic_program.built_in_call_targets.insert(position, built_in);
+		self.semantic_program.call_return_types.insert(position, return_type.clone());
+		Ok(return_type)
+	}
+
 	fn infer_expression_type(&mut self, expression: &Expr) -> Result<DataType, CompileError> {
 		match expression {
 			Expr::Array(array) => self.infer_array_literal_type(array.elements.as_slice(), array.position),
@@ -413,31 +449,37 @@ impl SemanticAnalyzer {
 			}
 			Expr::Boolean(_) => Ok(DataType::Bool),
 			Expr::Call(CallExpr { arguments, callee, .. }) => {
-				let signature = self.functions.get(&callee.name).cloned().ok_or(self.compile_error(
-					callee.position,
-					format!("Function `{}` is not declared in this scope.", callee.name),
-				))?;
+				if let Some(signature) = self.functions.get(&callee.name).cloned() {
+					if arguments.len() != signature.parameter_types.len() {
+						return Err(self.compile_error(
+							expression.position(),
+							format!(
+								"Function `{}` expects {} argument(s), found {}.",
+								callee.name,
+								signature.parameter_types.len(),
+								arguments.len(),
+							),
+						));
+					}
 
-				if arguments.len() != signature.parameter_types.len() {
-					return Err(self.compile_error(
-						expression.position(),
-						format!(
-							"Function `{}` expects {} argument(s), found {}.",
-							callee.name,
-							signature.parameter_types.len(),
-							arguments.len(),
-						),
-					));
+					for (argument, parameter_type) in arguments.iter().zip(signature.parameter_types.iter()) {
+						let argument_type = self.infer_expression_type(argument)?;
+						self.ensure_assignable(parameter_type, &argument_type, argument.position())?;
+					}
+
+					self.semantic_program.call_targets.insert(expression.position(), signature.function_index);
+					self.semantic_program.call_return_types.insert(expression.position(), signature.return_type.clone());
+					Ok(signature.return_type)
 				}
-
-				for (argument, parameter_type) in arguments.iter().zip(signature.parameter_types.iter()) {
-					let argument_type = self.infer_expression_type(argument)?;
-					self.ensure_assignable(parameter_type, &argument_type, argument.position())?;
+				else if let Some(built_in) = BuiltInFunction::from_name(&callee.name) {
+					self.infer_built_in_call_type(built_in, arguments, expression.position())
 				}
-
-				self.semantic_program.call_targets.insert(expression.position(), signature.function_index);
-				self.semantic_program.call_return_types.insert(expression.position(), signature.return_type.clone());
-				Ok(signature.return_type)
+				else {
+					Err(self.compile_error(
+						callee.position,
+						format!("Function `{}` is not declared in this scope.", callee.name),
+					))
+				}
 			}
 			Expr::Decimal(_) => Ok(DataType::Dec),
 			Expr::Identifier(IdentifierExpr { name, .. }) => {

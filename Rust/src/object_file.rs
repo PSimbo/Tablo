@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use crate::builtins::BuiltInFunction;
 use crate::bytecode::CodeBody;
 use crate::bytecode::CompiledFunction;
 use crate::bytecode::ConstantPool;
@@ -45,6 +46,7 @@ const OPCODE_RETURN_VOID: u8 = 28;
 const OPCODE_MAKE_ARRAY: u8 = 29;
 const OPCODE_LOAD_INDEX: u8 = 30;
 const OPCODE_STORE_INDEX: u8 = 31;
+const OPCODE_CALL_BUILT_IN: u8 = 32;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectFileError {
@@ -118,6 +120,11 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 		Instruction::Call(function_index, argument_count) => {
 			bytes.push(OPCODE_CALL);
 			bytes.extend_from_slice(&function_index.to_le_bytes());
+			bytes.extend_from_slice(&argument_count.to_le_bytes());
+		}
+		Instruction::CallBuiltIn(built_in, argument_count) => {
+			bytes.push(OPCODE_CALL_BUILT_IN);
+			bytes.push(built_in.id());
 			bytes.extend_from_slice(&argument_count.to_le_bytes());
 		}
 		Instruction::Divide => bytes.push(OPCODE_DIVIDE),
@@ -302,6 +309,15 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_ADD => Ok(Instruction::Add),
 			OPCODE_AND => Ok(Instruction::And),
 			OPCODE_CALL => Ok(Instruction::Call(self.read_u32()?, self.read_u32()?)),
+			OPCODE_CALL_BUILT_IN => {
+				let built_in_id = self.read_u8()?;
+				let argument_count = self.read_u32()?;
+				let built_in = BuiltInFunction::from_id(built_in_id).ok_or(ObjectFileError {
+					offset: self.offset - 5,
+					message: format!("Unknown built-in function id {built_in_id}."),
+				})?;
+				Ok(Instruction::CallBuiltIn(built_in, argument_count))
+			}
 			OPCODE_DIVIDE => Ok(Instruction::Divide),
 			OPCODE_EQUAL => Ok(Instruction::Equal),
 			OPCODE_GREATER_THAN => Ok(Instruction::GreaterThan),
@@ -450,6 +466,7 @@ impl ObjectFileLayout {
 
 #[cfg(test)]
 mod tests {
+	use crate::builtins::BuiltInFunction;
 	use crate::bytecode::CodeBody;
 	use crate::bytecode::CompiledFunction;
 	use crate::bytecode::ConstantPool;
@@ -532,6 +549,21 @@ mod tests {
 			Instruction::PushInteger(1),
 			Instruction::PushInteger(2),
 			Instruction::Add,
+		]);
+
+		let bytes = write_program(&program);
+		let decoded = read_program(&bytes).unwrap();
+
+		assert_eq!(decoded, program);
+	}
+
+	#[test]
+	fn round_trips_program_bytes_with_built_in_call() {
+		let program = Program::new(vec![
+			Instruction::PushInteger(1),
+			Instruction::PushInteger(2),
+			Instruction::MakeArray(2),
+			Instruction::CallBuiltIn(BuiltInFunction::Len, 1),
 		]);
 
 		let bytes = write_program(&program);

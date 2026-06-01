@@ -3,6 +3,7 @@
 // grow into a richer structure once functions, sections, and debug metadata
 // are introduced.
 
+use crate::builtins::BuiltInFunction;
 use crate::value::Decimal;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -18,6 +19,7 @@ pub enum Instruction {
 	Add,
 	And,
 	Call(u32, u32),
+	CallBuiltIn(BuiltInFunction, u32),
 	Divide,
 	Equal,
 	GreaterThan,

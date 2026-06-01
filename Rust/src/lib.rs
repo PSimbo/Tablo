@@ -2,6 +2,7 @@ use std::path::Path;
 use std::fmt::Display;
 
 pub mod ast;
+pub mod builtins;
 pub mod bytecode;
 pub mod compiler;
 pub mod object_file;
@@ -205,6 +206,16 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_len_with_non_array_argument_source_text() {
+		let error = run("len(1)").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Built-in function `len` does not accept an argument of type `int`."),
+			position: 4,
+		}));
+	}
+
+	#[test]
 	fn rejects_out_of_bounds_array_index_source_text() {
 		let error = run("var xs: [int] = [10, 20];\nxs[3]").unwrap_err();
 
@@ -287,6 +298,13 @@ mod tests {
 		let result = run("var xs: [int] = [10, 20, 30];\nxs[2]").unwrap();
 
 		assert_eq!(result, Some(Value::Integer(20)));
+	}
+
+	#[test]
+	fn runs_array_length_source_text() {
+		let result = run("var xs: [int] = [10, 20, 30];\nlen(xs)").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(3)));
 	}
 
 	#[test]
@@ -460,6 +478,13 @@ mod tests {
 		let result = run("var name: text = 'world';\n'hello ${name}!'").unwrap();
 
 		assert_eq!(result, Some(Value::Text(String::from("hello world!"))));
+	}
+
+	#[test]
+	fn runs_len_on_empty_array_literal_source_text() {
+		let result = run("len([])").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(0)));
 	}
 
 	#[test]

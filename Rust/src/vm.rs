@@ -1,7 +1,8 @@
+use crate::builtins::BuiltInFunction;
 use crate::bytecode::CodeBody;
 use crate::bytecode::CompiledFunction;
-use crate::bytecode::Program;
 use crate::bytecode::Instruction;
+use crate::bytecode::Program;
 use crate::value::Decimal;
 use crate::value::Value;
 
@@ -112,6 +113,12 @@ impl VirtualMachine {
 					self.stack.push(result);
 				}
 
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::CallBuiltIn(built_in, argument_count) => {
+				let arguments = self.pop_call_arguments(*argument_count as usize, instruction_index)?;
+				let result = self.run_built_in_function(*built_in, arguments, instruction_index)?;
+				self.stack.push(result);
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::Divide => {
@@ -326,6 +333,27 @@ impl VirtualMachine {
 			instruction_index,
 			message: String::from("Stack underflow while reading operand."),
 		})
+	}
+
+	fn run_built_in_function(
+		&mut self,
+		built_in: BuiltInFunction,
+		arguments: Vec<Value>,
+		instruction_index: usize,
+	) -> Result<Value, VmError> {
+		match built_in {
+			BuiltInFunction::Len => match arguments.as_slice() {
+				[Value::Array(values)] => Ok(Value::Integer(values.len() as i64)),
+				[value] => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `len` does not accept a `{}` value.", type_name(value)),
+				)),
+				_ => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `len` expects 1 argument(s), found {}.", arguments.len()),
+				)),
+			}
+		}
 	}
 
 	fn run_function(
@@ -672,6 +700,7 @@ fn vm_error(instruction_index: usize, message: String) -> VmError {
 
 #[cfg(test)]
 mod tests {
+	use crate::builtins::BuiltInFunction;
 	use crate::bytecode::Instruction;
 	use crate::bytecode::Program;
 	use crate::value::Decimal;
@@ -853,6 +882,21 @@ mod tests {
 		let result = VirtualMachine::new().run(&program).unwrap();
 
 		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
+	fn runs_built_in_len_program() {
+		let program = Program::new(vec![
+			Instruction::PushInteger(1),
+			Instruction::PushInteger(2),
+			Instruction::PushInteger(3),
+			Instruction::MakeArray(3),
+			Instruction::CallBuiltIn(BuiltInFunction::Len, 1),
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(3)));
 	}
 
 	#[test]
