@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::ast::AssignmentExpr;
 use crate::ast::AssignmentOperator;
+use crate::ast::AssignmentTarget;
 use crate::ast::BinaryExpr;
 use crate::ast::BinaryOperator;
 use crate::ast::BlockStatement;
@@ -316,30 +317,78 @@ impl SemanticAnalyzer {
 		match expression {
 			Expr::Array(array) => self.infer_array_literal_type(array.elements.as_slice(), array.position),
 			Expr::Assignment(AssignmentExpr { operator, target, value, .. }) => {
-				let local = self.lookup_local(&target.name).ok_or(self.compile_error(
-					target.position,
-					format!("Variable `{}` is not declared in this scope.", target.name),
-				))?;
-				self.semantic_program.identifier_slots.insert(target.position, local.slot);
+				match target {
+					AssignmentTarget::Identifier(target) => {
+						let local = self.lookup_local(&target.name).ok_or(self.compile_error(
+							target.position,
+							format!("Variable `{}` is not declared in this scope.", target.name),
+						))?;
+						self.semantic_program.identifier_slots.insert(target.position, local.slot);
 
-				if local.is_const {
-					let operation = match operator {
-						AssignmentOperator::Assign => "=",
-						AssignmentOperator::AddAssign => "+=",
-						AssignmentOperator::DivideAssign => "/=",
-						AssignmentOperator::ModuloAssign => "%=",
-						AssignmentOperator::MultiplyAssign => "*=",
-						AssignmentOperator::SubtractAssign => "-=",
-					};
+						if local.is_const {
+							let operation = match operator {
+								AssignmentOperator::Assign => "=",
+								AssignmentOperator::AddAssign => "+=",
+								AssignmentOperator::DivideAssign => "/=",
+								AssignmentOperator::ModuloAssign => "%=",
+								AssignmentOperator::MultiplyAssign => "*=",
+								AssignmentOperator::SubtractAssign => "-=",
+							};
 
-					return Err(self.compile_error(
-						expression.position(),
-						format!("Constant `{}` cannot be assigned using `{operation}`.", target.name),
-					));
+							return Err(self.compile_error(
+								expression.position(),
+								format!("Constant `{}` cannot be assigned using `{operation}`.", target.name),
+							));
+						}
+
+						let value_type = self.infer_expression_type(value)?;
+						self.assignment_result_type(*operator, &local.data_type, &value_type, expression.position())
+					}
+					AssignmentTarget::Index(target) => {
+						let local = self.lookup_local(&target.array.name).ok_or(self.compile_error(
+							target.array.position,
+							format!("Variable `{}` is not declared in this scope.", target.array.name),
+						))?;
+						self.semantic_program.identifier_slots.insert(target.array.position, local.slot);
+
+						if local.is_const {
+							return Err(self.compile_error(
+								expression.position(),
+								format!("Constant `{}` cannot be assigned using `=`.", target.array.name),
+							));
+						}
+
+						if *operator != AssignmentOperator::Assign {
+							return Err(self.compile_error(
+								expression.position(),
+								String::from("Indexed assignment currently supports only `=`."),
+							));
+						}
+
+						let index_type = self.infer_expression_type(&target.index)?;
+
+						if index_type != DataType::Int {
+							return Err(self.compile_error(
+								target.index.position(),
+								format!("Array index must be of type `int`, found `{}`.", self.data_type_name(&index_type)),
+							));
+						}
+
+						let element_type = match &local.data_type {
+							DataType::Array(element_type) => element_type.as_ref(),
+							other => {
+								return Err(self.compile_error(
+									target.array.position,
+									format!("Indexed assignment requires an array operand, found `{}`.", self.data_type_name(other)),
+								));
+							}
+						};
+
+						let value_type = self.infer_expression_type(value)?;
+						self.ensure_assignable(element_type, &value_type, expression.position())?;
+						Ok(element_type.clone())
+					}
 				}
-
-				let value_type = self.infer_expression_type(value)?;
-				self.assignment_result_type(*operator, &local.data_type, &value_type, expression.position())
 			}
 			Expr::Binary(BinaryExpr { left, operator, right, .. }) => {
 				let left_type = self.infer_expression_type(left)?;

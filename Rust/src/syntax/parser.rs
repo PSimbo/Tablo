@@ -1,6 +1,8 @@
+use crate::ast::ArrayIndexAssignmentTarget;
 use crate::ast::ArrayLiteral;
 use crate::ast::AssignmentExpr;
 use crate::ast::AssignmentOperator;
+use crate::ast::AssignmentTarget;
 use crate::ast::BinaryExpr;
 use crate::ast::BinaryOperator;
 use crate::ast::BlockStatement;
@@ -190,10 +192,27 @@ impl Parser {
 		let operator_position = token.start;
 
 		let target = match left {
-			Expr::Identifier(target) => target,
+			Expr::Identifier(target) => AssignmentTarget::Identifier(target),
+			Expr::Index(IndexExpr { array, index, position }) => {
+				let array = match *array {
+					Expr::Identifier(identifier) => identifier,
+					_ => {
+						return Err(ParseError {
+							message: String::from("Indexed assignment target must be an identifier-based array access."),
+							position: operator_position,
+						});
+					}
+				};
+
+				AssignmentTarget::Index(ArrayIndexAssignmentTarget {
+					array,
+					index,
+					position,
+				})
+			}
 			_ => {
 				return Err(ParseError {
-					message: String::from("Assignment target must be an identifier."),
+					message: String::from("Assignment target must be an identifier or indexed array element."),
 					position: token.start,
 				});
 			}
@@ -865,9 +884,11 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
+	use crate::ast::ArrayIndexAssignmentTarget;
 	use crate::ast::ArrayLiteral;
 	use crate::ast::AssignmentExpr;
 	use crate::ast::AssignmentOperator;
+	use crate::ast::AssignmentTarget;
 	use crate::ast::BinaryExpr;
 	use crate::ast::BinaryOperator;
 	use crate::ast::BooleanLiteral;
@@ -896,6 +917,17 @@ mod tests {
 	use super::super::lexer::Lexer;
 	use super::Parser;
 
+	fn normalize_assignment_target(target: AssignmentTarget) -> AssignmentTarget {
+		match target {
+			AssignmentTarget::Identifier(identifier) => AssignmentTarget::Identifier(normalize_identifier(identifier)),
+			AssignmentTarget::Index(target) => AssignmentTarget::Index(ArrayIndexAssignmentTarget {
+				array: normalize_identifier(target.array),
+				index: Box::new(normalize_expr(*target.index)),
+				position: 0,
+			}),
+		}
+	}
+
 	fn normalize_block(block: BlockStatement) -> BlockStatement {
 		BlockStatement {
 			position: 0,
@@ -917,7 +949,7 @@ mod tests {
 			}) => Expr::Assignment(AssignmentExpr {
 				operator,
 				position: 0,
-				target: normalize_identifier(target),
+				target: normalize_assignment_target(target),
 				value: Box::new(normalize_expr(*value)),
 			}),
 			Expr::Binary(BinaryExpr {
@@ -1141,17 +1173,17 @@ mod tests {
 			Expr::Assignment(AssignmentExpr {
 				operator: AssignmentOperator::Assign,
 				position: 0,
-				target: IdentifierExpr {
+				target: AssignmentTarget::Identifier(IdentifierExpr {
 					name: String::from("x"),
 					position: 0,
-				},
+				}),
 				value: Box::new(Expr::Assignment(AssignmentExpr {
 					operator: AssignmentOperator::Assign,
 					position: 0,
-					target: IdentifierExpr {
+					target: AssignmentTarget::Identifier(IdentifierExpr {
 						name: String::from("y"),
 						position: 0,
-					},
+					}),
 					value: Box::new(Expr::Integer(IntegerLiteral {
 						position: 0,
 						value: 1,
@@ -1184,10 +1216,10 @@ mod tests {
 							Statement::Expression(Expr::Assignment(AssignmentExpr {
 								operator: AssignmentOperator::AddAssign,
 								position: 0,
-								target: IdentifierExpr {
+								target: AssignmentTarget::Identifier(IdentifierExpr {
 									position: 0,
 									name: String::from("x"),
-								},
+								}),
 								value: Box::new(Expr::Integer(IntegerLiteral {
 									position: 0,
 									value: 2,
@@ -1219,10 +1251,10 @@ mod tests {
 			Expr::Assignment(AssignmentExpr {
 				operator: AssignmentOperator::AddAssign,
 				position: 0,
-				target: IdentifierExpr {
+				target: AssignmentTarget::Identifier(IdentifierExpr {
 					name: String::from("x"),
 					position: 0,
-				},
+				}),
 				value: Box::new(Expr::Integer(IntegerLiteral {
 					position: 0,
 					value: 1,
@@ -1312,10 +1344,10 @@ mod tests {
 					Statement::Expression(Expr::Assignment(AssignmentExpr {
 						operator: AssignmentOperator::AddAssign,
 						position: 0,
-						target: IdentifierExpr {
+						target: AssignmentTarget::Identifier(IdentifierExpr {
 							position: 0,
 							name: String::from("x"),
-						},
+						}),
 						value: Box::new(Expr::Integer(IntegerLiteral {
 							position: 0,
 							value: 2,
@@ -1589,6 +1621,37 @@ mod tests {
 				result: None,
 			}
 		);
+	}
+
+	#[test]
+	fn parses_indexed_assignment_expression() {
+		let program = parse_program("xs[1] = 2;");
+
+		assert_eq!(normalize_program(program), Program {
+			functions: vec![],
+			result: None,
+			statements: vec![
+				Statement::Expression(Expr::Assignment(AssignmentExpr {
+					operator: AssignmentOperator::Assign,
+					position: 0,
+					target: AssignmentTarget::Index(ArrayIndexAssignmentTarget {
+						array: IdentifierExpr {
+							name: String::from("xs"),
+							position: 0,
+						},
+						index: Box::new(Expr::Integer(IntegerLiteral {
+							position: 0,
+							value: 1,
+						})),
+						position: 0,
+					}),
+					value: Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
+						value: 2,
+					})),
+				})),
+			],
+		});
 	}
 
 	#[test]
@@ -1961,10 +2024,10 @@ mod tests {
 								Statement::Expression(Expr::Assignment(AssignmentExpr {
 									operator: AssignmentOperator::AddAssign,
 									position: 0,
-									target: IdentifierExpr {
+									target: AssignmentTarget::Identifier(IdentifierExpr {
 										name: String::from("x"),
 										position: 0,
-									},
+									}),
 									value: Box::new(Expr::Integer(IntegerLiteral {
 										position: 0,
 										value: 1,

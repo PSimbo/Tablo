@@ -5,6 +5,7 @@
 use crate::ast::ArrayLiteral;
 use crate::ast::AssignmentExpr;
 use crate::ast::AssignmentOperator;
+use crate::ast::AssignmentTarget;
 use crate::ast::BlockStatement;
 use crate::ast::BooleanLiteral;
 use crate::ast::CallExpr;
@@ -147,6 +148,21 @@ impl Compiler {
 		))
 	}
 
+	fn compile_indexed_assignment(
+		&mut self,
+		slot: u32,
+		index: &Expr,
+		value: &Expr,
+		semantic_program: &SemanticProgram,
+		instructions: &mut Vec<Instruction>,
+	) {
+		instructions.push(Instruction::LoadLocal(slot));
+		self.compile_into(index, semantic_program, instructions);
+		self.compile_into(value, semantic_program, instructions);
+		instructions.push(Instruction::StoreIndex);
+		instructions.push(Instruction::StoreLocal(slot));
+	}
+
 	fn compile_into(&mut self, expression: &Expr, semantic_program: &SemanticProgram, instructions: &mut Vec<Instruction>) {
 		let _ = self;
 
@@ -159,9 +175,18 @@ impl Compiler {
 				instructions.push(Instruction::MakeArray(elements.len() as u32));
 			}
 			Expr::Assignment(AssignmentExpr { operator, target, value, .. }) => {
-				let slot = semantic_program.identifier_slot(target.position)
-					.unwrap_or_else(|| panic!("Missing slot for identifier `{}`.", target.name));
-				self.compile_assignment(slot, *operator, value, semantic_program, instructions);
+				match target {
+					AssignmentTarget::Identifier(target) => {
+						let slot = semantic_program.identifier_slot(target.position)
+							.unwrap_or_else(|| panic!("Missing slot for identifier `{}`.", target.name));
+						self.compile_assignment(slot, *operator, value, semantic_program, instructions);
+					}
+					AssignmentTarget::Index(target) => {
+						let slot = semantic_program.identifier_slot(target.array.position)
+							.unwrap_or_else(|| panic!("Missing slot for identifier `{}`.", target.array.name));
+						self.compile_indexed_assignment(slot, &target.index, value, semantic_program, instructions);
+					}
+				}
 			}
 			Expr::Binary(binary) => {
 				self.compile_into(&binary.left, semantic_program, instructions);
@@ -319,6 +344,7 @@ fn expression_produces_runtime_value(expression: &Expr, semantic_program: &Seman
 mod tests {
 	use crate::ast::AssignmentExpr;
 	use crate::ast::AssignmentOperator;
+	use crate::ast::AssignmentTarget;
 	use crate::ast::BinaryExpr;
 	use crate::ast::BinaryOperator;
 	use crate::ast::BlockStatement;
@@ -408,10 +434,10 @@ mod tests {
 			result: Some(Expr::Assignment(AssignmentExpr {
 				operator: AssignmentOperator::AddAssign,
 				position: 0,
-				target: IdentifierExpr {
+				target: AssignmentTarget::Identifier(IdentifierExpr {
 					name: String::from("x"),
 					position: 0,
-				},
+				}),
 				value: Box::new(Expr::Integer(IntegerLiteral {
 					position: 0,
 					value: 3,
@@ -519,10 +545,10 @@ mod tests {
 				Statement::Expression(Expr::Assignment(AssignmentExpr {
 					operator: AssignmentOperator::AddAssign,
 					position: 0,
-					target: IdentifierExpr {
+					target: AssignmentTarget::Identifier(IdentifierExpr {
 						name: String::from("x"),
 						position: 0,
-					},
+					}),
 					value: Box::new(Expr::Integer(IntegerLiteral {
 						position: 0,
 						value: 3,
@@ -576,10 +602,10 @@ mod tests {
 							Statement::Expression(Expr::Assignment(AssignmentExpr {
 								operator: AssignmentOperator::Assign,
 								position: 0,
-								target: IdentifierExpr {
+								target: AssignmentTarget::Identifier(IdentifierExpr {
 									name: String::from("x"),
 									position: 0,
-								},
+								}),
 								value: Box::new(Expr::Integer(IntegerLiteral {
 									position: 0,
 									value: 3,
@@ -594,10 +620,10 @@ mod tests {
 							Statement::Expression(Expr::Assignment(AssignmentExpr {
 								operator: AssignmentOperator::Assign,
 								position: 0,
-								target: IdentifierExpr {
+								target: AssignmentTarget::Identifier(IdentifierExpr {
 									name: String::from("x"),
 									position: 0,
-								},
+								}),
 								value: Box::new(Expr::Integer(IntegerLiteral {
 									position: 0,
 									value: 2,
@@ -856,10 +882,10 @@ mod tests {
 							Statement::Expression(Expr::Assignment(AssignmentExpr {
 								operator: AssignmentOperator::AddAssign,
 								position: 0,
-								target: IdentifierExpr {
+								target: AssignmentTarget::Identifier(IdentifierExpr {
 									name: String::from("x"),
 									position: 0,
-								},
+								}),
 								value: Box::new(Expr::Integer(IntegerLiteral {
 									position: 0,
 									value: 1,
@@ -927,10 +953,10 @@ mod tests {
 			result: Some(Expr::Assignment(AssignmentExpr {
 				operator: AssignmentOperator::Assign,
 				position: 0,
-				target: IdentifierExpr {
+				target: AssignmentTarget::Identifier(IdentifierExpr {
 					name: String::from("x"),
 					position: 0,
-				},
+				}),
 				value: Box::new(Expr::Integer(IntegerLiteral {
 					position: 0,
 					value: 3,
@@ -962,10 +988,10 @@ mod tests {
 			result: Some(Expr::Assignment(AssignmentExpr {
 				operator: AssignmentOperator::AddAssign,
 				position: 0,
-				target: IdentifierExpr {
+				target: AssignmentTarget::Identifier(IdentifierExpr {
 					name: String::from("x"),
 					position: 0,
-				},
+				}),
 				value: Box::new(Expr::Decimal(DecimalLiteral {
 					position: 0,
 					value: Decimal::from_literal("1.5").unwrap(),
@@ -1050,10 +1076,10 @@ mod tests {
 			result: Some(Expr::Assignment(AssignmentExpr {
 				operator: AssignmentOperator::Assign,
 				position: 0,
-				target: IdentifierExpr {
+				target: AssignmentTarget::Identifier(IdentifierExpr {
 					name: String::from("x"),
 					position: 0,
-				},
+				}),
 				value: Box::new(Expr::Text(TextLiteral {
 					position: 0,
 					value: String::from("hello"),

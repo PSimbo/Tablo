@@ -250,6 +250,15 @@ impl VirtualMachine {
 				self.stack.push(subtract_values(lhs, rhs, instruction_index)?);
 				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::StoreIndex => {
+				let value = self.pop_value(instruction_index)?;
+				let index = self.pop_value(instruction_index)?;
+				let array = self.pop_value(instruction_index)?;
+				let (assigned_value, updated_array) = store_index_value(array, index, value, instruction_index)?;
+				self.stack.push(assigned_value);
+				self.stack.push(updated_array);
+				Ok(ExecutionOutcome::Continue(None))
+			}
 			Instruction::StoreLocal(slot) => {
 				let value = self.pop_value(instruction_index)?;
 				let slot = *slot as usize;
@@ -561,6 +570,52 @@ fn pow10_i128(exponent: u32) -> Result<i128, String> {
 	Ok(value)
 }
 
+fn store_index_value(array: Value, index: Value, value: Value, instruction_index: usize) -> Result<(Value, Value), VmError> {
+	let index = match index {
+		Value::Integer(value) => value,
+		other => {
+			return Err(vm_error(
+				instruction_index,
+				format!("Array index must be an `int`, found `{}`.", type_name(&other)),
+			));
+		}
+	};
+
+	let mut values = match array {
+		Value::Array(values) => values,
+		other => {
+			return Err(vm_error(
+				instruction_index,
+				format!("Cannot index a `{}` value.", type_name(&other)),
+			));
+		}
+	};
+
+	if index < 1 {
+		return Err(vm_error(
+			instruction_index,
+			format!("Array index {} is out of bounds for length {}.", index, values.len()),
+		));
+	}
+
+	let zero_based_index = index as usize - 1;
+
+	if zero_based_index < values.len() {
+		values[zero_based_index] = value.clone();
+		return Ok((value, Value::Array(values)));
+	}
+
+	if zero_based_index == values.len() {
+		values.push(value.clone());
+		return Ok((value, Value::Array(values)));
+	}
+
+	Err(vm_error(
+		instruction_index,
+		format!("Array index {} is out of bounds for length {}.", index, values.len()),
+	))
+}
+
 fn stringify_value(value: &Value) -> String {
 	match value {
 		Value::Array(values) => {
@@ -742,6 +797,25 @@ mod tests {
 		let result = VirtualMachine::new().run(&program).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(20)));
+	}
+
+	#[test]
+	fn runs_array_store_index_program() {
+		let program = Program::new(vec![
+			Instruction::PushInteger(10),
+			Instruction::PushInteger(20),
+			Instruction::MakeArray(2),
+			Instruction::PushInteger(2),
+			Instruction::PushInteger(99),
+			Instruction::StoreIndex,
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Integer(10),
+			Value::Integer(99),
+		])));
 	}
 
 	#[test]

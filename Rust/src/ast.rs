@@ -10,6 +10,12 @@ pub enum AssignmentOperator {
 	SubtractAssign,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AssignmentTarget {
+	Identifier(IdentifierExpr),
+	Index(ArrayIndexAssignmentTarget),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BinaryOperator {
 	Add,
@@ -71,6 +77,13 @@ pub enum UnaryOperator {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArrayIndexAssignmentTarget {
+	pub array: IdentifierExpr,
+	pub index: Box<Expr>,
+	pub position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArrayLiteral {
 	pub elements: Vec<Expr>,
 	pub position: usize,
@@ -80,7 +93,7 @@ pub struct ArrayLiteral {
 pub struct AssignmentExpr {
 	pub operator: AssignmentOperator,
 	pub position: usize,
-	pub target: IdentifierExpr,
+	pub target: AssignmentTarget,
 	pub value: Box<Expr>,
 }
 

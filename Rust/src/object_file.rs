@@ -44,6 +44,7 @@ const OPCODE_RETURN: u8 = 27;
 const OPCODE_RETURN_VOID: u8 = 28;
 const OPCODE_MAKE_ARRAY: u8 = 29;
 const OPCODE_LOAD_INDEX: u8 = 30;
+const OPCODE_STORE_INDEX: u8 = 31;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectFileError {
@@ -170,6 +171,7 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 		}
 		Instruction::Return => bytes.push(OPCODE_RETURN),
 		Instruction::ReturnVoid => bytes.push(OPCODE_RETURN_VOID),
+		Instruction::StoreIndex => bytes.push(OPCODE_STORE_INDEX),
 		Instruction::StoreLocal(slot) => {
 			bytes.push(OPCODE_STORE_LOCAL);
 			bytes.extend_from_slice(&slot.to_le_bytes());
@@ -324,6 +326,7 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_PUSH_TEXT => Ok(Instruction::PushText(self.read_string()?)),
 			OPCODE_RETURN => Ok(Instruction::Return),
 			OPCODE_RETURN_VOID => Ok(Instruction::ReturnVoid),
+			OPCODE_STORE_INDEX => Ok(Instruction::StoreIndex),
 			OPCODE_STORE_LOCAL => Ok(Instruction::StoreLocal(self.read_u32()?)),
 			OPCODE_SUBTRACT => Ok(Instruction::Subtract),
 			OPCODE_XOR => Ok(Instruction::Xor),

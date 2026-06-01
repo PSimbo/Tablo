@@ -42,6 +42,7 @@ pub enum Instruction {
 	PushText(String),
 	Return,
 	ReturnVoid,
+	StoreIndex,
 	StoreLocal(u32),
 	Subtract,
 	Xor,

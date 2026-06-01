@@ -365,6 +365,13 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_expression_statement_before_final_expression() {
+		let result = run("var x: int = 5;\nx += 1;\nx").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(6)));
+	}
+
+	#[test]
 	fn runs_function_call_source_text() {
 		let result = run("fn add(a: int, b: int) int { return a + b; }\nadd(1, 2)").unwrap();
 
@@ -403,10 +410,25 @@ mod tests {
 	}
 
 	#[test]
-	fn runs_expression_statement_before_final_expression() {
-		let result = run("var x: int = 5;\nx += 1;\nx").unwrap();
+	fn runs_indexed_assignment_append_source_text() {
+		let result = run("var xs: [int] = [10, 20];\nxs[3] = 30;\nxs").unwrap();
 
-		assert_eq!(result, Some(Value::Integer(6)));
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Integer(10),
+			Value::Integer(20),
+			Value::Integer(30),
+		])));
+	}
+
+	#[test]
+	fn runs_indexed_assignment_source_text() {
+		let result = run("var xs: [int] = [10, 20, 30];\nxs[2] = 99;\nxs").unwrap();
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Integer(10),
+			Value::Integer(99),
+			Value::Integer(30),
+		])));
 	}
 
 	#[test]
