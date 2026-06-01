@@ -2,6 +2,7 @@
 // semantically validated AST. It still owns local-slot allocation, but most
 // name resolution and type checking now live in `semantic::analyzer`.
 
+use crate::ast::ArrayLiteral;
 use crate::ast::AssignmentExpr;
 use crate::ast::AssignmentOperator;
 use crate::ast::BlockStatement;
@@ -149,6 +150,13 @@ impl Compiler {
 		let _ = self;
 
 		match expression {
+			Expr::Array(ArrayLiteral { elements, .. }) => {
+				for element in elements {
+					self.compile_into(element, semantic_program, instructions);
+				}
+
+				instructions.push(Instruction::MakeArray(elements.len() as u32));
+			}
 			Expr::Assignment(AssignmentExpr { operator, target, value, .. }) => {
 				let slot = semantic_program.identifier_slot(target.position)
 					.unwrap_or_else(|| panic!("Missing slot for identifier `{}`.", target.name));

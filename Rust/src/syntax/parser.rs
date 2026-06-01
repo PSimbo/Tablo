@@ -1,3 +1,4 @@
+use crate::ast::ArrayLiteral;
 use crate::ast::AssignmentExpr;
 use crate::ast::AssignmentOperator;
 use crate::ast::BinaryExpr;
@@ -146,6 +147,30 @@ impl Parser {
 		Some(token)
 	}
 
+	fn parse_array_literal(&mut self, start: usize) -> Result<Expr, ParseError> {
+		let mut elements = Vec::new();
+
+		if !self.current().is_some_and(|token| token.kind == TokenKind::RightBracket) {
+			loop {
+				elements.push(self.parse_assignment_expression()?);
+
+				match self.current() {
+					Some(token) if token.kind == TokenKind::Comma => {
+						self.next();
+					}
+					_ => break,
+				}
+			}
+		}
+
+		self.expect_token(TokenKind::RightBracket, "Expected `]` to close array literal.")?;
+
+		Ok(Expr::Array(ArrayLiteral {
+			elements,
+			position: start,
+		}))
+	}
+
 	fn parse_assignment_expression(&mut self) -> Result<Expr, ParseError> {
 		let left = self.parse_expression_with_binding_power(BindingPower::Default)?;
 		let Some(token) = self.current() else {
@@ -289,6 +314,11 @@ impl Parser {
 			TokenKind::BoolKeyword => Ok(DataType::Bool),
 			TokenKind::DecKeyword => Ok(DataType::Dec),
 			TokenKind::IntKeyword => Ok(DataType::Int),
+			TokenKind::LeftBracket => {
+				let element_type = self.parse_data_type()?;
+				self.expect_token(TokenKind::RightBracket, "Expected `]` after array element type.")?;
+				Ok(DataType::Array(Box::new(element_type)))
+			}
 			TokenKind::TextKeyword => Ok(DataType::Text),
 			TokenKind::VoidKeyword => Ok(DataType::Void),
 			_ => Err(ParseError {
@@ -710,6 +740,7 @@ impl Parser {
 			TokenKind::Identifier => Ok(self.parse_identifier_expression(token)),
 			TokenKind::IntegerLiteral => self.parse_integer_literal(token),
 			TokenKind::InterpolatedStringStart => self.parse_interpolated_string(token),
+			TokenKind::LeftBracket => self.parse_array_literal(token.start),
 			TokenKind::LeftParenthesis => self.parse_group_expression(token.start),
 			TokenKind::NotKeyword => self.parse_not_expression(token.start),
 			TokenKind::StringLiteral => Ok(self.parse_text_literal(token)),
@@ -820,6 +851,7 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
+	use crate::ast::ArrayLiteral;
 	use crate::ast::AssignmentExpr;
 	use crate::ast::AssignmentOperator;
 	use crate::ast::BinaryExpr;
@@ -858,6 +890,10 @@ mod tests {
 
 	fn normalize_expr(expression: Expr) -> Expr {
 		match expression {
+			Expr::Array(ArrayLiteral { elements, .. }) => Expr::Array(ArrayLiteral {
+				elements: elements.into_iter().map(normalize_expr).collect(),
+				position: 0,
+			}),
 			Expr::Assignment(AssignmentExpr {
 				operator,
 				target,
@@ -1010,6 +1046,51 @@ mod tests {
 		let tokens = lexer.tokenize().unwrap();
 		let mut parser = Parser::new(tokens);
 		normalize_program(parser.parse_program().unwrap())
+	}
+
+	#[test]
+	fn parses_array_literal() {
+		let program = parse_program("[1, 2]");
+
+		assert_eq!(normalize_program(program), Program {
+			functions: vec![],
+			result: Some(Expr::Array(ArrayLiteral {
+				elements: vec![
+					Expr::Integer(IntegerLiteral {
+						position: 0,
+						value: 1,
+					}),
+					Expr::Integer(IntegerLiteral {
+						position: 0,
+						value: 2,
+					}),
+				],
+				position: 0,
+			})),
+			statements: vec![],
+		});
+	}
+
+	#[test]
+	fn parses_array_variable_declaration() {
+		let program = parse_program("var xs: [int] = [];");
+
+		assert_eq!(normalize_program(program), Program {
+			functions: vec![],
+			result: None,
+			statements: vec![
+				Statement::VariableDeclaration(VariableDeclaration {
+					data_type: DataType::Array(Box::new(DataType::Int)),
+					initial_value: Some(Expr::Array(ArrayLiteral {
+						elements: vec![],
+						position: 0,
+					})),
+					is_const: false,
+					name: String::from("xs"),
+					position: 0,
+				}),
+			],
+		});
 	}
 
 	#[test]

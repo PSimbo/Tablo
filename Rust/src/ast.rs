@@ -28,10 +28,12 @@ pub enum BinaryOperator {
 	Xor,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataType {
+	Array(Box<DataType>),
 	Bool,
 	Dec,
+	EmptyArray,
 	Int,
 	Text,
 	Void,
@@ -39,6 +41,7 @@ pub enum DataType {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Expr {
+	Array(ArrayLiteral),
 	Assignment(AssignmentExpr),
 	Binary(BinaryExpr),
 	Boolean(BooleanLiteral),
@@ -64,6 +67,12 @@ pub enum Statement {
 pub enum UnaryOperator {
 	Negate,
 	Not,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArrayLiteral {
+	pub elements: Vec<Expr>,
+	pub position: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -188,6 +197,7 @@ pub struct WhileStatement {
 impl Expr {
 	pub fn position(&self) -> usize {
 		match self {
+			Expr::Array(expression) => expression.position,
 			Expr::Assignment(expression) => expression.position,
 			Expr::Binary(expression) => expression.position,
 			Expr::Boolean(expression) => expression.position,

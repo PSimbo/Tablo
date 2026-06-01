@@ -173,6 +173,7 @@ impl Lexer {
 			'%' => TokenKind::Percent,
 			':' => TokenKind::Colon,
 			',' => TokenKind::Comma,
+			'[' => TokenKind::LeftBracket,
 			'{' => TokenKind::LeftBrace,
 			';' => TokenKind::Semicolon,
 			'(' => TokenKind::LeftParenthesis,
@@ -189,6 +190,7 @@ impl Lexer {
 				}));
 			}
 			'}' => TokenKind::RightBrace,
+			']' => TokenKind::RightBracket,
 			'!' if self.peek_next_char() == Some('=') => {
 				self.advance_char();
 				self.advance_char();
@@ -749,6 +751,20 @@ mod tests {
 		assert_eq!(tokens[9].kind, TokenKind::Plus);
 		assert_eq!(tokens[10].kind, TokenKind::IntegerLiteral);
 		assert_eq!(tokens[11].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
+	fn tokenizes_array_literal_brackets() {
+		let mut lexer = Lexer::new(SourceText::new("[1, 2]"));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens.len(), 6);
+		assert_eq!(tokens[0].kind, TokenKind::LeftBracket);
+		assert_eq!(tokens[1].kind, TokenKind::IntegerLiteral);
+		assert_eq!(tokens[2].kind, TokenKind::Comma);
+		assert_eq!(tokens[3].kind, TokenKind::IntegerLiteral);
+		assert_eq!(tokens[4].kind, TokenKind::RightBracket);
+		assert_eq!(tokens[5].kind, TokenKind::EndOfFile);
 	}
 
 	#[test]

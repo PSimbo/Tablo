@@ -24,8 +24,8 @@ use crate::compiler::CompileError;
 use super::scope::ScopeStack;
 
 // This pass is responsible for name resolution and type checking. It does not
-// yet produce an annotated intermediate form, but it establishes a clear
-// separation between semantic validation and bytecode emission.
+// emit bytecode directly, but it resolves locals and function targets so code
+// generation can remain simple.
 #[derive(Default)]
 pub struct SemanticAnalyzer {
 	current_return_type: Option<DataType>,
@@ -35,7 +35,7 @@ pub struct SemanticAnalyzer {
 	semantic_program: SemanticProgram,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct LocalBinding {
 	data_type: DataType,
 	is_const: bool,
@@ -59,7 +59,7 @@ pub struct SemanticProgram {
 
 impl SemanticProgram {
 	pub fn call_return_type(&self, position: usize) -> Option<DataType> {
-		self.call_return_types.get(&position).copied()
+		self.call_return_types.get(&position).cloned()
 	}
 
 	pub fn call_target(&self, position: usize) -> Option<u32> {
@@ -110,6 +110,7 @@ impl SemanticAnalyzer {
 		}
 
 		self.exit_scope();
+
 		Ok(self.semantic_program.clone())
 	}
 
@@ -117,44 +118,56 @@ impl SemanticAnalyzer {
 		self.analyze_program(program).map(|_| ())
 	}
 
-	fn assignment_result_type(&self, operator: AssignmentOperator, target: DataType, value: DataType, position: usize) -> Result<DataType, CompileError> {
+	fn assignment_result_type(
+		&self,
+		operator: AssignmentOperator,
+		target: &DataType,
+		value: &DataType,
+		position: usize,
+	) -> Result<DataType, CompileError> {
 		match operator {
-			AssignmentOperator::AddAssign => {
-				let result = self.binary_result_type(BinaryOperator::Add, target, value, position)?;
-				self.ensure_assignable(target, result, position)?;
-				Ok(target)
-			}
 			AssignmentOperator::Assign => {
 				self.ensure_assignable(target, value, position)?;
-				Ok(target)
+				Ok(target.clone())
+			}
+			AssignmentOperator::AddAssign => {
+				let result = self.binary_result_type(BinaryOperator::Add, target, value, position)?;
+				self.ensure_assignable(target, &result, position)?;
+				Ok(target.clone())
 			}
 			AssignmentOperator::DivideAssign => {
 				let result = self.binary_result_type(BinaryOperator::Divide, target, value, position)?;
-				self.ensure_assignable(target, result, position)?;
-				Ok(target)
+				self.ensure_assignable(target, &result, position)?;
+				Ok(target.clone())
 			}
 			AssignmentOperator::ModuloAssign => {
 				let result = self.binary_result_type(BinaryOperator::Modulo, target, value, position)?;
-				self.ensure_assignable(target, result, position)?;
-				Ok(target)
+				self.ensure_assignable(target, &result, position)?;
+				Ok(target.clone())
 			}
 			AssignmentOperator::MultiplyAssign => {
 				let result = self.binary_result_type(BinaryOperator::Multiply, target, value, position)?;
-				self.ensure_assignable(target, result, position)?;
-				Ok(target)
+				self.ensure_assignable(target, &result, position)?;
+				Ok(target.clone())
 			}
 			AssignmentOperator::SubtractAssign => {
 				let result = self.binary_result_type(BinaryOperator::Subtract, target, value, position)?;
-				self.ensure_assignable(target, result, position)?;
-				Ok(target)
+				self.ensure_assignable(target, &result, position)?;
+				Ok(target.clone())
 			}
 		}
 	}
 
-	fn binary_result_type(&self, operator: BinaryOperator, lhs: DataType, rhs: DataType, position: usize) -> Result<DataType, CompileError> {
+	fn binary_result_type(
+		&self,
+		operator: BinaryOperator,
+		lhs: &DataType,
+		rhs: &DataType,
+		position: usize,
+	) -> Result<DataType, CompileError> {
 		match operator {
 			BinaryOperator::Add => {
-				if lhs == DataType::Text || rhs == DataType::Text {
+				if lhs == &DataType::Text || rhs == &DataType::Text {
 					return Ok(DataType::Text);
 				}
 
@@ -191,12 +204,33 @@ impl SemanticAnalyzer {
 				));
 			}
 
-			let parameter_types = function.parameters.iter().map(|parameter| parameter.data_type).collect();
+			let mut parameter_types = Vec::with_capacity(function.parameters.len());
+
+			for parameter in &function.parameters {
+				self.validate_non_void_data_type(
+					&parameter.data_type,
+					parameter.position,
+					format!("Parameter `{}` cannot have type `{}`.", parameter.name, self.data_type_name(&parameter.data_type)),
+				)?;
+				parameter_types.push(parameter.data_type.clone());
+			}
+
+			if !matches!(function.return_type, DataType::Void) {
+				self.validate_non_void_data_type(
+					&function.return_type,
+					function.position,
+					format!(
+						"Function `{}` cannot return `{}`.",
+						function.name,
+						self.data_type_name(&function.return_type),
+					),
+				)?;
+			}
 
 			self.functions.insert(function.name.clone(), FunctionSignature {
-				parameter_types,
-				return_type: function.return_type,
 				function_index: index as u32,
+				parameter_types,
+				return_type: function.return_type.clone(),
 			});
 		}
 
@@ -214,13 +248,15 @@ impl SemanticAnalyzer {
 		self.locals.contains_in_current_scope(name)
 	}
 
-	fn data_type_name(&self, data_type: DataType) -> &'static str {
+	fn data_type_name(&self, data_type: &DataType) -> String {
 		match data_type {
-			DataType::Bool => "bool",
-			DataType::Dec => "dec",
-			DataType::Int => "int",
-			DataType::Text => "text",
-			DataType::Void => "void",
+			DataType::Array(element_type) => format!("[{}]", self.data_type_name(element_type)),
+			DataType::Bool => String::from("bool"),
+			DataType::Dec => String::from("dec"),
+			DataType::EmptyArray => String::from("empty array"),
+			DataType::Int => String::from("int"),
+			DataType::Text => String::from("text"),
+			DataType::Void => String::from("void"),
 		}
 	}
 
@@ -228,19 +264,25 @@ impl SemanticAnalyzer {
 		self.locals.declare(name, local);
 	}
 
-	fn ensure_assignable(&self, target: DataType, value: DataType, position: usize) -> Result<(), CompileError> {
-		if target == value || (target == DataType::Dec && value == DataType::Int) {
+	fn ensure_assignable(&self, target: &DataType, value: &DataType, position: usize) -> Result<(), CompileError> {
+		if target == value || (target == &DataType::Dec && value == &DataType::Int) {
 			return Ok(());
 		}
 
-		Err(self.compile_error(
-			position,
-			format!(
-				"Cannot assign a value of type `{}` to a variable of type `{}`.",
-				self.data_type_name(value),
-				self.data_type_name(target),
-			),
-		))
+		match (target, value) {
+			(DataType::Array(target_element), DataType::Array(value_element)) => {
+				self.ensure_assignable(target_element, value_element, position)
+			}
+			(DataType::Array(_), DataType::EmptyArray) => Ok(()),
+			_ => Err(self.compile_error(
+				position,
+				format!(
+					"Cannot assign a value of type `{}` to a variable of type `{}`.",
+					self.data_type_name(value),
+					self.data_type_name(target),
+				),
+			)),
+		}
 	}
 
 	fn enter_scope(&mut self) {
@@ -251,8 +293,27 @@ impl SemanticAnalyzer {
 		self.locals.exit_scope();
 	}
 
+	fn infer_array_literal_type(&mut self, elements: &[Expr], position: usize) -> Result<DataType, CompileError> {
+		let mut element_type: Option<DataType> = None;
+
+		for element in elements {
+			let candidate = self.infer_expression_type(element)?;
+
+			element_type = Some(match &element_type {
+				None => candidate,
+				Some(existing) => self.merge_array_element_types(existing, &candidate, position)?,
+			});
+		}
+
+		match element_type {
+			Some(element_type) => Ok(DataType::Array(Box::new(element_type))),
+			None => Ok(DataType::EmptyArray),
+		}
+	}
+
 	fn infer_expression_type(&mut self, expression: &Expr) -> Result<DataType, CompileError> {
 		match expression {
+			Expr::Array(array) => self.infer_array_literal_type(array.elements.as_slice(), array.position),
 			Expr::Assignment(AssignmentExpr { operator, target, value, .. }) => {
 				let local = self.lookup_local(&target.name).ok_or(self.compile_error(
 					target.position,
@@ -277,12 +338,12 @@ impl SemanticAnalyzer {
 				}
 
 				let value_type = self.infer_expression_type(value)?;
-				self.assignment_result_type(*operator, local.data_type, value_type, expression.position())
+				self.assignment_result_type(*operator, &local.data_type, &value_type, expression.position())
 			}
 			Expr::Binary(BinaryExpr { left, operator, right, .. }) => {
 				let left_type = self.infer_expression_type(left)?;
 				let right_type = self.infer_expression_type(right)?;
-				self.binary_result_type(*operator, left_type, right_type, expression.position())
+				self.binary_result_type(*operator, &left_type, &right_type, expression.position())
 			}
 			Expr::Boolean(_) => Ok(DataType::Bool),
 			Expr::Call(CallExpr { arguments, callee, .. }) => {
@@ -303,13 +364,13 @@ impl SemanticAnalyzer {
 					));
 				}
 
-				for (argument, parameter_type) in arguments.iter().zip(signature.parameter_types.iter().copied()) {
+				for (argument, parameter_type) in arguments.iter().zip(signature.parameter_types.iter()) {
 					let argument_type = self.infer_expression_type(argument)?;
-					self.ensure_assignable(parameter_type, argument_type, argument.position())?;
+					self.ensure_assignable(parameter_type, &argument_type, argument.position())?;
 				}
 
 				self.semantic_program.call_targets.insert(expression.position(), signature.function_index);
-				self.semantic_program.call_return_types.insert(expression.position(), signature.return_type);
+				self.semantic_program.call_return_types.insert(expression.position(), signature.return_type.clone());
 				Ok(signature.return_type)
 			}
 			Expr::Decimal(_) => Ok(DataType::Dec),
@@ -328,13 +389,13 @@ impl SemanticAnalyzer {
 
 				match operator {
 					UnaryOperator::Negate => {
-						if self.is_numeric_type(operand_type) {
+						if self.is_numeric_type(&operand_type) {
 							Ok(operand_type)
 						}
 						else {
 							Err(self.compile_error(
 								expression.position(),
-								format!("Unary `-` requires a numeric operand, found `{}`.", self.data_type_name(operand_type)),
+								format!("Unary `-` requires a numeric operand, found `{}`.", self.data_type_name(&operand_type)),
 							))
 						}
 					}
@@ -345,7 +406,7 @@ impl SemanticAnalyzer {
 						else {
 							Err(self.compile_error(
 								expression.position(),
-								format!("Unary `not` requires a `bool` operand, found `{}`.", self.data_type_name(operand_type)),
+								format!("Unary `not` requires a `bool` operand, found `{}`.", self.data_type_name(&operand_type)),
 							))
 						}
 					}
@@ -354,15 +415,43 @@ impl SemanticAnalyzer {
 		}
 	}
 
-	fn is_numeric_type(&self, data_type: DataType) -> bool {
+	fn is_numeric_type(&self, data_type: &DataType) -> bool {
 		matches!(data_type, DataType::Dec | DataType::Int)
 	}
 
 	fn lookup_local(&self, name: &str) -> Option<LocalBinding> {
-		self.locals.lookup(name).copied()
+		self.locals.lookup(name).cloned()
 	}
 
-	fn numeric_result_type(&self, lhs: DataType, rhs: DataType, position: usize) -> Result<DataType, CompileError> {
+	fn merge_array_element_types(&self, lhs: &DataType, rhs: &DataType, position: usize) -> Result<DataType, CompileError> {
+		if lhs == rhs {
+			return Ok(lhs.clone());
+		}
+
+		if self.is_numeric_type(lhs) && self.is_numeric_type(rhs) {
+			return Ok(if lhs == &DataType::Int && rhs == &DataType::Int {
+				DataType::Int
+			}
+			else {
+				DataType::Dec
+			});
+		}
+
+		if let (DataType::Array(lhs_element), DataType::Array(rhs_element)) = (lhs, rhs) {
+			return Ok(DataType::Array(Box::new(self.merge_array_element_types(lhs_element, rhs_element, position)?)));
+		}
+
+		Err(self.compile_error(
+			position,
+			format!(
+				"Array literal elements must have compatible types, found `{}` and `{}`.",
+				self.data_type_name(lhs),
+				self.data_type_name(rhs),
+			),
+		))
+	}
+
+	fn numeric_result_type(&self, lhs: &DataType, rhs: &DataType, position: usize) -> Result<DataType, CompileError> {
 		if !self.is_numeric_type(lhs) || !self.is_numeric_type(rhs) {
 			return Err(self.compile_error(
 				position,
@@ -374,7 +463,7 @@ impl SemanticAnalyzer {
 			));
 		}
 
-		if lhs == DataType::Int && rhs == DataType::Int {
+		if lhs == &DataType::Int && rhs == &DataType::Int {
 			Ok(DataType::Int)
 		}
 		else {
@@ -401,8 +490,8 @@ impl SemanticAnalyzer {
 		}
 	}
 
-	fn require_boolean_operands(&self, operator: BinaryOperator, lhs: DataType, rhs: DataType, position: usize) -> Result<(), CompileError> {
-		if lhs == DataType::Bool && rhs == DataType::Bool {
+	fn require_boolean_operands(&self, operator: BinaryOperator, lhs: &DataType, rhs: &DataType, position: usize) -> Result<(), CompileError> {
+		if lhs == &DataType::Bool && rhs == &DataType::Bool {
 			return Ok(());
 		}
 
@@ -417,23 +506,29 @@ impl SemanticAnalyzer {
 		))
 	}
 
-	fn require_equality_operands(&self, lhs: DataType, rhs: DataType, position: usize) -> Result<(), CompileError> {
+	fn require_equality_operands(&self, lhs: &DataType, rhs: &DataType, position: usize) -> Result<(), CompileError> {
 		if lhs == rhs || (self.is_numeric_type(lhs) && self.is_numeric_type(rhs)) {
 			return Ok(());
 		}
 
-		Err(self.compile_error(
-			position,
-			format!(
-				"Equality comparison is not supported between `{}` and `{}`.",
-				self.data_type_name(lhs),
-				self.data_type_name(rhs),
-			),
-		))
+		match (lhs, rhs) {
+			(DataType::Array(lhs_element), DataType::Array(rhs_element)) => self.require_equality_operands(lhs_element, rhs_element, position),
+			(DataType::Array(_), DataType::EmptyArray)
+			| (DataType::EmptyArray, DataType::Array(_))
+			| (DataType::EmptyArray, DataType::EmptyArray) => Ok(()),
+			_ => Err(self.compile_error(
+				position,
+				format!(
+					"Equality comparison is not supported between `{}` and `{}`.",
+					self.data_type_name(lhs),
+					self.data_type_name(rhs),
+				),
+			)),
+		}
 	}
 
-	fn require_ordering_operands(&self, lhs: DataType, rhs: DataType, position: usize) -> Result<(), CompileError> {
-		if (lhs == DataType::Text && rhs == DataType::Text) || (self.is_numeric_type(lhs) && self.is_numeric_type(rhs)) {
+	fn require_ordering_operands(&self, lhs: &DataType, rhs: &DataType, position: usize) -> Result<(), CompileError> {
+		if (lhs == &DataType::Text && rhs == &DataType::Text) || (self.is_numeric_type(lhs) && self.is_numeric_type(rhs)) {
 			return Ok(());
 		}
 
@@ -462,11 +557,11 @@ impl SemanticAnalyzer {
 	fn validate_function_declaration(&mut self, function: &FunctionDeclaration) -> Result<(), CompileError> {
 		let saved_locals = std::mem::take(&mut self.locals);
 		let saved_next_local_slot = self.next_local_slot;
-		let saved_return_type = self.current_return_type;
+		let saved_return_type = self.current_return_type.clone();
 
 		self.locals = ScopeStack::default();
 		self.next_local_slot = 0;
-		self.current_return_type = Some(function.return_type);
+		self.current_return_type = Some(function.return_type.clone());
 		self.enter_scope();
 
 		for parameter in &function.parameters {
@@ -481,13 +576,12 @@ impl SemanticAnalyzer {
 				format!(
 					"Function `{}` must return a value of type `{}` on all paths.",
 					function.name,
-					self.data_type_name(function.return_type),
+					self.data_type_name(&function.return_type),
 				),
 			));
 		}
 
 		self.exit_scope();
-
 		self.locals = saved_locals;
 		self.next_local_slot = saved_next_local_slot;
 		self.current_return_type = saved_return_type;
@@ -496,12 +590,11 @@ impl SemanticAnalyzer {
 	}
 
 	fn validate_function_parameter(&mut self, parameter: &FunctionParameter) -> Result<(), CompileError> {
-		if parameter.data_type == DataType::Void {
-			return Err(self.compile_error(
-				parameter.position,
-				format!("Parameter `{}` cannot have type `void`.", parameter.name),
-			));
-		}
+		self.validate_non_void_data_type(
+			&parameter.data_type,
+			parameter.position,
+			format!("Parameter `{}` cannot have type `{}`.", parameter.name, self.data_type_name(&parameter.data_type)),
+		)?;
 
 		if self.current_scope_contains(&parameter.name) {
 			return Err(self.compile_error(
@@ -514,12 +607,20 @@ impl SemanticAnalyzer {
 		self.next_local_slot += 1;
 		self.semantic_program.declaration_slots.insert(parameter.position, slot);
 		self.declare_local(parameter.name.clone(), LocalBinding {
-			data_type: parameter.data_type,
+			data_type: parameter.data_type.clone(),
 			is_const: false,
 			slot,
 		});
 
 		Ok(())
+	}
+
+	fn validate_non_void_data_type(&self, data_type: &DataType, position: usize, message: String) -> Result<(), CompileError> {
+		match data_type {
+			DataType::Void | DataType::EmptyArray => Err(self.compile_error(position, message)),
+			DataType::Array(element_type) => self.validate_non_void_data_type(element_type, position, message),
+			_ => Ok(()),
+		}
 	}
 
 	fn validate_statement(&mut self, statement: &Statement) -> Result<(), CompileError> {
@@ -538,18 +639,13 @@ impl SemanticAnalyzer {
 				self.infer_expression_type(expression)?;
 				Ok(())
 			}
-			Statement::If(IfStatement {
-				condition,
-				else_branch,
-				position,
-				then_branch,
-			}) => {
+			Statement::If(IfStatement { condition, else_branch, position, then_branch }) => {
 				let condition_type = self.infer_expression_type(condition)?;
 
 				if condition_type != DataType::Bool {
 					return Err(self.compile_error(
 						condition.position().max(*position),
-						format!("`if` condition must be of type `bool`, found `{}`.", self.data_type_name(condition_type)),
+						format!("`if` condition must be of type `bool`, found `{}`.", self.data_type_name(&condition_type)),
 					));
 				}
 
@@ -562,7 +658,7 @@ impl SemanticAnalyzer {
 				Ok(())
 			}
 			Statement::Return(ReturnStatement { position, value }) => {
-				let return_type = self.current_return_type.ok_or(self.compile_error(
+				let return_type = self.current_return_type.clone().ok_or(self.compile_error(
 					*position,
 					String::from("`return` may only be used inside a function body."),
 				))?;
@@ -575,21 +671,24 @@ impl SemanticAnalyzer {
 					)),
 					(expected_type, Some(value)) => {
 						let value_type = self.infer_expression_type(value)?;
-						self.ensure_assignable(expected_type, value_type, value.position())
+						self.ensure_assignable(&expected_type, &value_type, value.position())
 					}
 					(expected_type, None) => Err(self.compile_error(
 						*position,
-						format!("Function must return a value of type `{}`.", self.data_type_name(expected_type)),
+						format!("Function must return a value of type `{}`.", self.data_type_name(&expected_type)),
 					)),
 				}
 			}
 			Statement::VariableDeclaration(VariableDeclaration { data_type, initial_value, is_const, name, position }) => {
-				if *data_type == DataType::Void {
-					return Err(self.compile_error(
-						*position,
-						format!("Variable `{name}` cannot have type `void`."),
-					));
-				}
+				self.validate_non_void_data_type(
+					data_type,
+					*position,
+					format!(
+						"{} `{name}` cannot have type `{}`.",
+						if *is_const { "Constant" } else { "Variable" },
+						self.data_type_name(data_type),
+					),
+				)?;
 
 				if self.current_scope_contains(name) {
 					return Err(self.compile_error(
@@ -608,29 +707,26 @@ impl SemanticAnalyzer {
 					},
 				))?;
 				let initial_type = self.infer_expression_type(initial_value)?;
-				self.ensure_assignable(*data_type, initial_type, initial_value.position())?;
+				self.ensure_assignable(data_type, &initial_type, initial_value.position())?;
+
 				let slot = self.next_local_slot;
 				self.next_local_slot += 1;
 				self.semantic_program.declaration_slots.insert(*position, slot);
 				self.declare_local(name.clone(), LocalBinding {
-					data_type: *data_type,
+					data_type: data_type.clone(),
 					is_const: *is_const,
 					slot,
 				});
 
 				Ok(())
 			}
-			Statement::While(WhileStatement {
-				body,
-				condition,
-				position,
-			}) => {
+			Statement::While(WhileStatement { body, condition, position }) => {
 				let condition_type = self.infer_expression_type(condition)?;
 
 				if condition_type != DataType::Bool {
 					return Err(self.compile_error(
 						condition.position().max(*position),
-						format!("`while` condition must be of type `bool`, found `{}`.", self.data_type_name(condition_type)),
+						format!("`while` condition must be of type `bool`, found `{}`.", self.data_type_name(&condition_type)),
 					));
 				}
 

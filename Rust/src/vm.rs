@@ -171,6 +171,17 @@ impl VirtualMachine {
 				self.stack.push(value);
 				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::MakeArray(element_count) => {
+				let mut values = Vec::with_capacity(*element_count as usize);
+
+				for _ in 0..*element_count {
+					values.push(self.pop_value(instruction_index)?);
+				}
+
+				values.reverse();
+				self.stack.push(Value::Array(values));
+				Ok(ExecutionOutcome::Continue(None))
+			}
 			Instruction::Modulo => {
 				let rhs = self.pop_numeric(instruction_index)?;
 				let lhs = self.pop_numeric(instruction_index)?;
@@ -285,7 +296,7 @@ impl VirtualMachine {
 			message: String::from("Stack underflow while reading numeric operand."),
 		})?;
 
-		if matches!(value, Value::Boolean(_) | Value::Text(_)) {
+		if matches!(value, Value::Array(_) | Value::Boolean(_) | Value::Text(_)) {
 			return Err(VmError {
 				instruction_index,
 				message: format!("Expected a numeric operand, found a {} value.", type_name(&value)),
@@ -426,8 +437,15 @@ fn divide_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Val
 
 fn equals_value(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
 	let value = match (lhs, rhs) {
+		(Value::Array(lhs), Value::Array(rhs)) => lhs == rhs,
 		(Value::Boolean(lhs), Value::Boolean(rhs)) => lhs == rhs,
 		(Value::Text(lhs), Value::Text(rhs)) => lhs == rhs,
+		(lhs @ Value::Array(_), rhs) | (lhs, rhs @ Value::Array(_)) => {
+			return Err(vm_error(
+				instruction_index,
+				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
+			));
+		}
 		(lhs @ Value::Text(_), rhs) | (lhs, rhs @ Value::Text(_)) => {
 			return Err(vm_error(
 				instruction_index,
@@ -477,6 +495,7 @@ fn multiply_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<V
 
 fn negate_value(value: Value) -> Value {
 	match value {
+		Value::Array(_) => unreachable!("Array values are rejected before numeric negation."),
 		Value::Boolean(_) => unreachable!("Boolean values are rejected before numeric negation."),
 		Value::Decimal(mut decimal) => {
 			decimal.coefficient = decimal.coefficient.saturating_neg();
@@ -507,6 +526,20 @@ fn pow10_i128(exponent: u32) -> Result<i128, String> {
 
 fn stringify_value(value: &Value) -> String {
 	match value {
+		Value::Array(values) => {
+			let mut result = String::from("[");
+
+			for (index, value) in values.iter().enumerate() {
+				if index > 0 {
+					result.push_str(", ");
+				}
+
+				result.push_str(&stringify_value(value));
+			}
+
+			result.push(']');
+			result
+		}
 		Value::Boolean(value) => value.to_string(),
 		Value::Decimal(value) => value.to_string(),
 		Value::Integer(value) => value.to_string(),
@@ -526,6 +559,7 @@ fn subtract_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<V
 
 fn type_name(value: &Value) -> &'static str {
 	match value {
+		Value::Array(_) => "array",
 		Value::Boolean(_) => "bool",
 		Value::Decimal(_) => "dec",
 		Value::Integer(_) => "int",

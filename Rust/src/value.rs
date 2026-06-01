@@ -2,6 +2,7 @@ use std::fmt::Display;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Value {
+	Array(Vec<Value>),
 	Boolean(bool),
 	Decimal(Decimal),
 	Integer(i64),
@@ -11,6 +12,19 @@ pub enum Value {
 impl Display for Value {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
+			Value::Array(values) => {
+				write!(f, "[")?;
+
+				for (index, value) in values.iter().enumerate() {
+					if index > 0 {
+						write!(f, ", ")?;
+					}
+
+					write!(f, "{value}")?;
+				}
+
+				write!(f, "]")
+			}
 			Value::Boolean(value) => write!(f, "{value}"),
 			Value::Decimal(value) => write!(f, "{value}"),
 			Value::Integer(value) => write!(f, "{value}"),

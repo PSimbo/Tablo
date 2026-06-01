@@ -243,6 +243,37 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_array_equality_source_text() {
+		let result = run("[1, 2] == [1, 2]").unwrap();
+
+		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
+	fn runs_array_literal_source_text() {
+		let result = run("var xs: [int] = [1, 2, 3];\nxs").unwrap();
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Integer(1),
+			Value::Integer(2),
+			Value::Integer(3),
+		])));
+	}
+
+	#[test]
+	fn runs_array_object_file() {
+		let output_path = unique_test_output_path("runs_array_object_file");
+		compile("var xs: [int] = [1, 2];\nxs", &output_path).unwrap();
+		let result = run_file(&output_path).unwrap();
+		let _ = std::fs::remove_file(&output_path);
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Integer(1),
+			Value::Integer(2),
+		])));
+	}
+
+	#[test]
 	fn runs_boolean_source_text() {
 		let result = run("true").unwrap();
 
@@ -292,6 +323,13 @@ mod tests {
 		let result = run("1.25 + .5").unwrap();
 
 		assert_eq!(result, Some(Value::Decimal(crate::value::Decimal::from_literal("1.75").unwrap())));
+	}
+
+	#[test]
+	fn runs_empty_array_literal_source_text() {
+		let result = run("var xs: [int] = [];\nxs").unwrap();
+
+		assert_eq!(result, Some(Value::Array(vec![])));
 	}
 
 	#[test]

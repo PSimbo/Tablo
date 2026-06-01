@@ -42,6 +42,7 @@ const OPCODE_PUSH_TEXT: u8 = 25;
 const OPCODE_CALL: u8 = 26;
 const OPCODE_RETURN: u8 = 27;
 const OPCODE_RETURN_VOID: u8 = 28;
+const OPCODE_MAKE_ARRAY: u8 = 29;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectFileError {
@@ -134,6 +135,10 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 		Instruction::LoadLocal(slot) => {
 			bytes.push(OPCODE_LOAD_LOCAL);
 			bytes.extend_from_slice(&slot.to_le_bytes());
+		}
+		Instruction::MakeArray(element_count) => {
+			bytes.push(OPCODE_MAKE_ARRAY);
+			bytes.extend_from_slice(&element_count.to_le_bytes());
 		}
 		Instruction::Modulo => bytes.push(OPCODE_MODULO),
 		Instruction::Multiply => bytes.push(OPCODE_MULTIPLY),
@@ -302,6 +307,7 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_LESS_THAN => Ok(Instruction::LessThan),
 			OPCODE_LESS_THAN_OR_EQUAL => Ok(Instruction::LessThanOrEqual),
 			OPCODE_LOAD_LOCAL => Ok(Instruction::LoadLocal(self.read_u32()?)),
+			OPCODE_MAKE_ARRAY => Ok(Instruction::MakeArray(self.read_u32()?)),
 			OPCODE_MODULO => Ok(Instruction::Modulo),
 			OPCODE_MULTIPLY => Ok(Instruction::Multiply),
 			OPCODE_NEGATE => Ok(Instruction::Negate),
@@ -470,6 +476,20 @@ mod tests {
 			offset: 14,
 			message: String::from("Unknown opcode 255."),
 		});
+	}
+
+	#[test]
+	fn round_trips_array_program_bytes() {
+		let program = Program::new(vec![
+			Instruction::PushInteger(1),
+			Instruction::PushInteger(2),
+			Instruction::MakeArray(2),
+		]);
+
+		let bytes = write_program(&program);
+		let decoded = read_program(&bytes).unwrap();
+
+		assert_eq!(decoded, program);
 	}
 
 	#[test]

@@ -27,6 +27,7 @@ pub enum Instruction {
 	LessThan,
 	LessThanOrEqual,
 	LoadLocal(u32),
+	MakeArray(u32),
 	Modulo,
 	Multiply,
 	Negate,
