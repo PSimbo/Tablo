@@ -48,6 +48,7 @@ pub enum Expr {
 	Call(CallExpr),
 	Decimal(DecimalLiteral),
 	Identifier(IdentifierExpr),
+	Index(IndexExpr),
 	Integer(IntegerLiteral),
 	Text(TextLiteral),
 	Unary(UnaryExpr),
@@ -147,6 +148,13 @@ pub struct IfStatement {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexExpr {
+	pub array: Box<Expr>,
+	pub index: Box<Expr>,
+	pub position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IntegerLiteral {
 	pub position: usize,
 	pub value: i64,
@@ -204,6 +212,7 @@ impl Expr {
 			Expr::Call(expression) => expression.position,
 			Expr::Decimal(expression) => expression.position,
 			Expr::Identifier(expression) => expression.position,
+			Expr::Index(expression) => expression.position,
 			Expr::Integer(expression) => expression.position,
 			Expr::Text(expression) => expression.position,
 			Expr::Unary(expression) => expression.position,

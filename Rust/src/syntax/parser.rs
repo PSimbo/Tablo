@@ -13,6 +13,7 @@ use crate::ast::FunctionDeclaration;
 use crate::ast::FunctionParameter;
 use crate::ast::IdentifierExpr;
 use crate::ast::IfStatement;
+use crate::ast::IndexExpr;
 use crate::ast::IntegerLiteral;
 use crate::ast::Program;
 use crate::ast::ReturnStatement;
@@ -353,6 +354,7 @@ impl Parser {
 				TokenKind::ForwardSlash => BindingPower::Multiplicative,
 				TokenKind::GreaterThan => BindingPower::Comparison,
 				TokenKind::GreaterThanOrEqual => BindingPower::Comparison,
+				TokenKind::LeftBracket => BindingPower::Call,
 				TokenKind::LeftParenthesis => BindingPower::Call,
 				TokenKind::LessThan => BindingPower::Comparison,
 				TokenKind::LessThanOrEqual => BindingPower::Comparison,
@@ -486,6 +488,17 @@ impl Parser {
 		}))
 	}
 
+	fn parse_index_expression(&mut self, array: Expr, start: usize) -> Result<Expr, ParseError> {
+		let index = self.parse_assignment_expression()?;
+		self.expect_token(TokenKind::RightBracket, "Expected `]` to close array index expression.")?;
+
+		Ok(Expr::Index(IndexExpr {
+			array: Box::new(array),
+			index: Box::new(index),
+			position: start,
+		}))
+	}
+
 	fn parse_infix(&mut self, left: Expr, operator: Token, binding_power: BindingPower) -> Result<Expr, ParseError> {
 		match operator.kind {
 			TokenKind::AndKeyword => {
@@ -568,6 +581,7 @@ impl Parser {
 					right: Box::new(right),
 				}))
 			}
+			TokenKind::LeftBracket => self.parse_index_expression(left, operator.start),
 			TokenKind::LeftParenthesis => self.parse_call_expression(left, operator.start),
 			TokenKind::LessThan => {
 				let right = self.parse_expression_with_binding_power(binding_power)?;
@@ -866,6 +880,7 @@ mod tests {
 	use crate::ast::FunctionParameter;
 	use crate::ast::IdentifierExpr;
 	use crate::ast::IfStatement;
+	use crate::ast::IndexExpr;
 	use crate::ast::IntegerLiteral;
 	use crate::ast::Program;
 	use crate::ast::ReturnStatement;
@@ -934,6 +949,11 @@ mod tests {
 				value,
 			}),
 			Expr::Identifier(identifier) => Expr::Identifier(normalize_identifier(identifier)),
+			Expr::Index(IndexExpr { array, index, .. }) => Expr::Index(IndexExpr {
+				array: Box::new(normalize_expr(*array)),
+				index: Box::new(normalize_expr(*index)),
+				position: 0,
+			}),
 			Expr::Integer(IntegerLiteral { value, .. }) => Expr::Integer(IntegerLiteral {
 				position: 0,
 				value,
@@ -1046,6 +1066,27 @@ mod tests {
 		let tokens = lexer.tokenize().unwrap();
 		let mut parser = Parser::new(tokens);
 		normalize_program(parser.parse_program().unwrap())
+	}
+
+	#[test]
+	fn parses_array_index_expression() {
+		let program = parse_program("xs[1]");
+
+		assert_eq!(normalize_program(program), Program {
+			functions: vec![],
+			result: Some(Expr::Index(IndexExpr {
+				array: Box::new(Expr::Identifier(IdentifierExpr {
+					name: String::from("xs"),
+					position: 0,
+				})),
+				index: Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
+					value: 1,
+				})),
+				position: 0,
+			})),
+			statements: vec![],
+		});
 	}
 
 	#[test]

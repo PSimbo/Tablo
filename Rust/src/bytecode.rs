@@ -26,6 +26,7 @@ pub enum Instruction {
 	JumpIfFalse(u32),
 	LessThan,
 	LessThanOrEqual,
+	LoadIndex,
 	LoadLocal(u32),
 	MakeArray(u32),
 	Modulo,

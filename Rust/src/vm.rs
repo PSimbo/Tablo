@@ -163,6 +163,12 @@ impl VirtualMachine {
 				self.stack.push(compare_values(lhs, rhs, instruction_index, ComparisonKind::LessThanOrEqual)?);
 				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::LoadIndex => {
+				let index = self.pop_value(instruction_index)?;
+				let array = self.pop_value(instruction_index)?;
+				self.stack.push(load_index_value(array, index, instruction_index)?);
+				Ok(ExecutionOutcome::Continue(None))
+			}
 			Instruction::LoadLocal(slot) => {
 				let value = locals.get(*slot as usize).cloned().ok_or(VmError {
 					instruction_index,
@@ -467,6 +473,37 @@ fn equals_value(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Valu
 	Ok(Value::Boolean(value))
 }
 
+fn load_index_value(array: Value, index: Value, instruction_index: usize) -> Result<Value, VmError> {
+	let index = match index {
+		Value::Integer(value) => value,
+		other => {
+			return Err(vm_error(
+				instruction_index,
+				format!("Array index must be an `int`, found `{}`.", type_name(&other)),
+			));
+		}
+	};
+
+	let values = match array {
+		Value::Array(values) => values,
+		other => {
+			return Err(vm_error(
+				instruction_index,
+				format!("Cannot index a `{}` value.", type_name(&other)),
+			));
+		}
+	};
+
+	if index < 1 || index as usize > values.len() {
+		return Err(vm_error(
+			instruction_index,
+			format!("Array index {} is out of bounds for length {}.", index, values.len()),
+		));
+	}
+
+	Ok(values[index as usize - 1].clone())
+}
+
 fn modulo_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
 	match (lhs, rhs) {
 		(Value::Integer(lhs), Value::Integer(rhs)) => {
@@ -690,6 +727,21 @@ mod tests {
 		let result = VirtualMachine::new().run(&program).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
+	fn runs_array_index_program() {
+		let program = Program::new(vec![
+			Instruction::PushInteger(10),
+			Instruction::PushInteger(20),
+			Instruction::MakeArray(2),
+			Instruction::PushInteger(2),
+			Instruction::LoadIndex,
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(20)));
 	}
 
 	#[test]

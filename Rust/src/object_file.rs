@@ -43,6 +43,7 @@ const OPCODE_CALL: u8 = 26;
 const OPCODE_RETURN: u8 = 27;
 const OPCODE_RETURN_VOID: u8 = 28;
 const OPCODE_MAKE_ARRAY: u8 = 29;
+const OPCODE_LOAD_INDEX: u8 = 30;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectFileError {
@@ -132,6 +133,7 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 		}
 		Instruction::LessThan => bytes.push(OPCODE_LESS_THAN),
 		Instruction::LessThanOrEqual => bytes.push(OPCODE_LESS_THAN_OR_EQUAL),
+		Instruction::LoadIndex => bytes.push(OPCODE_LOAD_INDEX),
 		Instruction::LoadLocal(slot) => {
 			bytes.push(OPCODE_LOAD_LOCAL);
 			bytes.extend_from_slice(&slot.to_le_bytes());
@@ -306,6 +308,7 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_JUMP_IF_FALSE => Ok(Instruction::JumpIfFalse(self.read_u32()?)),
 			OPCODE_LESS_THAN => Ok(Instruction::LessThan),
 			OPCODE_LESS_THAN_OR_EQUAL => Ok(Instruction::LessThanOrEqual),
+			OPCODE_LOAD_INDEX => Ok(Instruction::LoadIndex),
 			OPCODE_LOAD_LOCAL => Ok(Instruction::LoadLocal(self.read_u32()?)),
 			OPCODE_MAKE_ARRAY => Ok(Instruction::MakeArray(self.read_u32()?)),
 			OPCODE_MODULO => Ok(Instruction::Modulo),
@@ -484,6 +487,8 @@ mod tests {
 			Instruction::PushInteger(1),
 			Instruction::PushInteger(2),
 			Instruction::MakeArray(2),
+			Instruction::PushInteger(1),
+			Instruction::LoadIndex,
 		]);
 
 		let bytes = write_program(&program);

@@ -13,6 +13,7 @@ use crate::ast::Expr;
 use crate::ast::FunctionDeclaration;
 use crate::ast::IdentifierExpr;
 use crate::ast::IfStatement;
+use crate::ast::IndexExpr;
 use crate::ast::Program as AstProgram;
 use crate::ast::ReturnStatement;
 use crate::ast::Statement;
@@ -187,6 +188,11 @@ impl Compiler {
 				let slot = semantic_program.identifier_slot(expression.position())
 					.unwrap_or_else(|| panic!("Missing slot for identifier `{name}`."));
 				instructions.push(Instruction::LoadLocal(slot));
+			}
+			Expr::Index(IndexExpr { array, index, .. }) => {
+				self.compile_into(array, semantic_program, instructions);
+				self.compile_into(index, semantic_program, instructions);
+				instructions.push(Instruction::LoadIndex);
 			}
 			Expr::Integer(integer) => {
 				instructions.push(Instruction::PushInteger(integer.value));

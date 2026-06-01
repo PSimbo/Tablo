@@ -12,6 +12,7 @@ use crate::ast::FunctionDeclaration;
 use crate::ast::FunctionParameter;
 use crate::ast::IdentifierExpr;
 use crate::ast::IfStatement;
+use crate::ast::IndexExpr;
 use crate::ast::Program;
 use crate::ast::ReturnStatement;
 use crate::ast::Statement;
@@ -381,6 +382,29 @@ impl SemanticAnalyzer {
 				))?;
 				self.semantic_program.identifier_slots.insert(expression.position(), local.slot);
 				Ok(local.data_type)
+			}
+			Expr::Index(IndexExpr { array, index, .. }) => {
+				let array_type = self.infer_expression_type(array)?;
+				let index_type = self.infer_expression_type(index)?;
+
+				if index_type != DataType::Int {
+					return Err(self.compile_error(
+						index.position(),
+						format!("Array index must be of type `int`, found `{}`.", self.data_type_name(&index_type)),
+					));
+				}
+
+				match array_type {
+					DataType::Array(element_type) => Ok(*element_type),
+					DataType::EmptyArray => Err(self.compile_error(
+						array.position(),
+						String::from("Cannot index an empty array literal without a known element type."),
+					)),
+					other => Err(self.compile_error(
+						array.position(),
+						format!("Array indexing requires an array operand, found `{}`.", self.data_type_name(&other)),
+					)),
+				}
 			}
 			Expr::Integer(_) => Ok(DataType::Int),
 			Expr::Text(_) => Ok(DataType::Text),

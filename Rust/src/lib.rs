@@ -119,6 +119,17 @@ mod tests {
 	}
 
 	#[test]
+	fn formats_array_index_type_error_with_line_and_column() {
+		let source = "var xs: [int] = [1, 2];\nxs['1']";
+		let error = run(source).unwrap_err();
+
+		assert_eq!(
+			error.format_with_source(source),
+			"Compile error at line 2, column 4: Array index must be of type `int`, found `text`.\n  |\n2 | xs['1']\n  |    ^"
+		);
+	}
+
+	#[test]
 	fn formats_compile_error_with_line_and_column() {
 		let source = "var x: int = true;\nx";
 		let error = run(source).unwrap_err();
@@ -194,6 +205,16 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_out_of_bounds_array_index_source_text() {
+		let error = run("var xs: [int] = [10, 20];\nxs[3]").unwrap_err();
+
+		assert_eq!(error, TabloError::Runtime(crate::vm::VmError {
+			instruction_index: 6,
+			message: String::from("Array index 3 is out of bounds for length 2."),
+		}));
+	}
+
+	#[test]
 	fn rejects_out_of_scope_variable_source_text() {
 		let error = run("{ var x: int = 1; }\nx").unwrap_err();
 
@@ -250,6 +271,13 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_array_index_source_text() {
+		let result = run("var xs: [int] = [10, 20, 30];\nxs[2]").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(20)));
+	}
+
+	#[test]
 	fn runs_array_literal_source_text() {
 		let result = run("var xs: [int] = [1, 2, 3];\nxs").unwrap();
 
@@ -263,14 +291,11 @@ mod tests {
 	#[test]
 	fn runs_array_object_file() {
 		let output_path = unique_test_output_path("runs_array_object_file");
-		compile("var xs: [int] = [1, 2];\nxs", &output_path).unwrap();
+		compile("var xs: [int] = [1, 2];\nxs[1]", &output_path).unwrap();
 		let result = run_file(&output_path).unwrap();
 		let _ = std::fs::remove_file(&output_path);
 
-		assert_eq!(result, Some(Value::Array(vec![
-			Value::Integer(1),
-			Value::Integer(2),
-		])));
+		assert_eq!(result, Some(Value::Integer(1)));
 	}
 
 	#[test]
