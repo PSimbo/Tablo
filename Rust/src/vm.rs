@@ -351,6 +351,10 @@ impl<'a> CallFrame<'a> {
 
 fn add_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
 	match (lhs, rhs) {
+		(Value::Array(mut lhs), Value::Array(rhs)) => {
+			lhs.extend(rhs);
+			Ok(Value::Array(lhs))
+		}
 		(Value::Text(lhs), Value::Text(rhs)) => Ok(Value::Text(lhs + &rhs)),
 		(Value::Text(lhs), rhs) => Ok(Value::Text(lhs + &stringify_value(&rhs))),
 		(lhs, Value::Text(rhs)) => Ok(Value::Text(stringify_value(&lhs) + &rhs)),
@@ -782,6 +786,28 @@ mod tests {
 		let result = VirtualMachine::new().run(&program).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
+	fn runs_array_concatenation_program() {
+		let program = Program::new(vec![
+			Instruction::PushInteger(1),
+			Instruction::PushInteger(2),
+			Instruction::MakeArray(2),
+			Instruction::PushInteger(3),
+			Instruction::PushInteger(4),
+			Instruction::MakeArray(2),
+			Instruction::Add,
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Integer(1),
+			Value::Integer(2),
+			Value::Integer(3),
+			Value::Integer(4),
+		])));
 	}
 
 	#[test]

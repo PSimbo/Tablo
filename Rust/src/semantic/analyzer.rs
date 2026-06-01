@@ -173,6 +173,22 @@ impl SemanticAnalyzer {
 					return Ok(DataType::Text);
 				}
 
+				match (lhs, rhs) {
+					(DataType::Array(lhs_element), DataType::Array(rhs_element)) => {
+						return Ok(DataType::Array(Box::new(
+							self.merge_array_element_types(lhs_element, rhs_element, position)?,
+						)));
+					}
+					(DataType::Array(element_type), DataType::EmptyArray)
+					| (DataType::EmptyArray, DataType::Array(element_type)) => {
+						return Ok(DataType::Array(element_type.clone()));
+					}
+					(DataType::EmptyArray, DataType::EmptyArray) => {
+						return Ok(DataType::EmptyArray);
+					}
+					_ => {}
+				}
+
 				self.numeric_result_type(lhs, rhs, position)
 			}
 			BinaryOperator::And | BinaryOperator::Or | BinaryOperator::Xor => {

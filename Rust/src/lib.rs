@@ -264,6 +264,18 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_array_concatenation_source_text() {
+		let result = run("[1, 2] + [3, 4]").unwrap();
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Integer(1),
+			Value::Integer(2),
+			Value::Integer(3),
+			Value::Integer(4),
+		])));
+	}
+
+	#[test]
 	fn runs_array_equality_source_text() {
 		let result = run("[1, 2] == [1, 2]").unwrap();
 
@@ -303,6 +315,18 @@ mod tests {
 		let result = run("true").unwrap();
 
 		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
+	fn runs_compound_array_concatenation_source_text() {
+		let result = run("var xs: [int] = [1, 2];\nxs += [3, 4];\nxs").unwrap();
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Integer(1),
+			Value::Integer(2),
+			Value::Integer(3),
+			Value::Integer(4),
+		])));
 	}
 
 	#[test]
