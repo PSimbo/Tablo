@@ -404,16 +404,18 @@ impl SemanticAnalyzer {
 						self.semantic_program.identifier_slots.insert(target.array.position, local.slot);
 
 						if local.is_const {
-							return Err(self.compile_error(
-								expression.position(),
-								format!("Constant `{}` cannot be assigned using `=`.", target.array.name),
-							));
-						}
+							let operation = match operator {
+								AssignmentOperator::Assign => "=",
+								AssignmentOperator::AddAssign => "+=",
+								AssignmentOperator::DivideAssign => "/=",
+								AssignmentOperator::ModuloAssign => "%=",
+								AssignmentOperator::MultiplyAssign => "*=",
+								AssignmentOperator::SubtractAssign => "-=",
+							};
 
-						if *operator != AssignmentOperator::Assign {
 							return Err(self.compile_error(
 								expression.position(),
-								String::from("Indexed assignment currently supports only `=`."),
+								format!("Constant `{}` cannot be assigned using `{operation}`.", target.array.name),
 							));
 						}
 
@@ -437,8 +439,7 @@ impl SemanticAnalyzer {
 						};
 
 						let value_type = self.infer_expression_type(value)?;
-						self.ensure_assignable(element_type, &value_type, expression.position())?;
-						Ok(element_type.clone())
+						self.assignment_result_type(*operator, element_type, &value_type, expression.position())
 					}
 				}
 			}

@@ -21,6 +21,7 @@ pub enum Instruction {
 	Call(u32, u32),
 	CallBuiltIn(BuiltInFunction, u32),
 	Divide,
+	Dup2,
 	Equal,
 	GreaterThan,
 	GreaterThanOrEqual,

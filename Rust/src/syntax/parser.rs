@@ -1291,6 +1291,37 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_compound_indexed_assignment_expression() {
+		let program = parse_program("xs[1] += 2;");
+
+		assert_eq!(normalize_program(program), Program {
+			functions: vec![],
+			result: None,
+			statements: vec![
+				Statement::Expression(Expr::Assignment(AssignmentExpr {
+					operator: AssignmentOperator::AddAssign,
+					position: 0,
+					target: AssignmentTarget::Index(ArrayIndexAssignmentTarget {
+						array: IdentifierExpr {
+							name: String::from("xs"),
+							position: 0,
+						},
+						index: Box::new(Expr::Integer(IntegerLiteral {
+							position: 0,
+							value: 1,
+						})),
+						position: 0,
+					}),
+					value: Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
+						value: 2,
+					})),
+				})),
+			],
+		});
+	}
+
+	#[test]
 	fn parses_const_variable_declaration() {
 		assert_eq!(
 			parse_program("const name: text = 'Tablo';"),

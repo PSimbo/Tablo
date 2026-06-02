@@ -121,6 +121,20 @@ impl VirtualMachine {
 				self.stack.push(result);
 				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::Dup2 => {
+				if self.stack.len() < 2 {
+					return Err(VmError {
+						instruction_index,
+						message: String::from("Stack underflow while duplicating operands."),
+					});
+				}
+
+				let lhs = self.stack[self.stack.len() - 2].clone();
+				let rhs = self.stack[self.stack.len() - 1].clone();
+				self.stack.push(lhs);
+				self.stack.push(rhs);
+				Ok(ExecutionOutcome::Continue(None))
+			}
 			Instruction::Divide => {
 				let rhs = self.pop_numeric(instruction_index)?;
 				let lhs = self.pop_numeric(instruction_index)?;
@@ -897,6 +911,28 @@ mod tests {
 		let result = VirtualMachine::new().run(&program).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
+	fn runs_compound_array_store_index_program() {
+		let program = Program::new(vec![
+			Instruction::PushInteger(10),
+			Instruction::PushInteger(20),
+			Instruction::MakeArray(2),
+			Instruction::PushInteger(2),
+			Instruction::Dup2,
+			Instruction::LoadIndex,
+			Instruction::PushInteger(5),
+			Instruction::Add,
+			Instruction::StoreIndex,
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Integer(10),
+			Value::Integer(25),
+		])));
 	}
 
 	#[test]

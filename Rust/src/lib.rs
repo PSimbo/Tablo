@@ -329,6 +329,13 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_block_scope_with_shadowing() {
+		let result = run("var x: int = 1;\n{\n  var x: int = 2;\n  x += 3;\n}\nx").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
 	fn runs_boolean_source_text() {
 		let result = run("true").unwrap();
 
@@ -369,10 +376,14 @@ mod tests {
 	}
 
 	#[test]
-	fn runs_block_scope_with_shadowing() {
-		let result = run("var x: int = 1;\n{\n  var x: int = 2;\n  x += 3;\n}\nx").unwrap();
+	fn runs_compound_indexed_assignment_source_text() {
+		let result = run("var xs: [int] = [10, 20, 30];\nxs[2] += 5;\nxs").unwrap();
 
-		assert_eq!(result, Some(Value::Integer(1)));
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Integer(10),
+			Value::Integer(25),
+			Value::Integer(30),
+		])));
 	}
 
 	#[test]

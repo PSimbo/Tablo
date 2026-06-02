@@ -47,6 +47,7 @@ const OPCODE_MAKE_ARRAY: u8 = 29;
 const OPCODE_LOAD_INDEX: u8 = 30;
 const OPCODE_STORE_INDEX: u8 = 31;
 const OPCODE_CALL_BUILT_IN: u8 = 32;
+const OPCODE_DUP2: u8 = 33;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectFileError {
@@ -128,6 +129,7 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.extend_from_slice(&argument_count.to_le_bytes());
 		}
 		Instruction::Divide => bytes.push(OPCODE_DIVIDE),
+		Instruction::Dup2 => bytes.push(OPCODE_DUP2),
 		Instruction::Equal => bytes.push(OPCODE_EQUAL),
 		Instruction::GreaterThan => bytes.push(OPCODE_GREATER_THAN),
 		Instruction::GreaterThanOrEqual => bytes.push(OPCODE_GREATER_THAN_OR_EQUAL),
@@ -319,6 +321,7 @@ impl<'a> ObjectFileReader<'a> {
 				Ok(Instruction::CallBuiltIn(built_in, argument_count))
 			}
 			OPCODE_DIVIDE => Ok(Instruction::Divide),
+			OPCODE_DUP2 => Ok(Instruction::Dup2),
 			OPCODE_EQUAL => Ok(Instruction::Equal),
 			OPCODE_GREATER_THAN => Ok(Instruction::GreaterThan),
 			OPCODE_GREATER_THAN_OR_EQUAL => Ok(Instruction::GreaterThanOrEqual),
@@ -616,6 +619,20 @@ mod tests {
 				),
 			],
 		));
+	}
+
+	#[test]
+	fn round_trips_program_bytes_with_dup2() {
+		let program = Program::new(vec![
+			Instruction::PushInteger(1),
+			Instruction::PushInteger(2),
+			Instruction::Dup2,
+		]);
+
+		let bytes = write_program(&program);
+		let decoded = read_program(&bytes).unwrap();
+
+		assert_eq!(decoded, program);
 	}
 
 	#[test]

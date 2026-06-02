@@ -151,6 +151,7 @@ impl Compiler {
 	fn compile_indexed_assignment(
 		&mut self,
 		slot: u32,
+		operator: AssignmentOperator,
 		index: &Expr,
 		value: &Expr,
 		semantic_program: &SemanticProgram,
@@ -158,7 +159,17 @@ impl Compiler {
 	) {
 		instructions.push(Instruction::LoadLocal(slot));
 		self.compile_into(index, semantic_program, instructions);
-		self.compile_into(value, semantic_program, instructions);
+
+		if let Some(instruction) = operator.compound_instruction() {
+			instructions.push(Instruction::Dup2);
+			instructions.push(Instruction::LoadIndex);
+			self.compile_into(value, semantic_program, instructions);
+			instructions.push(instruction);
+		}
+		else {
+			self.compile_into(value, semantic_program, instructions);
+		}
+
 		instructions.push(Instruction::StoreIndex);
 		instructions.push(Instruction::StoreLocal(slot));
 	}
@@ -184,7 +195,7 @@ impl Compiler {
 					AssignmentTarget::Index(target) => {
 						let slot = semantic_program.identifier_slot(target.array.position)
 							.unwrap_or_else(|| panic!("Missing slot for identifier `{}`.", target.array.name));
-						self.compile_indexed_assignment(slot, &target.index, value, semantic_program, instructions);
+						self.compile_indexed_assignment(slot, *operator, &target.index, value, semantic_program, instructions);
 					}
 				}
 			}
@@ -500,6 +511,70 @@ mod tests {
 			Instruction::Add,
 			Instruction::StoreLocal(0),
 			Instruction::LoadLocal(0),
+		]);
+	}
+
+	#[test]
+	fn compiles_compound_indexed_assignment_expression() {
+		let program = AstProgram {
+			functions: vec![],
+			statements: vec![
+				Statement::VariableDeclaration(VariableDeclaration {
+					data_type: DataType::Array(Box::new(DataType::Int)),
+					initial_value: Some(Expr::Array(ArrayLiteral {
+						elements: vec![
+							Expr::Integer(IntegerLiteral {
+								position: 0,
+								value: 5,
+							}),
+							Expr::Integer(IntegerLiteral {
+								position: 0,
+								value: 10,
+							}),
+						],
+						position: 0,
+					})),
+					is_const: false,
+					name: String::from("xs"),
+					position: 0,
+				}),
+			],
+			result: Some(Expr::Assignment(AssignmentExpr {
+				operator: AssignmentOperator::AddAssign,
+				position: 0,
+				target: AssignmentTarget::Index(crate::ast::ArrayIndexAssignmentTarget {
+					array: IdentifierExpr {
+						name: String::from("xs"),
+						position: 0,
+					},
+					index: Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
+						value: 2,
+					})),
+					position: 0,
+				}),
+				value: Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
+					value: 3,
+				})),
+			})),
+		};
+
+		let bytecode = Compiler::new().compile_program(&program).unwrap();
+
+		assert_eq!(bytecode.entry.instructions, vec![
+			Instruction::PushInteger(5),
+			Instruction::PushInteger(10),
+			Instruction::MakeArray(2),
+			Instruction::StoreLocal(0),
+			Instruction::LoadLocal(0),
+			Instruction::PushInteger(2),
+			Instruction::Dup2,
+			Instruction::LoadIndex,
+			Instruction::PushInteger(3),
+			Instruction::Add,
+			Instruction::StoreIndex,
+			Instruction::StoreLocal(0),
 		]);
 	}
 
