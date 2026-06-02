@@ -382,6 +382,30 @@ When the left operand is an indexed array element, the assignment modifies that 
 
 The `.` operator is used to express that the column on the right exists in the table on the left. Operands must be identifiers.
 
+### Range Syntax
+
+Tablo uses `:` to express numeric ranges. The form `from:to` is equivalent to `from:1:to`.
+
+The form `from:step:to` starts at `from` and repeatedly adds `step` until doing so would pass `to`. The final yielded value is therefore included only if it is reached exactly.
+
+If `step` is zero, a runtime error is raised.
+
+If the supplied or implied step moves away from `to`, the range yields no values.
+
+Range expressions are primarily used by `for` loops and array slices.
+
+~~~
+// Valid ranges:
+3:7
+5:-1:1
+10:10 // Yields one value
+2.5:0.5:7.5
+6:2 // Yields no values
+
+// Invalid ranges:
+5:0:10
+~~~
+
 ### Operator Precedence
 
 ~~~
@@ -393,6 +417,7 @@ not
 and
 xor
 or
+:
 = += -= *= /= %=
 ~~~
 
@@ -501,6 +526,10 @@ Array literals are written using `[` and `]` with comma-separated element expres
 Arrays are indexed using the syntax `arrayExpr[indexExpr]`. Indices must be of type `int`. Tablo uses one-based indexing, so an index of 1 refers to the first element in the array.
 
 If an array is read using an index that is outside its valid bounds, a runtime error is raised.
+
+Arrays may also be sliced by providing an integer range as the index. For example, `xs[2:4]` yields a new array containing the second through fourth elements of `xs`, while `xs[5:-1:1]` yields a reversed copy of the first five elements.
+
+When slicing an array, each index yielded by the range must be within the valid bounds of the array or a runtime error is raised. If the range yields no indices then the result is the empty array. Negative values have no special meaning for array indexing or slicing; they are treated as ordinary integer values and therefore usually result in an out-of-bounds runtime error when evaluated.
 
 Array elements may be assigned using ordinary assignment and compound assignment operators:
 
@@ -652,8 +681,15 @@ For Loops
 
 Tablo supports for loops. For loops always use the `in` operator where the right operand is any iterable.
 
+At present, the built-in iterable forms are:
+
+* arrays
+* integer ranges written using `from:to` or `from:step:to`
+
+Database query loops use their own `for rec ... in ...` syntax and are described later in the "Database Queries" section.
+
 ~~~
-for i in 0...10 {
+for i in 1:10 {
     var fib: [int] = [1, 1, 2, 3, 5, 8];
 
     for val in fib {
@@ -1480,6 +1516,7 @@ block = `{` { statement } `}`
 
 blockStatement = forStatement | ifStatement | whileStatement
 simpleStatement = ( `break` | `continue` | expression | returnStatement | variableDeclaration ) `;`
+forStatement = `for` identifier `in` expression block
 functionDeclaration = `fn` identifier `(` [ functionParameter { `,` functionParameter } ] `)` returnType block
 functionParameter = identifier `:` dataType
 variableDeclaration = ( `const` | `var` ) identifier `:` dataType [ `=` expression ]
@@ -1491,7 +1528,8 @@ dataType = unquotedIdentifier | arrayType
 arrayType = `[` dataType `]`
 
 expression = assignment
-assignment = logicalOr [ assignmentOperator assignment ]
+assignment = range [ assignmentOperator assignment ]
+range = logicalOr [ `:` logicalOr [ `:` logicalOr ] ]
 groupExpression = `(` expression `)`
 logicalOr = logicalXor { `or` logicalXor }
 logicalXor = logicalAnd { `xor` logicalAnd }
