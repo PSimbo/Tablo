@@ -107,7 +107,7 @@ Whitespace has no semantic meaning and is ignored during parsing.
 Statements
 ----------
 
-Simple statements are terminated with a `;` character. This includes variable declarations, constant declarations, expression statements, and `return` statements.
+Simple statements are terminated with a `;` character. This includes variable declarations, constant declarations, expression statements, `return` statements, `break` statements, and `continue` statements.
 
 Statements that are already delimited by a block are not followed by a semicolon. This includes bare blocks, `if` statements, `for` loops, and `while` loops.
 
@@ -179,8 +179,10 @@ The following identifiers are reserved as keywords:
 | `asc`         | Marks the sort order for a field as ascending       |
 | `bin`         | Binary data data type                               |
 | `bool`        | Boolean data type                                   |
+| `break`       | Exits the innermost enclosing loop                  |
 | `by`          | Follows keywords `group` or `order`                 |
 | `const`       | Starts a constant variable declaration              |
+| `continue`    | Skips to the next iteration of the innermost loop   |
 | `count`       | Returns the number of records matching a query      |
 | `create`      | Commits a database record creation                  |
 | `date`        | Date data type                                      |
@@ -620,6 +622,28 @@ var i: int = 0;
 
 while i < 10 {
   i += 1;
+}
+~~~
+
+Tablo supports both `break` and `continue` within loop bodies.
+
+The `break` statement exits the innermost enclosing `while` or `for` loop immediately.
+
+The `continue` statement skips the remainder of the current iteration of the innermost enclosing `while` or `for` loop and proceeds with the next iteration.
+
+Both statements may only be used within the body of a `while` or `for` loop.
+
+~~~
+var i: int = 0;
+
+while true {
+  i += 1;
+
+  if i < 5 {
+    continue;
+  }
+
+  break;
 }
 ~~~
 
@@ -1455,7 +1479,7 @@ statement = block | blockStatement | simpleStatement
 block = `{` { statement } `}`
 
 blockStatement = forStatement | ifStatement | whileStatement
-simpleStatement = ( expression | returnStatement | variableDeclaration ) `;`
+simpleStatement = ( `break` | `continue` | expression | returnStatement | variableDeclaration ) `;`
 functionDeclaration = `fn` identifier `(` [ functionParameter { `,` functionParameter } ] `)` returnType block
 functionParameter = identifier `:` dataType
 variableDeclaration = ( `const` | `var` ) identifier `:` dataType [ `=` expression ]
