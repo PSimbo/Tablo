@@ -7,7 +7,9 @@ use crate::ast::BinaryExpr;
 use crate::ast::BinaryOperator;
 use crate::ast::BlockStatement;
 use crate::ast::BooleanLiteral;
+use crate::ast::BreakStatement;
 use crate::ast::CallExpr;
+use crate::ast::ContinueStatement;
 use crate::ast::DataType;
 use crate::ast::DecimalLiteral;
 use crate::ast::Expr;
@@ -82,7 +84,7 @@ impl Parser {
 				Some(token) if token.kind == TokenKind::FnKeyword => {
 					functions.push(self.parse_function_declaration()?);
 				}
-				Some(token) if matches!(token.kind, TokenKind::ConstKeyword | TokenKind::IfKeyword | TokenKind::LeftBrace | TokenKind::VarKeyword | TokenKind::WhileKeyword) => {
+				Some(token) if matches!(token.kind, TokenKind::BreakKeyword | TokenKind::ConstKeyword | TokenKind::ContinueKeyword | TokenKind::IfKeyword | TokenKind::LeftBrace | TokenKind::ReturnKeyword | TokenKind::VarKeyword | TokenKind::WhileKeyword) => {
 					statements.push(self.parse_statement()?);
 				}
 				Some(_) => {
@@ -279,6 +281,15 @@ impl Parser {
 		}))
 	}
 
+	fn parse_break_statement(&mut self) -> Result<Statement, ParseError> {
+		let break_keyword = self.expect_token(TokenKind::BreakKeyword, "Expected `break` to start break statement.")?;
+		self.expect_token(TokenKind::Semicolon, "Expected `;` after break statement.")?;
+
+		Ok(Statement::Break(BreakStatement {
+			position: break_keyword.start,
+		}))
+	}
+
 	fn parse_call_expression(&mut self, callee: Expr, start: usize) -> Result<Expr, ParseError> {
 		let callee = match callee {
 			Expr::Identifier(identifier) => identifier,
@@ -321,6 +332,15 @@ impl Parser {
 			arguments,
 			callee,
 			position: start,
+		}))
+	}
+
+	fn parse_continue_statement(&mut self) -> Result<Statement, ParseError> {
+		let continue_keyword = self.expect_token(TokenKind::ContinueKeyword, "Expected `continue` to start continue statement.")?;
+		self.expect_token(TokenKind::Semicolon, "Expected `;` after continue statement.")?;
+
+		Ok(Statement::Continue(ContinueStatement {
+			position: continue_keyword.start,
 		}))
 	}
 
@@ -803,6 +823,8 @@ impl Parser {
 
 	fn parse_statement(&mut self) -> Result<Statement, ParseError> {
 		match self.current() {
+			Some(token) if token.kind == TokenKind::BreakKeyword => self.parse_break_statement(),
+			Some(token) if token.kind == TokenKind::ContinueKeyword => self.parse_continue_statement(),
 			Some(token) if token.kind == TokenKind::IfKeyword => self.parse_if_statement(),
 			Some(token) if token.kind == TokenKind::LeftBrace => self.parse_block_statement(),
 			Some(token) if token.kind == TokenKind::ReturnKeyword => self.parse_return_statement(),
@@ -893,7 +915,9 @@ mod tests {
 	use crate::ast::BinaryOperator;
 	use crate::ast::BooleanLiteral;
 	use crate::ast::BlockStatement;
+	use crate::ast::BreakStatement;
 	use crate::ast::CallExpr;
+	use crate::ast::ContinueStatement;
 	use crate::ast::DataType;
 	use crate::ast::DecimalLiteral;
 	use crate::ast::Expr;
@@ -1042,6 +1066,12 @@ mod tests {
 	fn normalize_statement(statement: Statement) -> Statement {
 		match statement {
 			Statement::Block(block) => Statement::Block(normalize_block(block)),
+			Statement::Break(_) => Statement::Break(BreakStatement {
+				position: 0,
+			}),
+			Statement::Continue(_) => Statement::Continue(ContinueStatement {
+				position: 0,
+			}),
 			Statement::Expression(expression) => Statement::Expression(normalize_expr(expression)),
 			Statement::If(if_statement) => Statement::If(normalize_if_statement(if_statement)),
 			Statement::Return(return_statement) => Statement::Return(normalize_return_statement(return_statement)),
@@ -2082,6 +2112,37 @@ mod tests {
 					}),
 				],
 				result: None,
+			}
+		);
+	}
+
+	#[test]
+	fn parses_while_statement_with_break_and_continue() {
+		assert_eq!(
+			parse_program("while true { continue; break; }"),
+			Program {
+				functions: vec![],
+				result: None,
+				statements: vec![
+					Statement::While(WhileStatement {
+						body: BlockStatement {
+							position: 0,
+							statements: vec![
+								Statement::Continue(ContinueStatement {
+									position: 0,
+								}),
+								Statement::Break(BreakStatement {
+									position: 0,
+								}),
+							],
+						},
+						condition: Expr::Boolean(BooleanLiteral {
+							position: 0,
+							value: true,
+						}),
+						position: 0,
+					}),
+				],
 			}
 		);
 	}

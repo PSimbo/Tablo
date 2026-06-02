@@ -63,6 +63,8 @@ pub enum Expr {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Statement {
 	Block(BlockStatement),
+	Break(BreakStatement),
+	Continue(ContinueStatement),
 	Expression(Expr),
 	If(IfStatement),
 	Return(ReturnStatement),
@@ -112,6 +114,11 @@ pub struct BlockStatement {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BreakStatement {
+	pub position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BooleanLiteral {
 	pub position: usize,
 	pub value: bool,
@@ -121,6 +128,11 @@ pub struct BooleanLiteral {
 pub struct CallExpr {
 	pub arguments: Vec<Expr>,
 	pub callee: IdentifierExpr,
+	pub position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContinueStatement {
 	pub position: usize,
 }
 

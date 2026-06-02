@@ -6,7 +6,9 @@ use crate::ast::AssignmentTarget;
 use crate::ast::BinaryExpr;
 use crate::ast::BinaryOperator;
 use crate::ast::BlockStatement;
+use crate::ast::BreakStatement;
 use crate::ast::CallExpr;
+use crate::ast::ContinueStatement;
 use crate::ast::DataType;
 use crate::ast::Expr;
 use crate::ast::FunctionDeclaration;
@@ -34,6 +36,7 @@ pub struct SemanticAnalyzer {
 	current_return_type: Option<DataType>,
 	functions: BTreeMap<String, FunctionSignature>,
 	locals: ScopeStack<LocalBinding>,
+	loop_depth: usize,
 	next_local_slot: u32,
 	semantic_program: SemanticProgram,
 }
@@ -89,6 +92,7 @@ impl SemanticAnalyzer {
 			current_return_type: None,
 			functions: BTreeMap::new(),
 			locals: ScopeStack::default(),
+			loop_depth: 0,
 			next_local_slot: 0,
 			semantic_program: SemanticProgram::default(),
 		}
@@ -98,6 +102,7 @@ impl SemanticAnalyzer {
 		self.current_return_type = None;
 		self.functions = BTreeMap::new();
 		self.locals = ScopeStack::default();
+		self.loop_depth = 0;
 		self.next_local_slot = 0;
 		self.semantic_program = SemanticProgram::default();
 
@@ -677,6 +682,7 @@ impl SemanticAnalyzer {
 	fn statement_guarantees_return(&self, statement: &Statement) -> bool {
 		match statement {
 			Statement::Block(block) => self.block_guarantees_return(block),
+			Statement::Break(_) | Statement::Continue(_) => false,
 			Statement::If(if_statement) => {
 				self.block_guarantees_return(&if_statement.then_branch)
 					&& if_statement.else_branch.as_ref().is_some_and(|else_branch| self.statement_guarantees_return(else_branch))
@@ -688,10 +694,12 @@ impl SemanticAnalyzer {
 
 	fn validate_function_declaration(&mut self, function: &FunctionDeclaration) -> Result<(), CompileError> {
 		let saved_locals = std::mem::take(&mut self.locals);
+		let saved_loop_depth = self.loop_depth;
 		let saved_next_local_slot = self.next_local_slot;
 		let saved_return_type = self.current_return_type.clone();
 
 		self.locals = ScopeStack::default();
+		self.loop_depth = 0;
 		self.next_local_slot = 0;
 		self.current_return_type = Some(function.return_type.clone());
 		self.enter_scope();
@@ -715,6 +723,7 @@ impl SemanticAnalyzer {
 
 		self.exit_scope();
 		self.locals = saved_locals;
+		self.loop_depth = saved_loop_depth;
 		self.next_local_slot = saved_next_local_slot;
 		self.current_return_type = saved_return_type;
 
@@ -765,6 +774,26 @@ impl SemanticAnalyzer {
 				}
 
 				self.exit_scope();
+				Ok(())
+			}
+			Statement::Break(BreakStatement { position }) => {
+				if self.loop_depth == 0 {
+					return Err(self.compile_error(
+						*position,
+						String::from("`break` may only be used inside a `while` or `for` loop."),
+					));
+				}
+
+				Ok(())
+			}
+			Statement::Continue(ContinueStatement { position }) => {
+				if self.loop_depth == 0 {
+					return Err(self.compile_error(
+						*position,
+						String::from("`continue` may only be used inside a `while` or `for` loop."),
+					));
+				}
+
 				Ok(())
 			}
 			Statement::Expression(expression) => {
@@ -862,7 +891,9 @@ impl SemanticAnalyzer {
 					));
 				}
 
+				self.loop_depth += 1;
 				self.validate_statement(&Statement::Block(body.clone()))?;
+				self.loop_depth -= 1;
 				Ok(())
 			}
 		}

@@ -8,7 +8,9 @@ use crate::ast::AssignmentOperator;
 use crate::ast::AssignmentTarget;
 use crate::ast::BlockStatement;
 use crate::ast::BooleanLiteral;
+use crate::ast::BreakStatement;
 use crate::ast::CallExpr;
+use crate::ast::ContinueStatement;
 use crate::ast::DecimalLiteral;
 use crate::ast::Expr;
 use crate::ast::FunctionDeclaration;
@@ -36,7 +38,16 @@ pub struct CompileError {
 }
 
 #[derive(Default)]
-pub struct Compiler;
+pub struct Compiler {
+	loop_stack: Vec<LoopContext>,
+}
+
+#[derive(Default)]
+struct LoopContext {
+	break_jump_indices: Vec<usize>,
+	continue_jump_indices: Vec<usize>,
+	loop_start: u32,
+}
 
 impl AssignmentOperator {
 	fn compound_instruction(self) -> Option<Instruction> {
@@ -83,12 +94,14 @@ impl crate::ast::UnaryOperator {
 
 impl Compiler {
 	pub fn compile_expression(&mut self, expression: &Expr) -> Program {
+		self.loop_stack.clear();
 		let mut instructions = Vec::new();
 		self.compile_into(expression, &SemanticProgram::default(), &mut instructions);
 		Program::new(instructions)
 	}
 
 	pub fn compile_program(&mut self, program: &AstProgram) -> Result<Program, CompileError> {
+		self.loop_stack.clear();
 		let semantic_program = SemanticAnalyzer::new().analyze_program(program)?;
 		let mut functions = Vec::with_capacity(program.functions.len());
 
@@ -114,7 +127,9 @@ impl Compiler {
 	}
 
 	pub fn new() -> Self {
-		Self
+		Self {
+			loop_stack: Vec::new(),
+		}
 	}
 
 	fn compile_assignment(&mut self, slot: u32, operator: AssignmentOperator, value: &Expr, semantic_program: &SemanticProgram, instructions: &mut Vec<Instruction>) {
@@ -139,6 +154,7 @@ impl Compiler {
 	}
 
 	fn compile_function(&mut self, function: &FunctionDeclaration, semantic_program: &SemanticProgram) -> Result<CompiledFunction, CompileError> {
+		self.loop_stack.clear();
 		let mut instructions = Vec::new();
 		self.compile_statement(&Statement::Block(function.body.clone()), semantic_program, &mut instructions)?;
 
@@ -256,6 +272,28 @@ impl Compiler {
 
 				Ok(())
 			}
+			Statement::Break(BreakStatement { position }) => {
+				let Some(loop_context) = self.loop_stack.last_mut() else {
+					return Err(self.compile_error(
+						*position,
+						String::from("`break` may only be used inside a `while` or `for` loop."),
+					));
+				};
+				loop_context.break_jump_indices.push(instructions.len());
+				instructions.push(Instruction::Jump(0));
+				Ok(())
+			}
+			Statement::Continue(ContinueStatement { position }) => {
+				let Some(loop_context) = self.loop_stack.last_mut() else {
+					return Err(self.compile_error(
+						*position,
+						String::from("`continue` may only be used inside a `while` or `for` loop."),
+					));
+				};
+				loop_context.continue_jump_indices.push(instructions.len());
+				instructions.push(Instruction::Jump(0));
+				Ok(())
+			}
 			Statement::Expression(expression) => {
 				self.compile_into(expression, semantic_program, instructions);
 
@@ -332,6 +370,11 @@ impl Compiler {
 				..
 			}) => {
 				let loop_start = instructions.len() as u32;
+				self.loop_stack.push(LoopContext {
+					break_jump_indices: Vec::new(),
+					continue_jump_indices: Vec::new(),
+					loop_start,
+				});
 				self.compile_into(condition, semantic_program, instructions);
 				let jump_if_false_index = instructions.len();
 				instructions.push(Instruction::JumpIfFalse(0));
@@ -341,6 +384,17 @@ impl Compiler {
 
 				let loop_end = instructions.len() as u32;
 				instructions[jump_if_false_index] = Instruction::JumpIfFalse(loop_end);
+
+				let loop_context = self.loop_stack.pop()
+					.expect("Loop context must exist while compiling a while statement.");
+
+				for break_jump_index in loop_context.break_jump_indices {
+					instructions[break_jump_index] = Instruction::Jump(loop_end);
+				}
+
+				for continue_jump_index in loop_context.continue_jump_indices {
+					instructions[continue_jump_index] = Instruction::Jump(loop_context.loop_start);
+				}
 
 				Ok(())
 			}
@@ -365,7 +419,9 @@ mod tests {
 	use crate::ast::BinaryOperator;
 	use crate::ast::BlockStatement;
 	use crate::ast::BooleanLiteral;
+	use crate::ast::BreakStatement;
 	use crate::ast::CallExpr;
+	use crate::ast::ContinueStatement;
 	use crate::ast::DataType;
 	use crate::ast::DecimalLiteral;
 	use crate::ast::Expr;
@@ -1049,6 +1105,103 @@ mod tests {
 			Instruction::StoreLocal(0),
 			Instruction::LoadLocal(0),
 			Instruction::Pop,
+			Instruction::Jump(2),
+			Instruction::LoadLocal(0),
+		]);
+	}
+
+	#[test]
+	fn compiles_while_statement_with_break_and_continue() {
+		let program = AstProgram {
+			functions: vec![],
+			statements: vec![
+				Statement::VariableDeclaration(VariableDeclaration {
+					data_type: DataType::Int,
+					initial_value: Some(Expr::Integer(IntegerLiteral {
+						position: 0,
+						value: 0,
+					})),
+					is_const: false,
+					name: String::from("x"),
+					position: 0,
+				}),
+				Statement::While(WhileStatement {
+					body: BlockStatement {
+						position: 0,
+						statements: vec![
+							Statement::Expression(Expr::Assignment(AssignmentExpr {
+								operator: AssignmentOperator::AddAssign,
+								position: 0,
+								target: AssignmentTarget::Identifier(IdentifierExpr {
+									name: String::from("x"),
+									position: 0,
+								}),
+								value: Box::new(Expr::Integer(IntegerLiteral {
+									position: 0,
+									value: 1,
+								})),
+							})),
+							Statement::If(IfStatement {
+								condition: Expr::Binary(BinaryExpr {
+									left: Box::new(Expr::Identifier(IdentifierExpr {
+										name: String::from("x"),
+										position: 0,
+									})),
+									operator: BinaryOperator::LessThan,
+									position: 0,
+									right: Box::new(Expr::Integer(IntegerLiteral {
+										position: 0,
+										value: 2,
+									})),
+								}),
+								else_branch: None,
+								position: 0,
+								then_branch: BlockStatement {
+									position: 0,
+									statements: vec![
+										Statement::Continue(ContinueStatement {
+											position: 0,
+										}),
+									],
+								},
+							}),
+							Statement::Break(BreakStatement {
+								position: 0,
+							}),
+						],
+					},
+					condition: Expr::Boolean(BooleanLiteral {
+						position: 0,
+						value: true,
+					}),
+					position: 0,
+				}),
+			],
+			result: Some(Expr::Identifier(IdentifierExpr {
+				name: String::from("x"),
+				position: 0,
+			})),
+		};
+
+		let bytecode = Compiler::new().compile_program(&program).unwrap();
+
+		assert_eq!(bytecode.entry.instructions, vec![
+			Instruction::PushInteger(0),
+			Instruction::StoreLocal(0),
+			Instruction::PushBoolean(true),
+			Instruction::JumpIfFalse(17),
+			Instruction::LoadLocal(0),
+			Instruction::PushInteger(1),
+			Instruction::Add,
+			Instruction::StoreLocal(0),
+			Instruction::LoadLocal(0),
+			Instruction::Pop,
+			Instruction::LoadLocal(0),
+			Instruction::PushInteger(2),
+			Instruction::LessThan,
+			Instruction::JumpIfFalse(15),
+			Instruction::Jump(2),
+			Instruction::Jump(17),
 			Instruction::Jump(2),
 			Instruction::LoadLocal(0),
 		]);

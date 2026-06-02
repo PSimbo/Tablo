@@ -131,6 +131,17 @@ mod tests {
 	}
 
 	#[test]
+	fn formats_break_outside_loop_compile_error_with_line_and_column() {
+		let source = "break;\n";
+		let error = run(source).unwrap_err();
+
+		assert_eq!(
+			error.format_with_source(source),
+			"Compile error at line 1, column 1: `break` may only be used inside a `while` or `for` loop.\n  |\n1 | break;\n  | ^"
+		);
+	}
+
+	#[test]
 	fn formats_compile_error_with_line_and_column() {
 		let source = "var x: int = true;\nx";
 		let error = run(source).unwrap_err();
@@ -340,6 +351,15 @@ mod tests {
 		let result = run("true").unwrap();
 
 		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
+	fn runs_break_and_continue_source_text() {
+		let result = run(
+			"var x: int = 0;\nwhile true {\n  x += 1;\n  if x < 3 {\n    continue;\n  }\n  break;\n}\nx"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(3)));
 	}
 
 	#[test]
