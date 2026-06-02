@@ -48,6 +48,8 @@ const OPCODE_LOAD_INDEX: u8 = 30;
 const OPCODE_STORE_INDEX: u8 = 31;
 const OPCODE_CALL_BUILT_IN: u8 = 32;
 const OPCODE_DUP2: u8 = 33;
+const OPCODE_MAKE_RANGE: u8 = 34;
+const OPCODE_MAKE_STEPPED_RANGE: u8 = 35;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectFileError {
@@ -152,6 +154,8 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.push(OPCODE_MAKE_ARRAY);
 			bytes.extend_from_slice(&element_count.to_le_bytes());
 		}
+		Instruction::MakeRange => bytes.push(OPCODE_MAKE_RANGE),
+		Instruction::MakeSteppedRange => bytes.push(OPCODE_MAKE_STEPPED_RANGE),
 		Instruction::Modulo => bytes.push(OPCODE_MODULO),
 		Instruction::Multiply => bytes.push(OPCODE_MULTIPLY),
 		Instruction::Negate => bytes.push(OPCODE_NEGATE),
@@ -332,6 +336,8 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_LOAD_INDEX => Ok(Instruction::LoadIndex),
 			OPCODE_LOAD_LOCAL => Ok(Instruction::LoadLocal(self.read_u32()?)),
 			OPCODE_MAKE_ARRAY => Ok(Instruction::MakeArray(self.read_u32()?)),
+			OPCODE_MAKE_RANGE => Ok(Instruction::MakeRange),
+			OPCODE_MAKE_STEPPED_RANGE => Ok(Instruction::MakeSteppedRange),
 			OPCODE_MODULO => Ok(Instruction::Modulo),
 			OPCODE_MULTIPLY => Ok(Instruction::Multiply),
 			OPCODE_NEGATE => Ok(Instruction::Negate),
@@ -627,6 +633,20 @@ mod tests {
 			Instruction::PushInteger(1),
 			Instruction::PushInteger(2),
 			Instruction::Dup2,
+		]);
+
+		let bytes = write_program(&program);
+		let decoded = read_program(&bytes).unwrap();
+
+		assert_eq!(decoded, program);
+	}
+
+	#[test]
+	fn round_trips_program_bytes_with_range() {
+		let program = Program::new(vec![
+			Instruction::PushInteger(0),
+			Instruction::PushInteger(10),
+			Instruction::MakeRange,
 		]);
 
 		let bytes = write_program(&program);

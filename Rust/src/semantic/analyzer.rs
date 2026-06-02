@@ -17,6 +17,7 @@ use crate::ast::IdentifierExpr;
 use crate::ast::IfStatement;
 use crate::ast::IndexExpr;
 use crate::ast::Program;
+use crate::ast::RangeExpr;
 use crate::ast::ReturnStatement;
 use crate::ast::Statement;
 use crate::ast::UnaryExpr;
@@ -284,6 +285,7 @@ impl SemanticAnalyzer {
 			DataType::Dec => String::from("dec"),
 			DataType::EmptyArray => String::from("empty array"),
 			DataType::Int => String::from("int"),
+			DataType::Range(element_type) => format!("range<{}>", self.data_type_name(element_type)),
 			DataType::Text => String::from("text"),
 			DataType::Void => String::from("void"),
 		}
@@ -520,6 +522,43 @@ impl SemanticAnalyzer {
 				}
 			}
 			Expr::Integer(_) => Ok(DataType::Int),
+			Expr::Range(RangeExpr { start, step, end, position }) => {
+				let start_type = self.infer_expression_type(start)?;
+				let end_type = self.infer_expression_type(end)?;
+
+				if !self.is_numeric_type(&start_type) || !self.is_numeric_type(&end_type) {
+					return Err(self.compile_error(
+						*position,
+						format!(
+							"Range bounds must be numeric, found `{}` and `{}`.",
+							self.data_type_name(&start_type),
+							self.data_type_name(&end_type),
+						),
+					));
+				}
+
+				let element_type = if let Some(step) = step {
+					let step_type = self.infer_expression_type(step)?;
+
+					if !self.is_numeric_type(&step_type) {
+						return Err(self.compile_error(
+							step.position(),
+							format!("Range step must be numeric, found `{}`.", self.data_type_name(&step_type)),
+						));
+					}
+
+					self.merge_array_element_types(
+						&self.merge_array_element_types(&start_type, &end_type, *position)?,
+						&step_type,
+						*position,
+					)?
+				}
+				else {
+					self.merge_array_element_types(&start_type, &end_type, *position)?
+				};
+
+				Ok(DataType::Range(Box::new(element_type)))
+			}
 			Expr::Text(_) => Ok(DataType::Text),
 			Expr::Unary(UnaryExpr { operand, operator, .. }) => {
 				let operand_type = self.infer_expression_type(operand)?;
@@ -653,6 +692,14 @@ impl SemanticAnalyzer {
 			(DataType::Array(_), DataType::EmptyArray)
 			| (DataType::EmptyArray, DataType::Array(_))
 			| (DataType::EmptyArray, DataType::EmptyArray) => Ok(()),
+			(DataType::Range(_), _) | (_, DataType::Range(_)) => Err(self.compile_error(
+				position,
+				format!(
+					"Equality comparison is not supported between `{}` and `{}`.",
+					self.data_type_name(lhs),
+					self.data_type_name(rhs),
+				),
+			)),
 			_ => Err(self.compile_error(
 				position,
 				format!(

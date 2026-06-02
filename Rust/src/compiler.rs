@@ -18,6 +18,7 @@ use crate::ast::IdentifierExpr;
 use crate::ast::IfStatement;
 use crate::ast::IndexExpr;
 use crate::ast::Program as AstProgram;
+use crate::ast::RangeExpr;
 use crate::ast::ReturnStatement;
 use crate::ast::Statement;
 use crate::ast::TextLiteral;
@@ -253,6 +254,19 @@ impl Compiler {
 			Expr::Integer(integer) => {
 				instructions.push(Instruction::PushInteger(integer.value));
 			}
+			Expr::Range(RangeExpr { start, step, end, .. }) => {
+				self.compile_into(start, semantic_program, instructions);
+
+				if let Some(step) = step {
+					self.compile_into(step, semantic_program, instructions);
+					self.compile_into(end, semantic_program, instructions);
+					instructions.push(Instruction::MakeSteppedRange);
+				}
+				else {
+					self.compile_into(end, semantic_program, instructions);
+					instructions.push(Instruction::MakeRange);
+				}
+			}
 			Expr::Text(TextLiteral { value, .. }) => {
 				instructions.push(Instruction::PushText(value.clone()));
 			}
@@ -429,6 +443,7 @@ mod tests {
 	use crate::ast::IfStatement;
 	use crate::ast::IntegerLiteral;
 	use crate::ast::Program as AstProgram;
+	use crate::ast::RangeExpr;
 	use crate::ast::Statement;
 	use crate::ast::TextLiteral;
 	use crate::ast::UnaryExpr;
@@ -1000,6 +1015,30 @@ mod tests {
 			Instruction::LoadLocal(0),
 			Instruction::PushInteger(2),
 			Instruction::Add,
+		]);
+	}
+
+	#[test]
+	fn compiles_range_expression() {
+		let expression = Expr::Range(RangeExpr {
+			start: Box::new(Expr::Integer(IntegerLiteral {
+				position: 0,
+				value: 0,
+			})),
+			step: None,
+			end: Box::new(Expr::Integer(IntegerLiteral {
+				position: 2,
+				value: 10,
+			})),
+			position: 1,
+		});
+
+		let program = Compiler::new().compile_expression(&expression);
+
+		assert_eq!(program.entry.instructions, vec![
+			Instruction::PushInteger(0),
+			Instruction::PushInteger(10),
+			Instruction::MakeRange,
 		]);
 	}
 

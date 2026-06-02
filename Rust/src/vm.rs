@@ -4,6 +4,8 @@ use crate::bytecode::CompiledFunction;
 use crate::bytecode::Instruction;
 use crate::bytecode::Program;
 use crate::value::Decimal;
+use crate::value::DecimalRange;
+use crate::value::IntegerRange;
 use crate::value::Value;
 
 #[derive(Clone, Copy)]
@@ -209,6 +211,19 @@ impl VirtualMachine {
 				self.stack.push(Value::Array(values));
 				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::MakeRange => {
+				let end = self.pop_value(instruction_index)?;
+				let start = self.pop_value(instruction_index)?;
+				self.stack.push(make_range_value(start, None, end, instruction_index)?);
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::MakeSteppedRange => {
+				let end = self.pop_value(instruction_index)?;
+				let step = self.pop_value(instruction_index)?;
+				let start = self.pop_value(instruction_index)?;
+				self.stack.push(make_range_value(start, Some(step), end, instruction_index)?);
+				Ok(ExecutionOutcome::Continue(None))
+			}
 			Instruction::Modulo => {
 				let rhs = self.pop_numeric(instruction_index)?;
 				let lhs = self.pop_numeric(instruction_index)?;
@@ -332,7 +347,7 @@ impl VirtualMachine {
 			message: String::from("Stack underflow while reading numeric operand."),
 		})?;
 
-		if matches!(value, Value::Array(_) | Value::Boolean(_) | Value::Text(_)) {
+		if matches!(value, Value::Array(_) | Value::Boolean(_) | Value::DecimalRange(_) | Value::IntegerRange(_) | Value::Text(_)) {
 			return Err(VmError {
 				instruction_index,
 				message: format!("Expected a numeric operand, found a {} value.", type_name(&value)),
@@ -440,6 +455,17 @@ fn coerce_numeric_values(lhs: Value, rhs: Value, instruction_index: usize) -> Re
 		}
 		(Value::Integer(lhs), Value::Integer(rhs)) => Ok((Decimal::from_integer(lhs), Decimal::from_integer(rhs))),
 		_ => Err(vm_error(instruction_index, String::from("Expected numeric operands."))),
+	}
+}
+
+fn coerce_range_operand(value: Value, instruction_index: usize) -> Result<Decimal, VmError> {
+	match value {
+		Value::Decimal(value) => Ok(value),
+		Value::Integer(value) => Ok(Decimal::from_integer(value)),
+		other => Err(vm_error(
+			instruction_index,
+			format!("Range operands must be numeric, found `{}`.", type_name(&other)),
+		)),
 	}
 }
 
@@ -559,6 +585,43 @@ fn load_index_value(array: Value, index: Value, instruction_index: usize) -> Res
 	Ok(values[index as usize - 1].clone())
 }
 
+fn make_range_value(start: Value, step: Option<Value>, end: Value, instruction_index: usize) -> Result<Value, VmError> {
+	match (start, step, end) {
+		(Value::Integer(start), Some(Value::Integer(step)), Value::Integer(end)) => {
+			if step == 0 {
+				return Err(vm_error(instruction_index, String::from("Range step cannot be zero.")));
+			}
+
+			Ok(Value::IntegerRange(IntegerRange {
+				end,
+				start,
+				step: Some(step),
+			}))
+		}
+		(Value::Integer(start), None, Value::Integer(end)) => Ok(Value::IntegerRange(IntegerRange {
+			end,
+			start,
+			step: None,
+		})),
+		(start, step, end) => {
+			let step_was_explicit = step.is_some();
+			let start = coerce_range_operand(start, instruction_index)?;
+			let step = coerce_range_operand(step.unwrap_or(Value::Integer(1)), instruction_index)?;
+			let end = coerce_range_operand(end, instruction_index)?;
+
+			if step.coefficient == 0 {
+				return Err(vm_error(instruction_index, String::from("Range step cannot be zero.")));
+			}
+
+			Ok(Value::DecimalRange(DecimalRange {
+				end,
+				start,
+				step: if step_was_explicit { Some(step) } else { None },
+			}))
+		}
+	}
+}
+
 fn modulo_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
 	match (lhs, rhs) {
 		(Value::Integer(lhs), Value::Integer(rhs)) => {
@@ -593,7 +656,9 @@ fn negate_value(value: Value) -> Value {
 			decimal.coefficient = decimal.coefficient.saturating_neg();
 			Value::Decimal(decimal)
 		}
+		Value::DecimalRange(_) => unreachable!("Range values are rejected before numeric negation."),
 		Value::Integer(integer) => Value::Integer(integer.saturating_neg()),
+		Value::IntegerRange(_) => unreachable!("Range values are rejected before numeric negation."),
 		Value::Text(_) => unreachable!("Text values are rejected before numeric negation."),
 	}
 }
@@ -680,7 +745,9 @@ fn stringify_value(value: &Value) -> String {
 		}
 		Value::Boolean(value) => value.to_string(),
 		Value::Decimal(value) => value.to_string(),
+		Value::DecimalRange(value) => value.to_string(),
 		Value::Integer(value) => value.to_string(),
+		Value::IntegerRange(value) => value.to_string(),
 		Value::Text(value) => value.clone(),
 	}
 }
@@ -700,7 +767,9 @@ fn type_name(value: &Value) -> &'static str {
 		Value::Array(_) => "array",
 		Value::Boolean(_) => "bool",
 		Value::Decimal(_) => "dec",
+		Value::DecimalRange(_) => "range",
 		Value::Integer(_) => "int",
+		Value::IntegerRange(_) => "range",
 		Value::Text(_) => "text",
 	}
 }
@@ -718,6 +787,7 @@ mod tests {
 	use crate::bytecode::Instruction;
 	use crate::bytecode::Program;
 	use crate::value::Decimal;
+	use crate::value::DecimalRange;
 	use crate::value::Value;
 
 	use super::VirtualMachine;
@@ -815,6 +885,23 @@ mod tests {
 		assert_eq!(error, VmError {
 			instruction_index: 2,
 			message: String::from("Modulo by zero."),
+		});
+	}
+
+	#[test]
+	fn rejects_zero_range_step() {
+		let program = Program::new(vec![
+			Instruction::PushInteger(1),
+			Instruction::PushInteger(0),
+			Instruction::PushInteger(5),
+			Instruction::MakeSteppedRange,
+		]);
+
+		let error = VirtualMachine::new().run(&program).unwrap_err();
+
+		assert_eq!(error, VmError {
+			instruction_index: 3,
+			message: String::from("Range step cannot be zero."),
 		});
 	}
 
@@ -933,6 +1020,24 @@ mod tests {
 			Value::Integer(10),
 			Value::Integer(25),
 		])));
+	}
+
+	#[test]
+	fn runs_decimal_range_program() {
+		let program = Program::new(vec![
+			Instruction::PushDecimal(Decimal::from_literal("0.0").unwrap()),
+			Instruction::PushDecimal(Decimal::from_literal("0.1").unwrap()),
+			Instruction::PushDecimal(Decimal::from_literal("0.3").unwrap()),
+			Instruction::MakeSteppedRange,
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::DecimalRange(DecimalRange {
+			start: Decimal::from_literal("0.0").unwrap(),
+			step: Some(Decimal::from_literal("0.1").unwrap()),
+			end: Decimal::from_literal("0.3").unwrap(),
+		})));
 	}
 
 	#[test]

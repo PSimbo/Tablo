@@ -5,7 +5,9 @@ pub enum Value {
 	Array(Vec<Value>),
 	Boolean(bool),
 	Decimal(Decimal),
+	DecimalRange(DecimalRange),
 	Integer(i64),
+	IntegerRange(IntegerRange),
 	Text(String),
 }
 
@@ -27,7 +29,9 @@ impl Display for Value {
 			}
 			Value::Boolean(value) => write!(f, "{value}"),
 			Value::Decimal(value) => write!(f, "{value}"),
+			Value::DecimalRange(range) => write!(f, "{range}"),
 			Value::Integer(value) => write!(f, "{value}"),
+			Value::IntegerRange(range) => write!(f, "{range}"),
 			Value::Text(value) => write!(f, "{value}"),
 		}
 	}
@@ -214,6 +218,44 @@ impl Display for Decimal {
 		let fractional_part = &digits[integer_len..];
 
 		write!(f, "{}{}.{}", sign, integer_part, fractional_part)
+	}
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DecimalRange {
+	pub end: Decimal,
+	pub start: Decimal,
+	pub step: Option<Decimal>,
+}
+
+impl Display for DecimalRange {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}:", self.start)?;
+
+		if let Some(step) = &self.step {
+			write!(f, "{}:", step)?;
+		}
+
+		write!(f, "{}", self.end)
+	}
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntegerRange {
+	pub end: i64,
+	pub start: i64,
+	pub step: Option<i64>,
+}
+
+impl Display for IntegerRange {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}:", self.start)?;
+
+		if let Some(step) = self.step {
+			write!(f, "{}:", step)?;
+		}
+
+		write!(f, "{}", self.end)
 	}
 }
 

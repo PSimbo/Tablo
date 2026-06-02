@@ -32,6 +32,8 @@ pub enum Instruction {
 	LoadIndex,
 	LoadLocal(u32),
 	MakeArray(u32),
+	MakeRange,
+	MakeSteppedRange,
 	Modulo,
 	Multiply,
 	Negate,

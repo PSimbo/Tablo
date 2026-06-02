@@ -41,6 +41,7 @@ pub enum DataType {
 	Dec,
 	EmptyArray,
 	Int,
+	Range(Box<DataType>),
 	Text,
 	Void,
 }
@@ -56,6 +57,7 @@ pub enum Expr {
 	Identifier(IdentifierExpr),
 	Index(IndexExpr),
 	Integer(IntegerLiteral),
+	Range(RangeExpr),
 	Text(TextLiteral),
 	Unary(UnaryExpr),
 }
@@ -193,6 +195,14 @@ pub struct Program {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RangeExpr {
+	pub end: Box<Expr>,
+	pub position: usize,
+	pub start: Box<Expr>,
+	pub step: Option<Box<Expr>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReturnStatement {
 	pub position: usize,
 	pub value: Option<Expr>,
@@ -239,6 +249,7 @@ impl Expr {
 			Expr::Identifier(expression) => expression.position,
 			Expr::Index(expression) => expression.position,
 			Expr::Integer(expression) => expression.position,
+			Expr::Range(expression) => expression.position,
 			Expr::Text(expression) => expression.position,
 			Expr::Unary(expression) => expression.position,
 		}

@@ -20,6 +20,7 @@ use crate::ast::IfStatement;
 use crate::ast::IndexExpr;
 use crate::ast::IntegerLiteral;
 use crate::ast::Program;
+use crate::ast::RangeExpr;
 use crate::ast::ReturnStatement;
 use crate::ast::Statement;
 use crate::ast::TextLiteral;
@@ -177,7 +178,7 @@ impl Parser {
 	}
 
 	fn parse_assignment_expression(&mut self) -> Result<Expr, ParseError> {
-		let left = self.parse_expression_with_binding_power(BindingPower::Default)?;
+		let left = self.parse_range_expression()?;
 		let Some(token) = self.current() else {
 			return Ok(left);
 		};
@@ -804,6 +805,36 @@ impl Parser {
 		}
 	}
 
+	fn parse_range_expression(&mut self) -> Result<Expr, ParseError> {
+		let start = self.parse_expression_with_binding_power(BindingPower::Default)?;
+
+		if !self.current().is_some_and(|token| token.kind == TokenKind::Colon) {
+			return Ok(start);
+		}
+
+		let colon = self.next().unwrap();
+		let middle = self.parse_expression_with_binding_power(BindingPower::Default)?;
+
+		if self.current().is_some_and(|token| token.kind == TokenKind::Colon) {
+			self.next();
+			let end = self.parse_expression_with_binding_power(BindingPower::Default)?;
+
+			return Ok(Expr::Range(RangeExpr {
+				end: Box::new(end),
+				position: colon.start,
+				start: Box::new(start),
+				step: Some(Box::new(middle)),
+			}));
+		}
+
+		Ok(Expr::Range(RangeExpr {
+			end: Box::new(middle),
+			position: colon.start,
+			start: Box::new(start),
+			step: None,
+		}))
+	}
+
 	fn parse_return_statement(&mut self) -> Result<Statement, ParseError> {
 		let return_keyword = self.expect_token(TokenKind::ReturnKeyword, "Expected `return` to start return statement.")?;
 		let value = if self.current().is_some_and(|token| token.kind == TokenKind::Semicolon) {
@@ -913,8 +944,8 @@ mod tests {
 	use crate::ast::AssignmentTarget;
 	use crate::ast::BinaryExpr;
 	use crate::ast::BinaryOperator;
-	use crate::ast::BooleanLiteral;
 	use crate::ast::BlockStatement;
+	use crate::ast::BooleanLiteral;
 	use crate::ast::BreakStatement;
 	use crate::ast::CallExpr;
 	use crate::ast::ContinueStatement;
@@ -928,6 +959,7 @@ mod tests {
 	use crate::ast::IndexExpr;
 	use crate::ast::IntegerLiteral;
 	use crate::ast::Program;
+	use crate::ast::RangeExpr;
 	use crate::ast::ReturnStatement;
 	use crate::ast::Statement;
 	use crate::ast::TextLiteral;
@@ -1013,6 +1045,17 @@ mod tests {
 			Expr::Integer(IntegerLiteral { value, .. }) => Expr::Integer(IntegerLiteral {
 				position: 0,
 				value,
+			}),
+			Expr::Range(RangeExpr {
+				start,
+				step,
+				end,
+				..
+			}) => Expr::Range(RangeExpr {
+				start: Box::new(normalize_expr(*start)),
+				step: step.map(|step| Box::new(normalize_expr(*step))),
+				end: Box::new(normalize_expr(*end)),
+				position: 0,
 			}),
 			Expr::Text(TextLiteral { value, .. }) => Expr::Text(TextLiteral {
 				position: 0,
@@ -1975,6 +2018,47 @@ mod tests {
 					position: 0,
 					value: 4,
 				})),
+			})
+		);
+	}
+
+	#[test]
+	fn parses_simple_range_expression() {
+		assert_eq!(
+			parse("0:10"),
+			Expr::Range(RangeExpr {
+				start: Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
+					value: 0,
+				})),
+				step: None,
+				end: Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
+					value: 10,
+				})),
+				position: 0,
+			})
+		);
+	}
+
+	#[test]
+	fn parses_stepped_range_expression() {
+		assert_eq!(
+			parse("0:2:10"),
+			Expr::Range(RangeExpr {
+				start: Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
+					value: 0,
+				})),
+				step: Some(Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
+					value: 2,
+				}))),
+				end: Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
+					value: 10,
+				})),
+				position: 0,
 			})
 		);
 	}

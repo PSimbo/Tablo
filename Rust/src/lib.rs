@@ -227,6 +227,16 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_non_numeric_range_source_text() {
+		let error = run("'a':1").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Range bounds must be numeric, found `text` and `int`."),
+			position: 3,
+		}));
+	}
+
+	#[test]
 	fn rejects_out_of_bounds_array_index_source_text() {
 		let error = run("var xs: [int] = [10, 20];\nxs[3]").unwrap_err();
 
@@ -417,6 +427,17 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_decimal_range_source_text() {
+		let result = run("0.0:0.1:0.3").unwrap();
+
+		assert_eq!(result, Some(Value::DecimalRange(crate::value::DecimalRange {
+			start: crate::value::Decimal::from_literal("0.0").unwrap(),
+			step: Some(crate::value::Decimal::from_literal("0.1").unwrap()),
+			end: crate::value::Decimal::from_literal("0.3").unwrap(),
+		})));
+	}
+
+	#[test]
 	fn runs_decimal_source_text() {
 		let result = run("1.25 + .5").unwrap();
 
@@ -502,6 +523,17 @@ mod tests {
 			Value::Integer(99),
 			Value::Integer(30),
 		])));
+	}
+
+	#[test]
+	fn runs_integer_range_source_text() {
+		let result = run("0:10").unwrap();
+
+		assert_eq!(result, Some(Value::IntegerRange(crate::value::IntegerRange {
+			start: 0,
+			step: None,
+			end: 10,
+		})));
 	}
 
 	#[test]
