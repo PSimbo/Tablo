@@ -3,6 +3,7 @@ use crate::bytecode::CodeBody;
 use crate::bytecode::CompiledFunction;
 use crate::bytecode::Instruction;
 use crate::bytecode::Program;
+use crate::bytecode::SourceLocation;
 use crate::value::Decimal;
 use crate::value::DecimalRange;
 use crate::value::DecimalRangeIterator;
@@ -21,6 +22,7 @@ enum ComparisonKind {
 
 struct CallFrame<'a> {
 	code_body: &'a CodeBody,
+	debug_body_index: usize,
 	instruction_index: usize,
 	locals: Vec<Value>,
 }
@@ -39,6 +41,7 @@ pub struct VirtualMachine {
 pub struct VmError {
 	pub instruction_index: usize,
 	pub message: String,
+	pub source_location: Option<SourceLocation>,
 }
 
 impl VirtualMachine {
@@ -50,17 +53,18 @@ impl VirtualMachine {
 
 	pub fn run(&mut self, program: &Program) -> Result<Option<Value>, VmError> {
 		self.stack.clear();
-		self.run_code_body(program, &program.entry, Vec::new())
+		self.run_code_body(program, &program.entry, program.functions().len(), Vec::new())
 	}
 
 	fn run_code_body(
 		&mut self,
 		program: &Program,
 		code_body: &CodeBody,
+		debug_body_index: usize,
 		locals: Vec<Value>
 	) -> Result<Option<Value>, VmError> {
 		let base_stack_len = self.stack.len();
-		let mut frame = CallFrame::new(code_body, locals);
+		let mut frame = CallFrame::new(code_body, debug_body_index, locals);
 
 		while frame.instruction_index < frame.code_body.instructions.len() {
 			let outcome = self.execute_instruction(
@@ -68,7 +72,7 @@ impl VirtualMachine {
 				&frame.code_body.instructions[frame.instruction_index],
 				frame.instruction_index,
 				&mut frame.locals,
-			)?;
+			).map_err(|error| enrich_vm_error(program, frame.debug_body_index, error))?;
 
 			match outcome {
 				ExecutionOutcome::Continue(next_instruction_index) => {
@@ -110,9 +114,10 @@ impl VirtualMachine {
 				let function = program.functions().get(*function_index as usize).ok_or(VmError {
 					instruction_index,
 					message: format!("Function index {} does not exist.", function_index),
+					source_location: None,
 				})?;
 				let arguments = self.pop_call_arguments(*argument_count as usize, instruction_index)?;
-				let result = self.run_function(program, function, arguments, instruction_index)?;
+				let result = self.run_function(program, function, *function_index as usize, arguments, instruction_index)?;
 
 				if let Some(result) = result {
 					self.stack.push(result);
@@ -131,6 +136,7 @@ impl VirtualMachine {
 					return Err(VmError {
 						instruction_index,
 						message: String::from("Stack underflow while duplicating operands."),
+						source_location: None,
 					});
 				}
 
@@ -216,6 +222,7 @@ impl VirtualMachine {
 				let value = locals.get(*slot as usize).cloned().ok_or(VmError {
 					instruction_index,
 					message: format!("Local slot {} has not been initialized.", slot),
+					source_location: None,
 				})?;
 				self.stack.push(value);
 				Ok(ExecutionOutcome::Continue(None))
@@ -339,6 +346,7 @@ impl VirtualMachine {
 		let value = self.stack.pop().ok_or(VmError {
 			instruction_index,
 			message: String::from("Stack underflow while reading Boolean operand."),
+			source_location: None,
 		})?;
 
 		match value {
@@ -346,6 +354,7 @@ impl VirtualMachine {
 			_ => Err(VmError {
 				instruction_index,
 				message: String::from("Expected a Boolean operand."),
+				source_location: None,
 			}),
 		}
 	}
@@ -365,12 +374,14 @@ impl VirtualMachine {
 		let value = self.stack.pop().ok_or(VmError {
 			instruction_index,
 			message: String::from("Stack underflow while reading numeric operand."),
+			source_location: None,
 		})?;
 
 		if matches!(value, Value::Array(_) | Value::Boolean(_) | Value::DecimalRange(_) | Value::IntegerRange(_) | Value::Iterator(_) | Value::Text(_)) {
 			return Err(VmError {
 				instruction_index,
 				message: format!("Expected a numeric operand, found a {} value.", type_name(&value)),
+				source_location: None,
 			});
 		}
 
@@ -381,6 +392,7 @@ impl VirtualMachine {
 		self.stack.pop().ok_or(VmError {
 			instruction_index,
 			message: String::from("Stack underflow while reading operand."),
+			source_location: None,
 		})
 	}
 
@@ -409,17 +421,19 @@ impl VirtualMachine {
 		&mut self,
 		program: &Program,
 		function: &CompiledFunction,
+		function_index: usize,
 		arguments: Vec<Value>,
 		_: usize
 	) -> Result<Option<Value>, VmError> {
-		self.run_code_body(program, function.body(), arguments)
+		self.run_code_body(program, function.body(), function_index, arguments)
 	}
 }
 
 impl<'a> CallFrame<'a> {
-	fn new(code_body: &'a CodeBody, locals: Vec<Value>) -> Self {
+	fn new(code_body: &'a CodeBody, debug_body_index: usize, locals: Vec<Value>) -> Self {
 		Self {
 			code_body,
+			debug_body_index,
 			instruction_index: 0,
 			locals,
 		}
@@ -540,6 +554,11 @@ fn divide_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Val
 			Ok(Value::Decimal(lhs.checked_div(&rhs).map_err(|message| vm_error(instruction_index, message))?))
 		}
 	}
+}
+
+fn enrich_vm_error(program: &Program, debug_body_index: usize, mut error: VmError) -> VmError {
+	error.source_location = program.debug_location(debug_body_index, error.instruction_index);
+	error
 }
 
 fn equals_value(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
@@ -936,6 +955,7 @@ fn vm_error(instruction_index: usize, message: String) -> VmError {
 	VmError {
 		instruction_index,
 		message,
+		source_location: None,
 	}
 }
 
@@ -963,6 +983,7 @@ mod tests {
 		assert_eq!(error, VmError {
 			instruction_index: 1,
 			message: String::from("Stack underflow while reading operand."),
+			source_location: None,
 		});
 	}
 
@@ -979,6 +1000,7 @@ mod tests {
 		assert_eq!(error, VmError {
 			instruction_index: 2,
 			message: String::from("Division by zero."),
+			source_location: None,
 		});
 	}
 
@@ -995,6 +1017,7 @@ mod tests {
 		assert_eq!(error, VmError {
 			instruction_index: 2,
 			message: String::from("Expected a Boolean operand."),
+			source_location: None,
 		});
 	}
 
@@ -1011,6 +1034,7 @@ mod tests {
 		assert_eq!(error, VmError {
 			instruction_index: 2,
 			message: String::from("Cannot compare `bool` and `int` for equality."),
+			source_location: None,
 		});
 	}
 
@@ -1027,6 +1051,7 @@ mod tests {
 		assert_eq!(error, VmError {
 			instruction_index: 2,
 			message: String::from("Cannot compare `text` and `int` for equality."),
+			source_location: None,
 		});
 	}
 
@@ -1043,6 +1068,7 @@ mod tests {
 		assert_eq!(error, VmError {
 			instruction_index: 2,
 			message: String::from("Modulo by zero."),
+			source_location: None,
 		});
 	}
 
@@ -1060,6 +1086,7 @@ mod tests {
 		assert_eq!(error, VmError {
 			instruction_index: 3,
 			message: String::from("Range step cannot be zero."),
+			source_location: None,
 		});
 	}
 

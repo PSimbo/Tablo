@@ -4,6 +4,7 @@
 // are introduced.
 
 use crate::builtins::BuiltInFunction;
+use crate::source::SourceText;
 use crate::value::Decimal;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -64,7 +65,7 @@ pub struct CodeBody {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CodeBodyDebugInfo {
 	body_name: Option<String>,
-	instruction_positions: Vec<usize>,
+	instruction_positions: Vec<u32>,
 	source_file_index: Option<u32>,
 }
 
@@ -99,6 +100,15 @@ pub struct Program {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceFileDebugInfo {
 	display_name: String,
+	line_starts: Vec<u32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceLocation {
+	body_name: Option<String>,
+	column: u32,
+	display_name: Option<String>,
+	line: u32,
 }
 
 impl CodeBody {
@@ -143,6 +153,17 @@ impl ConstantPool {
 }
 
 impl DebugInfo {
+	pub fn attach_source_file(&mut self, source_file: SourceFileDebugInfo) {
+		let source_file_index = self.source_files.len() as u32;
+		self.source_files.push(source_file);
+
+		for code_body in &mut self.code_bodies {
+			if code_body.source_file_index.is_none() {
+				code_body.source_file_index = Some(source_file_index);
+			}
+		}
+	}
+
 	pub fn code_bodies(&self) -> &[CodeBodyDebugInfo] {
 		&self.code_bodies
 	}
@@ -195,12 +216,119 @@ impl Program {
 		&self.debug
 	}
 
+	pub fn debug_info_mut(&mut self) -> &mut DebugInfo {
+		&mut self.debug
+	}
+
+	pub fn debug_location(&self, body_index: usize, instruction_index: usize) -> Option<SourceLocation> {
+		let code_body = self.debug.code_bodies.get(body_index)?;
+		let position = *code_body.instruction_positions.get(instruction_index)? as usize;
+		let source_file = code_body.source_file_index
+			.and_then(|index| self.debug.source_files.get(index as usize));
+		let (line, column) = source_file
+			.map(|source_file| source_file.line_and_column(position))
+			.unwrap_or((1, position as u32 + 1));
+
+		Some(SourceLocation {
+			body_name: code_body.body_name.clone(),
+			column,
+			display_name: source_file.map(|source_file| source_file.display_name.clone()),
+			line,
+		})
+	}
+
 	pub fn functions(&self) -> &[CompiledFunction] {
 		&self.functions
 	}
 
 	pub fn instructions(&self) -> &[Instruction] {
 		&self.entry.instructions
+	}
+}
+
+impl CodeBodyDebugInfo {
+	pub fn new(body_name: Option<String>, instruction_positions: Vec<u32>, source_file_index: Option<u32>) -> Self {
+		Self {
+			body_name,
+			instruction_positions,
+			source_file_index,
+		}
+	}
+
+	pub fn body_name(&self) -> Option<&str> {
+		self.body_name.as_deref()
+	}
+
+	pub fn instruction_positions(&self) -> &[u32] {
+		&self.instruction_positions
+	}
+
+	pub fn source_file_index(&self) -> Option<u32> {
+		self.source_file_index
+	}
+}
+
+impl DebugInfo {
+	pub fn new(code_bodies: Vec<CodeBodyDebugInfo>, source_files: Vec<SourceFileDebugInfo>) -> Self {
+		Self {
+			code_bodies,
+			source_files,
+		}
+	}
+}
+
+impl SourceFileDebugInfo {
+	pub fn new(display_name: impl Into<String>, line_starts: Vec<u32>) -> Self {
+		Self {
+			display_name: display_name.into(),
+			line_starts,
+		}
+	}
+
+	pub fn from_source(display_name: impl Into<String>, source: &SourceText) -> Self {
+		Self::new(display_name, source.line_starts().into_iter().map(|start| start as u32).collect())
+	}
+
+	pub fn display_name(&self) -> &str {
+		&self.display_name
+	}
+
+	pub fn line_starts(&self) -> &[u32] {
+		&self.line_starts
+	}
+
+	fn line_and_column(&self, position: usize) -> (u32, u32) {
+		let position = position.min(u32::MAX as usize) as u32;
+		let line_index = self.line_starts.partition_point(|line_start| *line_start <= position).saturating_sub(1);
+		let line_start = self.line_starts.get(line_index).copied().unwrap_or(0);
+		(line_index as u32 + 1, position.saturating_sub(line_start) + 1)
+	}
+}
+
+impl SourceLocation {
+	pub fn new(body_name: Option<String>, column: u32, display_name: Option<String>, line: u32) -> Self {
+		Self {
+			body_name,
+			column,
+			display_name,
+			line,
+		}
+	}
+
+	pub fn body_name(&self) -> Option<&str> {
+		self.body_name.as_deref()
+	}
+
+	pub fn column(&self) -> u32 {
+		self.column
+	}
+
+	pub fn display_name(&self) -> Option<&str> {
+		self.display_name.as_deref()
+	}
+
+	pub fn line(&self) -> u32 {
+		self.line
 	}
 }
 

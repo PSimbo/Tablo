@@ -27,7 +27,9 @@ use crate::ast::UnaryExpr;
 use crate::ast::VariableDeclaration;
 use crate::ast::WhileStatement;
 use crate::bytecode::CodeBody;
+use crate::bytecode::CodeBodyDebugInfo;
 use crate::bytecode::CompiledFunction;
+use crate::bytecode::DebugInfo;
 use crate::bytecode::Instruction;
 use crate::bytecode::Program;
 use crate::semantic::analyzer::SemanticAnalyzer;
@@ -42,6 +44,12 @@ pub struct CompileError {
 #[derive(Default)]
 pub struct Compiler {
 	loop_stack: Vec<LoopContext>,
+}
+
+#[derive(Default)]
+struct EmissionState {
+	instructions: Vec<Instruction>,
+	positions: Vec<u32>,
 }
 
 #[derive(Default)]
@@ -97,34 +105,47 @@ impl crate::ast::UnaryOperator {
 impl Compiler {
 	pub fn compile_expression(&mut self, expression: &Expr) -> Program {
 		self.loop_stack.clear();
-		let mut instructions = Vec::new();
-		self.compile_into(expression, &SemanticProgram::default(), &mut instructions);
-		Program::new(instructions)
+		let mut emission = EmissionState::default();
+		self.compile_into(expression, &SemanticProgram::default(), &mut emission);
+		Program::from_parts_with_debug(
+			crate::bytecode::ConstantPool::default(),
+			CodeBody::new(emission.instructions),
+			DebugInfo::new(
+				vec![CodeBodyDebugInfo::new(None, emission.positions, None)],
+				vec![],
+			),
+		)
 	}
 
 	pub fn compile_program(&mut self, program: &AstProgram) -> Result<Program, CompileError> {
 		self.loop_stack.clear();
 		let semantic_program = SemanticAnalyzer::new().analyze_program(program)?;
 		let mut functions = Vec::with_capacity(program.functions.len());
+		let mut code_body_debug = Vec::with_capacity(program.functions.len() + 1);
 
 		for function in &program.functions {
-			functions.push(self.compile_function(function, &semantic_program)?);
+			let (compiled_function, debug_info) = self.compile_function(function, &semantic_program)?;
+			functions.push(compiled_function);
+			code_body_debug.push(debug_info);
 		}
 
-		let mut instructions = Vec::new();
+		let mut emission = EmissionState::default();
 
 		for statement in &program.statements {
-			self.compile_statement(statement, &semantic_program, &mut instructions)?;
+			self.compile_statement(statement, &semantic_program, &mut emission)?;
 		}
 
 		if let Some(result) = &program.result {
-			self.compile_into(result, &semantic_program, &mut instructions);
+			self.compile_into(result, &semantic_program, &mut emission);
 		}
 
-		Ok(Program::from_parts_with_functions(
+		code_body_debug.push(CodeBodyDebugInfo::new(None, emission.positions, None));
+
+		Ok(Program::from_parts_with_functions_and_debug(
 			crate::bytecode::ConstantPool::default(),
-			CodeBody::new(instructions),
+			CodeBody::new(emission.instructions),
 			functions,
+			DebugInfo::new(code_body_debug, vec![]),
 		))
 	}
 
@@ -134,18 +155,18 @@ impl Compiler {
 		}
 	}
 
-	fn compile_assignment(&mut self, slot: u32, operator: AssignmentOperator, value: &Expr, semantic_program: &SemanticProgram, instructions: &mut Vec<Instruction>) {
+	fn compile_assignment(&mut self, slot: u32, operator: AssignmentOperator, value: &Expr, semantic_program: &SemanticProgram, emission: &mut EmissionState) {
 		if let Some(instruction) = operator.compound_instruction() {
-			instructions.push(Instruction::LoadLocal(slot));
-			self.compile_into(value, semantic_program, instructions);
-			instructions.push(instruction);
+			self.emit(emission, Instruction::LoadLocal(slot), value.position());
+			self.compile_into(value, semantic_program, emission);
+			self.emit(emission, instruction, value.position());
 		}
 		else {
-			self.compile_into(value, semantic_program, instructions);
+			self.compile_into(value, semantic_program, emission);
 		}
 
-		instructions.push(Instruction::StoreLocal(slot));
-		instructions.push(Instruction::LoadLocal(slot));
+		self.emit(emission, Instruction::StoreLocal(slot), value.position());
+		self.emit(emission, Instruction::LoadLocal(slot), value.position());
 	}
 
 	fn compile_error(&self, position: usize, message: impl Into<String>) -> CompileError {
@@ -155,14 +176,17 @@ impl Compiler {
 		}
 	}
 
-	fn compile_function(&mut self, function: &FunctionDeclaration, semantic_program: &SemanticProgram) -> Result<CompiledFunction, CompileError> {
+	fn compile_function(&mut self, function: &FunctionDeclaration, semantic_program: &SemanticProgram) -> Result<(CompiledFunction, CodeBodyDebugInfo), CompileError> {
 		self.loop_stack.clear();
-		let mut instructions = Vec::new();
-		self.compile_statement(&Statement::Block(function.body.clone()), semantic_program, &mut instructions)?;
+		let mut emission = EmissionState::default();
+		self.compile_statement(&Statement::Block(function.body.clone()), semantic_program, &mut emission)?;
 
-		Ok(CompiledFunction::new(
-			Some(function.name.clone()),
-			CodeBody::new(instructions),
+		Ok((
+			CompiledFunction::new(
+				Some(function.name.clone()),
+				CodeBody::new(emission.instructions),
+			),
+			CodeBodyDebugInfo::new(Some(function.name.clone()), emission.positions, None),
 		))
 	}
 
@@ -173,116 +197,116 @@ impl Compiler {
 		index: &Expr,
 		value: &Expr,
 		semantic_program: &SemanticProgram,
-		instructions: &mut Vec<Instruction>,
+		emission: &mut EmissionState,
 	) {
-		instructions.push(Instruction::LoadLocal(slot));
-		self.compile_into(index, semantic_program, instructions);
+		self.emit(emission, Instruction::LoadLocal(slot), index.position());
+		self.compile_into(index, semantic_program, emission);
 
 		if let Some(instruction) = operator.compound_instruction() {
-			instructions.push(Instruction::Dup2);
-			instructions.push(Instruction::LoadIndex);
-			self.compile_into(value, semantic_program, instructions);
-			instructions.push(instruction);
+			self.emit(emission, Instruction::Dup2, index.position());
+			self.emit(emission, Instruction::LoadIndex, index.position());
+			self.compile_into(value, semantic_program, emission);
+			self.emit(emission, instruction, value.position());
 		}
 		else {
-			self.compile_into(value, semantic_program, instructions);
+			self.compile_into(value, semantic_program, emission);
 		}
 
-		instructions.push(Instruction::StoreIndex);
-		instructions.push(Instruction::StoreLocal(slot));
+		self.emit(emission, Instruction::StoreIndex, value.position());
+		self.emit(emission, Instruction::StoreLocal(slot), value.position());
 	}
 
-	fn compile_into(&mut self, expression: &Expr, semantic_program: &SemanticProgram, instructions: &mut Vec<Instruction>) {
+	fn compile_into(&mut self, expression: &Expr, semantic_program: &SemanticProgram, emission: &mut EmissionState) {
 		let _ = self;
 
 		match expression {
 			Expr::Array(ArrayLiteral { elements, .. }) => {
 				for element in elements {
-					self.compile_into(element, semantic_program, instructions);
+					self.compile_into(element, semantic_program, emission);
 				}
 
-				instructions.push(Instruction::MakeArray(elements.len() as u32));
+				self.emit(emission, Instruction::MakeArray(elements.len() as u32), expression.position());
 			}
 			Expr::Assignment(AssignmentExpr { operator, target, value, .. }) => {
 				match target {
 					AssignmentTarget::Identifier(target) => {
 						let slot = semantic_program.identifier_slot(target.position)
 							.unwrap_or_else(|| panic!("Missing slot for identifier `{}`.", target.name));
-						self.compile_assignment(slot, *operator, value, semantic_program, instructions);
+						self.compile_assignment(slot, *operator, value, semantic_program, emission);
 					}
 					AssignmentTarget::Index(target) => {
 						let slot = semantic_program.identifier_slot(target.array.position)
 							.unwrap_or_else(|| panic!("Missing slot for identifier `{}`.", target.array.name));
-						self.compile_indexed_assignment(slot, *operator, &target.index, value, semantic_program, instructions);
+						self.compile_indexed_assignment(slot, *operator, &target.index, value, semantic_program, emission);
 					}
 				}
 			}
 			Expr::Binary(binary) => {
-				self.compile_into(&binary.left, semantic_program, instructions);
-				self.compile_into(&binary.right, semantic_program, instructions);
-				instructions.push(binary.operator.instruction());
+				self.compile_into(&binary.left, semantic_program, emission);
+				self.compile_into(&binary.right, semantic_program, emission);
+				self.emit(emission, binary.operator.instruction(), binary.position);
 			}
 			Expr::Boolean(BooleanLiteral { value, .. }) => {
-				instructions.push(Instruction::PushBoolean(*value));
+				self.emit(emission, Instruction::PushBoolean(*value), expression.position());
 			}
 			Expr::Call(CallExpr { arguments, .. }) => {
 				for argument in arguments {
-					self.compile_into(argument, semantic_program, instructions);
+					self.compile_into(argument, semantic_program, emission);
 				}
 
 				if let Some(built_in) = semantic_program.built_in_call_target(expression.position()) {
-					instructions.push(Instruction::CallBuiltIn(built_in, arguments.len() as u32));
+					self.emit(emission, Instruction::CallBuiltIn(built_in, arguments.len() as u32), expression.position());
 				}
 				else {
 					let function_index = semantic_program.call_target(expression.position())
 						.unwrap_or_else(|| panic!("Missing function target for call expression."));
-					instructions.push(Instruction::Call(function_index, arguments.len() as u32));
+					self.emit(emission, Instruction::Call(function_index, arguments.len() as u32), expression.position());
 				}
 			}
 			Expr::Decimal(DecimalLiteral { value, .. }) => {
-				instructions.push(Instruction::PushDecimal(value.clone()));
+				self.emit(emission, Instruction::PushDecimal(value.clone()), expression.position());
 			}
 			Expr::Identifier(IdentifierExpr { name, .. }) => {
 				let slot = semantic_program.identifier_slot(expression.position())
 					.unwrap_or_else(|| panic!("Missing slot for identifier `{name}`."));
-				instructions.push(Instruction::LoadLocal(slot));
+				self.emit(emission, Instruction::LoadLocal(slot), expression.position());
 			}
 			Expr::Index(IndexExpr { array, index, .. }) => {
-				self.compile_into(array, semantic_program, instructions);
-				self.compile_into(index, semantic_program, instructions);
-				instructions.push(Instruction::LoadIndex);
+				self.compile_into(array, semantic_program, emission);
+				self.compile_into(index, semantic_program, emission);
+				self.emit(emission, Instruction::LoadIndex, expression.position());
 			}
 			Expr::Integer(integer) => {
-				instructions.push(Instruction::PushInteger(integer.value));
+				self.emit(emission, Instruction::PushInteger(integer.value), expression.position());
 			}
 			Expr::Range(RangeExpr { start, step, end, .. }) => {
-				self.compile_into(start, semantic_program, instructions);
+				self.compile_into(start, semantic_program, emission);
 
 				if let Some(step) = step {
-					self.compile_into(step, semantic_program, instructions);
-					self.compile_into(end, semantic_program, instructions);
-					instructions.push(Instruction::MakeSteppedRange);
+					self.compile_into(step, semantic_program, emission);
+					self.compile_into(end, semantic_program, emission);
+					self.emit(emission, Instruction::MakeSteppedRange, expression.position());
 				}
 				else {
-					self.compile_into(end, semantic_program, instructions);
-					instructions.push(Instruction::MakeRange);
+					self.compile_into(end, semantic_program, emission);
+					self.emit(emission, Instruction::MakeRange, expression.position());
 				}
 			}
 			Expr::Text(TextLiteral { value, .. }) => {
-				instructions.push(Instruction::PushText(value.clone()));
+				self.emit(emission, Instruction::PushText(value.clone()), expression.position());
 			}
 			Expr::Unary(UnaryExpr { operand, operator, .. }) => {
-				self.compile_into(operand, semantic_program, instructions);
-				instructions.push(operator.instruction());
+				self.compile_into(operand, semantic_program, emission);
+				self.emit(emission, operator.instruction(), expression.position());
 			}
 		}
 	}
 
-	fn compile_statement(&mut self, statement: &Statement, semantic_program: &SemanticProgram, instructions: &mut Vec<Instruction>) -> Result<(), CompileError> {
+	fn compile_statement(&mut self, statement: &Statement, semantic_program: &SemanticProgram, emission: &mut EmissionState) -> Result<(), CompileError> {
 		match statement {
 			Statement::Block(BlockStatement { statements, .. }) => {
 				for statement in statements {
-					self.compile_statement(statement, semantic_program, instructions)?;
+					self.compile_statement(statement, semantic_program, emission)?;
 				}
 
 				Ok(())
@@ -294,8 +318,8 @@ impl Compiler {
 						String::from("`break` may only be used inside a `while` or `for` loop."),
 					));
 				};
-				loop_context.break_jump_indices.push(instructions.len());
-				instructions.push(Instruction::Jump(0));
+				loop_context.break_jump_indices.push(emission.instructions.len());
+				self.emit(emission, Instruction::Jump(0), *position);
 				Ok(())
 			}
 			Statement::Continue(ContinueStatement { position }) => {
@@ -305,15 +329,15 @@ impl Compiler {
 						String::from("`continue` may only be used inside a `while` or `for` loop."),
 					));
 				};
-				loop_context.continue_jump_indices.push(instructions.len());
-				instructions.push(Instruction::Jump(0));
+				loop_context.continue_jump_indices.push(emission.instructions.len());
+				self.emit(emission, Instruction::Jump(0), *position);
 				Ok(())
 			}
 			Statement::Expression(expression) => {
-				self.compile_into(expression, semantic_program, instructions);
+				self.compile_into(expression, semantic_program, emission);
 
 				if expression_produces_runtime_value(expression, semantic_program) {
-					instructions.push(Instruction::Pop);
+					self.emit(emission, Instruction::Pop, expression.position());
 				}
 
 				Ok(())
@@ -333,42 +357,42 @@ impl Compiler {
 					String::from("Missing iterator slot for `for` statement."),
 				))?;
 
-				self.compile_into(iterable, semantic_program, instructions);
-				instructions.push(Instruction::IterInit);
-				instructions.push(Instruction::StoreLocal(iterator_slot));
+				self.compile_into(iterable, semantic_program, emission);
+				self.emit(emission, Instruction::IterInit, iterable.position());
+				self.emit(emission, Instruction::StoreLocal(iterator_slot), *position);
 
-				let loop_start = instructions.len() as u32;
+				let loop_start = emission.instructions.len() as u32;
 				self.loop_stack.push(LoopContext {
 					break_jump_indices: Vec::new(),
 					continue_jump_indices: Vec::new(),
 					loop_start,
 				});
 
-				instructions.push(Instruction::LoadLocal(iterator_slot));
-				instructions.push(Instruction::IterHasNext);
-				let jump_if_false_index = instructions.len();
-				instructions.push(Instruction::JumpIfFalse(0));
+				self.emit(emission, Instruction::LoadLocal(iterator_slot), *position);
+				self.emit(emission, Instruction::IterHasNext, iterable.position());
+				let jump_if_false_index = emission.instructions.len();
+				self.emit(emission, Instruction::JumpIfFalse(0), *position);
 
-				instructions.push(Instruction::LoadLocal(iterator_slot));
-				instructions.push(Instruction::IterNext);
-				instructions.push(Instruction::StoreLocal(iterator_slot));
-				instructions.push(Instruction::StoreLocal(variable_slot));
+				self.emit(emission, Instruction::LoadLocal(iterator_slot), *position);
+				self.emit(emission, Instruction::IterNext, iterable.position());
+				self.emit(emission, Instruction::StoreLocal(iterator_slot), *position);
+				self.emit(emission, Instruction::StoreLocal(variable_slot), variable.position);
 
-				self.compile_statement(&Statement::Block(body.clone()), semantic_program, instructions)?;
-				instructions.push(Instruction::Jump(loop_start));
+				self.compile_statement(&Statement::Block(body.clone()), semantic_program, emission)?;
+				self.emit(emission, Instruction::Jump(loop_start), *position);
 
-				let loop_end = instructions.len() as u32;
-				instructions[jump_if_false_index] = Instruction::JumpIfFalse(loop_end);
+				let loop_end = emission.instructions.len() as u32;
+				emission.instructions[jump_if_false_index] = Instruction::JumpIfFalse(loop_end);
 
 				let loop_context = self.loop_stack.pop()
 					.expect("Loop context must exist while compiling a for statement.");
 
 				for break_jump_index in loop_context.break_jump_indices {
-					instructions[break_jump_index] = Instruction::Jump(loop_end);
+					emission.instructions[break_jump_index] = Instruction::Jump(loop_end);
 				}
 
 				for continue_jump_index in loop_context.continue_jump_indices {
-					instructions[continue_jump_index] = Instruction::Jump(loop_context.loop_start);
+					emission.instructions[continue_jump_index] = Instruction::Jump(loop_context.loop_start);
 				}
 
 				Ok(())
@@ -379,37 +403,37 @@ impl Compiler {
 				then_branch,
 				..
 			}) => {
-				self.compile_into(condition, semantic_program, instructions);
-				let jump_if_false_index = instructions.len();
-				instructions.push(Instruction::JumpIfFalse(0));
+				self.compile_into(condition, semantic_program, emission);
+				let jump_if_false_index = emission.instructions.len();
+				self.emit(emission, Instruction::JumpIfFalse(0), condition.position());
 
-				self.compile_statement(&Statement::Block(then_branch.clone()), semantic_program, instructions)?;
+				self.compile_statement(&Statement::Block(then_branch.clone()), semantic_program, emission)?;
 
 				if let Some(else_branch) = else_branch {
-					let jump_to_end_index = instructions.len();
-					instructions.push(Instruction::Jump(0));
+					let jump_to_end_index = emission.instructions.len();
+					self.emit(emission, Instruction::Jump(0), statement_position(statement));
 
-					let else_target = instructions.len() as u32;
-					instructions[jump_if_false_index] = Instruction::JumpIfFalse(else_target);
-					self.compile_statement(else_branch, semantic_program, instructions)?;
+					let else_target = emission.instructions.len() as u32;
+					emission.instructions[jump_if_false_index] = Instruction::JumpIfFalse(else_target);
+					self.compile_statement(else_branch, semantic_program, emission)?;
 
-					let end_target = instructions.len() as u32;
-					instructions[jump_to_end_index] = Instruction::Jump(end_target);
+					let end_target = emission.instructions.len() as u32;
+					emission.instructions[jump_to_end_index] = Instruction::Jump(end_target);
 				}
 				else {
-					let end_target = instructions.len() as u32;
-					instructions[jump_if_false_index] = Instruction::JumpIfFalse(end_target);
+					let end_target = emission.instructions.len() as u32;
+					emission.instructions[jump_if_false_index] = Instruction::JumpIfFalse(end_target);
 				}
 
 				Ok(())
 			}
 			Statement::Return(ReturnStatement { value, .. }) => {
 				if let Some(value) = value {
-					self.compile_into(value, semantic_program, instructions);
-					instructions.push(Instruction::Return);
+					self.compile_into(value, semantic_program, emission);
+					self.emit(emission, Instruction::Return, value.position());
 				}
 				else {
-					instructions.push(Instruction::ReturnVoid);
+					self.emit(emission, Instruction::ReturnVoid, statement_position(statement));
 				}
 
 				Ok(())
@@ -429,8 +453,8 @@ impl Compiler {
 						format!("Variable `{name}` must currently have an initializer.")
 					},
 				))?;
-				self.compile_into(initial_value, semantic_program, instructions);
-				instructions.push(Instruction::StoreLocal(slot));
+				self.compile_into(initial_value, semantic_program, emission);
+				self.emit(emission, Instruction::StoreLocal(slot), *position);
 
 				Ok(())
 			}
@@ -439,36 +463,41 @@ impl Compiler {
 				condition,
 				..
 			}) => {
-				let loop_start = instructions.len() as u32;
+				let loop_start = emission.instructions.len() as u32;
 				self.loop_stack.push(LoopContext {
 					break_jump_indices: Vec::new(),
 					continue_jump_indices: Vec::new(),
 					loop_start,
 				});
-				self.compile_into(condition, semantic_program, instructions);
-				let jump_if_false_index = instructions.len();
-				instructions.push(Instruction::JumpIfFalse(0));
+				self.compile_into(condition, semantic_program, emission);
+				let jump_if_false_index = emission.instructions.len();
+				self.emit(emission, Instruction::JumpIfFalse(0), condition.position());
 
-				self.compile_statement(&Statement::Block(body.clone()), semantic_program, instructions)?;
-				instructions.push(Instruction::Jump(loop_start));
+				self.compile_statement(&Statement::Block(body.clone()), semantic_program, emission)?;
+				self.emit(emission, Instruction::Jump(loop_start), statement_position(statement));
 
-				let loop_end = instructions.len() as u32;
-				instructions[jump_if_false_index] = Instruction::JumpIfFalse(loop_end);
+				let loop_end = emission.instructions.len() as u32;
+				emission.instructions[jump_if_false_index] = Instruction::JumpIfFalse(loop_end);
 
 				let loop_context = self.loop_stack.pop()
 					.expect("Loop context must exist while compiling a while statement.");
 
 				for break_jump_index in loop_context.break_jump_indices {
-					instructions[break_jump_index] = Instruction::Jump(loop_end);
+					emission.instructions[break_jump_index] = Instruction::Jump(loop_end);
 				}
 
 				for continue_jump_index in loop_context.continue_jump_indices {
-					instructions[continue_jump_index] = Instruction::Jump(loop_context.loop_start);
+					emission.instructions[continue_jump_index] = Instruction::Jump(loop_context.loop_start);
 				}
 
 				Ok(())
 			}
 		}
+	}
+
+	fn emit(&self, emission: &mut EmissionState, instruction: Instruction, position: usize) {
+		emission.instructions.push(instruction);
+		emission.positions.push(position.min(u32::MAX as usize) as u32);
 	}
 }
 
@@ -476,6 +505,20 @@ fn expression_produces_runtime_value(expression: &Expr, semantic_program: &Seman
 	match expression {
 		Expr::Call(call) => semantic_program.call_return_type(call.position) != Some(crate::ast::DataType::Void),
 		_ => true,
+	}
+}
+
+fn statement_position(statement: &Statement) -> usize {
+	match statement {
+		Statement::Block(block) => block.position,
+		Statement::Break(statement) => statement.position,
+		Statement::Continue(statement) => statement.position,
+		Statement::Expression(expression) => expression.position(),
+		Statement::For(statement) => statement.position,
+		Statement::If(statement) => statement.position,
+		Statement::Return(statement) => statement.position,
+		Statement::VariableDeclaration(statement) => statement.position,
+		Statement::While(statement) => statement.position,
 	}
 }
 

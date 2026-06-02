@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Parser as ClapParser;
-use tablo::compile;
+use tablo::compile_with_source_name;
 
 #[derive(ClapParser, Debug)]
 #[command(name = "tabloc")]
@@ -25,7 +25,7 @@ fn main() {
 		}
 	};
 
-	if let Err(error) = compile(source.as_str(), &output_path) {
+	if let Err(error) = compile_with_source_name(source.as_str(), args.input_path.display().to_string(), &output_path) {
 		eprintln!("{}", error.format_with_source(&source));
 		std::process::exit(1);
 	}

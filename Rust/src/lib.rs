@@ -13,10 +13,11 @@ pub mod value;
 pub mod vm;
 
 use bytecode::Program;
+use bytecode::SourceFileDebugInfo;
 use compiler::CompileError;
 use compiler::Compiler;
-use object_file::read_program_from_path;
 use object_file::ObjectFileError;
+use object_file::read_program_from_path;
 use object_file::write_program_to_path;
 use source::SourceText;
 use syntax::lexer::LexError;
@@ -43,7 +44,19 @@ impl Display for TabloError {
 			TabloError::Lex(error) => write!(f, "Lex error at byte {}: {}", error.position, error.message),
 			TabloError::ObjectFile(error) => write!(f, "Object file error at byte {}: {}", error.offset, error.message),
 			TabloError::Parse(error) => write!(f, "Parse error at byte {}: {}", error.position, error.message),
-			TabloError::Runtime(error) => write!(f, "Runtime error at instruction {}: {}", error.instruction_index, error.message),
+			TabloError::Runtime(error) => {
+				if let Some(location) = &error.source_location {
+					if let Some(display_name) = location.display_name() {
+						write!(f, "Runtime error at {}:{}:{}: {}", display_name, location.line(), location.column(), error.message)
+					}
+					else {
+						write!(f, "Runtime error at line {}, column {}: {}", location.line(), location.column(), error.message)
+					}
+				}
+				else {
+					write!(f, "Runtime error at instruction {}: {}", error.instruction_index, error.message)
+				}
+			}
 		}
 	}
 }
@@ -62,12 +75,22 @@ impl TabloError {
 }
 
 pub fn compile(source: impl Into<String>, output_path: impl AsRef<Path>) -> Result<(), TabloError> {
-	let program = compile_to_program(source)?;
+	let program = compile_to_program_with_name(source, None)?;
+	write_program_to_path(output_path, &program).map_err(TabloError::ObjectFile)
+}
+
+pub fn compile_with_source_name(
+	source: impl Into<String>,
+	source_name: impl Into<String>,
+	output_path: impl AsRef<Path>
+) -> Result<(), TabloError> {
+	let source_name = source_name.into();
+	let program = compile_to_program_with_name(source, Some(source_name.as_str()))?;
 	write_program_to_path(output_path, &program).map_err(TabloError::ObjectFile)
 }
 
 pub fn run(source: impl Into<String>) -> Result<Option<Value>, TabloError> {
-	let program = compile_to_program(source)?;
+	let program = compile_to_program_with_name(source, None)?;
 	run_program(&program)
 }
 
@@ -81,14 +104,20 @@ pub fn run_program(program: &Program) -> Result<Option<Value>, TabloError> {
 	vm.run(&program).map_err(TabloError::Runtime)
 }
 
-fn compile_to_program(source: impl Into<String>) -> Result<Program, TabloError> {
+pub(crate) fn compile_to_program_with_name(source: impl Into<String>, source_name: Option<&str>) -> Result<Program, TabloError> {
 	let source = SourceText::new(source);
-	let mut lexer = Lexer::new(source);
+	let mut lexer = Lexer::new(source.clone());
 	let tokens = lexer.tokenize().map_err(TabloError::Lex)?;
 	let mut parser = Parser::new(tokens);
 	let program = parser.parse_program().map_err(TabloError::Parse)?;
 
-	Compiler::new().compile_program(&program).map_err(TabloError::Compile)
+	let mut program = Compiler::new().compile_program(&program).map_err(TabloError::Compile)?;
+	let source_file = SourceFileDebugInfo::from_source(
+		source_name.unwrap_or("<source>"),
+		&source,
+	);
+	program.debug_info_mut().attach_source_file(source_file);
+	Ok(program)
 }
 
 #[cfg(test)]
@@ -100,6 +129,7 @@ mod tests {
 	use crate::value::Value;
 
 	use super::compile;
+	use super::compile_with_source_name;
 	use super::run;
 	use super::run_file;
 	use super::run_program;
@@ -197,6 +227,20 @@ mod tests {
 	}
 
 	#[test]
+	fn preserves_debug_metadata_in_object_file() {
+		let output_path = unique_test_output_path("preserves_debug_metadata_in_object_file");
+		compile_with_source_name("1 + 2", "example.tablo", &output_path).unwrap();
+		let program = read_program_from_path(&output_path).unwrap();
+		let _ = std::fs::remove_file(&output_path);
+
+		let debug = program.debug_info();
+		assert_eq!(debug.source_files().len(), 1);
+		assert_eq!(debug.source_files()[0].display_name(), "example.tablo");
+		assert_eq!(debug.code_bodies().len(), 1);
+		assert_eq!(debug.code_bodies()[0].instruction_positions(), &[0, 4, 2]);
+	}
+
+	#[test]
 	fn rejects_39_digit_decimal_source_text() {
 		let error = run("3.14159265358979323846264338327950288415").unwrap_err();
 
@@ -253,6 +297,12 @@ mod tests {
 		assert_eq!(error, TabloError::Runtime(crate::vm::VmError {
 			instruction_index: 6,
 			message: String::from("Array index 3 is out of bounds for length 2."),
+			source_location: Some(crate::bytecode::SourceLocation::new(
+				None,
+				3,
+				Some(String::from("<source>")),
+				2,
+			)),
 		}));
 	}
 

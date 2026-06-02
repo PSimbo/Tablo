@@ -40,6 +40,18 @@ impl SourceText {
 		(line, column)
 	}
 
+	pub fn line_starts(&self) -> Vec<usize> {
+		let mut starts = vec![0];
+
+		for (index, ch) in self.text.char_indices() {
+			if ch == '\n' {
+				starts.push(index + ch.len_utf8());
+			}
+		}
+
+		starts
+	}
+
 	pub fn line_text(&self, position: usize) -> &str {
 		let position = position.min(self.text.len());
 		let line_start = self.text[..position].rfind('\n').map_or(0, |index| index + 1);

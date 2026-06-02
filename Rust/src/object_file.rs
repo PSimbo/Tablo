@@ -7,10 +7,13 @@ use std::path::Path;
 
 use crate::builtins::BuiltInFunction;
 use crate::bytecode::CodeBody;
+use crate::bytecode::CodeBodyDebugInfo;
 use crate::bytecode::CompiledFunction;
 use crate::bytecode::ConstantPool;
+use crate::bytecode::DebugInfo;
 use crate::bytecode::Instruction;
 use crate::bytecode::Program;
+use crate::bytecode::SourceFileDebugInfo;
 use crate::value::Decimal;
 
 const MAGIC_BYTES: [u8; 4] = *b"TBO0";
@@ -65,6 +68,7 @@ pub struct ObjectFileError {
 // path toward additional code bodies and embedded debug metadata later on.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ObjectFileLayout {
+	debug: DebugInfo,
 	sections: Vec<ObjectFileSection>,
 }
 
@@ -274,6 +278,51 @@ impl<'a> ObjectFileReader<'a> {
 		Ok(CodeBody::new(instructions))
 	}
 
+	fn read_debug_info(&mut self) -> Result<DebugInfo, ObjectFileError> {
+		let source_file_count = self.read_u32()? as usize;
+		let mut source_files = Vec::with_capacity(source_file_count);
+
+		for _ in 0..source_file_count {
+			let display_name = self.read_string()?;
+			let line_start_count = self.read_u32()? as usize;
+			let mut line_starts = Vec::with_capacity(line_start_count);
+
+			for _ in 0..line_start_count {
+				line_starts.push(self.read_u32()?);
+			}
+
+			source_files.push(SourceFileDebugInfo::new(display_name, line_starts));
+		}
+
+		let code_body_count = self.read_u32()? as usize;
+		let mut code_bodies = Vec::with_capacity(code_body_count);
+
+		for _ in 0..code_body_count {
+			let body_name = if self.read_bool()? {
+				Some(self.read_string()?)
+			}
+			else {
+				None
+			};
+			let source_file_index = if self.read_bool()? {
+				Some(self.read_u32()?)
+			}
+			else {
+				None
+			};
+			let position_count = self.read_u32()? as usize;
+			let mut positions = Vec::with_capacity(position_count);
+
+			for _ in 0..position_count {
+				positions.push(self.read_u32()?);
+			}
+
+			code_bodies.push(CodeBodyDebugInfo::new(body_name, positions, source_file_index));
+		}
+
+		Ok(DebugInfo::new(code_bodies, source_files))
+	}
+
 	fn read_decimal(&mut self) -> Result<Decimal, ObjectFileError> {
 		let mut coefficient_bytes = [0; 16];
 		coefficient_bytes.copy_from_slice(self.read_exact(16)?);
@@ -384,7 +433,15 @@ impl<'a> ObjectFileReader<'a> {
 
 		sections.push(ObjectFileSection::EntryCode(self.read_code_body()?));
 
+		let debug = if self.is_at_end() {
+			DebugInfo::default()
+		}
+		else {
+			self.read_debug_info()?
+		};
+
 		Ok(ObjectFileLayout {
+			debug,
 			sections,
 		})
 	}
@@ -421,10 +478,6 @@ impl ObjectFileLayout {
 			program.constant_pool().is_empty(),
 			"The current object file format does not yet serialize constant-pool entries."
 		);
-		debug_assert!(
-			program.debug_info().is_empty(),
-			"The current object file format does not yet serialize debug metadata."
-		);
 
 		let mut sections = Vec::with_capacity(program.functions().len() + 1);
 
@@ -434,7 +487,10 @@ impl ObjectFileLayout {
 
 		sections.push(ObjectFileSection::EntryCode(program.entry.clone()));
 
-		Self { sections }
+		Self {
+			debug: program.debug_info().clone(),
+			sections,
+		}
 	}
 
 	fn into_program(self) -> Result<Program, ObjectFileError> {
@@ -464,7 +520,12 @@ impl ObjectFileLayout {
 			message: String::from("Object file does not contain an entry code section."),
 		})?;
 
-		Ok(Program::from_parts_with_functions(ConstantPool::default(), entry_code, functions))
+		Ok(Program::from_parts_with_functions_and_debug(
+			ConstantPool::default(),
+			entry_code,
+			functions,
+			self.debug,
+		))
 	}
 
 	fn write_to(&self, bytes: &mut Vec<u8>) {
@@ -477,6 +538,38 @@ impl ObjectFileLayout {
 			match section {
 				ObjectFileSection::Function(function) => write_code_body(bytes, function.body()),
 				ObjectFileSection::EntryCode(code_body) => write_code_body(bytes, code_body),
+			}
+		}
+
+		bytes.extend_from_slice(&(self.debug.source_files().len() as u32).to_le_bytes());
+
+		for source_file in self.debug.source_files() {
+			bytes.extend_from_slice(&(source_file.display_name().len() as u32).to_le_bytes());
+			bytes.extend_from_slice(source_file.display_name().as_bytes());
+			bytes.extend_from_slice(&(source_file.line_starts().len() as u32).to_le_bytes());
+
+			for line_start in source_file.line_starts() {
+				bytes.extend_from_slice(&line_start.to_le_bytes());
+			}
+		}
+
+		bytes.extend_from_slice(&(self.debug.code_bodies().len() as u32).to_le_bytes());
+
+		for code_body in self.debug.code_bodies() {
+			bytes.push(u8::from(code_body.body_name().is_some()));
+			if let Some(body_name) = code_body.body_name() {
+				bytes.extend_from_slice(&(body_name.len() as u32).to_le_bytes());
+				bytes.extend_from_slice(body_name.as_bytes());
+			}
+
+			bytes.push(u8::from(code_body.source_file_index().is_some()));
+			if let Some(source_file_index) = code_body.source_file_index() {
+				bytes.extend_from_slice(&source_file_index.to_le_bytes());
+			}
+
+			bytes.extend_from_slice(&(code_body.instruction_positions().len() as u32).to_le_bytes());
+			for position in code_body.instruction_positions() {
+				bytes.extend_from_slice(&position.to_le_bytes());
 			}
 		}
 	}
@@ -509,7 +602,7 @@ mod tests {
 	fn rejects_unknown_opcode() {
 		let mut bytes = write_program(&Program::new(Vec::new()));
 		bytes[10..14].copy_from_slice(&1u32.to_le_bytes());
-		bytes.push(255);
+		bytes[14] = 255;
 
 		let error = read_program(&bytes).unwrap_err();
 
