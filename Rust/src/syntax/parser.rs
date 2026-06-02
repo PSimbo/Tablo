@@ -13,6 +13,7 @@ use crate::ast::ContinueStatement;
 use crate::ast::DataType;
 use crate::ast::DecimalLiteral;
 use crate::ast::Expr;
+use crate::ast::ForStatement;
 use crate::ast::FunctionDeclaration;
 use crate::ast::FunctionParameter;
 use crate::ast::IdentifierExpr;
@@ -85,7 +86,7 @@ impl Parser {
 				Some(token) if token.kind == TokenKind::FnKeyword => {
 					functions.push(self.parse_function_declaration()?);
 				}
-				Some(token) if matches!(token.kind, TokenKind::BreakKeyword | TokenKind::ConstKeyword | TokenKind::ContinueKeyword | TokenKind::IfKeyword | TokenKind::LeftBrace | TokenKind::ReturnKeyword | TokenKind::VarKeyword | TokenKind::WhileKeyword) => {
+				Some(token) if matches!(token.kind, TokenKind::BreakKeyword | TokenKind::ConstKeyword | TokenKind::ContinueKeyword | TokenKind::ForKeyword | TokenKind::IfKeyword | TokenKind::LeftBrace | TokenKind::ReturnKeyword | TokenKind::VarKeyword | TokenKind::WhileKeyword) => {
 					statements.push(self.parse_statement()?);
 				}
 				Some(_) => {
@@ -414,6 +415,27 @@ impl Parser {
 		}
 
 		Ok(left)
+	}
+
+	fn parse_for_statement(&mut self) -> Result<Statement, ParseError> {
+		let for_keyword = self.expect_token(TokenKind::ForKeyword, "Expected `for` to start for statement.")?;
+		let variable = self.expect_token(TokenKind::Identifier, "Expected loop variable name.")?;
+		self.expect_token(TokenKind::InKeyword, "Expected `in` after loop variable name.")?;
+		let iterable = self.parse_assignment_expression()?;
+		let body = match self.parse_block_statement()? {
+			Statement::Block(block) => block,
+			_ => unreachable!("Block parser must return a block statement."),
+		};
+
+		Ok(Statement::For(ForStatement {
+			body,
+			iterable,
+			position: for_keyword.start,
+			variable: IdentifierExpr {
+				name: variable.lexeme,
+				position: variable.start,
+			},
+		}))
 	}
 
 	fn parse_function_declaration(&mut self) -> Result<FunctionDeclaration, ParseError> {
@@ -856,6 +878,7 @@ impl Parser {
 		match self.current() {
 			Some(token) if token.kind == TokenKind::BreakKeyword => self.parse_break_statement(),
 			Some(token) if token.kind == TokenKind::ContinueKeyword => self.parse_continue_statement(),
+			Some(token) if token.kind == TokenKind::ForKeyword => self.parse_for_statement(),
 			Some(token) if token.kind == TokenKind::IfKeyword => self.parse_if_statement(),
 			Some(token) if token.kind == TokenKind::LeftBrace => self.parse_block_statement(),
 			Some(token) if token.kind == TokenKind::ReturnKeyword => self.parse_return_statement(),
@@ -952,6 +975,7 @@ mod tests {
 	use crate::ast::DataType;
 	use crate::ast::DecimalLiteral;
 	use crate::ast::Expr;
+	use crate::ast::ForStatement;
 	use crate::ast::FunctionDeclaration;
 	use crate::ast::FunctionParameter;
 	use crate::ast::IdentifierExpr;
@@ -1073,6 +1097,15 @@ mod tests {
 		}
 	}
 
+	fn normalize_for_statement(for_statement: ForStatement) -> ForStatement {
+		ForStatement {
+			body: normalize_block(for_statement.body),
+			iterable: normalize_expr(for_statement.iterable),
+			position: 0,
+			variable: normalize_identifier(for_statement.variable),
+		}
+	}
+
 	fn normalize_function_declaration(function: FunctionDeclaration) -> FunctionDeclaration {
 		FunctionDeclaration {
 			body: normalize_block(function.body),
@@ -1116,6 +1149,7 @@ mod tests {
 				position: 0,
 			}),
 			Statement::Expression(expression) => Statement::Expression(normalize_expr(expression)),
+			Statement::For(for_statement) => Statement::For(normalize_for_statement(for_statement)),
 			Statement::If(if_statement) => Statement::If(normalize_if_statement(if_statement)),
 			Statement::Return(return_statement) => Statement::Return(normalize_return_statement(return_statement)),
 			Statement::VariableDeclaration(declaration) => {
@@ -1462,6 +1496,48 @@ mod tests {
 					position: 0,
 					name: String::from("x"),
 				})),
+			}
+		);
+	}
+
+	#[test]
+	fn parses_for_statement() {
+		assert_eq!(
+			parse_program("for value in [1, 2] { value; }"),
+			Program {
+				functions: vec![],
+				statements: vec![
+					Statement::For(ForStatement {
+						body: BlockStatement {
+							position: 0,
+							statements: vec![
+								Statement::Expression(Expr::Identifier(IdentifierExpr {
+									name: String::from("value"),
+									position: 0,
+								})),
+							],
+						},
+						iterable: Expr::Array(ArrayLiteral {
+							elements: vec![
+								Expr::Integer(IntegerLiteral {
+									position: 0,
+									value: 1,
+								}),
+								Expr::Integer(IntegerLiteral {
+									position: 0,
+									value: 2,
+								}),
+							],
+							position: 0,
+						}),
+						position: 0,
+						variable: IdentifierExpr {
+							name: String::from("value"),
+							position: 0,
+						},
+					}),
+				],
+				result: None,
 			}
 		);
 	}

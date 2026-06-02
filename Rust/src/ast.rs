@@ -68,6 +68,7 @@ pub enum Statement {
 	Break(BreakStatement),
 	Continue(ContinueStatement),
 	Expression(Expr),
+	For(ForStatement),
 	If(IfStatement),
 	Return(ReturnStatement),
 	VariableDeclaration(VariableDeclaration),
@@ -142,6 +143,14 @@ pub struct ContinueStatement {
 pub struct DecimalLiteral {
 	pub position: usize,
 	pub value: Decimal,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForStatement {
+	pub body: BlockStatement,
+	pub iterable: Expr,
+	pub position: usize,
+	pub variable: IdentifierExpr,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

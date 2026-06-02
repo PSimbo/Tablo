@@ -5,7 +5,10 @@ use crate::bytecode::Instruction;
 use crate::bytecode::Program;
 use crate::value::Decimal;
 use crate::value::DecimalRange;
+use crate::value::DecimalRangeIterator;
 use crate::value::IntegerRange;
+use crate::value::IntegerRangeIterator;
+use crate::value::IteratorState;
 use crate::value::Value;
 
 #[derive(Clone, Copy)]
@@ -159,6 +162,23 @@ impl VirtualMachine {
 				let rhs = self.pop_value(instruction_index)?;
 				let lhs = self.pop_value(instruction_index)?;
 				self.stack.push(compare_values(lhs, rhs, instruction_index, ComparisonKind::GreaterThanOrEqual)?);
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::IterHasNext => {
+				let iterator = self.pop_value(instruction_index)?;
+				self.stack.push(Value::Boolean(iterator_has_next(&iterator, instruction_index)?));
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::IterInit => {
+				let iterable = self.pop_value(instruction_index)?;
+				self.stack.push(make_iterator_value(iterable, instruction_index)?);
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::IterNext => {
+				let iterator = self.pop_value(instruction_index)?;
+				let (value, iterator) = iterator_next_value(iterator, instruction_index)?;
+				self.stack.push(value);
+				self.stack.push(iterator);
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::Jump(target) => {
@@ -347,7 +367,7 @@ impl VirtualMachine {
 			message: String::from("Stack underflow while reading numeric operand."),
 		})?;
 
-		if matches!(value, Value::Array(_) | Value::Boolean(_) | Value::DecimalRange(_) | Value::IntegerRange(_) | Value::Text(_)) {
+		if matches!(value, Value::Array(_) | Value::Boolean(_) | Value::DecimalRange(_) | Value::IntegerRange(_) | Value::Iterator(_) | Value::Text(_)) {
 			return Err(VmError {
 				instruction_index,
 				message: format!("Expected a numeric operand, found a {} value.", type_name(&value)),
@@ -527,6 +547,12 @@ fn equals_value(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Valu
 		(Value::Array(lhs), Value::Array(rhs)) => lhs == rhs,
 		(Value::Boolean(lhs), Value::Boolean(rhs)) => lhs == rhs,
 		(Value::Text(lhs), Value::Text(rhs)) => lhs == rhs,
+		(lhs @ Value::Iterator(_), rhs) | (lhs, rhs @ Value::Iterator(_)) => {
+			return Err(vm_error(
+				instruction_index,
+				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
+			));
+		}
 		(lhs @ Value::Array(_), rhs) | (lhs, rhs @ Value::Array(_)) => {
 			return Err(vm_error(
 				instruction_index,
@@ -552,6 +578,81 @@ fn equals_value(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Valu
 	};
 
 	Ok(Value::Boolean(value))
+}
+
+fn iterator_has_next(iterator: &Value, instruction_index: usize) -> Result<bool, VmError> {
+	let iterator = match iterator {
+		Value::Iterator(iterator) => iterator,
+		other => {
+			return Err(vm_error(
+				instruction_index,
+				format!("Cannot iterate over a `{}` value.", type_name(other)),
+			));
+		}
+	};
+
+	match iterator {
+		IteratorState::Array(iterator) => Ok(iterator.next_index < iterator.elements.len()),
+		IteratorState::DecimalRange(iterator) => Ok(iterator.next_value.is_some()),
+		IteratorState::IntegerRange(iterator) => Ok(iterator.next_value.is_some()),
+	}
+}
+
+fn iterator_next_value(iterator: Value, instruction_index: usize) -> Result<(Value, Value), VmError> {
+	let iterator = match iterator {
+		Value::Iterator(iterator) => iterator,
+		other => {
+			return Err(vm_error(
+				instruction_index,
+				format!("Cannot iterate over a `{}` value.", type_name(&other)),
+			));
+		}
+	};
+
+	match iterator {
+		IteratorState::Array(mut iterator) => {
+			let value = iterator.elements.get(iterator.next_index).cloned().ok_or(vm_error(
+				instruction_index,
+				String::from("Iterator is exhausted."),
+			))?;
+			iterator.next_index += 1;
+			Ok((value, Value::Iterator(IteratorState::Array(iterator))))
+		}
+		IteratorState::DecimalRange(mut iterator) => {
+			let value = iterator.next_value.clone().ok_or(vm_error(
+				instruction_index,
+				String::from("Iterator is exhausted."),
+			))?;
+			let next_value = value.checked_add(&iterator.step)
+				.map_err(|message| vm_error(instruction_index, message))?;
+			let ordering = compare_decimals(&next_value, &iterator.end, instruction_index)?;
+			let in_bounds = if iterator.step.coefficient > 0 {
+				!ordering.is_gt()
+			}
+			else {
+				!ordering.is_lt()
+			};
+			iterator.next_value = if in_bounds { Some(next_value) } else { None };
+			Ok((Value::Decimal(value), Value::Iterator(IteratorState::DecimalRange(iterator))))
+		}
+		IteratorState::IntegerRange(mut iterator) => {
+			let value = iterator.next_value.ok_or(vm_error(
+				instruction_index,
+				String::from("Iterator is exhausted."),
+			))?;
+			let next_value = value.checked_add(iterator.step);
+			let in_bounds = next_value.is_some_and(|next_value| {
+				if iterator.step > 0 {
+					next_value <= iterator.end
+				}
+				else {
+					next_value >= iterator.end
+				}
+			});
+			iterator.next_value = if in_bounds { next_value } else { None };
+			Ok((Value::Integer(value), Value::Iterator(IteratorState::IntegerRange(iterator))))
+		}
+	}
 }
 
 fn load_index_value(array: Value, index: Value, instruction_index: usize) -> Result<Value, VmError> {
@@ -583,6 +684,60 @@ fn load_index_value(array: Value, index: Value, instruction_index: usize) -> Res
 	}
 
 	Ok(values[index as usize - 1].clone())
+}
+
+fn make_iterator_value(iterable: Value, instruction_index: usize) -> Result<Value, VmError> {
+	match iterable {
+		Value::Array(elements) => Ok(Value::Iterator(IteratorState::Array(crate::value::ArrayIterator {
+			elements,
+			next_index: 0,
+		}))),
+		Value::DecimalRange(range) => {
+			let step = range.step.unwrap_or_else(|| Decimal::from_integer(1));
+
+			if step.coefficient == 0 {
+				return Err(vm_error(instruction_index, String::from("Range step cannot be zero.")));
+			}
+
+			let ordering = compare_decimals(&range.start, &range.end, instruction_index)?;
+			let in_bounds = if step.coefficient > 0 {
+				!ordering.is_gt()
+			}
+			else {
+				!ordering.is_lt()
+			};
+
+			Ok(Value::Iterator(IteratorState::DecimalRange(DecimalRangeIterator {
+				end: range.end,
+				next_value: if in_bounds { Some(range.start) } else { None },
+				step,
+			})))
+		}
+		Value::IntegerRange(range) => {
+			let step = range.step.unwrap_or(1);
+
+			if step == 0 {
+				return Err(vm_error(instruction_index, String::from("Range step cannot be zero.")));
+			}
+
+			let in_bounds = if step > 0 {
+				range.start <= range.end
+			}
+			else {
+				range.start >= range.end
+			};
+
+			Ok(Value::Iterator(IteratorState::IntegerRange(IntegerRangeIterator {
+				end: range.end,
+				next_value: if in_bounds { Some(range.start) } else { None },
+				step,
+			})))
+		}
+		other => Err(vm_error(
+			instruction_index,
+			format!("Cannot iterate over a `{}` value.", type_name(&other)),
+		)),
+	}
 }
 
 fn make_range_value(start: Value, step: Option<Value>, end: Value, instruction_index: usize) -> Result<Value, VmError> {
@@ -659,6 +814,7 @@ fn negate_value(value: Value) -> Value {
 		Value::DecimalRange(_) => unreachable!("Range values are rejected before numeric negation."),
 		Value::Integer(integer) => Value::Integer(integer.saturating_neg()),
 		Value::IntegerRange(_) => unreachable!("Range values are rejected before numeric negation."),
+		Value::Iterator(_) => unreachable!("Iterator values are rejected before numeric negation."),
 		Value::Text(_) => unreachable!("Text values are rejected before numeric negation."),
 	}
 }
@@ -748,6 +904,7 @@ fn stringify_value(value: &Value) -> String {
 		Value::DecimalRange(value) => value.to_string(),
 		Value::Integer(value) => value.to_string(),
 		Value::IntegerRange(value) => value.to_string(),
+		Value::Iterator(_) => String::from("<iterator>"),
 		Value::Text(value) => value.clone(),
 	}
 }
@@ -770,6 +927,7 @@ fn type_name(value: &Value) -> &'static str {
 		Value::DecimalRange(_) => "range",
 		Value::Integer(_) => "int",
 		Value::IntegerRange(_) => "range",
+		Value::Iterator(_) => "iterator",
 		Value::Text(_) => "text",
 	}
 }

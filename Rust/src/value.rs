@@ -1,6 +1,13 @@
 use std::fmt::Display;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum IteratorState {
+	Array(ArrayIterator),
+	DecimalRange(DecimalRangeIterator),
+	IntegerRange(IntegerRangeIterator),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Value {
 	Array(Vec<Value>),
 	Boolean(bool),
@@ -8,6 +15,7 @@ pub enum Value {
 	DecimalRange(DecimalRange),
 	Integer(i64),
 	IntegerRange(IntegerRange),
+	Iterator(IteratorState),
 	Text(String),
 }
 
@@ -32,9 +40,16 @@ impl Display for Value {
 			Value::DecimalRange(range) => write!(f, "{range}"),
 			Value::Integer(value) => write!(f, "{value}"),
 			Value::IntegerRange(range) => write!(f, "{range}"),
+			Value::Iterator(_) => write!(f, "<iterator>"),
 			Value::Text(value) => write!(f, "{value}"),
 		}
 	}
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArrayIterator {
+	pub elements: Vec<Value>,
+	pub next_index: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -241,6 +256,13 @@ impl Display for DecimalRange {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DecimalRangeIterator {
+	pub end: Decimal,
+	pub next_value: Option<Decimal>,
+	pub step: Decimal,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IntegerRange {
 	pub end: i64,
 	pub start: i64,
@@ -257,6 +279,13 @@ impl Display for IntegerRange {
 
 		write!(f, "{}", self.end)
 	}
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntegerRangeIterator {
+	pub end: i64,
+	pub next_value: Option<i64>,
+	pub step: i64,
 }
 
 fn align_decimal_operands(lhs: &Decimal, rhs: &Decimal) -> Result<(i128, i128, u8), String> {

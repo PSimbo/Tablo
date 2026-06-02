@@ -227,6 +227,16 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_non_iterable_for_source_text() {
+		let error = run("for value in 1 {\n}\n").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("`for` iterable must be an array or range, found `int`."),
+			position: 13,
+		}));
+	}
+
+	#[test]
 	fn rejects_non_numeric_range_source_text() {
 		let error = run("'a':1").unwrap_err();
 
@@ -463,6 +473,38 @@ mod tests {
 		let result = run("var x: int = 5;\nx += 1;\nx").unwrap();
 
 		assert_eq!(result, Some(Value::Integer(6)));
+	}
+
+	#[test]
+	fn runs_for_array_source_text() {
+		let result = run("var total: int = 0;\nfor value in [1, 2, 3] {\n  total += value;\n}\ntotal").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(6)));
+	}
+
+	#[test]
+	fn runs_for_decimal_range_source_text() {
+		let result = run("var total: dec = 0.0;\nfor value in 0.0:0.5:1.0 {\n  total += value;\n}\ntotal").unwrap();
+
+		assert_eq!(result, Some(Value::Decimal(
+			crate::value::Decimal::from_literal("1.5").unwrap()
+		)));
+	}
+
+	#[test]
+	fn runs_for_integer_range_source_text() {
+		let result = run("var total: int = 0;\nfor value in 1:3 {\n  total += value;\n}\ntotal").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(6)));
+	}
+
+	#[test]
+	fn runs_for_with_break_and_continue_source_text() {
+		let result = run(
+			"var total: int = 0;\nfor value in [1, 2, 3, 4] {\n  if value == 2 {\n    continue;\n  }\n  if value == 4 {\n    break;\n  }\n  total += value;\n}\ntotal"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(4)));
 	}
 
 	#[test]

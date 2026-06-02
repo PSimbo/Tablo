@@ -11,6 +11,7 @@ use crate::ast::CallExpr;
 use crate::ast::ContinueStatement;
 use crate::ast::DataType;
 use crate::ast::Expr;
+use crate::ast::ForStatement;
 use crate::ast::FunctionDeclaration;
 use crate::ast::FunctionParameter;
 use crate::ast::IdentifierExpr;
@@ -63,6 +64,7 @@ pub struct SemanticProgram {
 	call_targets: BTreeMap<usize, u32>,
 	declaration_slots: BTreeMap<usize, u32>,
 	identifier_slots: BTreeMap<usize, u32>,
+	iterator_slots: BTreeMap<usize, u32>,
 }
 
 impl SemanticProgram {
@@ -84,6 +86,10 @@ impl SemanticProgram {
 
 	pub fn identifier_slot(&self, position: usize) -> Option<u32> {
 		self.identifier_slots.get(&position).copied()
+	}
+
+	pub fn iterator_slot(&self, position: usize) -> Option<u32> {
+		self.iterator_slots.get(&position).copied()
 	}
 }
 
@@ -735,7 +741,7 @@ impl SemanticAnalyzer {
 					&& if_statement.else_branch.as_ref().is_some_and(|else_branch| self.statement_guarantees_return(else_branch))
 			}
 			Statement::Return(_) => true,
-			Statement::Expression(_) | Statement::VariableDeclaration(_) | Statement::While(_) => false,
+			Statement::Expression(_) | Statement::For(_) | Statement::VariableDeclaration(_) | Statement::While(_) => false,
 		}
 	}
 
@@ -846,6 +852,54 @@ impl SemanticAnalyzer {
 			Statement::Expression(expression) => {
 				self.infer_expression_type(expression)?;
 				Ok(())
+			}
+			Statement::For(ForStatement { body, iterable, position, variable }) => {
+				let iterable_type = self.infer_expression_type(iterable)?;
+				let variable_type = match iterable_type {
+					DataType::Array(element_type) => *element_type,
+					DataType::Range(element_type) => *element_type,
+					DataType::EmptyArray => {
+						return Err(self.compile_error(
+							iterable.position().max(*position),
+							String::from("`for` iterable must have a known element type."),
+						));
+					}
+					other => {
+						return Err(self.compile_error(
+							iterable.position().max(*position),
+							format!("`for` iterable must be an array or range, found `{}`.", self.data_type_name(&other)),
+						));
+					}
+				};
+
+				self.enter_scope();
+
+				if self.current_scope_contains(&variable.name) {
+					self.exit_scope();
+					return Err(self.compile_error(
+						variable.position,
+						format!("Variable `{}` is already declared in this scope.", variable.name),
+					));
+				}
+
+				let loop_variable_slot = self.next_local_slot;
+				self.next_local_slot += 1;
+				self.semantic_program.declaration_slots.insert(variable.position, loop_variable_slot);
+				self.declare_local(variable.name.clone(), LocalBinding {
+					data_type: variable_type,
+					is_const: false,
+					slot: loop_variable_slot,
+				});
+
+				let iterator_slot = self.next_local_slot;
+				self.next_local_slot += 1;
+				self.semantic_program.iterator_slots.insert(*position, iterator_slot);
+
+				self.loop_depth += 1;
+				let validation_result = self.validate_statement(&Statement::Block(body.clone()));
+				self.loop_depth -= 1;
+				self.exit_scope();
+				validation_result
 			}
 			Statement::If(IfStatement { condition, else_branch, position, then_branch }) => {
 				let condition_type = self.infer_expression_type(condition)?;

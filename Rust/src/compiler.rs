@@ -13,6 +13,7 @@ use crate::ast::CallExpr;
 use crate::ast::ContinueStatement;
 use crate::ast::DecimalLiteral;
 use crate::ast::Expr;
+use crate::ast::ForStatement;
 use crate::ast::FunctionDeclaration;
 use crate::ast::IdentifierExpr;
 use crate::ast::IfStatement;
@@ -317,6 +318,61 @@ impl Compiler {
 
 				Ok(())
 			}
+			Statement::For(ForStatement {
+				body,
+				iterable,
+				position,
+				variable,
+			}) => {
+				let variable_slot = semantic_program.declaration_slot(variable.position).ok_or(self.compile_error(
+					variable.position,
+					format!("Missing slot for loop variable `{}`.", variable.name),
+				))?;
+				let iterator_slot = semantic_program.iterator_slot(*position).ok_or(self.compile_error(
+					*position,
+					String::from("Missing iterator slot for `for` statement."),
+				))?;
+
+				self.compile_into(iterable, semantic_program, instructions);
+				instructions.push(Instruction::IterInit);
+				instructions.push(Instruction::StoreLocal(iterator_slot));
+
+				let loop_start = instructions.len() as u32;
+				self.loop_stack.push(LoopContext {
+					break_jump_indices: Vec::new(),
+					continue_jump_indices: Vec::new(),
+					loop_start,
+				});
+
+				instructions.push(Instruction::LoadLocal(iterator_slot));
+				instructions.push(Instruction::IterHasNext);
+				let jump_if_false_index = instructions.len();
+				instructions.push(Instruction::JumpIfFalse(0));
+
+				instructions.push(Instruction::LoadLocal(iterator_slot));
+				instructions.push(Instruction::IterNext);
+				instructions.push(Instruction::StoreLocal(iterator_slot));
+				instructions.push(Instruction::StoreLocal(variable_slot));
+
+				self.compile_statement(&Statement::Block(body.clone()), semantic_program, instructions)?;
+				instructions.push(Instruction::Jump(loop_start));
+
+				let loop_end = instructions.len() as u32;
+				instructions[jump_if_false_index] = Instruction::JumpIfFalse(loop_end);
+
+				let loop_context = self.loop_stack.pop()
+					.expect("Loop context must exist while compiling a for statement.");
+
+				for break_jump_index in loop_context.break_jump_indices {
+					instructions[break_jump_index] = Instruction::Jump(loop_end);
+				}
+
+				for continue_jump_index in loop_context.continue_jump_indices {
+					instructions[continue_jump_index] = Instruction::Jump(loop_context.loop_start);
+				}
+
+				Ok(())
+			}
 			Statement::If(IfStatement {
 				condition,
 				else_branch,
@@ -439,6 +495,7 @@ mod tests {
 	use crate::ast::DataType;
 	use crate::ast::DecimalLiteral;
 	use crate::ast::Expr;
+	use crate::ast::ForStatement;
 	use crate::ast::IdentifierExpr;
 	use crate::ast::IfStatement;
 	use crate::ast::IntegerLiteral;
@@ -764,6 +821,65 @@ mod tests {
 			Instruction::LoadLocal(0),
 			Instruction::Pop,
 			Instruction::LoadLocal(0),
+		]);
+	}
+
+	#[test]
+	fn compiles_for_statement() {
+		let program = AstProgram {
+			functions: vec![],
+			statements: vec![
+				Statement::For(ForStatement {
+					body: BlockStatement {
+						position: 0,
+						statements: vec![
+							Statement::Expression(Expr::Identifier(IdentifierExpr {
+								name: String::from("value"),
+								position: 1,
+							})),
+						],
+					},
+					iterable: Expr::Array(ArrayLiteral {
+						elements: vec![
+							Expr::Integer(IntegerLiteral {
+								position: 0,
+								value: 1,
+							}),
+							Expr::Integer(IntegerLiteral {
+								position: 0,
+								value: 2,
+							}),
+						],
+						position: 0,
+					}),
+					position: 0,
+					variable: IdentifierExpr {
+						name: String::from("value"),
+						position: 1,
+					},
+				}),
+			],
+			result: None,
+		};
+
+		let program = Compiler::new().compile_program(&program).unwrap();
+
+		assert_eq!(program.entry.instructions, vec![
+			Instruction::PushInteger(1),
+			Instruction::PushInteger(2),
+			Instruction::MakeArray(2),
+			Instruction::IterInit,
+			Instruction::StoreLocal(1),
+			Instruction::LoadLocal(1),
+			Instruction::IterHasNext,
+			Instruction::JumpIfFalse(15),
+			Instruction::LoadLocal(1),
+			Instruction::IterNext,
+			Instruction::StoreLocal(1),
+			Instruction::StoreLocal(0),
+			Instruction::LoadLocal(0),
+			Instruction::Pop,
+			Instruction::Jump(5),
 		]);
 	}
 
