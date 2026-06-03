@@ -28,6 +28,13 @@ use value::Value;
 use vm::VirtualMachine;
 use vm::VmError;
 
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompilationTarget {
+	Snippet,
+	Standalone,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TabloError {
 	Compile(CompileError),
@@ -135,19 +142,43 @@ pub fn run_program(program: &Program) -> Result<Option<Value>, TabloError> {
 }
 
 pub(crate) fn compile_to_program_with_name(source: impl Into<String>, source_name: Option<&str>) -> Result<Program, TabloError> {
+	compile_source_to_program_with_name(source, source_name, CompilationTarget::Standalone)
+}
+
+fn attach_source_debug_info(program: &mut Program, source: &SourceText, source_name: Option<&str>) {
+	let source_file = SourceFileDebugInfo::from_source(
+		source_name.unwrap_or("<source>"),
+		source,
+	);
+	program.debug_info_mut().attach_source_file(source_file);
+}
+
+fn compile_ast_program(program: &ast::Program, target: CompilationTarget) -> Result<Program, TabloError> {
+	let mut compiler = Compiler::new();
+
+	match target {
+		CompilationTarget::Snippet => compiler.compile_program(program).map_err(TabloError::Compile),
+		CompilationTarget::Standalone => compiler.compile_standalone_program(program).map_err(TabloError::Compile),
+	}
+}
+
+fn compile_source_to_program_with_name(
+	source: impl Into<String>,
+	source_name: Option<&str>,
+	target: CompilationTarget,
+) -> Result<Program, TabloError> {
 	let source = SourceText::new(source);
+	let program = parse_source_text(&source)?;
+	let mut program = compile_ast_program(&program, target)?;
+	attach_source_debug_info(&mut program, &source, source_name);
+	Ok(program)
+}
+
+fn parse_source_text(source: &SourceText) -> Result<ast::Program, TabloError> {
 	let mut lexer = Lexer::new(source.clone());
 	let tokens = lexer.tokenize().map_err(TabloError::Lex)?;
 	let mut parser = Parser::new(tokens);
-	let program = parser.parse_program().map_err(TabloError::Parse)?;
-
-	let mut program = Compiler::new().compile_standalone_program(&program).map_err(TabloError::Compile)?;
-	let source_file = SourceFileDebugInfo::from_source(
-		source_name.unwrap_or("<source>"),
-		&source,
-	);
-	program.debug_info_mut().attach_source_file(source_file);
-	Ok(program)
+	parser.parse_program().map_err(TabloError::Parse)
 }
 
 #[cfg(test)]
@@ -155,20 +186,17 @@ mod tests {
 	use std::path::PathBuf;
 
 	use crate::bytecode::Instruction;
-	use crate::bytecode::SourceFileDebugInfo;
-	use crate::compiler::Compiler;
-	use crate::object_file::write_program_to_path;
-	use crate::source::SourceText;
-	use crate::syntax::lexer::Lexer;
-	use crate::syntax::parser::Parser;
 	use crate::object_file::read_program_from_path;
+	use crate::object_file::write_program_to_path;
 	use crate::value::Value;
 
+	use super::compile_source_to_program_with_name;
 	use super::compile;
 	use super::compile_with_source_name;
 	use super::run;
 	use super::run_file;
 	use super::run_program;
+	use super::CompilationTarget;
 	use super::TabloError;
 
 	fn standalone_expression(expression: &str) -> String {
@@ -180,24 +208,12 @@ mod tests {
 	}
 
 	fn evaluate_snippet(source: &str) -> Result<Option<Value>, TabloError> {
-		let source_text = SourceText::new(source);
-		let mut lexer = Lexer::new(source_text.clone());
-		let tokens = lexer.tokenize().map_err(TabloError::Lex)?;
-		let mut parser = Parser::new(tokens);
-		let program = parser.parse_program().map_err(TabloError::Parse)?;
-		let mut program = Compiler::new().compile_program(&program).map_err(TabloError::Compile)?;
-		program.debug_info_mut().attach_source_file(SourceFileDebugInfo::from_source("<source>", &source_text));
+		let program = compile_source_to_program_with_name(source, None, CompilationTarget::Snippet)?;
 		run_program(&program)
 	}
 
 	fn compile_snippet_to_object_file(source: &str, output_path: &std::path::Path) -> Result<(), TabloError> {
-		let source_text = SourceText::new(source);
-		let mut lexer = Lexer::new(source_text.clone());
-		let tokens = lexer.tokenize().map_err(TabloError::Lex)?;
-		let mut parser = Parser::new(tokens);
-		let program = parser.parse_program().map_err(TabloError::Parse)?;
-		let mut program = Compiler::new().compile_program(&program).map_err(TabloError::Compile)?;
-		program.debug_info_mut().attach_source_file(SourceFileDebugInfo::from_source("<source>", &source_text));
+		let program = compile_source_to_program_with_name(source, None, CompilationTarget::Snippet)?;
 		write_program_to_path(output_path, &program).map_err(TabloError::ObjectFile)
 	}
 

@@ -158,6 +158,30 @@ impl Compiler {
 		self.emit(emission, Instruction::LoadLocal(slot), value.position());
 	}
 
+	fn compile_entry_body(
+		&mut self,
+		program: &AstProgram,
+		semantic_program: &SemanticProgram,
+		emission: &mut EmissionState,
+	) -> Result<(), CompileError> {
+		if let Some(function_index) = semantic_program.entry_point_function_index() {
+			let position = semantic_program.entry_point_position().unwrap_or(0);
+			self.emit(emission, Instruction::MakeArray(0), position);
+			self.emit(emission, Instruction::Call(function_index, 1), position);
+			return Ok(());
+		}
+
+		for statement in &program.statements {
+			self.compile_statement(statement, semantic_program, emission)?;
+		}
+
+		if let Some(result) = &program.result {
+			self.compile_into(result, semantic_program, emission);
+		}
+
+		Ok(())
+	}
+
 	fn compile_error(&self, position: usize, message: impl Into<String>) -> CompileError {
 		CompileError {
 			message: message.into(),
@@ -321,29 +345,7 @@ impl Compiler {
 
 		let mut emission = EmissionState::default();
 		self.enter_debug_scope(&mut emission);
-
-		if let Some(function_index) = semantic_program.entry_point_function_index() {
-			let position = semantic_program.entry_point_position().unwrap_or(0);
-			self.emit(	
-				&mut emission,
-				Instruction::MakeArray(0),
-				position,
-			);
-			self.emit(
-				&mut emission,
-				Instruction::Call(function_index, 1),
-				position,
-			);
-		}
-		else {
-			for statement in &program.statements {
-				self.compile_statement(statement, &semantic_program, &mut emission)?;
-			}
-
-			if let Some(result) = &program.result {
-				self.compile_into(result, &semantic_program, &mut emission);
-			}
-		}
+		self.compile_entry_body(program, semantic_program, &mut emission)?;
 
 		self.close_all_debug_scopes(&mut emission);
 		code_body_debug.push(CodeBodyDebugInfo::new(None, emission.positions, emission.locals, None));
