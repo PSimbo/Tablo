@@ -57,13 +57,7 @@ fn main() {
 	}
 
 	let initial_stop = if args.breakpoints.is_empty() {
-		match pause_at_program_start(&mut session) {
-			Ok(stop) => stop,
-			Err(error) => {
-				eprintln!("{error}");
-				std::process::exit(1);
-			}
-		}
+		session.pause_at_start()
 	}
 	else {
 		match session.resume() {
@@ -263,24 +257,6 @@ fn resolve_breakpoints(
 	}
 
 	Ok(breakpoints)
-}
-
-fn pause_at_program_start(session: &mut DebuggerSession<'_>) -> Result<DebuggerStop, TabloError> {
-	let first = session.step_in().map_err(TabloError::Runtime)?;
-
-	let should_step_again = first
-		.paused_state()
-		.and_then(|paused| paused.current_frame())
-		.and_then(|frame| frame.source_location())
-		.and_then(|location| location.body_name())
-		!= Some("Main");
-
-	if should_step_again {
-		session.step_in().map_err(TabloError::Runtime)
-	}
-	else {
-		Ok(first)
-	}
 }
 
 fn run_debug_loop(program: &Program, session: &mut DebuggerSession<'_>, mut stop: DebuggerStop) {

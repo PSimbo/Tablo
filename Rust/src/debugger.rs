@@ -70,6 +70,12 @@ impl<'a> DebuggerSession<'a> {
 		}
 	}
 
+	pub fn pause_at_start(&mut self) -> DebuggerStop {
+		self.ensure_started();
+		self.skip_breakpoint_once = None;
+		DebuggerStop::Paused(self.paused_state(PauseReason::StepIn))
+	}
+
 	pub fn resolve_source_breakpoints(&self, display_name: &str, lines: &[u32]) -> Vec<InstructionBreakpoint> {
 		lines.iter()
 			.filter_map(|line| {
