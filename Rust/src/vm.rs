@@ -48,7 +48,17 @@ pub struct VmError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VmStackFrame {
 	pub instruction_index: usize,
+	pub locals: Vec<VmVisibleLocal>,
 	pub source_location: Option<SourceLocation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VmVisibleLocal {
+	pub declared_type: String,
+	pub is_const: bool,
+	pub name: String,
+	pub slot: u32,
+	pub value: Value,
 }
 
 impl VirtualMachine {
@@ -79,7 +89,15 @@ impl VirtualMachine {
 				&frame.code_body.instructions[frame.instruction_index],
 				frame.instruction_index,
 				&mut frame.locals,
-			).map_err(|error| enrich_vm_error(program, frame.debug_body_index, frame.instruction_index, error))?;
+			).map_err(|error| {
+				enrich_vm_error(
+					program,
+					frame.debug_body_index,
+					frame.instruction_index,
+					&frame.locals,
+					error,
+				)
+			})?;
 
 			match outcome {
 				ExecutionOutcome::Continue(next_instruction_index) => {
@@ -571,7 +589,13 @@ fn divide_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Val
 	}
 }
 
-fn enrich_vm_error(program: &Program, debug_body_index: usize, instruction_index: usize, mut error: VmError) -> VmError {
+fn enrich_vm_error(
+	program: &Program,
+	debug_body_index: usize,
+	instruction_index: usize,
+	locals: &[Value],
+	mut error: VmError
+) -> VmError {
 	let source_location = program.debug_location(debug_body_index, instruction_index);
 
 	if error.source_location.is_none() {
@@ -580,6 +604,7 @@ fn enrich_vm_error(program: &Program, debug_body_index: usize, instruction_index
 
 	error.stack_trace.push(VmStackFrame {
 		instruction_index,
+		locals: resolve_visible_locals(program, debug_body_index, instruction_index, locals),
 		source_location,
 	});
 	error
@@ -880,6 +905,28 @@ fn pow10_i128(exponent: u32) -> Result<i128, String> {
 	Ok(value)
 }
 
+fn resolve_visible_locals(
+	program: &Program,
+	debug_body_index: usize,
+	instruction_index: usize,
+	locals: &[Value],
+) -> Vec<VmVisibleLocal> {
+	program.visible_locals(debug_body_index, instruction_index)
+		.into_iter()
+		.filter_map(|local| {
+			let value = locals.get(local.slot() as usize)?.clone();
+
+			Some(VmVisibleLocal {
+				declared_type: local.declared_type().to_string(),
+				is_const: local.is_const(),
+				name: local.name().to_string(),
+				slot: local.slot(),
+				value,
+			})
+		})
+		.collect()
+}
+
 fn store_index_value(array: Value, index: Value, value: Value, instruction_index: usize) -> Result<(Value, Value), VmError> {
 	let index = match index {
 		Value::Integer(value) => value,
@@ -987,7 +1034,12 @@ fn vm_error(instruction_index: usize, message: String) -> VmError {
 #[cfg(test)]
 mod tests {
 	use crate::builtins::BuiltInFunction;
+	use crate::bytecode::CodeBody;
+	use crate::bytecode::CodeBodyDebugInfo;
+	use crate::bytecode::ConstantPool;
+	use crate::bytecode::DebugInfo;
 	use crate::bytecode::Instruction;
+	use crate::bytecode::LocalVariableDebugInfo;
 	use crate::bytecode::Program;
 	use crate::value::Decimal;
 	use crate::value::DecimalRange;
@@ -995,6 +1047,44 @@ mod tests {
 
 	use super::VirtualMachine;
 	use super::VmError;
+
+	#[test]
+	fn captures_visible_locals_in_runtime_stack_frame() {
+		let program = Program::from_parts_with_debug(
+			ConstantPool::default(),
+			CodeBody::new(vec![
+				Instruction::PushInteger(0),
+				Instruction::StoreLocal(0),
+				Instruction::LoadLocal(0),
+				Instruction::PushInteger(0),
+				Instruction::Divide,
+			]),
+			DebugInfo::new(
+				vec![CodeBodyDebugInfo::new(
+					None,
+					vec![0, 0, 0, 0, 0],
+					vec![LocalVariableDebugInfo::new("x", 0, "int", false, 1, 5)],
+					None,
+				)],
+				vec![],
+			),
+		);
+
+		let error = VirtualMachine::new().run(&program).unwrap_err();
+
+		assert_eq!(error.message, "Division by zero.");
+		assert_eq!(error.stack_trace.len(), 1);
+		assert_eq!(
+			error.stack_trace[0].locals,
+			vec![super::VmVisibleLocal {
+				declared_type: String::from("int"),
+				is_const: false,
+				name: String::from("x"),
+				slot: 0,
+				value: Value::Integer(0),
+			}],
+		);
+	}
 
 	#[test]
 	fn rejects_addition_without_enough_operands() {
@@ -1012,6 +1102,7 @@ mod tests {
 			stack_trace: vec![
 				super::VmStackFrame {
 					instruction_index: 1,
+					locals: vec![],
 					source_location: None,
 				},
 			],
@@ -1035,6 +1126,7 @@ mod tests {
 			stack_trace: vec![
 				super::VmStackFrame {
 					instruction_index: 2,
+					locals: vec![],
 					source_location: None,
 				},
 			],
@@ -1058,6 +1150,7 @@ mod tests {
 			stack_trace: vec![
 				super::VmStackFrame {
 					instruction_index: 2,
+					locals: vec![],
 					source_location: None,
 				},
 			],
@@ -1081,6 +1174,7 @@ mod tests {
 			stack_trace: vec![
 				super::VmStackFrame {
 					instruction_index: 2,
+					locals: vec![],
 					source_location: None,
 				},
 			],
@@ -1104,6 +1198,7 @@ mod tests {
 			stack_trace: vec![
 				super::VmStackFrame {
 					instruction_index: 2,
+					locals: vec![],
 					source_location: None,
 				},
 			],
@@ -1127,6 +1222,7 @@ mod tests {
 			stack_trace: vec![
 				super::VmStackFrame {
 					instruction_index: 2,
+					locals: vec![],
 					source_location: None,
 				},
 			],
@@ -1151,6 +1247,7 @@ mod tests {
 			stack_trace: vec![
 				super::VmStackFrame {
 					instruction_index: 3,
+					locals: vec![],
 					source_location: None,
 				},
 			],

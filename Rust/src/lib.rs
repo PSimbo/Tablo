@@ -422,6 +422,18 @@ mod tests {
 			stack_trace: vec![
 				crate::vm::VmStackFrame {
 					instruction_index: 6,
+					locals: vec![
+						crate::vm::VmVisibleLocal {
+							declared_type: String::from("[int]"),
+							is_const: false,
+							name: String::from("xs"),
+							slot: 0,
+							value: crate::value::Value::Array(vec![
+								crate::value::Value::Integer(10),
+								crate::value::Value::Integer(20),
+							]),
+						},
+					],
 					source_location: Some(crate::bytecode::SourceLocation::new(
 						None,
 						3,

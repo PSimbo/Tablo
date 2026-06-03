@@ -255,6 +255,13 @@ impl Program {
 	pub fn instructions(&self) -> &[Instruction] {
 		&self.entry.instructions
 	}
+
+	pub fn visible_locals(&self, body_index: usize, instruction_index: usize) -> Vec<LocalVariableDebugInfo> {
+		self.debug.code_bodies
+			.get(body_index)
+			.map(|code_body| code_body.visible_locals(instruction_index))
+			.unwrap_or_default()
+	}
 }
 
 impl CodeBodyDebugInfo {
@@ -282,6 +289,16 @@ impl CodeBodyDebugInfo {
 
 	pub fn locals(&self) -> &[LocalVariableDebugInfo] {
 		&self.locals
+	}
+
+	pub fn visible_locals(&self, instruction_index: usize) -> Vec<LocalVariableDebugInfo> {
+		let instruction_index = instruction_index as u32;
+
+		self.locals
+			.iter()
+			.filter(|local| local.scope_start <= instruction_index && instruction_index < local.scope_end)
+			.cloned()
+			.collect()
 	}
 
 	pub fn source_file_index(&self) -> Option<u32> {
