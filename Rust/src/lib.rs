@@ -45,20 +45,50 @@ impl Display for TabloError {
 			TabloError::ObjectFile(error) => write!(f, "Object file error at byte {}: {}", error.offset, error.message),
 			TabloError::Parse(error) => write!(f, "Parse error at byte {}: {}", error.position, error.message),
 			TabloError::Runtime(error) => {
-				if let Some(location) = &error.source_location {
-					if let Some(display_name) = location.display_name() {
-						write!(f, "Runtime error at {}:{}:{}: {}", display_name, location.line(), location.column(), error.message)
+				write!(f, "Runtime error: {}", error.message)?;
+
+				if !error.stack_trace.is_empty() {
+					write!(f, "\nStack trace:")?;
+
+					for frame in &error.stack_trace {
+						write!(f, "\n  at {}", format_stack_frame(frame))?;
 					}
-					else {
-						write!(f, "Runtime error at line {}, column {}: {}", location.line(), location.column(), error.message)
-					}
+				}
+				else if let Some(location) = &error.source_location {
+					write!(f, "\nStack trace:\n  at {}", format_source_location(location, true))?;
 				}
 				else {
-					write!(f, "Runtime error at instruction {}: {}", error.instruction_index, error.message)
+					write!(f, "\nStack trace:\n  at instruction {}", error.instruction_index)?;
 				}
+
+				Ok(())
 			}
 		}
 	}
+}
+
+fn format_stack_frame(frame: &vm::VmStackFrame) -> String {
+	match &frame.source_location {
+		Some(location) => format_source_location(location, true),
+		None => format!("instruction {}", frame.instruction_index),
+	}
+}
+
+fn format_source_location(location: &bytecode::SourceLocation, include_body_name: bool) -> String {
+	let position = if let Some(display_name) = location.display_name() {
+		format!("{display_name}:{}:{}", location.line(), location.column())
+	}
+	else {
+		format!("line {}, column {}", location.line(), location.column())
+	};
+
+	if include_body_name {
+		if let Some(body_name) = location.body_name() {
+			return format!("{body_name} ({position})");
+		}
+	}
+
+	position
 }
 
 impl TabloError {
@@ -205,6 +235,17 @@ mod tests {
 	}
 
 	#[test]
+	fn formats_runtime_stack_trace_with_function_names() {
+		let source = "fn inner() int {\n  var xs: [int] = [1];\n  return xs[2];\n}\nfn outer() int {\n  return inner();\n}\nouter()";
+		let error = run(source).unwrap_err();
+
+		assert_eq!(
+			error.to_string(),
+			"Runtime error: Array index 2 is out of bounds for length 1.\nStack trace:\n  at inner (<source>:3:12)\n  at outer (<source>:6:15)\n  at <source>:8:6"
+		);
+	}
+
+	#[test]
 	fn formats_source_error_with_line_and_column() {
 		let source = "1 + 2\n?";
 		let error = run(source).unwrap_err();
@@ -303,6 +344,17 @@ mod tests {
 				Some(String::from("<source>")),
 				2,
 			)),
+			stack_trace: vec![
+				crate::vm::VmStackFrame {
+					instruction_index: 6,
+					source_location: Some(crate::bytecode::SourceLocation::new(
+						None,
+						3,
+						Some(String::from("<source>")),
+						2,
+					)),
+				},
+			],
 		}));
 	}
 

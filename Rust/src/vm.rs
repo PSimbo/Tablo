@@ -42,6 +42,13 @@ pub struct VmError {
 	pub instruction_index: usize,
 	pub message: String,
 	pub source_location: Option<SourceLocation>,
+	pub stack_trace: Vec<VmStackFrame>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VmStackFrame {
+	pub instruction_index: usize,
+	pub source_location: Option<SourceLocation>,
 }
 
 impl VirtualMachine {
@@ -72,7 +79,7 @@ impl VirtualMachine {
 				&frame.code_body.instructions[frame.instruction_index],
 				frame.instruction_index,
 				&mut frame.locals,
-			).map_err(|error| enrich_vm_error(program, frame.debug_body_index, error))?;
+			).map_err(|error| enrich_vm_error(program, frame.debug_body_index, frame.instruction_index, error))?;
 
 			match outcome {
 				ExecutionOutcome::Continue(next_instruction_index) => {
@@ -115,6 +122,7 @@ impl VirtualMachine {
 					instruction_index,
 					message: format!("Function index {} does not exist.", function_index),
 					source_location: None,
+					stack_trace: Vec::new(),
 				})?;
 				let arguments = self.pop_call_arguments(*argument_count as usize, instruction_index)?;
 				let result = self.run_function(program, function, *function_index as usize, arguments, instruction_index)?;
@@ -137,6 +145,7 @@ impl VirtualMachine {
 						instruction_index,
 						message: String::from("Stack underflow while duplicating operands."),
 						source_location: None,
+						stack_trace: Vec::new(),
 					});
 				}
 
@@ -223,6 +232,7 @@ impl VirtualMachine {
 					instruction_index,
 					message: format!("Local slot {} has not been initialized.", slot),
 					source_location: None,
+					stack_trace: Vec::new(),
 				})?;
 				self.stack.push(value);
 				Ok(ExecutionOutcome::Continue(None))
@@ -347,6 +357,7 @@ impl VirtualMachine {
 			instruction_index,
 			message: String::from("Stack underflow while reading Boolean operand."),
 			source_location: None,
+			stack_trace: Vec::new(),
 		})?;
 
 		match value {
@@ -355,6 +366,7 @@ impl VirtualMachine {
 				instruction_index,
 				message: String::from("Expected a Boolean operand."),
 				source_location: None,
+				stack_trace: Vec::new(),
 			}),
 		}
 	}
@@ -375,6 +387,7 @@ impl VirtualMachine {
 			instruction_index,
 			message: String::from("Stack underflow while reading numeric operand."),
 			source_location: None,
+			stack_trace: Vec::new(),
 		})?;
 
 		if matches!(value, Value::Array(_) | Value::Boolean(_) | Value::DecimalRange(_) | Value::IntegerRange(_) | Value::Iterator(_) | Value::Text(_)) {
@@ -382,6 +395,7 @@ impl VirtualMachine {
 				instruction_index,
 				message: format!("Expected a numeric operand, found a {} value.", type_name(&value)),
 				source_location: None,
+				stack_trace: Vec::new(),
 			});
 		}
 
@@ -393,6 +407,7 @@ impl VirtualMachine {
 			instruction_index,
 			message: String::from("Stack underflow while reading operand."),
 			source_location: None,
+			stack_trace: Vec::new(),
 		})
 	}
 
@@ -556,8 +571,17 @@ fn divide_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Val
 	}
 }
 
-fn enrich_vm_error(program: &Program, debug_body_index: usize, mut error: VmError) -> VmError {
-	error.source_location = program.debug_location(debug_body_index, error.instruction_index);
+fn enrich_vm_error(program: &Program, debug_body_index: usize, instruction_index: usize, mut error: VmError) -> VmError {
+	let source_location = program.debug_location(debug_body_index, instruction_index);
+
+	if error.source_location.is_none() {
+		error.source_location = source_location.clone();
+	}
+
+	error.stack_trace.push(VmStackFrame {
+		instruction_index,
+		source_location,
+	});
 	error
 }
 
@@ -956,6 +980,7 @@ fn vm_error(instruction_index: usize, message: String) -> VmError {
 		instruction_index,
 		message,
 		source_location: None,
+		stack_trace: Vec::new(),
 	}
 }
 
@@ -984,6 +1009,12 @@ mod tests {
 			instruction_index: 1,
 			message: String::from("Stack underflow while reading operand."),
 			source_location: None,
+			stack_trace: vec![
+				super::VmStackFrame {
+					instruction_index: 1,
+					source_location: None,
+				},
+			],
 		});
 	}
 
@@ -1001,6 +1032,12 @@ mod tests {
 			instruction_index: 2,
 			message: String::from("Division by zero."),
 			source_location: None,
+			stack_trace: vec![
+				super::VmStackFrame {
+					instruction_index: 2,
+					source_location: None,
+				},
+			],
 		});
 	}
 
@@ -1018,6 +1055,12 @@ mod tests {
 			instruction_index: 2,
 			message: String::from("Expected a Boolean operand."),
 			source_location: None,
+			stack_trace: vec![
+				super::VmStackFrame {
+					instruction_index: 2,
+					source_location: None,
+				},
+			],
 		});
 	}
 
@@ -1035,6 +1078,12 @@ mod tests {
 			instruction_index: 2,
 			message: String::from("Cannot compare `bool` and `int` for equality."),
 			source_location: None,
+			stack_trace: vec![
+				super::VmStackFrame {
+					instruction_index: 2,
+					source_location: None,
+				},
+			],
 		});
 	}
 
@@ -1052,6 +1101,12 @@ mod tests {
 			instruction_index: 2,
 			message: String::from("Cannot compare `text` and `int` for equality."),
 			source_location: None,
+			stack_trace: vec![
+				super::VmStackFrame {
+					instruction_index: 2,
+					source_location: None,
+				},
+			],
 		});
 	}
 
@@ -1069,6 +1124,12 @@ mod tests {
 			instruction_index: 2,
 			message: String::from("Modulo by zero."),
 			source_location: None,
+			stack_trace: vec![
+				super::VmStackFrame {
+					instruction_index: 2,
+					source_location: None,
+				},
+			],
 		});
 	}
 
@@ -1087,6 +1148,12 @@ mod tests {
 			instruction_index: 3,
 			message: String::from("Range step cannot be zero."),
 			source_location: None,
+			stack_trace: vec![
+				super::VmStackFrame {
+					instruction_index: 3,
+					source_location: None,
+				},
+			],
 		});
 	}
 
