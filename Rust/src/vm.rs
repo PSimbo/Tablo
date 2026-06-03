@@ -150,6 +150,10 @@ impl VirtualMachine {
 		Some((self.frame_debug_body_index(program, frame), frame.instruction_index))
 	}
 
+	pub(crate) fn current_stack_depth(&self) -> usize {
+		self.frames.len()
+	}
+
 	pub(crate) fn current_stack_frames(&self, program: &Program) -> Vec<VmStackFrame> {
 		self.frames.iter().rev().map(|frame| {
 			let debug_body_index = self.frame_debug_body_index(program, frame);

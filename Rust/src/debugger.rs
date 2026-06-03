@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use crate::bytecode::InstructionSite;
 use crate::bytecode::Program;
+use crate::bytecode::SourceLocation;
 use crate::value::Value;
 use crate::vm::VirtualMachine;
 use crate::vm::VmError;
@@ -33,7 +34,9 @@ impl DebuggerStop {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PauseReason {
 	Breakpoint,
-	Step,
+	StepIn,
+	StepOut,
+	StepOver,
 }
 
 pub struct DebuggerSession<'a> {
@@ -97,7 +100,74 @@ impl<'a> DebuggerSession<'a> {
 
 		match self.vm.step(self.program)? {
 			VmExecutionState::Completed(result) => Ok(DebuggerStop::Completed(result)),
-			VmExecutionState::Running => Ok(DebuggerStop::Paused(self.paused_state(PauseReason::Step))),
+			VmExecutionState::Running => Ok(DebuggerStop::Paused(self.paused_state(PauseReason::StepIn))),
+		}
+	}
+
+	pub fn step_out(&mut self) -> Result<DebuggerStop, VmError> {
+		self.ensure_started();
+		self.skip_breakpoint_once = None;
+
+		let start_depth = self.vm.current_stack_depth();
+		let mut unwind_location: Option<SourceLocation> = None;
+
+		loop {
+			match self.vm.step(self.program)? {
+				VmExecutionState::Completed(result) => return Ok(DebuggerStop::Completed(result)),
+				VmExecutionState::Running => {}
+			}
+
+			if let Some(stop) = self.stop_at_breakpoint_if_present() {
+				return Ok(stop);
+			}
+
+			if self.vm.current_stack_depth() < start_depth {
+				let current_location = self.current_source_location();
+
+				if let Some(location) = &unwind_location {
+					if !same_user_location(current_location.as_ref(), Some(location)) {
+						return Ok(DebuggerStop::Paused(self.paused_state(PauseReason::StepOut)));
+					}
+				}
+				else {
+					unwind_location = current_location;
+				}
+			}
+		}
+	}
+
+	pub fn step_over(&mut self) -> Result<DebuggerStop, VmError> {
+		self.ensure_started();
+		self.skip_breakpoint_once = None;
+
+		let start_depth = self.vm.current_stack_depth();
+		let start_location = self.current_source_location();
+
+		match self.vm.step(self.program)? {
+			VmExecutionState::Completed(result) => return Ok(DebuggerStop::Completed(result)),
+			VmExecutionState::Running => {}
+		}
+
+		if let Some(stop) = self.stop_at_breakpoint_if_present() {
+			return Ok(stop);
+		}
+
+		loop {
+			let current_depth = self.vm.current_stack_depth();
+			let current_location = self.current_source_location();
+
+			if current_depth < start_depth || (current_depth == start_depth && !same_user_location(current_location.as_ref(), start_location.as_ref())) {
+				return Ok(DebuggerStop::Paused(self.paused_state(PauseReason::StepOver)));
+			}
+
+			match self.vm.step(self.program)? {
+				VmExecutionState::Completed(result) => return Ok(DebuggerStop::Completed(result)),
+				VmExecutionState::Running => {}
+			}
+
+			if let Some(stop) = self.stop_at_breakpoint_if_present() {
+				return Ok(stop);
+			}
 		}
 	}
 
@@ -109,6 +179,13 @@ impl<'a> DebuggerSession<'a> {
 		};
 
 		self.breakpoints.contains(&breakpoint).then_some(breakpoint)
+	}
+
+	fn current_source_location(&self) -> Option<SourceLocation> {
+		self.vm.current_stack_frames(self.program)
+			.into_iter()
+			.next()
+			.and_then(|frame| frame.source_location().cloned())
 	}
 
 	fn ensure_started(&mut self) {
@@ -123,6 +200,24 @@ impl<'a> DebuggerSession<'a> {
 			reason,
 			stack_frames: self.vm.current_stack_frames(self.program),
 		}
+	}
+
+	fn stop_at_breakpoint_if_present(&mut self) -> Option<DebuggerStop> {
+		let breakpoint = self.current_breakpoint()?;
+		self.skip_breakpoint_once = Some(breakpoint);
+		Some(DebuggerStop::Paused(self.paused_state(PauseReason::Breakpoint)))
+	}
+}
+
+fn same_user_location(lhs: Option<&SourceLocation>, rhs: Option<&SourceLocation>) -> bool {
+	match (lhs, rhs) {
+		(Some(lhs), Some(rhs)) => {
+			lhs.body_name() == rhs.body_name()
+				&& lhs.display_name() == rhs.display_name()
+				&& lhs.line() == rhs.line()
+		}
+		(None, None) => true,
+		_ => false,
 	}
 }
 
@@ -237,7 +332,49 @@ mod tests {
 
 		let stop = session.step_in().unwrap();
 		let paused = stop.paused_state().unwrap();
-		assert_eq!(paused.reason(), PauseReason::Step);
+		assert_eq!(paused.reason(), PauseReason::StepIn);
 		assert_eq!(paused.current_frame().unwrap().source_location().unwrap().line(), 1);
+	}
+
+	#[test]
+	fn steps_out_to_caller_after_entering_function() {
+		let source = "fn helper() int {\n  var y: int = 1;\n  return y;\n}\nvar x: int = helper();\nx";
+		let program = compile_debug_program(source, "example.tablo");
+		let mut session = DebuggerSession::new(&program);
+		let breakpoints = session.resolve_source_breakpoints("example.tablo", &[2]);
+		session.set_breakpoints(breakpoints);
+
+		let stop = session.resume().unwrap();
+		let paused = stop.paused_state().unwrap();
+		assert_eq!(paused.reason(), PauseReason::Breakpoint);
+		assert_eq!(paused.current_frame().unwrap().source_location().unwrap().line(), 2);
+
+		let stop = session.step_out().unwrap();
+		let paused = stop.paused_state().unwrap();
+
+		assert_eq!(paused.reason(), PauseReason::StepOut);
+		assert_eq!(paused.current_frame().unwrap().source_location().unwrap().line(), 6);
+		assert_eq!(paused.current_frame().unwrap().local("x").unwrap().value(), &Value::Integer(1));
+	}
+
+	#[test]
+	fn steps_over_function_call_without_entering_callee() {
+		let source = "fn helper() int {\n  return 1;\n}\nvar x: int = helper();\nx";
+		let program = compile_debug_program(source, "example.tablo");
+		let mut session = DebuggerSession::new(&program);
+		let breakpoints = session.resolve_source_breakpoints("example.tablo", &[4]);
+		session.set_breakpoints(breakpoints);
+
+		let stop = session.resume().unwrap();
+		let paused = stop.paused_state().unwrap();
+		assert_eq!(paused.reason(), PauseReason::Breakpoint);
+		assert_eq!(paused.current_frame().unwrap().source_location().unwrap().line(), 4);
+
+		let stop = session.step_over().unwrap();
+		let paused = stop.paused_state().unwrap();
+
+		assert_eq!(paused.reason(), PauseReason::StepOver);
+		assert_eq!(paused.current_frame().unwrap().source_location().unwrap().line(), 5);
+		assert_eq!(paused.current_frame().unwrap().local("x").unwrap().value(), &Value::Integer(1));
 	}
 }
