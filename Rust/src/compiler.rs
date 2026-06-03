@@ -31,6 +31,7 @@ use crate::bytecode::CodeBodyDebugInfo;
 use crate::bytecode::CompiledFunction;
 use crate::bytecode::DebugInfo;
 use crate::bytecode::Instruction;
+use crate::bytecode::LocalVariableDebugInfo;
 use crate::bytecode::Program;
 use crate::semantic::analyzer::SemanticAnalyzer;
 use crate::semantic::analyzer::SemanticProgram;
@@ -49,6 +50,8 @@ pub struct Compiler {
 #[derive(Default)]
 struct EmissionState {
 	instructions: Vec<Instruction>,
+	local_scope_stack: Vec<Vec<usize>>,
+	locals: Vec<LocalVariableDebugInfo>,
 	positions: Vec<u32>,
 }
 
@@ -111,7 +114,7 @@ impl Compiler {
 			crate::bytecode::ConstantPool::default(),
 			CodeBody::new(emission.instructions),
 			DebugInfo::new(
-				vec![CodeBodyDebugInfo::new(None, emission.positions, None)],
+				vec![CodeBodyDebugInfo::new(None, emission.positions, emission.locals, None)],
 				vec![],
 			),
 		)
@@ -130,6 +133,7 @@ impl Compiler {
 		}
 
 		let mut emission = EmissionState::default();
+		self.enter_debug_scope(&mut emission);
 
 		for statement in &program.statements {
 			self.compile_statement(statement, &semantic_program, &mut emission)?;
@@ -139,7 +143,8 @@ impl Compiler {
 			self.compile_into(result, &semantic_program, &mut emission);
 		}
 
-		code_body_debug.push(CodeBodyDebugInfo::new(None, emission.positions, None));
+		self.close_all_debug_scopes(&mut emission);
+		code_body_debug.push(CodeBodyDebugInfo::new(None, emission.positions, emission.locals, None));
 
 		Ok(Program::from_parts_with_functions_and_debug(
 			crate::bytecode::ConstantPool::default(),
@@ -152,6 +157,12 @@ impl Compiler {
 	pub fn new() -> Self {
 		Self {
 			loop_stack: Vec::new(),
+		}
+	}
+
+	fn close_all_debug_scopes(&self, emission: &mut EmissionState) {
+		while !emission.local_scope_stack.is_empty() {
+			self.exit_debug_scope(emission);
 		}
 	}
 
@@ -179,14 +190,32 @@ impl Compiler {
 	fn compile_function(&mut self, function: &FunctionDeclaration, semantic_program: &SemanticProgram) -> Result<(CompiledFunction, CodeBodyDebugInfo), CompileError> {
 		self.loop_stack.clear();
 		let mut emission = EmissionState::default();
+		self.enter_debug_scope(&mut emission);
+
+		for parameter in &function.parameters {
+			let slot = semantic_program.declaration_slot(parameter.position).ok_or(self.compile_error(
+				parameter.position,
+				format!("Missing slot for parameter `{}`.", parameter.name),
+			))?;
+			self.record_local_debug(
+				&mut emission,
+				parameter.name.clone(),
+				slot,
+				data_type_name(&parameter.data_type),
+				false,
+				0,
+			);
+		}
+
 		self.compile_statement(&Statement::Block(function.body.clone()), semantic_program, &mut emission)?;
+		self.close_all_debug_scopes(&mut emission);
 
 		Ok((
 			CompiledFunction::new(
 				Some(function.name.clone()),
 				CodeBody::new(emission.instructions),
 			),
-			CodeBodyDebugInfo::new(Some(function.name.clone()), emission.positions, None),
+			CodeBodyDebugInfo::new(Some(function.name.clone()), emission.positions, emission.locals, None),
 		))
 	}
 
@@ -305,10 +334,13 @@ impl Compiler {
 	fn compile_statement(&mut self, statement: &Statement, semantic_program: &SemanticProgram, emission: &mut EmissionState) -> Result<(), CompileError> {
 		match statement {
 			Statement::Block(BlockStatement { statements, .. }) => {
+				self.enter_debug_scope(emission);
+
 				for statement in statements {
 					self.compile_statement(statement, semantic_program, emission)?;
 				}
 
+				self.exit_debug_scope(emission);
 				Ok(())
 			}
 			Statement::Break(BreakStatement { position }) => {
@@ -357,6 +389,7 @@ impl Compiler {
 					String::from("Missing iterator slot for `for` statement."),
 				))?;
 
+				self.enter_debug_scope(emission);
 				self.compile_into(iterable, semantic_program, emission);
 				self.emit(emission, Instruction::IterInit, iterable.position());
 				self.emit(emission, Instruction::StoreLocal(iterator_slot), *position);
@@ -377,6 +410,18 @@ impl Compiler {
 				self.emit(emission, Instruction::IterNext, iterable.position());
 				self.emit(emission, Instruction::StoreLocal(iterator_slot), *position);
 				self.emit(emission, Instruction::StoreLocal(variable_slot), variable.position);
+				let variable_type = semantic_program.declaration_type(variable.position).ok_or(self.compile_error(
+					variable.position,
+					format!("Missing declared type for loop variable `{}`.", variable.name),
+				))?;
+				self.record_local_debug(
+					emission,
+					variable.name.clone(),
+					variable_slot,
+					data_type_name(variable_type),
+					false,
+					emission.instructions.len() as u32,
+				);
 
 				self.compile_statement(&Statement::Block(body.clone()), semantic_program, emission)?;
 				self.emit(emission, Instruction::Jump(loop_start), *position);
@@ -395,6 +440,7 @@ impl Compiler {
 					emission.instructions[continue_jump_index] = Instruction::Jump(loop_context.loop_start);
 				}
 
+				self.exit_debug_scope(emission);
 				Ok(())
 			}
 			Statement::If(IfStatement {
@@ -438,7 +484,7 @@ impl Compiler {
 
 				Ok(())
 			}
-			Statement::VariableDeclaration(VariableDeclaration { data_type: _, initial_value, is_const, name, position }) => {
+			Statement::VariableDeclaration(VariableDeclaration { data_type, initial_value, is_const, name, position }) => {
 				let slot = semantic_program.declaration_slot(*position).ok_or(self.compile_error(
 					*position,
 					format!("Missing slot for variable declaration `{name}`."),
@@ -455,6 +501,14 @@ impl Compiler {
 				))?;
 				self.compile_into(initial_value, semantic_program, emission);
 				self.emit(emission, Instruction::StoreLocal(slot), *position);
+				self.record_local_debug(
+					emission,
+					name.clone(),
+					slot,
+					data_type_name(data_type),
+					*is_const,
+					emission.instructions.len() as u32,
+				);
 
 				Ok(())
 			}
@@ -498,6 +552,68 @@ impl Compiler {
 	fn emit(&self, emission: &mut EmissionState, instruction: Instruction, position: usize) {
 		emission.instructions.push(instruction);
 		emission.positions.push(position.min(u32::MAX as usize) as u32);
+	}
+
+	fn enter_debug_scope(&self, emission: &mut EmissionState) {
+		emission.local_scope_stack.push(Vec::new());
+	}
+
+	fn exit_debug_scope(&self, emission: &mut EmissionState) {
+		let Some(local_indices) = emission.local_scope_stack.pop() else {
+			return;
+		};
+
+		let scope_end = emission.instructions.len() as u32;
+
+		for local_index in local_indices {
+			if let Some(local) = emission.locals.get_mut(local_index) {
+				*local = LocalVariableDebugInfo::new(
+					local.name().to_string(),
+					local.slot(),
+					local.declared_type().to_string(),
+					local.is_const(),
+					local.scope_start(),
+					scope_end,
+				);
+			}
+		}
+	}
+
+	fn record_local_debug(
+		&self,
+		emission: &mut EmissionState,
+		name: String,
+		slot: u32,
+		declared_type: String,
+		is_const: bool,
+		scope_start: u32,
+	) {
+		let local_index = emission.locals.len();
+		emission.locals.push(LocalVariableDebugInfo::new(
+			name,
+			slot,
+			declared_type,
+			is_const,
+			scope_start,
+			scope_start,
+		));
+
+		if let Some(scope) = emission.local_scope_stack.last_mut() {
+			scope.push(local_index);
+		}
+	}
+}
+
+fn data_type_name(data_type: &crate::ast::DataType) -> String {
+	match data_type {
+		crate::ast::DataType::Array(element_type) => format!("[{}]", data_type_name(element_type)),
+		crate::ast::DataType::Bool => String::from("bool"),
+		crate::ast::DataType::Dec => String::from("dec"),
+		crate::ast::DataType::EmptyArray => String::from("empty array"),
+		crate::ast::DataType::Int => String::from("int"),
+		crate::ast::DataType::Range(element_type) => format!("range<{}>", data_type_name(element_type)),
+		crate::ast::DataType::Text => String::from("text"),
+		crate::ast::DataType::Void => String::from("void"),
 	}
 }
 

@@ -66,6 +66,7 @@ pub struct CodeBody {
 pub struct CodeBodyDebugInfo {
 	body_name: Option<String>,
 	instruction_positions: Vec<u32>,
+	locals: Vec<LocalVariableDebugInfo>,
 	source_file_index: Option<u32>,
 }
 
@@ -87,6 +88,16 @@ pub struct ConstantPool {
 pub struct DebugInfo {
 	code_bodies: Vec<CodeBodyDebugInfo>,
 	source_files: Vec<SourceFileDebugInfo>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalVariableDebugInfo {
+	declared_type: String,
+	is_const: bool,
+	name: String,
+	scope_end: u32,
+	scope_start: u32,
+	slot: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -247,10 +258,16 @@ impl Program {
 }
 
 impl CodeBodyDebugInfo {
-	pub fn new(body_name: Option<String>, instruction_positions: Vec<u32>, source_file_index: Option<u32>) -> Self {
+	pub fn new(
+		body_name: Option<String>,
+		instruction_positions: Vec<u32>,
+		locals: Vec<LocalVariableDebugInfo>,
+		source_file_index: Option<u32>
+	) -> Self {
 		Self {
 			body_name,
 			instruction_positions,
+			locals,
 			source_file_index,
 		}
 	}
@@ -261,6 +278,10 @@ impl CodeBodyDebugInfo {
 
 	pub fn instruction_positions(&self) -> &[u32] {
 		&self.instruction_positions
+	}
+
+	pub fn locals(&self) -> &[LocalVariableDebugInfo] {
+		&self.locals
 	}
 
 	pub fn source_file_index(&self) -> Option<u32> {
@@ -274,6 +295,50 @@ impl DebugInfo {
 			code_bodies,
 			source_files,
 		}
+	}
+}
+
+impl LocalVariableDebugInfo {
+	pub fn new(
+		name: impl Into<String>,
+		slot: u32,
+		declared_type: impl Into<String>,
+		is_const: bool,
+		scope_start: u32,
+		scope_end: u32,
+	) -> Self {
+		Self {
+			declared_type: declared_type.into(),
+			is_const,
+			name: name.into(),
+			scope_end,
+			scope_start,
+			slot,
+		}
+	}
+
+	pub fn declared_type(&self) -> &str {
+		&self.declared_type
+	}
+
+	pub fn is_const(&self) -> bool {
+		self.is_const
+	}
+
+	pub fn name(&self) -> &str {
+		&self.name
+	}
+
+	pub fn scope_end(&self) -> u32 {
+		self.scope_end
+	}
+
+	pub fn scope_start(&self) -> u32 {
+		self.scope_start
+	}
+
+	pub fn slot(&self) -> u32 {
+		self.slot
 	}
 }
 

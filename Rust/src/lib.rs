@@ -270,7 +270,7 @@ mod tests {
 	#[test]
 	fn preserves_debug_metadata_in_object_file() {
 		let output_path = unique_test_output_path("preserves_debug_metadata_in_object_file");
-		compile_with_source_name("1 + 2", "example.tablo", &output_path).unwrap();
+		compile_with_source_name("var x: int = 1;\nx", "example.tablo", &output_path).unwrap();
 		let program = read_program_from_path(&output_path).unwrap();
 		let _ = std::fs::remove_file(&output_path);
 
@@ -278,7 +278,13 @@ mod tests {
 		assert_eq!(debug.source_files().len(), 1);
 		assert_eq!(debug.source_files()[0].display_name(), "example.tablo");
 		assert_eq!(debug.code_bodies().len(), 1);
-		assert_eq!(debug.code_bodies()[0].instruction_positions(), &[0, 4, 2]);
+		assert_eq!(debug.code_bodies()[0].instruction_positions(), &[13, 0, 16]);
+		assert_eq!(debug.code_bodies()[0].locals().len(), 1);
+		assert_eq!(debug.code_bodies()[0].locals()[0].name(), "x");
+		assert_eq!(debug.code_bodies()[0].locals()[0].slot(), 0);
+		assert_eq!(debug.code_bodies()[0].locals()[0].declared_type(), "int");
+		assert_eq!(debug.code_bodies()[0].locals()[0].scope_start(), 2);
+		assert_eq!(debug.code_bodies()[0].locals()[0].scope_end(), 3);
 	}
 
 	#[test]

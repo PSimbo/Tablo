@@ -12,6 +12,7 @@ use crate::bytecode::CompiledFunction;
 use crate::bytecode::ConstantPool;
 use crate::bytecode::DebugInfo;
 use crate::bytecode::Instruction;
+use crate::bytecode::LocalVariableDebugInfo;
 use crate::bytecode::Program;
 use crate::bytecode::SourceFileDebugInfo;
 use crate::value::Decimal;
@@ -317,7 +318,27 @@ impl<'a> ObjectFileReader<'a> {
 				positions.push(self.read_u32()?);
 			}
 
-			code_bodies.push(CodeBodyDebugInfo::new(body_name, positions, source_file_index));
+			let local_count = self.read_u32()? as usize;
+			let mut locals = Vec::with_capacity(local_count);
+
+			for _ in 0..local_count {
+				let name = self.read_string()?;
+				let slot = self.read_u32()?;
+				let declared_type = self.read_string()?;
+				let is_const = self.read_bool()?;
+				let scope_start = self.read_u32()?;
+				let scope_end = self.read_u32()?;
+				locals.push(LocalVariableDebugInfo::new(
+					name,
+					slot,
+					declared_type,
+					is_const,
+					scope_start,
+					scope_end,
+				));
+			}
+
+			code_bodies.push(CodeBodyDebugInfo::new(body_name, positions, locals, source_file_index));
 		}
 
 		Ok(DebugInfo::new(code_bodies, source_files))
@@ -570,6 +591,18 @@ impl ObjectFileLayout {
 			bytes.extend_from_slice(&(code_body.instruction_positions().len() as u32).to_le_bytes());
 			for position in code_body.instruction_positions() {
 				bytes.extend_from_slice(&position.to_le_bytes());
+			}
+
+			bytes.extend_from_slice(&(code_body.locals().len() as u32).to_le_bytes());
+			for local in code_body.locals() {
+				bytes.extend_from_slice(&(local.name().len() as u32).to_le_bytes());
+				bytes.extend_from_slice(local.name().as_bytes());
+				bytes.extend_from_slice(&local.slot().to_le_bytes());
+				bytes.extend_from_slice(&(local.declared_type().len() as u32).to_le_bytes());
+				bytes.extend_from_slice(local.declared_type().as_bytes());
+				bytes.push(u8::from(local.is_const()));
+				bytes.extend_from_slice(&local.scope_start().to_le_bytes());
+				bytes.extend_from_slice(&local.scope_end().to_le_bytes());
 			}
 		}
 	}

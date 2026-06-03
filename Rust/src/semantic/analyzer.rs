@@ -63,6 +63,7 @@ pub struct SemanticProgram {
 	call_return_types: BTreeMap<usize, DataType>,
 	call_targets: BTreeMap<usize, u32>,
 	declaration_slots: BTreeMap<usize, u32>,
+	declaration_types: BTreeMap<usize, DataType>,
 	identifier_slots: BTreeMap<usize, u32>,
 	iterator_slots: BTreeMap<usize, u32>,
 }
@@ -82,6 +83,10 @@ impl SemanticProgram {
 
 	pub fn declaration_slot(&self, position: usize) -> Option<u32> {
 		self.declaration_slots.get(&position).copied()
+	}
+
+	pub fn declaration_type(&self, position: usize) -> Option<&DataType> {
+		self.declaration_types.get(&position)
 	}
 
 	pub fn identifier_slot(&self, position: usize) -> Option<u32> {
@@ -800,6 +805,7 @@ impl SemanticAnalyzer {
 		let slot = self.next_local_slot;
 		self.next_local_slot += 1;
 		self.semantic_program.declaration_slots.insert(parameter.position, slot);
+		self.semantic_program.declaration_types.insert(parameter.position, parameter.data_type.clone());
 		self.declare_local(parameter.name.clone(), LocalBinding {
 			data_type: parameter.data_type.clone(),
 			is_const: false,
@@ -885,6 +891,7 @@ impl SemanticAnalyzer {
 				let loop_variable_slot = self.next_local_slot;
 				self.next_local_slot += 1;
 				self.semantic_program.declaration_slots.insert(variable.position, loop_variable_slot);
+				self.semantic_program.declaration_types.insert(variable.position, variable_type.clone());
 				self.declare_local(variable.name.clone(), LocalBinding {
 					data_type: variable_type,
 					is_const: false,
@@ -974,6 +981,7 @@ impl SemanticAnalyzer {
 				let slot = self.next_local_slot;
 				self.next_local_slot += 1;
 				self.semantic_program.declaration_slots.insert(*position, slot);
+				self.semantic_program.declaration_types.insert(*position, data_type.clone());
 				self.declare_local(name.clone(), LocalBinding {
 					data_type: data_type.clone(),
 					is_const: *is_const,
