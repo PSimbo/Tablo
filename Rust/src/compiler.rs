@@ -164,13 +164,6 @@ impl Compiler {
 		semantic_program: &SemanticProgram,
 		emission: &mut EmissionState,
 	) -> Result<(), CompileError> {
-		if let Some(function_index) = semantic_program.entry_point_function_index() {
-			let position = semantic_program.entry_point_position().unwrap_or(0);
-			self.emit(emission, Instruction::MakeArray(0), position);
-			self.emit(emission, Instruction::Call(function_index, 1), position);
-			return Ok(());
-		}
-
 		for statement in &program.statements {
 			self.compile_statement(statement, semantic_program, emission)?;
 		}
@@ -341,6 +334,15 @@ impl Compiler {
 			let (compiled_function, debug_info) = self.compile_function(function, &semantic_program)?;
 			functions.push(compiled_function);
 			code_body_debug.push(debug_info);
+		}
+
+		if let Some(function_index) = semantic_program.entry_point_function_index() {
+			return Ok(Program::from_entry_function(
+				crate::bytecode::ConstantPool::default(),
+				function_index,
+				functions,
+				DebugInfo::new(code_body_debug, vec![]),
+			));
 		}
 
 		let mut emission = EmissionState::default();
@@ -723,7 +725,7 @@ mod tests {
 
 		let program = Compiler::new().compile_expression(&expression);
 
-		assert_eq!(program.entry.instructions, vec![
+		assert_eq!(program.entry_code().unwrap().instructions, vec![
 			Instruction::PushInteger(1),
 			Instruction::PushInteger(2),
 			Instruction::PushInteger(3),
@@ -741,7 +743,7 @@ mod tests {
 
 		let program = Compiler::new().compile_expression(&expression);
 
-		assert_eq!(program.entry.instructions, vec![
+		assert_eq!(program.entry_code().unwrap().instructions, vec![
 			Instruction::PushBoolean(true),
 		]);
 	}
@@ -777,7 +779,7 @@ mod tests {
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
 
-		assert_eq!(bytecode.entry.instructions, vec![
+		assert_eq!(bytecode.entry_code().unwrap().instructions, vec![
 			Instruction::PushInteger(1),
 			Instruction::PushInteger(2),
 			Instruction::MakeArray(2),
@@ -817,7 +819,7 @@ mod tests {
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
 
-		assert_eq!(bytecode.entry.instructions, vec![
+		assert_eq!(bytecode.entry_code().unwrap().instructions, vec![
 			Instruction::PushInteger(5),
 			Instruction::StoreLocal(0),
 			Instruction::LoadLocal(0),
@@ -876,7 +878,7 @@ mod tests {
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
 
-		assert_eq!(bytecode.entry.instructions, vec![
+		assert_eq!(bytecode.entry_code().unwrap().instructions, vec![
 			Instruction::PushInteger(5),
 			Instruction::PushInteger(10),
 			Instruction::MakeArray(2),
@@ -916,7 +918,7 @@ mod tests {
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
 
-		assert_eq!(bytecode.entry.instructions, vec![
+		assert_eq!(bytecode.entry_code().unwrap().instructions, vec![
 			Instruction::PushInteger(5),
 			Instruction::StoreLocal(0),
 			Instruction::LoadLocal(0),
@@ -932,7 +934,7 @@ mod tests {
 
 		let program = Compiler::new().compile_expression(&expression);
 
-		assert_eq!(program.entry.instructions, vec![
+		assert_eq!(program.entry_code().unwrap().instructions, vec![
 			Instruction::PushDecimal(Decimal::from_literal("1.25").unwrap()),
 		]);
 	}
@@ -954,7 +956,7 @@ mod tests {
 
 		let program = Compiler::new().compile_expression(&expression);
 
-		assert_eq!(program.entry.instructions, vec![
+		assert_eq!(program.entry_code().unwrap().instructions, vec![
 			Instruction::PushBoolean(true),
 			Instruction::PushBoolean(false),
 			Instruction::Equal,
@@ -997,7 +999,7 @@ mod tests {
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
 
-		assert_eq!(bytecode.entry.instructions, vec![
+		assert_eq!(bytecode.entry_code().unwrap().instructions, vec![
 			Instruction::PushInteger(5),
 			Instruction::StoreLocal(0),
 			Instruction::LoadLocal(0),
@@ -1050,7 +1052,7 @@ mod tests {
 
 		let program = Compiler::new().compile_program(&program).unwrap();
 
-		assert_eq!(program.entry.instructions, vec![
+		assert_eq!(program.entry_code().unwrap().instructions, vec![
 			Instruction::PushInteger(1),
 			Instruction::PushInteger(2),
 			Instruction::MakeArray(2),
@@ -1134,7 +1136,7 @@ mod tests {
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
 
-		assert_eq!(bytecode.entry.instructions, vec![
+		assert_eq!(bytecode.entry_code().unwrap().instructions, vec![
 			Instruction::PushInteger(1),
 			Instruction::StoreLocal(0),
 			Instruction::PushBoolean(false),
@@ -1180,7 +1182,7 @@ mod tests {
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
 
-		assert_eq!(bytecode.entry.instructions, vec![
+		assert_eq!(bytecode.entry_code().unwrap().instructions, vec![
 			Instruction::PushBoolean(true),
 			Instruction::JumpIfFalse(4),
 			Instruction::PushInteger(1),
@@ -1197,7 +1199,7 @@ mod tests {
 
 		let program = Compiler::new().compile_expression(&expression);
 
-		assert_eq!(program.entry.instructions, vec![
+		assert_eq!(program.entry_code().unwrap().instructions, vec![
 			Instruction::PushInteger(42),
 		]);
 	}
@@ -1215,7 +1217,7 @@ mod tests {
 
 		let program = Compiler::new().compile_expression(&expression);
 
-		assert_eq!(program.entry.instructions, vec![
+		assert_eq!(program.entry_code().unwrap().instructions, vec![
 			Instruction::PushBoolean(false),
 			Instruction::Not,
 		]);
@@ -1238,7 +1240,7 @@ mod tests {
 
 		let program = Compiler::new().compile_expression(&expression);
 
-		assert_eq!(program.entry.instructions, vec![
+		assert_eq!(program.entry_code().unwrap().instructions, vec![
 			Instruction::PushBoolean(true),
 			Instruction::PushBoolean(false),
 			Instruction::Xor,
@@ -1270,7 +1272,7 @@ mod tests {
 
 		let program = Compiler::new().compile_expression(&expression);
 
-		assert_eq!(program.entry.instructions, vec![
+		assert_eq!(program.entry_code().unwrap().instructions, vec![
 			Instruction::PushInteger(9),
 			Instruction::PushInteger(4),
 			Instruction::PushInteger(2),
@@ -1311,7 +1313,7 @@ mod tests {
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
 
-		assert_eq!(bytecode.entry.instructions, vec![
+		assert_eq!(bytecode.entry_code().unwrap().instructions, vec![
 			Instruction::PushInteger(1),
 			Instruction::StoreLocal(0),
 			Instruction::LoadLocal(0),
@@ -1337,7 +1339,7 @@ mod tests {
 
 		let program = Compiler::new().compile_expression(&expression);
 
-		assert_eq!(program.entry.instructions, vec![
+		assert_eq!(program.entry_code().unwrap().instructions, vec![
 			Instruction::PushInteger(0),
 			Instruction::PushInteger(10),
 			Instruction::MakeRange,
@@ -1353,7 +1355,7 @@ mod tests {
 
 		let program = Compiler::new().compile_expression(&expression);
 
-		assert_eq!(program.entry.instructions, vec![
+		assert_eq!(program.entry_code().unwrap().instructions, vec![
 			Instruction::PushText(String::from("hello")),
 		]);
 	}
@@ -1371,7 +1373,7 @@ mod tests {
 
 		let program = Compiler::new().compile_expression(&expression);
 
-		assert_eq!(program.entry.instructions, vec![
+		assert_eq!(program.entry_code().unwrap().instructions, vec![
 			Instruction::PushInteger(42),
 			Instruction::Negate,
 		]);
@@ -1433,7 +1435,7 @@ mod tests {
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
 
-		assert_eq!(bytecode.entry.instructions, vec![
+		assert_eq!(bytecode.entry_code().unwrap().instructions, vec![
 			Instruction::PushInteger(0),
 			Instruction::StoreLocal(0),
 			Instruction::LoadLocal(0),
@@ -1526,7 +1528,7 @@ mod tests {
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
 
-		assert_eq!(bytecode.entry.instructions, vec![
+		assert_eq!(bytecode.entry_code().unwrap().instructions, vec![
 			Instruction::PushInteger(0),
 			Instruction::StoreLocal(0),
 			Instruction::PushBoolean(true),

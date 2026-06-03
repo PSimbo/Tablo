@@ -225,10 +225,7 @@ mod tests {
 		let program = read_program_from_path(&output_path).unwrap();
 		let _ = std::fs::remove_file(&output_path);
 
-		assert_eq!(program.entry.instructions, vec![
-			Instruction::MakeArray(0),
-			Instruction::Call(0, 1),
-		]);
+		assert_eq!(program.entry_function_index(), Some(0));
 	}
 
 	#[test]
@@ -320,6 +317,17 @@ mod tests {
 	}
 
 	#[test]
+	fn omits_synthetic_entry_frame_from_standalone_runtime_stack_trace() {
+		let source = "fn inner() int {\n  var xs: [int] = [1];\n  return xs[2];\n}\nfn Main(args: [text]) int {\n  return inner();\n}";
+		let error = run(source).unwrap_err();
+
+		assert_eq!(
+			error.to_string(),
+			"Runtime error: Array index 2 is out of bounds for length 1.\nStack trace:\n  at inner (<source>:3:12)\n  at Main (<source>:6:15)"
+		);
+	}
+
+	#[test]
 	fn preserves_debug_metadata_in_object_file() {
 		let output_path = unique_test_output_path("preserves_debug_metadata_in_object_file");
 		compile_with_source_name("fn Main(args: [text]) int {\nvar x: int = 1;\nreturn x;\n}", "example.tablo", &output_path).unwrap();
@@ -329,7 +337,7 @@ mod tests {
 		let debug = program.debug_info();
 		assert_eq!(debug.source_files().len(), 1);
 		assert_eq!(debug.source_files()[0].display_name(), "example.tablo");
-		assert_eq!(debug.code_bodies().len(), 2);
+		assert_eq!(debug.code_bodies().len(), 1);
 		assert_eq!(debug.code_bodies()[0].body_name(), Some("Main"));
 		assert_eq!(debug.code_bodies()[0].locals().len(), 2);
 		assert_eq!(debug.code_bodies()[0].locals()[1].name(), "x");

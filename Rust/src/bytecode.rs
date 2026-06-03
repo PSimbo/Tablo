@@ -91,6 +91,12 @@ pub struct DebugInfo {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EntryPoint {
+	Code(CodeBody),
+	Function(u32),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstructionSite {
 	body_index: usize,
 	instruction_index: usize,
@@ -111,8 +117,8 @@ pub struct LocalVariableDebugInfo {
 pub struct Program {
 	constants: ConstantPool,
 	debug: DebugInfo,
+	entry_point: EntryPoint,
 	functions: Vec<CompiledFunction>,
-	pub entry: CodeBody,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -200,6 +206,20 @@ impl Program {
 		Self::from_parts(ConstantPool::default(), CodeBody::new(instructions))
 	}
 
+	pub fn from_entry_function(
+		constants: ConstantPool,
+		entry_function_index: u32,
+		functions: Vec<CompiledFunction>,
+		debug: DebugInfo,
+	) -> Self {
+		Self {
+			constants,
+			debug,
+			entry_point: EntryPoint::Function(entry_function_index),
+			functions,
+		}
+	}
+
 	pub fn from_parts(constants: ConstantPool, entry: CodeBody) -> Self {
 		Self::from_parts_with_functions_and_debug(constants, entry, Vec::new(), DebugInfo::default())
 	}
@@ -221,8 +241,8 @@ impl Program {
 		Self {
 			constants,
 			debug,
+			entry_point: EntryPoint::Code(entry),
 			functions,
-			entry,
 		}
 	}
 
@@ -255,6 +275,24 @@ impl Program {
 		})
 	}
 
+	pub fn entry_code(&self) -> Option<&CodeBody> {
+		match &self.entry_point {
+			EntryPoint::Code(code_body) => Some(code_body),
+			EntryPoint::Function(_) => None,
+		}
+	}
+
+	pub fn entry_function_index(&self) -> Option<u32> {
+		match self.entry_point {
+			EntryPoint::Code(_) => None,
+			EntryPoint::Function(function_index) => Some(function_index),
+		}
+	}
+
+	pub fn entry_point(&self) -> &EntryPoint {
+		&self.entry_point
+	}
+
 	pub fn functions(&self) -> &[CompiledFunction] {
 		&self.functions
 	}
@@ -278,7 +316,10 @@ impl Program {
 	}
 
 	pub fn instructions(&self) -> &[Instruction] {
-		&self.entry.instructions
+		match &self.entry_point {
+			EntryPoint::Code(code_body) => &code_body.instructions,
+			EntryPoint::Function(_) => &[],
+		}
 	}
 
 	pub fn visible_locals(&self, body_index: usize, instruction_index: usize) -> Vec<LocalVariableDebugInfo> {
@@ -491,7 +532,7 @@ mod tests {
 
 		let program = Program::from_parts_with_functions(ConstantPool::default(), entry.clone(), vec![helper.clone()]);
 
-		assert_eq!(program.entry, entry);
+		assert_eq!(program.entry_code(), Some(&entry));
 		assert_eq!(program.functions(), &[helper]);
 	}
 }

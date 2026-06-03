@@ -11,6 +11,7 @@ use crate::bytecode::CodeBodyDebugInfo;
 use crate::bytecode::CompiledFunction;
 use crate::bytecode::ConstantPool;
 use crate::bytecode::DebugInfo;
+use crate::bytecode::EntryPoint;
 use crate::bytecode::Instruction;
 use crate::bytecode::LocalVariableDebugInfo;
 use crate::bytecode::Program;
@@ -75,6 +76,7 @@ struct ObjectFileLayout {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ObjectFileSection {
+	EntryFunction(u32),
 	Function(CompiledFunction),
 	EntryCode(CodeBody),
 }
@@ -452,7 +454,16 @@ impl<'a> ObjectFileReader<'a> {
 			)));
 		}
 
-		sections.push(ObjectFileSection::EntryCode(self.read_code_body()?));
+		match self.read_u8()? {
+			0 => sections.push(ObjectFileSection::EntryCode(self.read_code_body()?)),
+			1 => sections.push(ObjectFileSection::EntryFunction(self.read_u32()?)),
+			kind => {
+				return Err(ObjectFileError {
+					offset: self.offset - 1,
+					message: format!("Unknown entry point kind {kind}."),
+				});
+			}
+		}
 
 		let debug = if self.is_at_end() {
 			DebugInfo::default()
@@ -506,7 +517,10 @@ impl ObjectFileLayout {
 			sections.push(ObjectFileSection::Function(function.clone()));
 		}
 
-		sections.push(ObjectFileSection::EntryCode(program.entry.clone()));
+		match program.entry_point() {
+			EntryPoint::Code(code_body) => sections.push(ObjectFileSection::EntryCode(code_body.clone())),
+			EntryPoint::Function(function_index) => sections.push(ObjectFileSection::EntryFunction(*function_index)),
+		}
 
 		Self {
 			debug: program.debug_info().clone(),
@@ -516,18 +530,29 @@ impl ObjectFileLayout {
 
 	fn into_program(self) -> Result<Program, ObjectFileError> {
 		let mut entry_code = None;
+		let mut entry_function = None;
 		let mut functions = Vec::new();
 
 		for section in self.sections {
 			match section {
+				ObjectFileSection::EntryFunction(function_index) => {
+					if entry_code.is_some() || entry_function.is_some() {
+						return Err(ObjectFileError {
+							offset: 0,
+							message: String::from("Object file contains more than one entry point section."),
+						});
+					}
+
+					entry_function = Some(function_index);
+				}
 				ObjectFileSection::Function(function) => {
 					functions.push(function);
 				}
 				ObjectFileSection::EntryCode(code_body) => {
-					if entry_code.is_some() {
+					if entry_code.is_some() || entry_function.is_some() {
 						return Err(ObjectFileError {
 							offset: 0,
-							message: String::from("Object file contains more than one entry code section."),
+							message: String::from("Object file contains more than one entry point section."),
 						});
 					}
 
@@ -536,9 +561,18 @@ impl ObjectFileLayout {
 			}
 		}
 
+		if let Some(function_index) = entry_function {
+			return Ok(Program::from_entry_function(
+				ConstantPool::default(),
+				function_index,
+				functions,
+				self.debug,
+			));
+		}
+
 		let entry_code = entry_code.ok_or(ObjectFileError {
 			offset: 0,
-			message: String::from("Object file does not contain an entry code section."),
+			message: String::from("Object file does not contain an entry point section."),
 		})?;
 
 		Ok(Program::from_parts_with_functions_and_debug(
@@ -557,9 +591,22 @@ impl ObjectFileLayout {
 
 		for section in &self.sections {
 			match section {
+				ObjectFileSection::EntryFunction(_) => {}
 				ObjectFileSection::Function(function) => write_code_body(bytes, function.body()),
-				ObjectFileSection::EntryCode(code_body) => write_code_body(bytes, code_body),
+				ObjectFileSection::EntryCode(_) => {}
 			}
+		}
+
+		match self.sections.iter().find(|section| !matches!(section, ObjectFileSection::Function(_))) {
+			Some(ObjectFileSection::EntryCode(code_body)) => {
+				bytes.push(0);
+				write_code_body(bytes, code_body);
+			}
+			Some(ObjectFileSection::EntryFunction(function_index)) => {
+				bytes.push(1);
+				bytes.extend_from_slice(&function_index.to_le_bytes());
+			}
+			Some(ObjectFileSection::Function(_)) | None => unreachable!("Object file layout must include a non-function entry point section."),
 		}
 
 		bytes.extend_from_slice(&(self.debug.source_files().len() as u32).to_le_bytes());
@@ -633,14 +680,15 @@ mod tests {
 
 	#[test]
 	fn rejects_unknown_opcode() {
-		let mut bytes = write_program(&Program::new(Vec::new()));
-		bytes[10..14].copy_from_slice(&1u32.to_le_bytes());
-		bytes[14] = 255;
+		let mut bytes = write_program(&Program::new(vec![
+			Instruction::PushInteger(1),
+		]));
+		bytes[15] = 255;
 
 		let error = read_program(&bytes).unwrap_err();
 
 		assert_eq!(error, ObjectFileError {
-			offset: 14,
+			offset: 15,
 			message: String::from("Unknown opcode 255."),
 		});
 	}

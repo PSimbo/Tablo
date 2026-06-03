@@ -142,7 +142,18 @@ impl VirtualMachine {
 		self.finished_result = None;
 		self.frames.clear();
 		self.stack.clear();
-		self.frames.push(CallFrame::new(None, 0, Vec::new()));
+		match _program.entry_point() {
+			crate::bytecode::EntryPoint::Code(_) => {
+				self.frames.push(CallFrame::new(None, 0, Vec::new()));
+			}
+			crate::bytecode::EntryPoint::Function(function_index) => {
+				self.frames.push(CallFrame::new(
+					Some(*function_index as usize),
+					0,
+					vec![Value::Array(Vec::new())],
+				));
+			}
+		}
 	}
 
 	pub(crate) fn current_instruction_site(&self, program: &Program) -> Option<(usize, usize)> {
@@ -155,14 +166,18 @@ impl VirtualMachine {
 	}
 
 	pub(crate) fn current_stack_frames(&self, program: &Program) -> Vec<VmStackFrame> {
-		self.frames.iter().rev().map(|frame| {
-			let debug_body_index = self.frame_debug_body_index(program, frame);
-			VmStackFrame {
-				instruction_index: frame.instruction_index,
-				locals: resolve_visible_locals(program, debug_body_index, frame.instruction_index, &frame.locals),
-				source_location: program.debug_location(debug_body_index, frame.instruction_index),
-			}
-		}).collect()
+		self.frames
+			.iter()
+			.rev()
+			.map(|frame| {
+				let debug_body_index = self.frame_debug_body_index(program, frame);
+				VmStackFrame {
+					instruction_index: frame.instruction_index,
+					locals: resolve_visible_locals(program, debug_body_index, frame.instruction_index, &frame.locals),
+					source_location: program.debug_location(debug_body_index, frame.instruction_index),
+				}
+			})
+			.collect()
 	}
 
 	pub(crate) fn step(&mut self, program: &Program) -> Result<VmExecutionState, VmError> {
@@ -533,7 +548,7 @@ impl VirtualMachine {
 	fn current_code_body<'a>(&self, program: &'a Program, frame: &CallFrame) -> &'a CodeBody {
 		match frame.function_index {
 			Some(function_index) => program.functions()[function_index].body(),
-			None => &program.entry,
+			None => program.entry_code().expect("code-entry programs must provide entry code"),
 		}
 	}
 
