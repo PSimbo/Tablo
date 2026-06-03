@@ -361,6 +361,16 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_missing_main_in_standalone_source_text() {
+		let error = run("var x: int = 1;").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Standalone Tablo programs must define `fn Main(args: [text]) int`."),
+			position: 0,
+		}));
+	}
+
+	#[test]
 	fn rejects_non_iterable_for_source_text() {
 		let error = evaluate_snippet("for value in 1 {\n}\n").unwrap_err();
 

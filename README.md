@@ -6,6 +6,8 @@ Tablo is a procedural language designed to executed on relational database data.
 > [!CAUTION]
 > This project is nowhere near finished. A small Rust reference implementation does exist, but it currently supports only a small subset of the language and almost any aspect of the design could change at any time.
 
+For the current Rust implementation, standalone source files compiled with `tabloc` must define an entry-point function with the exact signature `fn Main(args: [text]) int`.
+
 The primary purpose of this language is to provide a syntax for generating ORM code in a type-safe manner. When code is to be generated, the compiled would read the database schema (in the form of a database DDL file) and generate code in the required output formats. However, I am also considering the possibility of supporting the ability to execute Tablo in the database as an alternative to languages such as PL/pgSQL.
 
 At present, Tablo syntax looks like this:
