@@ -140,6 +140,7 @@ pub(crate) fn compile_to_program_with_name(source: impl Into<String>, source_nam
 	let tokens = lexer.tokenize().map_err(TabloError::Lex)?;
 	let mut parser = Parser::new(tokens);
 	let program = parser.parse_program().map_err(TabloError::Parse)?;
+	let program = lower_entry_point_program(program).map_err(TabloError::Compile)?;
 
 	let mut program = Compiler::new().compile_program(&program).map_err(TabloError::Compile)?;
 	let source_file = SourceFileDebugInfo::from_source(
@@ -148,6 +149,75 @@ pub(crate) fn compile_to_program_with_name(source: impl Into<String>, source_nam
 	);
 	program.debug_info_mut().attach_source_file(source_file);
 	Ok(program)
+}
+
+fn lower_entry_point_program(mut program: ast::Program) -> Result<ast::Program, CompileError> {
+	let Some(main_function) = program.functions.iter().find(|function| function.name == "Main") else {
+		return Ok(program);
+	};
+
+	validate_main_entry_point(&program, main_function)?;
+
+	let position = main_function.position;
+	program.statements.clear();
+	program.result = Some(ast::Expr::Call(ast::CallExpr {
+		arguments: vec![
+			ast::Expr::Array(ast::ArrayLiteral {
+				elements: Vec::new(),
+				position,
+			}),
+		],
+		callee: ast::IdentifierExpr {
+			name: String::from("Main"),
+			position,
+		},
+		position,
+	}));
+
+	Ok(program)
+}
+
+fn statement_position(statement: &ast::Statement) -> usize {
+	match statement {
+		ast::Statement::Block(block) => block.position,
+		ast::Statement::Break(statement) => statement.position,
+		ast::Statement::Continue(statement) => statement.position,
+		ast::Statement::Expression(expression) => expression.position(),
+		ast::Statement::For(statement) => statement.position,
+		ast::Statement::If(statement) => statement.position,
+		ast::Statement::Return(statement) => statement.position,
+		ast::Statement::VariableDeclaration(statement) => statement.position,
+		ast::Statement::While(statement) => statement.position,
+	}
+}
+
+fn validate_main_entry_point(program: &ast::Program, main_function: &ast::FunctionDeclaration) -> Result<(), CompileError> {
+	if let Some(statement) = program.statements.first() {
+		return Err(CompileError {
+			message: String::from("Top-level executable statements are not permitted when `Main` is defined."),
+			position: statement_position(statement),
+		});
+	}
+
+	if let Some(result) = &program.result {
+		return Err(CompileError {
+			message: String::from("Top-level executable statements are not permitted when `Main` is defined."),
+			position: result.position(),
+		});
+	}
+
+	if main_function.parameters.len() != 1
+		|| main_function.parameters[0].name != "args"
+		|| main_function.parameters[0].data_type != ast::DataType::Array(Box::new(ast::DataType::Text))
+		|| main_function.return_type != ast::DataType::Int
+	{
+		return Err(CompileError {
+			message: String::from("Entry-point function `Main` must have the exact signature `fn Main(args: [text]) int`."),
+			position: main_function.position,
+		});
+	}
+
+	Ok(())
 }
 
 #[cfg(test)]
@@ -308,6 +378,16 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_invalid_main_signature_source_text() {
+		let error = run("fn Main() int { return 0; }").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Entry-point function `Main` must have the exact signature `fn Main(args: [text]) int`."),
+			position: 0,
+		}));
+	}
+
+	#[test]
 	fn rejects_len_with_non_array_argument_source_text() {
 		let error = run("len(1)").unwrap_err();
 
@@ -371,6 +451,16 @@ mod tests {
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Variable `x` is not declared in this scope."),
 			position: 20,
+		}));
+	}
+
+	#[test]
+	fn rejects_top_level_code_when_main_is_present_source_text() {
+		let error = run("fn Main(args: [text]) int { return 0; }\n1 + 2").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Top-level executable statements are not permitted when `Main` is defined."),
+			position: 42,
 		}));
 	}
 
@@ -617,7 +707,7 @@ mod tests {
 
 	#[test]
 	fn runs_function_call_source_text() {
-		let result = run("fn add(a: int, b: int) int { return a + b; }\nadd(1, 2)").unwrap();
+		let result = run("fn Main(args: [text]) int { return add(1, 2); }\nfn add(a: int, b: int) int { return a + b; }").unwrap();
 
 		assert_eq!(result, Some(Value::Integer(3)));
 	}
@@ -712,6 +802,13 @@ mod tests {
 		let result = run("true or false xor true and false").unwrap();
 
 		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
+	fn runs_main_entry_point_source_text() {
+		let result = run("fn Main(args: [text]) int { return 7; }").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(7)));
 	}
 
 	#[test]
