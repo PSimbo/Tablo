@@ -91,6 +91,13 @@ pub struct DebugInfo {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstructionSite {
+	body_index: usize,
+	instruction_index: usize,
+	source_location: SourceLocation,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalVariableDebugInfo {
 	declared_type: String,
 	is_const: bool,
@@ -252,6 +259,24 @@ impl Program {
 		&self.functions
 	}
 
+	pub fn instruction_sites_for_source_line(&self, display_name: &str, line: u32) -> Vec<InstructionSite> {
+		let mut sites = Vec::new();
+
+		for (body_index, code_body) in self.debug.code_bodies.iter().enumerate() {
+			for instruction_index in 0..code_body.instruction_positions.len() {
+				let Some(location) = self.debug_location(body_index, instruction_index) else {
+					continue;
+				};
+
+				if location.display_name() == Some(display_name) && location.line() == line {
+					sites.push(InstructionSite::new(body_index, instruction_index, location));
+				}
+			}
+		}
+
+		sites
+	}
+
 	pub fn instructions(&self) -> &[Instruction] {
 		&self.entry.instructions
 	}
@@ -303,6 +328,28 @@ impl CodeBodyDebugInfo {
 
 	pub fn source_file_index(&self) -> Option<u32> {
 		self.source_file_index
+	}
+}
+
+impl InstructionSite {
+	pub fn new(body_index: usize, instruction_index: usize, source_location: SourceLocation) -> Self {
+		Self {
+			body_index,
+			instruction_index,
+			source_location,
+		}
+	}
+
+	pub fn body_index(&self) -> usize {
+		self.body_index
+	}
+
+	pub fn instruction_index(&self) -> usize {
+		self.instruction_index
+	}
+
+	pub fn source_location(&self) -> &SourceLocation {
+		&self.source_location
 	}
 }
 

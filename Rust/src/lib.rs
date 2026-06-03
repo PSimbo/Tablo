@@ -5,6 +5,7 @@ pub mod ast;
 pub mod builtins;
 pub mod bytecode;
 pub mod compiler;
+pub mod debugger;
 pub mod object_file;
 pub mod semantic;
 pub mod source;

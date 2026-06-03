@@ -1,6 +1,5 @@
 use crate::builtins::BuiltInFunction;
 use crate::bytecode::CodeBody;
-use crate::bytecode::CompiledFunction;
 use crate::bytecode::Instruction;
 use crate::bytecode::Program;
 use crate::bytecode::SourceLocation;
@@ -20,21 +19,29 @@ enum ComparisonKind {
 	LessThanOrEqual,
 }
 
-struct CallFrame<'a> {
-	code_body: &'a CodeBody,
-	debug_body_index: usize,
+struct CallFrame {
+	base_stack_len: usize,
+	function_index: Option<usize>,
 	instruction_index: usize,
 	locals: Vec<Value>,
 }
 
 enum ExecutionOutcome {
+	Call(u32, Vec<Value>),
 	Continue(Option<usize>),
 	Return(Option<Value>),
 }
 
 #[derive(Default)]
 pub struct VirtualMachine {
+	finished_result: Option<Option<Value>>,
+	frames: Vec<CallFrame>,
 	stack: Vec<Value>,
+}
+
+pub(crate) enum VmExecutionState {
+	Completed(Option<Value>),
+	Running,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -61,63 +68,144 @@ pub struct VmVisibleLocal {
 	pub value: Value,
 }
 
+impl VmError {
+	pub fn current_frame(&self) -> Option<&VmStackFrame> {
+		self.stack_trace.first()
+	}
+
+	pub fn stack_frames(&self) -> &[VmStackFrame] {
+		&self.stack_trace
+	}
+}
+
+impl VmStackFrame {
+	pub fn instruction_index(&self) -> usize {
+		self.instruction_index
+	}
+
+	pub fn locals(&self) -> &[VmVisibleLocal] {
+		&self.locals
+	}
+
+	pub fn local(&self, name: &str) -> Option<&VmVisibleLocal> {
+		self.locals.iter().find(|local| local.name == name)
+	}
+
+	pub fn source_location(&self) -> Option<&SourceLocation> {
+		self.source_location.as_ref()
+	}
+}
+
+impl VmVisibleLocal {
+	pub fn declared_type(&self) -> &str {
+		&self.declared_type
+	}
+
+	pub fn is_const(&self) -> bool {
+		self.is_const
+	}
+
+	pub fn name(&self) -> &str {
+		&self.name
+	}
+
+	pub fn slot(&self) -> u32 {
+		self.slot
+	}
+
+	pub fn value(&self) -> &Value {
+		&self.value
+	}
+}
+
 impl VirtualMachine {
 	pub fn new() -> Self {
 		Self {
+			finished_result: None,
+			frames: Vec::new(),
 			stack: Vec::new(),
 		}
 	}
 
 	pub fn run(&mut self, program: &Program) -> Result<Option<Value>, VmError> {
-		self.stack.clear();
-		self.run_code_body(program, &program.entry, program.functions().len(), Vec::new())
-	}
+		self.begin_execution(program);
 
-	fn run_code_body(
-		&mut self,
-		program: &Program,
-		code_body: &CodeBody,
-		debug_body_index: usize,
-		locals: Vec<Value>
-	) -> Result<Option<Value>, VmError> {
-		let base_stack_len = self.stack.len();
-		let mut frame = CallFrame::new(code_body, debug_body_index, locals);
-
-		while frame.instruction_index < frame.code_body.instructions.len() {
-			let outcome = self.execute_instruction(
-				program,
-				&frame.code_body.instructions[frame.instruction_index],
-				frame.instruction_index,
-				&mut frame.locals,
-			).map_err(|error| {
-				enrich_vm_error(
-					program,
-					frame.debug_body_index,
-					frame.instruction_index,
-					&frame.locals,
-					error,
-				)
-			})?;
-
-			match outcome {
-				ExecutionOutcome::Continue(next_instruction_index) => {
-					frame.instruction_index = next_instruction_index.unwrap_or(frame.instruction_index + 1);
-				}
-				ExecutionOutcome::Return(result) => {
-					self.stack.truncate(base_stack_len);
-					return Ok(result);
-				}
+		loop {
+			match self.step(program)? {
+				VmExecutionState::Completed(result) => return Ok(result),
+				VmExecutionState::Running => {}
 			}
 		}
+	}
 
-		let result = self.stack.pop();
-		self.stack.truncate(base_stack_len);
-		Ok(result)
+	pub(crate) fn begin_execution(&mut self, _program: &Program) {
+		self.finished_result = None;
+		self.frames.clear();
+		self.stack.clear();
+		self.frames.push(CallFrame::new(None, 0, Vec::new()));
+	}
+
+	pub(crate) fn current_instruction_site(&self, program: &Program) -> Option<(usize, usize)> {
+		let frame = self.frames.last()?;
+		Some((self.frame_debug_body_index(program, frame), frame.instruction_index))
+	}
+
+	pub(crate) fn current_stack_frames(&self, program: &Program) -> Vec<VmStackFrame> {
+		self.frames.iter().rev().map(|frame| {
+			let debug_body_index = self.frame_debug_body_index(program, frame);
+			VmStackFrame {
+				instruction_index: frame.instruction_index,
+				locals: resolve_visible_locals(program, debug_body_index, frame.instruction_index, &frame.locals),
+				source_location: program.debug_location(debug_body_index, frame.instruction_index),
+			}
+		}).collect()
+	}
+
+	pub(crate) fn step(&mut self, program: &Program) -> Result<VmExecutionState, VmError> {
+		if self.frames.is_empty() {
+			return Ok(VmExecutionState::Completed(self.finished_result.take().unwrap_or(None)));
+		}
+
+		let frame_index = self.frames.len() - 1;
+		let instruction_index = self.frames[frame_index].instruction_index;
+		let code_body = self.current_code_body(program, &self.frames[frame_index]);
+
+		if instruction_index >= code_body.instructions.len() {
+			let result = self.stack.pop();
+			return Ok(self.finish_current_frame(result));
+		}
+
+		let instruction = code_body.instructions[instruction_index].clone();
+		let mut locals = std::mem::take(&mut self.frames[frame_index].locals);
+		let outcome = self.execute_instruction(program, &instruction, instruction_index, &mut locals);
+		self.frames[frame_index].locals = locals;
+		let outcome = outcome.map_err(|error| self.enrich_vm_error(program, error))?;
+
+		match outcome {
+			ExecutionOutcome::Call(function_index, arguments) => {
+				if program.functions().get(function_index as usize).is_none() {
+					return Err(self.enrich_vm_error(program, VmError {
+						instruction_index,
+						message: format!("Function index {} does not exist.", function_index),
+						source_location: None,
+						stack_trace: Vec::new(),
+					}));
+				}
+
+				self.frames.push(CallFrame::new(Some(function_index as usize), self.stack.len(), arguments));
+				Ok(VmExecutionState::Running)
+			}
+			ExecutionOutcome::Continue(next_instruction_index) => {
+				self.frames[frame_index].instruction_index = next_instruction_index.unwrap_or(instruction_index + 1);
+				Ok(VmExecutionState::Running)
+			}
+			ExecutionOutcome::Return(result) => Ok(self.finish_current_frame(result)),
+		}
 	}
 
 	fn execute_instruction(
 		&mut self,
-		program: &Program,
+		_program: &Program,
 		instruction: &Instruction,
 		instruction_index: usize,
 		locals: &mut Vec<Value>
@@ -136,20 +224,8 @@ impl VirtualMachine {
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::Call(function_index, argument_count) => {
-				let function = program.functions().get(*function_index as usize).ok_or(VmError {
-					instruction_index,
-					message: format!("Function index {} does not exist.", function_index),
-					source_location: None,
-					stack_trace: Vec::new(),
-				})?;
 				let arguments = self.pop_call_arguments(*argument_count as usize, instruction_index)?;
-				let result = self.run_function(program, function, *function_index as usize, arguments, instruction_index)?;
-
-				if let Some(result) = result {
-					self.stack.push(result);
-				}
-
-				Ok(ExecutionOutcome::Continue(None))
+				Ok(ExecutionOutcome::Call(*function_index, arguments))
 			}
 			Instruction::CallBuiltIn(built_in, argument_count) => {
 				let arguments = self.pop_call_arguments(*argument_count as usize, instruction_index)?;
@@ -450,23 +526,52 @@ impl VirtualMachine {
 		}
 	}
 
-	fn run_function(
-		&mut self,
-		program: &Program,
-		function: &CompiledFunction,
-		function_index: usize,
-		arguments: Vec<Value>,
-		_: usize
-	) -> Result<Option<Value>, VmError> {
-		self.run_code_body(program, function.body(), function_index, arguments)
+	fn current_code_body<'a>(&self, program: &'a Program, frame: &CallFrame) -> &'a CodeBody {
+		match frame.function_index {
+			Some(function_index) => program.functions()[function_index].body(),
+			None => &program.entry,
+		}
+	}
+
+	fn enrich_vm_error(&self, program: &Program, mut error: VmError) -> VmError {
+		if error.source_location.is_none() {
+			error.source_location = self.current_instruction_site(program)
+				.and_then(|(body_index, instruction_index)| program.debug_location(body_index, instruction_index));
+		}
+
+		error.stack_trace = self.current_stack_frames(program);
+		error
+	}
+
+	fn finish_current_frame(&mut self, result: Option<Value>) -> VmExecutionState {
+		let frame = self.frames.pop().expect("A frame must exist while finishing execution.");
+		self.stack.truncate(frame.base_stack_len);
+
+		if let Some(caller) = self.frames.last_mut() {
+			caller.instruction_index += 1;
+
+			if let Some(result) = result {
+				self.stack.push(result);
+			}
+
+			VmExecutionState::Running
+		}
+		else {
+			self.finished_result = Some(result.clone());
+			VmExecutionState::Completed(result)
+		}
+	}
+
+	fn frame_debug_body_index(&self, program: &Program, frame: &CallFrame) -> usize {
+		frame.function_index.unwrap_or(program.functions().len())
 	}
 }
 
-impl<'a> CallFrame<'a> {
-	fn new(code_body: &'a CodeBody, debug_body_index: usize, locals: Vec<Value>) -> Self {
+impl CallFrame {
+	fn new(function_index: Option<usize>, base_stack_len: usize, locals: Vec<Value>) -> Self {
 		Self {
-			code_body,
-			debug_body_index,
+			base_stack_len,
+			function_index,
 			instruction_index: 0,
 			locals,
 		}
@@ -587,27 +692,6 @@ fn divide_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Val
 			Ok(Value::Decimal(lhs.checked_div(&rhs).map_err(|message| vm_error(instruction_index, message))?))
 		}
 	}
-}
-
-fn enrich_vm_error(
-	program: &Program,
-	debug_body_index: usize,
-	instruction_index: usize,
-	locals: &[Value],
-	mut error: VmError
-) -> VmError {
-	let source_location = program.debug_location(debug_body_index, instruction_index);
-
-	if error.source_location.is_none() {
-		error.source_location = source_location.clone();
-	}
-
-	error.stack_trace.push(VmStackFrame {
-		instruction_index,
-		locals: resolve_visible_locals(program, debug_body_index, instruction_index, locals),
-		source_location,
-	});
-	error
 }
 
 fn equals_value(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
@@ -1084,6 +1168,10 @@ mod tests {
 				value: Value::Integer(0),
 			}],
 		);
+		assert_eq!(error.current_frame().unwrap().instruction_index(), 4);
+		assert_eq!(error.current_frame().unwrap().local("x").unwrap().declared_type(), "int");
+		assert_eq!(error.current_frame().unwrap().local("x").unwrap().value(), &Value::Integer(0));
+		assert!(error.current_frame().unwrap().local("missing").is_none());
 	}
 
 	#[test]
