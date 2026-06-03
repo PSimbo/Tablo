@@ -15,6 +15,10 @@ path = "src/bin/tabloc.rs"
 name = "tablo"
 path = "src/bin/tablo.rs"
 
+[[bin]]
+name = "tablodbg"
+path = "src/bin/tablodbg.rs"
+
 [dependencies]
 clap = { version = "4.5.60", features = ["derive"] }
 colored = "3"

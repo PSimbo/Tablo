@@ -48,6 +48,18 @@ pub struct DebuggerSession<'a> {
 }
 
 impl<'a> DebuggerSession<'a> {
+	pub fn add_breakpoints(&mut self, breakpoints: Vec<InstructionBreakpoint>) {
+		self.breakpoints.extend(breakpoints);
+	}
+
+	pub fn breakpoints(&self) -> Vec<InstructionBreakpoint> {
+		self.breakpoints.iter().copied().collect()
+	}
+
+	pub fn clear_breakpoints(&mut self) {
+		self.breakpoints.clear();
+	}
+
 	pub fn new(program: &'a Program) -> Self {
 		Self {
 			breakpoints: BTreeSet::new(),
@@ -91,7 +103,8 @@ impl<'a> DebuggerSession<'a> {
 	}
 
 	pub fn set_breakpoints(&mut self, breakpoints: Vec<InstructionBreakpoint>) {
-		self.breakpoints = breakpoints.into_iter().collect();
+		self.clear_breakpoints();
+		self.add_breakpoints(breakpoints);
 	}
 
 	pub fn step_in(&mut self) -> Result<DebuggerStop, VmError> {
