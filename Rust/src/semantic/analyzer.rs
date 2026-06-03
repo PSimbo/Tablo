@@ -64,6 +64,8 @@ pub struct SemanticProgram {
 	call_targets: BTreeMap<usize, u32>,
 	declaration_slots: BTreeMap<usize, u32>,
 	declaration_types: BTreeMap<usize, DataType>,
+	entry_point_function_index: Option<u32>,
+	entry_point_position: Option<usize>,
 	identifier_slots: BTreeMap<usize, u32>,
 	iterator_slots: BTreeMap<usize, u32>,
 }
@@ -87,6 +89,14 @@ impl SemanticProgram {
 
 	pub fn declaration_type(&self, position: usize) -> Option<&DataType> {
 		self.declaration_types.get(&position)
+	}
+
+	pub fn entry_point_function_index(&self) -> Option<u32> {
+		self.entry_point_function_index
+	}
+
+	pub fn entry_point_position(&self) -> Option<usize> {
+		self.entry_point_position
 	}
 
 	pub fn identifier_slot(&self, position: usize) -> Option<u32> {
@@ -137,6 +147,23 @@ impl SemanticAnalyzer {
 		self.exit_scope();
 
 		Ok(self.semantic_program.clone())
+	}
+
+	pub fn analyze_standalone_program(&mut self, program: &Program) -> Result<SemanticProgram, CompileError> {
+		let semantic_program = self.analyze_program(program)?;
+		let Some(main_function) = program.functions.iter().find(|function| function.name == "Main") else {
+			return Err(self.compile_error(
+				0,
+				String::from("Standalone Tablo programs must define `fn Main(args: [text]) int`."),
+			));
+		};
+
+		self.validate_main_entry_point(program, main_function)?;
+
+		let mut semantic_program = semantic_program;
+		semantic_program.entry_point_function_index = self.functions.get("Main").map(|signature| signature.function_index);
+		semantic_program.entry_point_position = Some(main_function.position);
+		Ok(semantic_program)
 	}
 
 	pub fn validate_program(&mut self, program: &Program) -> Result<(), CompileError> {
@@ -815,6 +842,35 @@ impl SemanticAnalyzer {
 		Ok(())
 	}
 
+	fn validate_main_entry_point(&self, program: &Program, main_function: &FunctionDeclaration) -> Result<(), CompileError> {
+		if let Some(statement) = program.statements.first() {
+			return Err(self.compile_error(
+				statement_position(statement),
+				String::from("Top-level executable statements are not permitted when `Main` is defined."),
+			));
+		}
+
+		if let Some(result) = &program.result {
+			return Err(self.compile_error(
+				result.position(),
+				String::from("Top-level executable statements are not permitted when `Main` is defined."),
+			));
+		}
+
+		if main_function.parameters.len() != 1
+			|| main_function.parameters[0].name != "args"
+			|| main_function.parameters[0].data_type != DataType::Array(Box::new(DataType::Text))
+			|| main_function.return_type != DataType::Int
+		{
+			return Err(self.compile_error(
+				main_function.position,
+				String::from("Entry-point function `Main` must have the exact signature `fn Main(args: [text]) int`."),
+			));
+		}
+
+		Ok(())
+	}
+
 	fn validate_non_void_data_type(&self, data_type: &DataType, position: usize, message: String) -> Result<(), CompileError> {
 		match data_type {
 			DataType::Void | DataType::EmptyArray => Err(self.compile_error(position, message)),
@@ -1006,5 +1062,19 @@ impl SemanticAnalyzer {
 				Ok(())
 			}
 		}
+	}
+}
+
+fn statement_position(statement: &Statement) -> usize {
+	match statement {
+		Statement::Block(block) => block.position,
+		Statement::Break(statement) => statement.position,
+		Statement::Continue(statement) => statement.position,
+		Statement::Expression(expression) => expression.position(),
+		Statement::For(statement) => statement.position,
+		Statement::If(statement) => statement.position,
+		Statement::Return(statement) => statement.position,
+		Statement::VariableDeclaration(statement) => statement.position,
+		Statement::While(statement) => statement.position,
 	}
 }

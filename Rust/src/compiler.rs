@@ -123,35 +123,13 @@ impl Compiler {
 	pub fn compile_program(&mut self, program: &AstProgram) -> Result<Program, CompileError> {
 		self.loop_stack.clear();
 		let semantic_program = SemanticAnalyzer::new().analyze_program(program)?;
-		let mut functions = Vec::with_capacity(program.functions.len());
-		let mut code_body_debug = Vec::with_capacity(program.functions.len() + 1);
+		self.compile_program_with_semantics(program, &semantic_program)
+	}
 
-		for function in &program.functions {
-			let (compiled_function, debug_info) = self.compile_function(function, &semantic_program)?;
-			functions.push(compiled_function);
-			code_body_debug.push(debug_info);
-		}
-
-		let mut emission = EmissionState::default();
-		self.enter_debug_scope(&mut emission);
-
-		for statement in &program.statements {
-			self.compile_statement(statement, &semantic_program, &mut emission)?;
-		}
-
-		if let Some(result) = &program.result {
-			self.compile_into(result, &semantic_program, &mut emission);
-		}
-
-		self.close_all_debug_scopes(&mut emission);
-		code_body_debug.push(CodeBodyDebugInfo::new(None, emission.positions, emission.locals, None));
-
-		Ok(Program::from_parts_with_functions_and_debug(
-			crate::bytecode::ConstantPool::default(),
-			CodeBody::new(emission.instructions),
-			functions,
-			DebugInfo::new(code_body_debug, vec![]),
-		))
+	pub fn compile_standalone_program(&mut self, program: &AstProgram) -> Result<Program, CompileError> {
+		self.loop_stack.clear();
+		let semantic_program = SemanticAnalyzer::new().analyze_standalone_program(program)?;
+		self.compile_program_with_semantics(program, &semantic_program)
 	}
 
 	pub fn new() -> Self {
@@ -329,6 +307,53 @@ impl Compiler {
 				self.emit(emission, operator.instruction(), expression.position());
 			}
 		}
+	}
+
+	fn compile_program_with_semantics(&mut self, program: &AstProgram, semantic_program: &SemanticProgram) -> Result<Program, CompileError> {
+		let mut functions = Vec::with_capacity(program.functions.len());
+		let mut code_body_debug = Vec::with_capacity(program.functions.len() + 1);
+
+		for function in &program.functions {
+			let (compiled_function, debug_info) = self.compile_function(function, &semantic_program)?;
+			functions.push(compiled_function);
+			code_body_debug.push(debug_info);
+		}
+
+		let mut emission = EmissionState::default();
+		self.enter_debug_scope(&mut emission);
+
+		if let Some(function_index) = semantic_program.entry_point_function_index() {
+			let position = semantic_program.entry_point_position().unwrap_or(0);
+			self.emit(	
+				&mut emission,
+				Instruction::MakeArray(0),
+				position,
+			);
+			self.emit(
+				&mut emission,
+				Instruction::Call(function_index, 1),
+				position,
+			);
+		}
+		else {
+			for statement in &program.statements {
+				self.compile_statement(statement, &semantic_program, &mut emission)?;
+			}
+
+			if let Some(result) = &program.result {
+				self.compile_into(result, &semantic_program, &mut emission);
+			}
+		}
+
+		self.close_all_debug_scopes(&mut emission);
+		code_body_debug.push(CodeBodyDebugInfo::new(None, emission.positions, emission.locals, None));
+
+		Ok(Program::from_parts_with_functions_and_debug(
+			crate::bytecode::ConstantPool::default(),
+			CodeBody::new(emission.instructions),
+			functions,
+			DebugInfo::new(code_body_debug, vec![]),
+		))
 	}
 
 	fn compile_statement(&mut self, statement: &Statement, semantic_program: &SemanticProgram, emission: &mut EmissionState) -> Result<(), CompileError> {

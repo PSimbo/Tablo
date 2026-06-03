@@ -1,3 +1,11 @@
-var boolVar: bool = true;
-var decVar: decimal = 123.456;
-var strVar: text = 'Lorem ipsum dolor: ${ decVar }';
+fn Main(args: [text]) int {
+  var boolVar: bool = true;
+  var decVar: dec = 123.456;
+  var strVar: text = 'Lorem ipsum dolor: ${decVar}';
+
+  if boolVar and len(args) == 0 {
+    return 0;
+  }
+
+  return 1;
+}
