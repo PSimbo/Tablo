@@ -79,6 +79,20 @@ The language itself does not constrain the output that may be generated. For exa
 
 Many of the design decisions that drive the development of Tablo stem from the fact that code may need to be transpiled to a completely different language and needs to support database backends with differing capabilities. Therefore, it makes as few assumptions as possible about the capabilities of the target language and database backend.
 
+When Tablo code is compiled or interpreted as a standalone program, the module must define an entry-point function named `Main`. The required signature is:
+
+~~~
+fn Main(args: [text]) int {
+  ...
+}
+~~~
+
+Top-level executable statements are not permitted. All executable code must appear within a function body.
+
+The `args` parameter receives the program's command-line arguments. If no arguments are provided then `args` is the empty array. The integer returned from `Main` is the program's exit status.
+
+Examples elsewhere in this document may show partial snippets rather than complete standalone programs. Such snippets are intended only to illustrate a feature in isolation and therefore do not necessarily include a full `Main` definition.
+
 Comments
 --------
 
@@ -595,13 +609,13 @@ Scopes
 
 Scopes in Tablo are lexical. A variable or function is valid only within the scope in which it is declared and within any nested scopes.
 
-Both variables and functions may be declared either at file scope or within any nested scope.
+Variables may be declared within any block or function scope. Functions may be declared either at module scope or within any nested scope.
 
 If a variable within a nested scope matches the name of a variable in an outer scope then the variable in the nested scope "shadows" the variable in the outer scope. Until the end of the nested scope, references to the variable will resolve to that scope's variable. After the nested scope ends, references to the variable will once again resolve to the outer scope's variable.
 
 The same shadowing rules apply to functions. If a function declared in a nested scope has the same name as a function visible from an outer scope then, within the nested scope, unqualified calls to that name resolve to the nested function.
 
-Within a given scope, a function may be called before its declaration appears in the source code. Functions do not need to be forward-declared and Tablo provides no syntax for doing so. This rule applies equally to file-scope functions and to functions declared within a nested scope. A nested function is therefore visible throughout the entire scope in which it is declared as well as within any deeper nested scopes.
+Within a given scope, a function may be called before its declaration appears in the source code. Functions do not need to be forward-declared and Tablo provides no syntax for doing so. This rule applies equally to module-scope functions and to functions declared within a nested scope. A nested function is therefore visible throughout the entire scope in which it is declared as well as within any deeper nested scopes.
 
 Anonymous scopes are supported and are created using a bare block:
 
@@ -1039,6 +1053,10 @@ The return type follows immediately after the parameter list. Any valid Tablo ty
 
 The function body is enclosed between `{` and `}` characters and contains zero or more statements. Function parameters are referenced by name within the body of the function.
 
+For a standalone program, one module-scope function must be named `Main` and must use the exact signature `fn Main(args: [text]) int`. This function is the program entry point.
+
+The `Main` function's `args` parameter always exists, even when the program is launched without arguments, in which case it receives the empty array. The integer result returned from `Main` becomes the program's exit status.
+
 The `return` statement exits the body of the function, optionally returning a value:
 
 ~~~
@@ -1055,7 +1073,7 @@ var ts: timestamp! = timestamp(post.date, post.time);
 
 Arguments may be passed positionally or by name.
 
-Functions may be defined both at file scope and nested within other scopes. Only functions defined at file scope may be marked as `pub`.
+Functions may be defined both at module scope and nested within other scopes. Only functions defined at module scope may be marked as `pub`.
 
 Nested functions use normal lexical scope rules. A nested function may reference parameters, variables, and functions that are visible from the enclosing scope at the point where the nested function is declared. If a name is declared again within the nested function body, that inner declaration shadows the outer one in the usual way.
 
@@ -1508,7 +1526,7 @@ Production = <Components>
 ~~~
 
 ~~~
-program = { functionDeclaration | statement } [ expression ]
+program = { functionDeclaration }
 
 statement = block | blockStatement | simpleStatement
 
