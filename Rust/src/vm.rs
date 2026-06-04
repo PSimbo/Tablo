@@ -631,15 +631,13 @@ fn coerce_numeric_values(lhs: Value, rhs: Value, instruction_index: usize) -> Re
 	match (lhs, rhs) {
 		(Value::Decimal(lhs), Value::Decimal(rhs)) => Ok((lhs, rhs)),
 		(Value::Decimal(lhs), Value::Integer(rhs)) => {
-			let rhs = Decimal::from_integer(rhs)
-				.to_scale_with_precision(lhs.precision, lhs.scale)
+			let rhs = Decimal::from_integer_with_scale(rhs, lhs.scale)
 				.map_err(|message| vm_error(instruction_index, message))?;
 
 			Ok((lhs, rhs))
 		}
 		(Value::Integer(lhs), Value::Decimal(rhs)) => {
-			let lhs = Decimal::from_integer(lhs)
-				.to_scale_with_precision(rhs.precision, rhs.scale)
+			let lhs = Decimal::from_integer_with_scale(lhs, rhs.scale)
 				.map_err(|message| vm_error(instruction_index, message))?;
 
 			Ok((lhs, rhs))
@@ -1623,6 +1621,19 @@ mod tests {
 		let result = VirtualMachine::new().run(&program).unwrap();
 
 		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
+	fn runs_mixed_decimal_and_larger_integer_multiplication() {
+		let program = Program::new(vec![
+			Instruction::PushDecimal(Decimal::from_literal("0.75").unwrap()),
+			Instruction::PushInteger(20),
+			Instruction::Multiply,
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Decimal(Decimal::from_integer(15))));
 	}
 
 	#[test]

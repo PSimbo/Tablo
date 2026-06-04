@@ -533,6 +533,15 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_array_fill_with_mixed_decimal_integer_multiplication_source_text() {
+		let result = run(
+			"fn Main(args: [text]) int {\n  var foo: [dec] = [];\n\n  for i in 2:20 {\n    foo[i / 2] = 0.75 * i;\n  }\n\n  return 0;\n}"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(0)));
+	}
+
+	#[test]
 	fn runs_array_index_source_text() {
 		let result = evaluate_snippet("var xs: [int] = [10, 20, 30];\nxs[2]").unwrap();
 

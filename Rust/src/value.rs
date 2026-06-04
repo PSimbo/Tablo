@@ -144,6 +144,15 @@ impl Decimal {
 		Self::from_parts(value as i128, 0).unwrap()
 	}
 
+	pub fn from_integer_with_scale(value: i64, scale: u8) -> Result<Self, String> {
+		let multiplier = pow10(scale as u32)?;
+		let coefficient = (value as i128)
+			.checked_mul(multiplier)
+			.ok_or(String::from("Decimal conversion overflowed the supported precision."))?;
+
+		Self::from_parts(coefficient, scale)
+	}
+
 	pub fn from_literal(literal: &str) -> Result<Self, String> {
 		let (integer_part, fractional_part) = literal.split_once('.').ok_or(String::from("Invalid decimal literal."))?;
 
