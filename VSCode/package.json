@@ -1,0 +1,99 @@
+{
+  "name": "tablo-vscode",
+  "displayName": "Tablo",
+  "description": "VS Code support for the Tablo programming language.",
+  "version": "0.0.1",
+  "publisher": "tablo",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Debuggers",
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onDebug:tablo",
+    "workspaceContains:**/*.tablo"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "debuggers": [
+      {
+        "type": "tablo",
+        "label": "Tablo",
+        "languages": [
+          "tablo"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Path to the compiled Tablo object file (.tbo) to debug."
+              },
+              "sourceFile": {
+                "type": "string",
+                "description": "Path to the Tablo source file (.tablo) to compile and debug."
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Working directory used when launching the debugger."
+              },
+              "tablocPath": {
+                "type": "string",
+                "description": "Optional path to the tabloc executable. Defaults to `tabloc` on PATH."
+              },
+              "tablodbgPath": {
+                "type": "string",
+                "description": "Optional path to the tablodbg executable. Defaults to `tablodbg` on PATH."
+              }
+            }
+          }
+        },
+        "configurationSnippets": [
+          {
+            "label": "Tablo: Launch object file",
+            "description": "Launch a compiled Tablo object file under tablodbg.",
+            "body": {
+              "type": "tablo",
+              "request": "launch",
+              "name": "Launch Tablo Program",
+              "sourceFile": "${file}",
+              "cwd": "${workspaceFolder}"
+            }
+          }
+        ]
+      }
+    ],
+    "configuration": {
+      "title": "Tablo",
+      "properties": {
+        "tablo.debug.tablocPath": {
+          "type": "string",
+          "default": "tabloc",
+          "description": "Path to the `tabloc` executable used to compile `.tablo` files before debugging."
+        },
+        "tablo.debug.tablodbgPath": {
+          "type": "string",
+          "default": "tablodbg",
+          "description": "Path to the `tablodbg` executable used for DAP debugging."
+        },
+        "tablo.debug.outputDirectory": {
+          "type": "string",
+          "default": ".tablo/debug",
+          "description": "Workspace-relative directory used for generated debug-time `.tbo` files."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "watch": "tsc -w -p ."
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.5.4"
+  }
+}
