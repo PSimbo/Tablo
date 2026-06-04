@@ -14,10 +14,24 @@
   ],
   "activationEvents": [
     "onDebug:tablo",
+    "onLanguage:tablo",
     "workspaceContains:**/*.tablo"
   ],
   "main": "./dist/extension.js",
   "contributes": {
+    "languages": [
+      {
+        "id": "tablo",
+        "aliases": [
+          "Tablo",
+          "tablo"
+        ],
+        "extensions": [
+          ".tablo"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
     "debuggers": [
       {
         "type": "tablo",

@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { logError, logInfo, revealLogs } from "../log";
 import { compileSourceForDebugging } from "./tabloCompiler";
 import { isTabloObjectFile, isTabloSourceFile } from "./paths";
 
@@ -40,6 +41,7 @@ export class TabloDebugConfigurationProvider implements vscode.DebugConfiguratio
 
 		if (resolved.sourceFile && isTabloSourceFile(resolved.sourceFile)) {
 			try {
+				logInfo(`Preparing source-based Tablo debug launch for ${resolved.sourceFile}.`);
 				resolved.program = await compileSourceForDebugging(
 					resolved.sourceFile,
 					_folder,
@@ -48,6 +50,8 @@ export class TabloDebugConfigurationProvider implements vscode.DebugConfiguratio
 			}
 			catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
+				logError(`Failed to compile source for debugging: ${message}`);
+				revealLogs();
 				void vscode.window.showErrorMessage(`Failed to compile Tablo source for debugging: ${message}`);
 				return undefined;
 			}
@@ -58,10 +62,13 @@ export class TabloDebugConfigurationProvider implements vscode.DebugConfiguratio
 		}
 
 		if (!resolved.program || typeof resolved.program !== "string") {
+			logError("Debug launch aborted because neither a .tablo source file nor a .tbo object file was available.");
+			revealLogs();
 			void vscode.window.showErrorMessage("Tablo debugging requires either a `.tablo` source file or a `.tbo` object file.");
 			return undefined;
 		}
 
+		logInfo(`Launching Tablo debug session for ${resolved.program}.`);
 		return resolved;
 	}
 }

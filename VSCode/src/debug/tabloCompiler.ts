@@ -2,6 +2,7 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import { execFile } from "child_process";
 import * as vscode from "vscode";
+import { logError, logInfo } from "../log";
 import { defaultTablocPath, resolveDebugOutputPath } from "./paths";
 
 export async function compileSourceForDebugging(
@@ -13,6 +14,7 @@ export async function compileSourceForDebugging(
 	await fs.mkdir(path.dirname(outputPath), { recursive: true });
 
 	const tablocPath = explicitTablocPath || defaultTablocPath();
+	logInfo(`Compiling ${sourceFile} to ${outputPath} using ${tablocPath}.`);
 
 	await execFileAsync(tablocPath, [sourceFile, outputPath], {
 		cwd: workspaceFolder?.uri.fsPath || path.dirname(sourceFile),
@@ -33,7 +35,17 @@ function execFileAsync(
 				return;
 			}
 
+			if (error.code === "ENOENT") {
+				logError(`Could not find tabloc executable: ${command}`);
+				reject(new Error(
+					`The Tablo compiler executable \`${command}\` could not be found. ` +
+					`Make sure \`tabloc\` is on your PATH or set \`tablo.debug.tablocPath\` in VS Code settings.`
+				));
+				return;
+			}
+
 			const message = stderr?.trim() || error.message;
+			logError(`tabloc failed: ${message}`);
 			reject(new Error(message));
 		});
 	});
