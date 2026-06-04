@@ -1,25 +1,35 @@
+use std::collections::BTreeMap;
+use std::io::BufRead;
+use std::io::BufReader;
 use std::io::Write;
 use std::path::PathBuf;
 
 use clap::Parser as ClapParser;
 use colored::Colorize;
+use serde::Deserialize;
+use serde_json::Value as JsonValue;
+use serde_json::json;
 use tablo::TabloError;
 use tablo::bytecode::Program;
 use tablo::bytecode::SourceLocation;
 use tablo::debugger::DebuggerSession;
 use tablo::debugger::DebuggerStop;
+use tablo::debugger::InstructionBreakpoint;
+use tablo::debugger::PauseReason;
 use tablo::object_file::read_program_from_path;
 use tablo::vm::VmStackFrame;
 
 #[derive(ClapParser, Debug)]
 #[command(name = "tablodbg")]
-#[command(about = "Prototype interactive debugger for compiled Tablo object files.")]
-#[command(after_help = "Interactive commands:\n  continue | c               Resume execution\n  step-in | s | si           Step into the next instruction\n  step-over | n              Step over the current call or instruction\n  step-out | finish | fin | o Run until the current frame returns\n  break <SOURCE:LINE> | b    Add a breakpoint after launch\n  breakpoints | bl           List the current breakpoints\n  clear-breakpoints | bc     Remove all breakpoints\n  stack | bt | where         Show the current stack trace\n  locals | l                 Show locals in the current frame\n  help | h | ?               Show debugger command help\n  quit | q | exit            Exit the debugger")]
+#[command(about = "Prototype debugger for compiled Tablo object files.")]
+#[command(after_help = "Interactive mode:\n  tablodbg program.tbo\n\nDAP mode:\n  tablodbg --dap\n\nInteractive commands:\n  continue | c               Resume execution\n  step-in | s | si           Step into the next instruction\n  step-over | n              Step over the current call or instruction\n  step-out | finish | fin | o Run until the current frame returns\n  break <SOURCE:LINE> | b    Add a breakpoint after launch\n  breakpoints | bl           List the current breakpoints\n  clear-breakpoints | bc     Remove all breakpoints\n  stack | bt | where         Show the current stack trace\n  locals | l                 Show locals in the current frame\n  help | h | ?               Show debugger command help\n  quit | q | exit            Exit the debugger")]
 struct Args {
 	#[arg(value_name = "INPUT")]
-	input_path: PathBuf,
+	input_path: Option<PathBuf>,
 	#[arg(short = 'b', long = "breakpoint", value_name = "SOURCE:LINE")]
 	breakpoints: Vec<String>,
+	#[arg(long = "dap", help = "Run as a DAP server over stdin/stdout.")]
+	dap: bool,
 }
 
 enum DebugCommand {
@@ -36,9 +46,352 @@ enum DebugCommand {
 	StepOver,
 }
 
+#[derive(Deserialize)]
+struct DapRequest {
+	arguments: Option<JsonValue>,
+	command: String,
+	seq: i64,
+	#[serde(rename = "type")]
+	type_name: String,
+}
+
+struct DapServer {
+	breakpoints_by_source: BTreeMap<String, Vec<InstructionBreakpoint>>,
+	program: Option<&'static Program>,
+	session: Option<DebuggerSession<'static>>,
+	stop: Option<DebuggerStop>,
+}
+
+impl DapServer {
+	fn new() -> Self {
+		Self {
+			breakpoints_by_source: BTreeMap::new(),
+			program: None,
+			session: None,
+			stop: None,
+		}
+	}
+
+	fn current_paused_state(&self) -> Option<&tablo::debugger::PausedState> {
+		self.stop.as_ref()?.paused_state()
+	}
+
+	fn handle_configuration_done(&mut self, request_seq: i64) -> Result<Vec<JsonValue>, String> {
+		let all_breakpoints = self.all_breakpoints();
+		let session = self.session.as_mut().ok_or(String::from("No program is currently loaded."))?;
+		let stop = if all_breakpoints.is_empty() {
+			session.pause_at_start()
+		}
+		else {
+			session.resume().map_err(|error| TabloError::Runtime(error).to_string())?
+		};
+
+		self.stop = Some(stop.clone());
+
+		let mut messages = vec![dap_response(request_seq, "configurationDone", json!({}))];
+		messages.extend(self.messages_for_stop(&stop, Some("entry")));
+		Ok(messages)
+	}
+
+	fn handle_continue(&mut self, request_seq: i64) -> Result<Vec<JsonValue>, String> {
+		let session = self.session.as_mut().ok_or(String::from("No program is currently loaded."))?;
+		let stop = session.resume().map_err(|error| TabloError::Runtime(error).to_string())?;
+		self.stop = Some(stop.clone());
+
+		let mut messages = vec![dap_response(
+			request_seq,
+			"continue",
+			json!({ "allThreadsContinued": true }),
+		)];
+		messages.extend(self.messages_for_stop(&stop, None));
+		Ok(messages)
+	}
+
+	fn handle_disconnect(&mut self, request_seq: i64) -> Vec<JsonValue> {
+		vec![
+			dap_response(request_seq, "disconnect", json!({})),
+			dap_event("terminated", json!({})),
+		]
+	}
+
+	fn handle_initialize(&mut self, request_seq: i64) -> Vec<JsonValue> {
+		vec![
+			dap_response(
+				request_seq,
+				"initialize",
+				json!({
+					"supportsConfigurationDoneRequest": true,
+					"supportsStepInTargetsRequest": false,
+					"supportsTerminateRequest": false,
+					"supportsConditionalBreakpoints": false,
+					"supportsFunctionBreakpoints": false,
+					"supportsInstructionBreakpoints": false,
+				}),
+			),
+			dap_event("initialized", json!({})),
+		]
+	}
+
+	fn handle_launch(&mut self, request_seq: i64, arguments: Option<JsonValue>) -> Result<Vec<JsonValue>, String> {
+		let arguments = arguments.unwrap_or(JsonValue::Null);
+		let path = arguments.get("program")
+			.and_then(JsonValue::as_str)
+			.or_else(|| arguments.get("inputPath").and_then(JsonValue::as_str))
+			.ok_or(String::from("Launch request must include a `program` path."))?;
+
+		let program = read_program_from_path(path).map_err(|error| TabloError::ObjectFile(error).to_string())?;
+		let program = Box::leak(Box::new(program));
+		let mut session = DebuggerSession::new(program);
+
+		if !self.all_breakpoints().is_empty() {
+			session.set_breakpoints(self.all_breakpoints());
+		}
+
+		self.program = Some(program);
+		self.session = Some(session);
+		self.stop = None;
+
+		Ok(vec![dap_response(request_seq, "launch", json!({}))])
+	}
+
+	fn handle_scopes(&self, request_seq: i64, arguments: Option<JsonValue>) -> Result<Vec<JsonValue>, String> {
+		let frame_id = frame_id_from_arguments(arguments)?;
+		let paused = self.current_paused_state().ok_or(String::from("Program is not currently paused."))?;
+
+		if frame_id == 0 || frame_id > paused.stack_frames().len() as i64 {
+			return Err(format!("Unknown frame id {frame_id}."));
+		}
+
+		Ok(vec![dap_response(
+			request_seq,
+			"scopes",
+			json!({
+				"scopes": [
+					{
+						"name": "Locals",
+						"presentationHint": "locals",
+						"variablesReference": frame_id,
+						"expensive": false,
+					}
+				]
+			}),
+		)])
+	}
+
+	fn handle_set_breakpoints(
+		&mut self,
+		request_seq: i64,
+		arguments: Option<JsonValue>,
+	) -> Result<Vec<JsonValue>, String> {
+		let program = self.program.ok_or(String::from("No program is currently loaded."))?;
+		let session = self.session.as_ref().ok_or(String::from("No program is currently loaded."))?;
+		let arguments = arguments.unwrap_or(JsonValue::Null);
+		let source = arguments.get("source").cloned().unwrap_or(JsonValue::Null);
+		let source_path = source.get("path").and_then(JsonValue::as_str);
+		let source_name = source.get("name").and_then(JsonValue::as_str);
+		let source_key = source_path.or(source_name).ok_or(String::from("Breakpoint source must include `path` or `name`."))?;
+
+		let requested_lines = if let Some(breakpoints) = arguments.get("breakpoints").and_then(JsonValue::as_array) {
+			breakpoints.iter().filter_map(|breakpoint| breakpoint.get("line").and_then(JsonValue::as_u64).map(|line| line as u32)).collect::<Vec<_>>()
+		}
+		else {
+			arguments.get("lines")
+				.and_then(JsonValue::as_array)
+				.map(|lines| lines.iter().filter_map(|line| line.as_u64().map(|line| line as u32)).collect::<Vec<_>>())
+				.unwrap_or_default()
+		};
+
+		let resolved = session.resolve_source_breakpoints(source_key, &requested_lines);
+		self.breakpoints_by_source.insert(source_key.to_string(), resolved.clone());
+		let all_breakpoints = self.all_breakpoints();
+		let session = self.session.as_mut().ok_or(String::from("No program is currently loaded."))?;
+		session.set_breakpoints(all_breakpoints);
+
+		let breakpoint_results = requested_lines.into_iter().map(|line| {
+			let resolved_site = resolved.iter().find(|breakpoint| {
+				program
+					.debug_location(breakpoint.body_index(), breakpoint.instruction_index())
+					.is_some_and(|location| location.line() == line)
+			});
+
+			match resolved_site {
+				Some(breakpoint) => {
+					let location = program.debug_location(breakpoint.body_index(), breakpoint.instruction_index());
+					json!({
+						"verified": true,
+						"line": location.as_ref().map(|location| location.line()).unwrap_or(line),
+						"column": location.as_ref().map(|location| location.column()).unwrap_or(1),
+					})
+				}
+				None => json!({
+					"verified": false,
+					"line": line,
+				}),
+			}
+		}).collect::<Vec<_>>();
+
+		Ok(vec![dap_response(
+			request_seq,
+			"setBreakpoints",
+			json!({ "breakpoints": breakpoint_results }),
+		)])
+	}
+
+	fn handle_stack_trace(&self, request_seq: i64) -> Result<Vec<JsonValue>, String> {
+		let paused = self.current_paused_state().ok_or(String::from("Program is not currently paused."))?;
+		let stack_frames = paused.stack_frames().iter().enumerate().map(|(index, frame)| {
+			let source = frame.source_location().map(|location| {
+				json!({
+					"name": location.display_name().unwrap_or("<source>"),
+					"path": location.display_name(),
+				})
+			});
+
+			json!({
+				"id": (index + 1) as i64,
+				"name": frame.source_location()
+					.and_then(|location| location.body_name())
+					.unwrap_or("<entry>"),
+				"line": frame.source_location().map(|location| location.line()).unwrap_or(1),
+				"column": frame.source_location().map(|location| location.column()).unwrap_or(1),
+				"source": source,
+			})
+		}).collect::<Vec<_>>();
+
+		Ok(vec![dap_response(
+			request_seq,
+			"stackTrace",
+			json!({
+				"stackFrames": stack_frames,
+				"totalFrames": paused.stack_frames().len(),
+			}),
+		)])
+	}
+
+	fn handle_step_in(&mut self, request_seq: i64) -> Result<Vec<JsonValue>, String> {
+		let session = self.session.as_mut().ok_or(String::from("No program is currently loaded."))?;
+		let stop = session.step_in().map_err(|error| TabloError::Runtime(error).to_string())?;
+		self.stop = Some(stop.clone());
+
+		let mut messages = vec![dap_response(request_seq, "stepIn", json!({}))];
+		messages.extend(self.messages_for_stop(&stop, None));
+		Ok(messages)
+	}
+
+	fn handle_step_out(&mut self, request_seq: i64) -> Result<Vec<JsonValue>, String> {
+		let session = self.session.as_mut().ok_or(String::from("No program is currently loaded."))?;
+		let stop = session.step_out().map_err(|error| TabloError::Runtime(error).to_string())?;
+		self.stop = Some(stop.clone());
+
+		let mut messages = vec![dap_response(request_seq, "stepOut", json!({}))];
+		messages.extend(self.messages_for_stop(&stop, None));
+		Ok(messages)
+	}
+
+	fn handle_step_over(&mut self, request_seq: i64) -> Result<Vec<JsonValue>, String> {
+		let session = self.session.as_mut().ok_or(String::from("No program is currently loaded."))?;
+		let stop = session.step_over().map_err(|error| TabloError::Runtime(error).to_string())?;
+		self.stop = Some(stop.clone());
+
+		let mut messages = vec![dap_response(request_seq, "next", json!({}))];
+		messages.extend(self.messages_for_stop(&stop, None));
+		Ok(messages)
+	}
+
+	fn handle_threads(&self, request_seq: i64) -> Vec<JsonValue> {
+		vec![dap_response(
+			request_seq,
+			"threads",
+			json!({
+				"threads": [
+					{ "id": 1, "name": "Main" }
+				]
+			}),
+		)]
+	}
+
+	fn handle_variables(&self, request_seq: i64, arguments: Option<JsonValue>) -> Result<Vec<JsonValue>, String> {
+		let paused = self.current_paused_state().ok_or(String::from("Program is not currently paused."))?;
+		let variables_reference = arguments
+			.unwrap_or(JsonValue::Null)
+			.get("variablesReference")
+			.and_then(JsonValue::as_i64)
+			.ok_or(String::from("Variables request must include `variablesReference`."))?;
+
+		if variables_reference <= 0 || variables_reference > paused.stack_frames().len() as i64 {
+			return Err(format!("Unknown variables reference {variables_reference}."));
+		}
+
+		let frame = &paused.stack_frames()[(variables_reference - 1) as usize];
+		let variables = frame.locals().iter().map(|local| {
+			json!({
+				"name": local.name(),
+				"value": local.value().to_string(),
+				"type": local.declared_type(),
+				"variablesReference": 0,
+			})
+		}).collect::<Vec<_>>();
+
+		Ok(vec![dap_response(
+			request_seq,
+			"variables",
+			json!({ "variables": variables }),
+		)])
+	}
+
+	fn messages_for_stop(&self, stop: &DebuggerStop, reason_override: Option<&str>) -> Vec<JsonValue> {
+		match stop {
+			DebuggerStop::Completed(result) => {
+				let mut messages = Vec::new();
+				if let Some(result) = result {
+					messages.push(dap_event("output", json!({
+						"category": "stdout",
+						"output": format!("Program completed with result: {result}\n"),
+					})));
+				}
+				messages.push(dap_event("terminated", json!({})));
+				messages
+			}
+			DebuggerStop::Paused(paused) => {
+				let reason = reason_override.unwrap_or(match paused.reason() {
+					PauseReason::Breakpoint => "breakpoint",
+					PauseReason::StepIn | PauseReason::StepOut | PauseReason::StepOver => "step",
+				});
+
+				vec![dap_event("stopped", json!({
+					"reason": reason,
+					"threadId": 1,
+					"allThreadsStopped": true,
+				}))]
+			}
+		}
+	}
+
+	fn all_breakpoints(&self) -> Vec<InstructionBreakpoint> {
+		self.breakpoints_by_source
+			.values()
+			.flat_map(|breakpoints| breakpoints.iter().copied())
+			.collect()
+	}
+}
+
 fn main() {
 	let args = Args::parse();
-	let program = match read_program_from_path(&args.input_path) {
+
+	if args.dap {
+		if let Err(message) = run_dap_server() {
+			eprintln!("{message}");
+			std::process::exit(1);
+		}
+		return;
+	}
+
+	let Some(input_path) = args.input_path else {
+		eprintln!("Interactive mode requires an input object file path. Use `tablodbg --dap` for DAP mode.");
+		std::process::exit(1);
+	};
+
+	let program = match read_program_from_path(&input_path) {
 		Ok(program) => program,
 		Err(error) => {
 			eprintln!("{}", TabloError::ObjectFile(error));
@@ -70,6 +423,59 @@ fn main() {
 	};
 
 	run_debug_loop(&program, &mut session, initial_stop);
+}
+
+fn dap_error_response(request: &DapRequest, message: impl Into<String>) -> JsonValue {
+	json!({
+		"type": "response",
+		"request_seq": request.seq,
+		"success": false,
+		"command": request.command,
+		"message": message.into(),
+	})
+}
+
+fn dap_event(event: &str, body: JsonValue) -> JsonValue {
+	json!({
+		"type": "event",
+		"event": event,
+		"body": body,
+	})
+}
+
+fn dap_response(request_seq: i64, command: &str, body: JsonValue) -> JsonValue {
+	json!({
+		"type": "response",
+		"request_seq": request_seq,
+		"success": true,
+		"command": command,
+		"body": body,
+	})
+}
+
+fn emit_dap_message(writer: &mut impl Write, message: &JsonValue) -> Result<(), String> {
+	let payload = serde_json::to_vec(message).map_err(|error| format!("Failed to encode DAP message: {error}"))?;
+	write!(writer, "Content-Length: {}\r\n\r\n", payload.len())
+		.map_err(|error| format!("Failed to write DAP header: {error}"))?;
+	writer.write_all(&payload).map_err(|error| format!("Failed to write DAP payload: {error}"))?;
+	writer.flush().map_err(|error| format!("Failed to flush DAP output: {error}"))?;
+	Ok(())
+}
+
+fn emit_dap_messages(writer: &mut impl Write, messages: &[JsonValue]) -> Result<(), String> {
+	for message in messages {
+		emit_dap_message(writer, message)?;
+	}
+
+	Ok(())
+}
+
+fn frame_id_from_arguments(arguments: Option<JsonValue>) -> Result<i64, String> {
+	arguments
+		.unwrap_or(JsonValue::Null)
+		.get("frameId")
+		.and_then(JsonValue::as_i64)
+		.ok_or(String::from("Request must include `frameId`."))
 }
 
 fn format_location(location: &SourceLocation) -> String {
@@ -223,11 +629,42 @@ fn prompt_command() -> Result<DebugCommand, String> {
 	parse_command(&line)
 }
 
+fn read_dap_message(reader: &mut impl BufRead) -> Result<Option<String>, String> {
+	let mut content_length = None;
+
+	loop {
+		let mut header_line = String::new();
+		let bytes_read = reader.read_line(&mut header_line).map_err(|error| format!("Failed to read DAP header: {error}"))?;
+
+		if bytes_read == 0 {
+			return Ok(None);
+		}
+
+		let trimmed = header_line.trim_end_matches(['\r', '\n']);
+
+		if trimmed.is_empty() {
+			break;
+		}
+
+		if let Some(value) = trimmed.strip_prefix("Content-Length:") {
+			let length = value.trim().parse::<usize>().map_err(|_| format!("Invalid DAP Content-Length header `{trimmed}`."))?;
+			content_length = Some(length);
+		}
+	}
+
+	let content_length = content_length.ok_or(String::from("Missing DAP Content-Length header."))?;
+	let mut payload = vec![0; content_length];
+	reader.read_exact(&mut payload).map_err(|error| format!("Failed to read DAP payload: {error}"))?;
+	String::from_utf8(payload)
+		.map(Some)
+		.map_err(|_| String::from("DAP payload was not valid UTF-8."))
+}
+
 fn resolve_breakpoints(
 	program: &Program,
 	session: &DebuggerSession<'_>,
 	breakpoint_specs: &[String],
-) -> Result<Vec<tablo::debugger::InstructionBreakpoint>, String> {
+) -> Result<Vec<InstructionBreakpoint>, String> {
 	let mut breakpoints = Vec::new();
 
 	for spec in breakpoint_specs {
@@ -257,6 +694,54 @@ fn resolve_breakpoints(
 	}
 
 	Ok(breakpoints)
+}
+
+fn run_dap_server() -> Result<(), String> {
+	let stdin = std::io::stdin();
+	let stdout = std::io::stdout();
+	let mut reader = BufReader::new(stdin.lock());
+	let mut writer = stdout.lock();
+	let mut server = DapServer::new();
+
+	while let Some(message) = read_dap_message(&mut reader)? {
+		let request: DapRequest = serde_json::from_str(&message)
+			.map_err(|error| format!("Failed to decode DAP request: {error}"))?;
+
+		if request.type_name != "request" {
+			continue;
+		}
+
+		let result = match request.command.as_str() {
+			"configurationDone" => server.handle_configuration_done(request.seq),
+			"continue" => server.handle_continue(request.seq),
+			"disconnect" => Ok(server.handle_disconnect(request.seq)),
+			"initialize" => Ok(server.handle_initialize(request.seq)),
+			"launch" => server.handle_launch(request.seq, request.arguments.clone()),
+			"next" => server.handle_step_over(request.seq),
+			"scopes" => server.handle_scopes(request.seq, request.arguments.clone()),
+			"setBreakpoints" => server.handle_set_breakpoints(request.seq, request.arguments.clone()),
+			"stackTrace" => server.handle_stack_trace(request.seq),
+			"stepIn" => server.handle_step_in(request.seq),
+			"stepOut" => server.handle_step_out(request.seq),
+			"threads" => Ok(server.handle_threads(request.seq)),
+			"variables" => server.handle_variables(request.seq, request.arguments.clone()),
+			command => Err(format!("Unsupported DAP request `{command}`.")),
+		};
+
+		match result {
+			Ok(messages) => {
+				emit_dap_messages(&mut writer, &messages)?;
+				if request.command == "disconnect" {
+					return Ok(());
+				}
+			}
+			Err(message) => {
+				emit_dap_message(&mut writer, &dap_error_response(&request, message))?;
+			}
+		}
+	}
+
+	Ok(())
 }
 
 fn run_debug_loop(program: &Program, session: &mut DebuggerSession<'_>, mut stop: DebuggerStop) {
