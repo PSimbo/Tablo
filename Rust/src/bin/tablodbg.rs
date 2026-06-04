@@ -17,6 +17,7 @@ use tablo::debugger::DebuggerStop;
 use tablo::debugger::InstructionBreakpoint;
 use tablo::debugger::PauseReason;
 use tablo::object_file::read_program_from_path;
+use tablo::vm::VmError;
 use tablo::vm::VmStackFrame;
 
 #[derive(ClapParser, Debug)]
@@ -58,6 +59,7 @@ struct DapRequest {
 struct DapServer {
 	breakpoints_by_source: BTreeMap<String, Vec<InstructionBreakpoint>>,
 	program: Option<&'static Program>,
+	runtime_error: Option<VmError>,
 	session: Option<DebuggerSession<'static>>,
 	stop: Option<DebuggerStop>,
 }
@@ -67,6 +69,7 @@ impl DapServer {
 		Self {
 			breakpoints_by_source: BTreeMap::new(),
 			program: None,
+			runtime_error: None,
 			session: None,
 			stop: None,
 		}
@@ -74,6 +77,18 @@ impl DapServer {
 
 	fn current_paused_state(&self) -> Option<&tablo::debugger::PausedState> {
 		self.stop.as_ref()?.paused_state()
+	}
+
+	fn current_stack_frames(&self) -> Option<&[VmStackFrame]> {
+		if let Some(paused) = self.current_paused_state() {
+			return Some(paused.stack_frames());
+		}
+
+		self.runtime_error.as_ref().map(|error| error.stack_frames())
+	}
+
+	fn current_exception_message(&self) -> Option<&str> {
+		self.runtime_error.as_ref().map(|error| error.message.as_str())
 	}
 
 	fn handle_configuration_done(&mut self, request_seq: i64) -> Result<Vec<JsonValue>, String> {
@@ -87,6 +102,7 @@ impl DapServer {
 		};
 
 		self.stop = Some(stop.clone());
+		self.runtime_error = None;
 
 		let mut messages = vec![dap_response(request_seq, "configurationDone", json!({}))];
 		messages.extend(self.messages_for_stop(&stop, Some("entry")));
@@ -94,8 +110,31 @@ impl DapServer {
 	}
 
 	fn handle_continue(&mut self, request_seq: i64) -> Result<Vec<JsonValue>, String> {
+		if self.runtime_error.is_some() {
+			return Ok(vec![
+				dap_response(request_seq, "continue", json!({ "allThreadsContinued": true })),
+				dap_event("terminated", json!({})),
+			]);
+		}
+
 		let session = self.session.as_mut().ok_or(String::from("No program is currently loaded."))?;
-		let stop = session.resume().map_err(|error| TabloError::Runtime(error).to_string())?;
+		let stop = match session.resume() {
+			Ok(stop) => {
+				self.runtime_error = None;
+				stop
+			}
+			Err(error) => {
+				self.stop = None;
+				self.runtime_error = Some(error.clone());
+				let mut messages = vec![dap_response(
+					request_seq,
+					"continue",
+					json!({ "allThreadsContinued": true }),
+				)];
+				messages.extend(self.messages_for_runtime_error(&error));
+				return Ok(messages);
+			}
+		};
 		self.stop = Some(stop.clone());
 
 		let mut messages = vec![dap_response(
@@ -124,6 +163,7 @@ impl DapServer {
 					"supportsStepInTargetsRequest": false,
 					"supportsTerminateRequest": false,
 					"supportsConditionalBreakpoints": false,
+					"supportsExceptionInfoRequest": true,
 					"supportsFunctionBreakpoints": false,
 					"supportsInstructionBreakpoints": false,
 				}),
@@ -148,6 +188,7 @@ impl DapServer {
 		}
 
 		self.program = Some(program);
+		self.runtime_error = None;
 		self.session = Some(session);
 		self.stop = None;
 
@@ -156,9 +197,9 @@ impl DapServer {
 
 	fn handle_scopes(&self, request_seq: i64, arguments: Option<JsonValue>) -> Result<Vec<JsonValue>, String> {
 		let frame_id = frame_id_from_arguments(arguments)?;
-		let paused = self.current_paused_state().ok_or(String::from("Program is not currently paused."))?;
+		let stack_frames = self.current_stack_frames().ok_or(String::from("Program is not currently paused."))?;
 
-		if frame_id == 0 || frame_id > paused.stack_frames().len() as i64 {
+		if frame_id == 0 || frame_id > stack_frames.len() as i64 {
 			return Err(format!("Unknown frame id {frame_id}."));
 		}
 
@@ -238,8 +279,8 @@ impl DapServer {
 	}
 
 	fn handle_stack_trace(&self, request_seq: i64) -> Result<Vec<JsonValue>, String> {
-		let paused = self.current_paused_state().ok_or(String::from("Program is not currently paused."))?;
-		let stack_frames = paused.stack_frames().iter().enumerate().map(|(index, frame)| {
+		let stack_frames = self.current_stack_frames().ok_or(String::from("Program is not currently paused."))?;
+		let stack_frames = stack_frames.iter().enumerate().map(|(index, frame)| {
 			let source = frame.source_location().map(|location| {
 				json!({
 					"name": location.display_name().unwrap_or("<source>"),
@@ -263,14 +304,44 @@ impl DapServer {
 			"stackTrace",
 			json!({
 				"stackFrames": stack_frames,
-				"totalFrames": paused.stack_frames().len(),
+				"totalFrames": self.current_stack_frames().map(|frames| frames.len()).unwrap_or(0),
+			}),
+		)])
+	}
+
+	fn handle_exception_info(&self, request_seq: i64) -> Result<Vec<JsonValue>, String> {
+		let description = self.current_exception_message().ok_or(String::from("Program is not currently paused on an exception."))?;
+
+		Ok(vec![dap_response(
+			request_seq,
+			"exceptionInfo",
+			json!({
+				"exceptionId": "runtime",
+				"description": description,
+				"breakMode": "always",
 			}),
 		)])
 	}
 
 	fn handle_step_in(&mut self, request_seq: i64) -> Result<Vec<JsonValue>, String> {
+		if self.runtime_error.is_some() {
+			return Err(String::from("Program is paused on an exception and cannot step further."));
+		}
+
 		let session = self.session.as_mut().ok_or(String::from("No program is currently loaded."))?;
-		let stop = session.step_in().map_err(|error| TabloError::Runtime(error).to_string())?;
+		let stop = match session.step_in() {
+			Ok(stop) => {
+				self.runtime_error = None;
+				stop
+			}
+			Err(error) => {
+				self.stop = None;
+				self.runtime_error = Some(error.clone());
+				let mut messages = vec![dap_response(request_seq, "stepIn", json!({}))];
+				messages.extend(self.messages_for_runtime_error(&error));
+				return Ok(messages);
+			}
+		};
 		self.stop = Some(stop.clone());
 
 		let mut messages = vec![dap_response(request_seq, "stepIn", json!({}))];
@@ -279,8 +350,24 @@ impl DapServer {
 	}
 
 	fn handle_step_out(&mut self, request_seq: i64) -> Result<Vec<JsonValue>, String> {
+		if self.runtime_error.is_some() {
+			return Err(String::from("Program is paused on an exception and cannot step further."));
+		}
+
 		let session = self.session.as_mut().ok_or(String::from("No program is currently loaded."))?;
-		let stop = session.step_out().map_err(|error| TabloError::Runtime(error).to_string())?;
+		let stop = match session.step_out() {
+			Ok(stop) => {
+				self.runtime_error = None;
+				stop
+			}
+			Err(error) => {
+				self.stop = None;
+				self.runtime_error = Some(error.clone());
+				let mut messages = vec![dap_response(request_seq, "stepOut", json!({}))];
+				messages.extend(self.messages_for_runtime_error(&error));
+				return Ok(messages);
+			}
+		};
 		self.stop = Some(stop.clone());
 
 		let mut messages = vec![dap_response(request_seq, "stepOut", json!({}))];
@@ -289,8 +376,24 @@ impl DapServer {
 	}
 
 	fn handle_step_over(&mut self, request_seq: i64) -> Result<Vec<JsonValue>, String> {
+		if self.runtime_error.is_some() {
+			return Err(String::from("Program is paused on an exception and cannot step further."));
+		}
+
 		let session = self.session.as_mut().ok_or(String::from("No program is currently loaded."))?;
-		let stop = session.step_over().map_err(|error| TabloError::Runtime(error).to_string())?;
+		let stop = match session.step_over() {
+			Ok(stop) => {
+				self.runtime_error = None;
+				stop
+			}
+			Err(error) => {
+				self.stop = None;
+				self.runtime_error = Some(error.clone());
+				let mut messages = vec![dap_response(request_seq, "next", json!({}))];
+				messages.extend(self.messages_for_runtime_error(&error));
+				return Ok(messages);
+			}
+		};
 		self.stop = Some(stop.clone());
 
 		let mut messages = vec![dap_response(request_seq, "next", json!({}))];
@@ -311,18 +414,18 @@ impl DapServer {
 	}
 
 	fn handle_variables(&self, request_seq: i64, arguments: Option<JsonValue>) -> Result<Vec<JsonValue>, String> {
-		let paused = self.current_paused_state().ok_or(String::from("Program is not currently paused."))?;
+		let stack_frames = self.current_stack_frames().ok_or(String::from("Program is not currently paused."))?;
 		let variables_reference = arguments
 			.unwrap_or(JsonValue::Null)
 			.get("variablesReference")
 			.and_then(JsonValue::as_i64)
 			.ok_or(String::from("Variables request must include `variablesReference`."))?;
 
-		if variables_reference <= 0 || variables_reference > paused.stack_frames().len() as i64 {
+		if variables_reference <= 0 || variables_reference > stack_frames.len() as i64 {
 			return Err(format!("Unknown variables reference {variables_reference}."));
 		}
 
-		let frame = &paused.stack_frames()[(variables_reference - 1) as usize];
+		let frame = &stack_frames[(variables_reference - 1) as usize];
 		let variables = frame.locals().iter().map(|local| {
 			json!({
 				"name": local.name(),
@@ -365,6 +468,18 @@ impl DapServer {
 				}))]
 			}
 		}
+	}
+
+	fn messages_for_runtime_error(&self, error: &VmError) -> Vec<JsonValue> {
+		vec![
+			dap_event("stopped", json!({
+				"reason": "exception",
+				"text": error.message,
+				"description": error.message,
+				"threadId": 1,
+				"allThreadsStopped": true,
+			})),
+		]
 	}
 
 	fn all_breakpoints(&self) -> Vec<InstructionBreakpoint> {
@@ -715,6 +830,7 @@ fn run_dap_server() -> Result<(), String> {
 			"configurationDone" => server.handle_configuration_done(request.seq),
 			"continue" => server.handle_continue(request.seq),
 			"disconnect" => Ok(server.handle_disconnect(request.seq)),
+			"exceptionInfo" => server.handle_exception_info(request.seq),
 			"initialize" => Ok(server.handle_initialize(request.seq)),
 			"launch" => server.handle_launch(request.seq, request.arguments.clone()),
 			"next" => server.handle_step_over(request.seq),
