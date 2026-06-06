@@ -334,11 +334,12 @@ impl Compiler {
 	}
 
 	fn compile_program_with_semantics(&mut self, program: &AstProgram, semantic_program: &SemanticProgram) -> Result<Program, CompileError> {
-		let mut functions = Vec::with_capacity(program.functions.len());
-		let mut code_body_debug = Vec::with_capacity(program.functions.len() + 1);
+		let all_functions = collect_all_function_declarations(program);
+		let mut functions = Vec::with_capacity(all_functions.len());
+		let mut code_body_debug = Vec::with_capacity(all_functions.len() + 1);
 
-		for function in &program.functions {
-			let (compiled_function, debug_info) = self.compile_function(function, &semantic_program)?;
+		for function in all_functions {
+			let (compiled_function, debug_info) = self.compile_function(function, semantic_program)?;
 			functions.push(compiled_function);
 			code_body_debug.push(debug_info);
 		}
@@ -479,6 +480,7 @@ impl Compiler {
 				self.exit_debug_scope(emission);
 				Ok(())
 			}
+			Statement::FunctionDeclaration(_) => Ok(()),
 			Statement::If(IfStatement {
 				condition,
 				else_branch,
@@ -640,6 +642,43 @@ impl Compiler {
 	}
 }
 
+fn collect_all_function_declarations<'a>(program: &'a AstProgram) -> Vec<&'a FunctionDeclaration> {
+	let mut functions = Vec::new();
+
+	for function in &program.functions {
+		collect_function_declaration(function, &mut functions);
+	}
+
+	functions
+}
+
+fn collect_function_declaration<'a>(function: &'a FunctionDeclaration, functions: &mut Vec<&'a FunctionDeclaration>) {
+	functions.push(function);
+	collect_functions_from_statements(function.body.statements.as_slice(), functions);
+}
+
+fn collect_functions_from_statement<'a>(statement: &'a Statement, functions: &mut Vec<&'a FunctionDeclaration>) {
+	match statement {
+		Statement::Block(block) => collect_functions_from_statements(block.statements.as_slice(), functions),
+		Statement::For(statement) => collect_functions_from_statements(statement.body.statements.as_slice(), functions),
+		Statement::FunctionDeclaration(function) => collect_function_declaration(function, functions),
+		Statement::If(statement) => {
+			collect_functions_from_statements(statement.then_branch.statements.as_slice(), functions);
+			if let Some(else_branch) = &statement.else_branch {
+				collect_functions_from_statement(else_branch, functions);
+			}
+		}
+		Statement::While(statement) => collect_functions_from_statements(statement.body.statements.as_slice(), functions),
+		Statement::Break(_) | Statement::Continue(_) | Statement::Expression(_) | Statement::Return(_) | Statement::VariableDeclaration(_) => {}
+	}
+}
+
+fn collect_functions_from_statements<'a>(statements: &'a [Statement], functions: &mut Vec<&'a FunctionDeclaration>) {
+	for statement in statements {
+		collect_functions_from_statement(statement, functions);
+	}
+}
+
 fn data_type_name(data_type: &crate::ast::DataType) -> String {
 	match data_type {
 		crate::ast::DataType::Array(element_type) => format!("[{}]", data_type_name(element_type)),
@@ -667,6 +706,7 @@ fn statement_position(statement: &Statement) -> usize {
 		Statement::Continue(statement) => statement.position,
 		Statement::Expression(expression) => expression.position(),
 		Statement::For(statement) => statement.position,
+		Statement::FunctionDeclaration(statement) => statement.position,
 		Statement::If(statement) => statement.position,
 		Statement::Return(statement) => statement.position,
 		Statement::VariableDeclaration(statement) => statement.position,

@@ -37,9 +37,10 @@ use super::scope::ScopeStack;
 #[derive(Default)]
 pub struct SemanticAnalyzer {
 	current_return_type: Option<DataType>,
-	functions: BTreeMap<String, FunctionSignature>,
+	functions: ScopeStack<FunctionSignature>,
 	locals: ScopeStack<LocalBinding>,
 	loop_depth: usize,
+	next_function_index: u32,
 	next_local_slot: u32,
 	semantic_program: SemanticProgram,
 }
@@ -75,6 +76,7 @@ pub struct SemanticProgram {
 	declaration_types: BTreeMap<usize, DataType>,
 	entry_point_function_index: Option<u32>,
 	entry_point_position: Option<usize>,
+	function_declaration_targets: BTreeMap<usize, u32>,
 	identifier_slots: BTreeMap<usize, u32>,
 	iterator_slots: BTreeMap<usize, u32>,
 }
@@ -112,6 +114,10 @@ impl SemanticProgram {
 		self.entry_point_position
 	}
 
+	pub fn function_declaration_target(&self, position: usize) -> Option<u32> {
+		self.function_declaration_targets.get(&position).copied()
+	}
+
 	pub fn identifier_slot(&self, position: usize) -> Option<u32> {
 		self.identifier_slots.get(&position).copied()
 	}
@@ -125,9 +131,10 @@ impl SemanticAnalyzer {
 	pub fn new() -> Self {
 		Self {
 			current_return_type: None,
-			functions: BTreeMap::new(),
+			functions: ScopeStack::default(),
 			locals: ScopeStack::default(),
 			loop_depth: 0,
+			next_function_index: 0,
 			next_local_slot: 0,
 			semantic_program: SemanticProgram::default(),
 		}
@@ -135,13 +142,15 @@ impl SemanticAnalyzer {
 
 	pub fn analyze_program(&mut self, program: &Program) -> Result<SemanticProgram, CompileError> {
 		self.current_return_type = None;
-		self.functions = BTreeMap::new();
+		self.functions = ScopeStack::default();
 		self.locals = ScopeStack::default();
 		self.loop_depth = 0;
+		self.next_function_index = 0;
 		self.next_local_slot = 0;
 		self.semantic_program = SemanticProgram::default();
 
-		self.collect_function_signatures(&program.functions)?;
+		self.functions.enter_scope();
+		self.collect_scope_function_signatures(&program.functions, &program.statements)?;
 
 		for function in &program.functions {
 			self.validate_function_declaration(function)?;
@@ -158,6 +167,7 @@ impl SemanticAnalyzer {
 		}
 
 		self.exit_scope();
+		self.functions.exit_scope();
 
 		Ok(self.semantic_program.clone())
 	}
@@ -174,7 +184,7 @@ impl SemanticAnalyzer {
 		self.validate_main_entry_point(program, main_function)?;
 
 		let mut semantic_program = semantic_program;
-		semantic_program.entry_point_function_index = self.functions.get("Main").map(|signature| signature.function_index);
+		semantic_program.entry_point_function_index = semantic_program.function_declaration_target(main_function.position);
 		semantic_program.entry_point_position = Some(main_function.position);
 		Ok(semantic_program)
 	}
@@ -276,49 +286,63 @@ impl SemanticAnalyzer {
 		block.statements.iter().any(|statement| self.statement_guarantees_return(statement))
 	}
 
-	fn collect_function_signatures(&mut self, functions: &[FunctionDeclaration]) -> Result<(), CompileError> {
-		for (index, function) in functions.iter().enumerate() {
-			if self.functions.contains_key(&function.name) {
-				return Err(self.compile_error(
-					function.position,
-					format!("Function `{}` is already declared in this scope.", function.name),
-				));
+	fn collect_scope_function_signatures(&mut self, functions: &[FunctionDeclaration], statements: &[Statement]) -> Result<(), CompileError> {
+		for function in functions {
+			self.declare_function_signature(function)?;
+		}
+
+		for statement in statements {
+			if let Statement::FunctionDeclaration(function) = statement {
+				self.declare_function_signature(function)?;
 			}
+		}
 
-			let mut parameters = Vec::with_capacity(function.parameters.len());
+		Ok(())
+	}
 
-			for parameter in &function.parameters {
-				self.validate_non_void_data_type(
-					&parameter.data_type,
-					parameter.position,
-					format!("Parameter `{}` cannot have type `{}`.", parameter.name, self.data_type_name(&parameter.data_type)),
-				)?;
-				parameters.push(FunctionParameterSignature {
-					data_type: parameter.data_type.clone(),
-					is_by_ref: parameter.is_by_ref,
-					name: parameter.name.clone(),
-				});
-			}
+	fn declare_function_signature(&mut self, function: &FunctionDeclaration) -> Result<(), CompileError> {
+		if self.functions.contains_in_current_scope(&function.name) {
+			return Err(self.compile_error(
+				function.position,
+				format!("Function `{}` is already declared in this scope.", function.name),
+			));
+		}
 
-			if !matches!(function.return_type, DataType::Void) {
-				self.validate_non_void_data_type(
-					&function.return_type,
-					function.position,
-					format!(
-						"Function `{}` cannot return `{}`.",
-						function.name,
-						self.data_type_name(&function.return_type),
-					),
-				)?;
-			}
+		let mut parameters = Vec::with_capacity(function.parameters.len());
 
-			self.functions.insert(function.name.clone(), FunctionSignature {
-				function_index: index as u32,
-				parameters,
-				return_type: function.return_type.clone(),
+		for parameter in &function.parameters {
+			self.validate_non_void_data_type(
+				&parameter.data_type,
+				parameter.position,
+				format!("Parameter `{}` cannot have type `{}`.", parameter.name, self.data_type_name(&parameter.data_type)),
+			)?;
+			parameters.push(FunctionParameterSignature {
+				data_type: parameter.data_type.clone(),
+				is_by_ref: parameter.is_by_ref,
+				name: parameter.name.clone(),
 			});
 		}
 
+		if !matches!(function.return_type, DataType::Void) {
+			self.validate_non_void_data_type(
+				&function.return_type,
+				function.position,
+				format!(
+					"Function `{}` cannot return `{}`.",
+					function.name,
+					self.data_type_name(&function.return_type),
+				),
+			)?;
+		}
+
+		let function_index = self.next_function_index;
+		self.functions.declare(function.name.clone(), FunctionSignature {
+			function_index,
+			parameters,
+			return_type: function.return_type.clone(),
+		});
+		self.semantic_program.function_declaration_targets.insert(function.position, function_index);
+		self.next_function_index += 1;
 		Ok(())
 	}
 
@@ -521,7 +545,7 @@ impl SemanticAnalyzer {
 			}
 			Expr::Boolean(_) => Ok(DataType::Bool),
 			Expr::Call(CallExpr { arguments, callee, .. }) => {
-				if let Some(signature) = self.functions.get(&callee.name).cloned() {
+				if let Some(signature) = self.lookup_function(&callee.name).cloned() {
 					if arguments.len() != signature.parameters.len() {
 						return Err(self.compile_error(
 							expression.position(),
@@ -716,6 +740,10 @@ impl SemanticAnalyzer {
 		matches!(data_type, DataType::Dec | DataType::Int)
 	}
 
+	fn lookup_function(&self, name: &str) -> Option<&FunctionSignature> {
+		self.functions.lookup(name)
+	}
+
 	fn lookup_local(&self, name: &str) -> Option<LocalBinding> {
 		self.locals.lookup(name).cloned()
 	}
@@ -851,6 +879,7 @@ impl SemanticAnalyzer {
 		match statement {
 			Statement::Block(block) => self.block_guarantees_return(block),
 			Statement::Break(_) | Statement::Continue(_) => false,
+			Statement::FunctionDeclaration(_) => false,
 			Statement::If(if_statement) => {
 				self.block_guarantees_return(&if_statement.then_branch)
 					&& if_statement.else_branch.as_ref().is_some_and(|else_branch| self.statement_guarantees_return(else_branch))
@@ -858,6 +887,20 @@ impl SemanticAnalyzer {
 			Statement::Return(_) => true,
 			Statement::Expression(_) | Statement::For(_) | Statement::VariableDeclaration(_) | Statement::While(_) => false,
 		}
+	}
+
+	fn validate_block(&mut self, statements: &[Statement]) -> Result<(), CompileError> {
+		self.enter_scope();
+		self.functions.enter_scope();
+		self.collect_scope_function_signatures(&[], statements)?;
+
+		for statement in statements {
+			self.validate_statement(statement)?;
+		}
+
+		self.functions.exit_scope();
+		self.exit_scope();
+		Ok(())
 	}
 
 	fn validate_function_declaration(&mut self, function: &FunctionDeclaration) -> Result<(), CompileError> {
@@ -876,7 +919,7 @@ impl SemanticAnalyzer {
 			self.validate_function_parameter(parameter)?;
 		}
 
-		self.validate_statement(&Statement::Block(function.body.clone()))?;
+		self.validate_block(function.body.statements.as_slice())?;
 
 		if function.return_type != DataType::Void && !self.block_guarantees_return(&function.body) {
 			return Err(self.compile_error(
@@ -965,16 +1008,7 @@ impl SemanticAnalyzer {
 
 	fn validate_statement(&mut self, statement: &Statement) -> Result<(), CompileError> {
 		match statement {
-			Statement::Block(BlockStatement { statements, .. }) => {
-				self.enter_scope();
-
-				for statement in statements {
-					self.validate_statement(statement)?;
-				}
-
-				self.exit_scope();
-				Ok(())
-			}
+			Statement::Block(BlockStatement { statements, .. }) => self.validate_block(statements),
 			Statement::Break(BreakStatement { position }) => {
 				if self.loop_depth == 0 {
 					return Err(self.compile_error(
@@ -999,6 +1033,7 @@ impl SemanticAnalyzer {
 				self.infer_expression_type(expression)?;
 				Ok(())
 			}
+			Statement::FunctionDeclaration(function) => self.validate_function_declaration(function),
 			Statement::For(ForStatement { body, iterable, position, variable }) => {
 				let iterable_type = self.infer_expression_type(iterable)?;
 				let variable_type = match iterable_type {
@@ -1156,6 +1191,7 @@ fn statement_position(statement: &Statement) -> usize {
 		Statement::Continue(statement) => statement.position,
 		Statement::Expression(expression) => expression.position(),
 		Statement::For(statement) => statement.position,
+		Statement::FunctionDeclaration(statement) => statement.position,
 		Statement::If(statement) => statement.position,
 		Statement::Return(statement) => statement.position,
 		Statement::VariableDeclaration(statement) => statement.position,

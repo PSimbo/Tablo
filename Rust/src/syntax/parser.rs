@@ -901,6 +901,9 @@ impl Parser {
 			Some(token) if token.kind == TokenKind::BreakKeyword => self.parse_break_statement(),
 			Some(token) if token.kind == TokenKind::ContinueKeyword => self.parse_continue_statement(),
 			Some(token) if token.kind == TokenKind::ForKeyword => self.parse_for_statement(),
+			Some(token) if token.kind == TokenKind::FnKeyword => {
+				Ok(Statement::FunctionDeclaration(self.parse_function_declaration()?))
+			}
 			Some(token) if token.kind == TokenKind::IfKeyword => self.parse_if_statement(),
 			Some(token) if token.kind == TokenKind::LeftBrace => self.parse_block_statement(),
 			Some(token) if token.kind == TokenKind::ReturnKeyword => self.parse_return_statement(),
@@ -1182,6 +1185,9 @@ mod tests {
 			}),
 			Statement::Expression(expression) => Statement::Expression(normalize_expr(expression)),
 			Statement::For(for_statement) => Statement::For(normalize_for_statement(for_statement)),
+			Statement::FunctionDeclaration(function) => {
+				Statement::FunctionDeclaration(normalize_function_declaration(function))
+			}
 			Statement::If(if_statement) => Statement::If(normalize_if_statement(if_statement)),
 			Statement::Return(return_statement) => Statement::Return(normalize_return_statement(return_statement)),
 			Statement::VariableDeclaration(declaration) => {
@@ -2155,6 +2161,60 @@ mod tests {
 					})),
 				})),
 			})
+		);
+	}
+
+	#[test]
+	fn parses_nested_function_declaration() {
+		assert_eq!(
+			parse_program("fn outer() void { fn inner(value: &int) void { value += 1; } }"),
+			Program {
+				functions: vec![
+					FunctionDeclaration {
+						body: BlockStatement {
+							position: 0,
+							statements: vec![
+								Statement::FunctionDeclaration(FunctionDeclaration {
+									body: BlockStatement {
+										position: 0,
+										statements: vec![
+											Statement::Expression(Expr::Assignment(AssignmentExpr {
+												operator: AssignmentOperator::AddAssign,
+												position: 0,
+												target: AssignmentTarget::Identifier(IdentifierExpr {
+													name: String::from("value"),
+													position: 0,
+												}),
+												value: Box::new(Expr::Integer(IntegerLiteral {
+													position: 0,
+													value: 1,
+												})),
+											})),
+										],
+									},
+									name: String::from("inner"),
+									parameters: vec![
+										FunctionParameter {
+											data_type: DataType::Int,
+											is_by_ref: true,
+											name: String::from("value"),
+											position: 0,
+										},
+									],
+									position: 0,
+									return_type: DataType::Void,
+								}),
+							],
+						},
+						name: String::from("outer"),
+						parameters: vec![],
+						position: 0,
+						return_type: DataType::Void,
+					},
+				],
+				result: None,
+				statements: vec![],
+			}
 		);
 	}
 

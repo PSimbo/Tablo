@@ -396,6 +396,20 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_implicit_outer_variable_capture_in_nested_function_source_text() {
+		let error = run(
+			"fn Main(args: [text]) int { var x: int = 1; fn inner() int { return x; } return inner(); }"
+		).unwrap_err();
+
+		match error {
+			TabloError::Compile(compile_error) => {
+				assert_eq!(compile_error.message, "Variable `x` is not declared in this scope.");
+			}
+			other => panic!("expected compile error, found {other:?}"),
+		}
+	}
+
+	#[test]
 	fn rejects_invalid_main_signature_source_text() {
 		let error = run("fn Main() int { return 0; }").unwrap_err();
 
@@ -913,6 +927,33 @@ mod tests {
 		let result = run("fn Main(args: [text]) int { return 7; }").unwrap();
 
 		assert_eq!(result, Some(Value::Integer(7)));
+	}
+
+	#[test]
+	fn runs_nested_by_reference_function_call_source_text() {
+		let result = run(
+			"fn Main(args: [text]) int { var x: int = 1; fn bump(value: &int) void { value += 1; } bump(&x); return x; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(2)));
+	}
+
+	#[test]
+	fn runs_nested_function_call_before_declaration_source_text() {
+		let result = run(
+			"fn Main(args: [text]) int { return add(1, 2); fn add(a: int, b: int) int { return a + b; } }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
+	fn runs_nested_function_call_source_text() {
+		let result = run(
+			"fn Main(args: [text]) int { fn add(a: int, b: int) int { return a + b; } return add(1, 2); }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(3)));
 	}
 
 	#[test]

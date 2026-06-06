@@ -69,6 +69,7 @@ pub enum Statement {
 	Continue(ContinueStatement),
 	Expression(Expr),
 	For(ForStatement),
+	FunctionDeclaration(FunctionDeclaration),
 	If(IfStatement),
 	Return(ReturnStatement),
 	VariableDeclaration(VariableDeclaration),
