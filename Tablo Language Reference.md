@@ -1049,6 +1049,28 @@ pub fn FindPosts(id: int, madeBy: int, since: date, until: date) [ForumPost]! {
 
 The parameter list is enclosed between `(` and `)` characters, which are required even if the parameter list is empty. Each parameter is declared using the syntax `<name>: <type>`. Parameters are separated by commas.
 
+Ordinary parameters are passed by value. To declare that a parameter is passed by reference, prefix the parameter type with `&`:
+
+~~~
+fn Increment(value: &int) void {
+  value += 1;
+}
+~~~
+
+The `&` marker is valid only in function parameter declarations. It does not define a general-purpose reference type and may not be used for local variable declarations, return types, array element types, or any other type position.
+
+Reference parameters must be bound explicitly at the call site using `&` before the argument expression:
+
+~~~
+Increment(&counter);
+~~~
+
+For the time being, only plain identifiers may be passed by reference. It is therefore invalid to pass literals, arbitrary expressions, or indexed array elements by reference.
+
+Assigning to a by-reference parameter modifies the caller's variable behind the reference. This remains true even when the assigned value is read from another by-reference parameter.
+
+Tablo references are not nullable and cannot be created independently of a function call. A by-reference parameter exists only for the duration of the corresponding call and must not outlive it.
+
 The return type follows immediately after the parameter list. Any valid Tablo type may be used as the return type, including arrays, objects, and nullable or non-nullable types.
 
 The function body is enclosed between `{` and `}` characters and contains zero or more statements. Function parameters are referenced by name within the body of the function.
@@ -1071,11 +1093,13 @@ To call a function, use the function name followed by an argument list between `
 var ts: timestamp! = timestamp(post.date, post.time);
 ~~~
 
-Arguments may be passed positionally or by name.
+Arguments may be passed positionally or by name. Arguments corresponding to by-reference parameters must use the explicit `&name` syntax at the call site and are still subject to the usual positional or named-argument rules.
 
 Functions may be defined both at module scope and nested within other scopes. Only functions defined at module scope may be marked as `pub`.
 
-Nested functions use normal lexical scope rules. A nested function may reference parameters, variables, and functions that are visible from the enclosing scope at the point where the nested function is declared. If a name is declared again within the nested function body, that inner declaration shadows the outer one in the usual way.
+Nested functions use normal lexical scope rules for function visibility. A nested function may call functions that are visible from the enclosing scope at the point where the nested function is declared. If a name is declared again within the nested function body, that inner declaration shadows the outer one in the usual way.
+
+Variables and parameters from an enclosing scope are not captured implicitly, even for read-only access. If a nested function needs access to a variable from the enclosing scope, that variable must be passed explicitly as an argument. If the nested function must modify the variable, the corresponding parameter must be declared using `&` and the call site must pass the variable using `&name`.
 
 A `return` statement always exits the innermost enclosing function body. A `return` within a nested function therefore returns from the nested function only and does not cause the enclosing function to return.
 
@@ -1108,6 +1132,7 @@ Any function may be called with a mix of positional arguments, named arguments, 
 * Each named argument must match the corresponding parameter name in the function declaration.
 * No named argument is provided more than once.
 * Any omitted parameter must either be nullable or have a default value.
+* Any argument corresponding to a by-reference parameter must use the explicit `&identifier` syntax.
 
 ~~~
 fn Name(<Positional Args>, <Named Args>, <Varargs>) void {}
@@ -1544,7 +1569,7 @@ blockStatement = forStatement | ifStatement | whileStatement
 simpleStatement = ( `break` | `continue` | expression | returnStatement | variableDeclaration ) `;`
 forStatement = `for` identifier `in` expression block
 functionDeclaration = `fn` identifier `(` [ functionParameter { `,` functionParameter } ] `)` returnType block
-functionParameter = identifier `:` dataType
+functionParameter = identifier `:` [ `&` ] dataType
 variableDeclaration = ( `const` | `var` ) identifier `:` dataType [ `=` expression ]
 returnStatement = `return` [ expression ]
 ifStatement = `if` expression block [ `else` ( block | ifStatement ) ]
@@ -1569,7 +1594,9 @@ postfix = primary { callSuffix | indexSuffix }
 primary = literal | groupExpression | identifier
 literal = `null` | arrayLiteral | booleanLiteral | decimalLiteral | hexLiteral | integerLiteral | octalLiteral | stringLiteral
 arrayLiteral = `[` [ expression { `,` expression } ] `]`
-callSuffix = `(` [ expression { `,` expression } ] `)`
+callSuffix = `(` [ callArgument { `,` callArgument } ] `)`
+callArgument = expression | referenceArgument
+referenceArgument = `&` identifier
 indexSuffix = `[` expression `]`
 assignmentOperator = `=` | `+=` | `-=` | `*=` | `/=` | `%=`
 equalityOperator = `==` | `!=`

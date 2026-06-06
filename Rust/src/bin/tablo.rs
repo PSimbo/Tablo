@@ -15,8 +15,7 @@ fn main() {
 	let args = Args::parse();
 
 	match run_file(&args.input_path) {
-		Ok(Some(value)) => println!("{value}"),
-		Ok(None) => {}
+		Ok(_) => {}
 		Err(error) => {
 			eprintln!("{error}");
 			std::process::exit(1);
