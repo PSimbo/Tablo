@@ -35,6 +35,7 @@ pub enum Instruction {
 	LessThanOrEqual,
 	LoadIndex,
 	LoadLocal(u32),
+	LoadReference(u32),
 	MakeArray(u32),
 	MakeRange,
 	MakeSteppedRange,

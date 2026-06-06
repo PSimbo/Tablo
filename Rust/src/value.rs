@@ -16,6 +16,7 @@ pub enum Value {
 	Integer(i64),
 	IntegerRange(IntegerRange),
 	Iterator(IteratorState),
+	Reference(LocalReference),
 	Text(String),
 }
 
@@ -41,6 +42,7 @@ impl Display for Value {
 			Value::Integer(value) => write!(f, "{value}"),
 			Value::IntegerRange(range) => write!(f, "{range}"),
 			Value::Iterator(_) => write!(f, "<iterator>"),
+			Value::Reference(_) => write!(f, "<reference>"),
 			Value::Text(value) => write!(f, "{value}"),
 		}
 	}
@@ -295,6 +297,12 @@ pub struct IntegerRangeIterator {
 	pub end: i64,
 	pub next_value: Option<i64>,
 	pub step: i64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LocalReference {
+	pub frame_index: usize,
+	pub slot: usize,
 }
 
 fn align_decimal_operands(lhs: &Decimal, rhs: &Decimal) -> Result<(i128, i128, u8), String> {

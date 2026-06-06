@@ -7,6 +7,7 @@ use crate::ast::BinaryExpr;
 use crate::ast::BinaryOperator;
 use crate::ast::BlockStatement;
 use crate::ast::BreakStatement;
+use crate::ast::CallArgument;
 use crate::ast::CallExpr;
 use crate::ast::ContinueStatement;
 use crate::ast::DataType;
@@ -44,22 +45,30 @@ pub struct SemanticAnalyzer {
 }
 
 #[derive(Clone)]
+struct FunctionParameterSignature {
+	data_type: DataType,
+	is_by_ref: bool,
+	name: String,
+}
+
+#[derive(Clone)]
+struct FunctionSignature {
+	function_index: u32,
+	parameters: Vec<FunctionParameterSignature>,
+	return_type: DataType,
+}
+
+#[derive(Clone)]
 struct LocalBinding {
 	data_type: DataType,
 	is_const: bool,
 	slot: u32,
 }
 
-#[derive(Clone)]
-struct FunctionSignature {
-	function_index: u32,
-	parameter_types: Vec<DataType>,
-	return_type: DataType,
-}
-
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SemanticProgram {
 	built_in_call_targets: BTreeMap<usize, BuiltInFunction>,
+	call_argument_reference_slots: BTreeMap<usize, Vec<Option<u32>>>,
 	call_return_types: BTreeMap<usize, DataType>,
 	call_targets: BTreeMap<usize, u32>,
 	declaration_slots: BTreeMap<usize, u32>,
@@ -73,6 +82,10 @@ pub struct SemanticProgram {
 impl SemanticProgram {
 	pub fn built_in_call_target(&self, position: usize) -> Option<BuiltInFunction> {
 		self.built_in_call_targets.get(&position).copied()
+	}
+
+	pub fn call_argument_reference_slots(&self, position: usize) -> Option<&[Option<u32>]> {
+		self.call_argument_reference_slots.get(&position).map(Vec::as_slice)
 	}
 
 	pub fn call_return_type(&self, position: usize) -> Option<DataType> {
@@ -272,7 +285,7 @@ impl SemanticAnalyzer {
 				));
 			}
 
-			let mut parameter_types = Vec::with_capacity(function.parameters.len());
+			let mut parameters = Vec::with_capacity(function.parameters.len());
 
 			for parameter in &function.parameters {
 				self.validate_non_void_data_type(
@@ -280,7 +293,11 @@ impl SemanticAnalyzer {
 					parameter.position,
 					format!("Parameter `{}` cannot have type `{}`.", parameter.name, self.data_type_name(&parameter.data_type)),
 				)?;
-				parameter_types.push(parameter.data_type.clone());
+				parameters.push(FunctionParameterSignature {
+					data_type: parameter.data_type.clone(),
+					is_by_ref: parameter.is_by_ref,
+					name: parameter.name.clone(),
+				});
 			}
 
 			if !matches!(function.return_type, DataType::Void) {
@@ -297,7 +314,7 @@ impl SemanticAnalyzer {
 
 			self.functions.insert(function.name.clone(), FunctionSignature {
 				function_index: index as u32,
-				parameter_types,
+				parameters,
 				return_type: function.return_type.clone(),
 			});
 		}
@@ -380,7 +397,7 @@ impl SemanticAnalyzer {
 		}
 	}
 
-	fn infer_built_in_call_type(&mut self, built_in: BuiltInFunction, arguments: &[Expr], position: usize) -> Result<DataType, CompileError> {
+	fn infer_built_in_call_type(&mut self, built_in: BuiltInFunction, arguments: &[CallArgument], position: usize) -> Result<DataType, CompileError> {
 		if !built_in.supports_arity(arguments.len()) {
 			return Err(self.compile_error(
 				position,
@@ -392,12 +409,21 @@ impl SemanticAnalyzer {
 			));
 		}
 
+		for argument in arguments {
+			if argument.is_by_ref {
+				return Err(self.compile_error(
+					argument.position,
+					format!("Built-in function `{}` does not accept by-reference arguments.", built_in.name()),
+				));
+			}
+		}
+
 		let argument_types = arguments.iter()
-			.map(|argument| self.infer_expression_type(argument))
+			.map(|argument| self.infer_expression_type(&argument.value))
 			.collect::<Result<Vec<_>, _>>()?;
 
 		let return_type = built_in.return_type(&argument_types).ok_or(self.compile_error(
-			arguments.first().map_or(position, Expr::position),
+			arguments.first().map_or(position, |argument| argument.value.position()),
 			format!(
 				"Built-in function `{}` does not accept an argument of type `{}`.",
 				built_in.name(),
@@ -496,24 +522,72 @@ impl SemanticAnalyzer {
 			Expr::Boolean(_) => Ok(DataType::Bool),
 			Expr::Call(CallExpr { arguments, callee, .. }) => {
 				if let Some(signature) = self.functions.get(&callee.name).cloned() {
-					if arguments.len() != signature.parameter_types.len() {
+					if arguments.len() != signature.parameters.len() {
 						return Err(self.compile_error(
 							expression.position(),
 							format!(
 								"Function `{}` expects {} argument(s), found {}.",
 								callee.name,
-								signature.parameter_types.len(),
+								signature.parameters.len(),
 								arguments.len(),
 							),
 						));
 					}
 
-					for (argument, parameter_type) in arguments.iter().zip(signature.parameter_types.iter()) {
-						let argument_type = self.infer_expression_type(argument)?;
-						self.ensure_assignable(parameter_type, &argument_type, argument.position())?;
+					let mut reference_slots = Vec::with_capacity(arguments.len());
+
+					for (argument, parameter) in arguments.iter().zip(signature.parameters.iter()) {
+						let argument_type = self.infer_expression_type(&argument.value)?;
+
+						if parameter.is_by_ref {
+							if !argument.is_by_ref {
+								return Err(self.compile_error(
+									argument.position,
+									format!("Parameter `{}` must be passed by reference.", parameter.name),
+								));
+							}
+
+							let Expr::Identifier(identifier) = &argument.value else {
+								return Err(self.compile_error(
+									argument.position,
+									String::from("By-reference arguments must be plain identifiers."),
+								));
+							};
+
+							let local = self.lookup_local(&identifier.name).ok_or(self.compile_error(
+								identifier.position,
+								format!("Variable `{}` is not declared in this scope.", identifier.name),
+							))?;
+
+							if argument_type != parameter.data_type {
+								return Err(self.compile_error(
+									argument.position,
+									format!(
+										"By-reference argument for parameter `{}` must have type `{}`, found `{}`.",
+										parameter.name,
+										self.data_type_name(&parameter.data_type),
+										self.data_type_name(&argument_type),
+									),
+								));
+							}
+
+							reference_slots.push(Some(local.slot));
+						}
+						else {
+							if argument.is_by_ref {
+								return Err(self.compile_error(
+									argument.position,
+									format!("Parameter `{}` must be passed by value.", parameter.name),
+								));
+							}
+
+							self.ensure_assignable(&parameter.data_type, &argument_type, argument.value.position())?;
+							reference_slots.push(None);
+						}
 					}
 
 					self.semantic_program.call_targets.insert(expression.position(), signature.function_index);
+					self.semantic_program.call_argument_reference_slots.insert(expression.position(), reference_slots);
 					self.semantic_program.call_return_types.insert(expression.position(), signature.return_type.clone());
 					Ok(signature.return_type)
 				}
@@ -868,6 +942,7 @@ impl SemanticAnalyzer {
 
 		if main_function.parameters.len() != 1
 			|| main_function.parameters[0].name != "args"
+			|| main_function.parameters[0].is_by_ref
 			|| main_function.parameters[0].data_type != DataType::Array(Box::new(DataType::Text))
 			|| main_function.return_type != DataType::Int
 		{

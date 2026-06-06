@@ -366,6 +366,16 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_by_reference_argument_for_built_in_source_text() {
+		let error = evaluate_snippet("var xs: [int] = [1];\nlen(&xs)").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Built-in function `len` does not accept by-reference arguments."),
+			position: 25,
+		}));
+	}
+
+	#[test]
 	fn rejects_decimal_range_array_slice_source_text() {
 		let error = evaluate_snippet("var xs: [int] = [10, 20, 30];\nxs[1.0:2.0]").unwrap_err();
 
@@ -402,6 +412,18 @@ mod tests {
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Built-in function `len` does not accept an argument of type `int`."),
 			position: 4,
+		}));
+	}
+
+	#[test]
+	fn rejects_missing_by_reference_argument_source_text() {
+		let error = run(
+			"fn Main(args: [text]) int { var x: int = 1; bump(x); return x; }\nfn bump(value: &int) void { value += 1; }"
+		).unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Parameter `value` must be passed by reference."),
+			position: 49,
 		}));
 	}
 
@@ -608,6 +630,15 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_assignment_between_by_reference_parameters_source_text() {
+		let result = run(
+			"fn Main(args: [text]) int { var x: int = 1; var y: int = 5; copy(&x, &y); return x; }\nfn copy(dst: &int, src: &int) void { dst = src; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(5)));
+	}
+
+	#[test]
 	fn runs_block_scope_with_shadowing() {
 		let result = run(standalone_body("var x: int = 1;\n{\n  var x: int = 2;\n  x += 3;\n}\nreturn x;")).unwrap();
 
@@ -628,6 +659,15 @@ mod tests {
 		)).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
+	fn runs_by_reference_function_call_source_text() {
+		let result = run(
+			"fn Main(args: [text]) int { var x: int = 1; bump(&x); return x; }\nfn bump(value: &int) void { value += 1; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(2)));
 	}
 
 	#[test]

@@ -111,6 +111,7 @@ impl Lexer {
 		}
 
 		let token_kind = match next {
+			'&' => TokenKind::Ampersand,
 			'+' if self.peek_next_char() == Some('=') => {
 				self.advance_char();
 				self.advance_char();
@@ -755,6 +756,16 @@ mod tests {
 		assert_eq!(tokens[9].kind, TokenKind::Plus);
 		assert_eq!(tokens[10].kind, TokenKind::IntegerLiteral);
 		assert_eq!(tokens[11].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
+	fn tokenizes_ampersand() {
+		let mut lexer = Lexer::new(SourceText::new("&x"));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens[0].kind, TokenKind::Ampersand);
+		assert_eq!(tokens[1].kind, TokenKind::Identifier);
+		assert_eq!(tokens[2].kind, TokenKind::EndOfFile);
 	}
 
 	#[test]

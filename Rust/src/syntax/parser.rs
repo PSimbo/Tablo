@@ -8,6 +8,7 @@ use crate::ast::BinaryOperator;
 use crate::ast::BlockStatement;
 use crate::ast::BooleanLiteral;
 use crate::ast::BreakStatement;
+use crate::ast::CallArgument;
 use crate::ast::CallExpr;
 use crate::ast::ContinueStatement;
 use crate::ast::DataType;
@@ -307,7 +308,20 @@ impl Parser {
 
 		if !self.current().is_some_and(|token| token.kind == TokenKind::RightParenthesis) {
 			loop {
-				arguments.push(self.parse_assignment_expression()?);
+				let argument_position = self.current().map_or(start, |token| token.start);
+				let is_by_ref = if self.current().is_some_and(|token| token.kind == TokenKind::Ampersand) {
+					self.next();
+					true
+				}
+				else {
+					false
+				};
+				let value = self.parse_assignment_expression()?;
+				arguments.push(CallArgument {
+					is_by_ref,
+					position: argument_position,
+					value,
+				});
 
 				match self.current() {
 					Some(token) if token.kind == TokenKind::Comma => {
@@ -477,10 +491,18 @@ impl Parser {
 	fn parse_function_parameter(&mut self) -> Result<FunctionParameter, ParseError> {
 		let name = self.expect_token(TokenKind::Identifier, "Expected parameter name.")?;
 		self.expect_token(TokenKind::Colon, "Expected `:` after parameter name.")?;
+		let is_by_ref = if self.current().is_some_and(|token| token.kind == TokenKind::Ampersand) {
+			self.next();
+			true
+		}
+		else {
+			false
+		};
 		let data_type = self.parse_data_type()?;
 
 		Ok(FunctionParameter {
 			data_type,
+			is_by_ref,
 			name: name.lexeme,
 			position: name.start,
 		})
@@ -970,6 +992,7 @@ mod tests {
 	use crate::ast::BlockStatement;
 	use crate::ast::BooleanLiteral;
 	use crate::ast::BreakStatement;
+	use crate::ast::CallArgument;
 	use crate::ast::CallExpr;
 	use crate::ast::ContinueStatement;
 	use crate::ast::DataType;
@@ -1015,6 +1038,14 @@ mod tests {
 		}
 	}
 
+	fn normalize_call_argument(argument: CallArgument) -> CallArgument {
+		CallArgument {
+			is_by_ref: argument.is_by_ref,
+			position: 0,
+			value: normalize_expr(argument.value),
+		}
+	}
+
 	fn normalize_expr(expression: Expr) -> Expr {
 		match expression {
 			Expr::Array(ArrayLiteral { elements, .. }) => Expr::Array(ArrayLiteral {
@@ -1052,7 +1083,7 @@ mod tests {
 				callee,
 				..
 			}) => Expr::Call(CallExpr {
-				arguments: arguments.into_iter().map(normalize_expr).collect(),
+				arguments: arguments.into_iter().map(normalize_call_argument).collect(),
 				callee: normalize_identifier(callee),
 				position: 0,
 			}),
@@ -1119,6 +1150,7 @@ mod tests {
 	fn normalize_function_parameter(parameter: FunctionParameter) -> FunctionParameter {
 		FunctionParameter {
 			data_type: parameter.data_type,
+			is_by_ref: parameter.is_by_ref,
 			name: parameter.name,
 			position: 0,
 		}
@@ -1381,6 +1413,73 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_by_reference_function_call_expression() {
+		assert_eq!(
+			parse("bump(&x)"),
+			Expr::Call(CallExpr {
+				arguments: vec![
+					CallArgument {
+						is_by_ref: true,
+						position: 0,
+						value: Expr::Identifier(IdentifierExpr {
+							name: String::from("x"),
+							position: 0,
+						}),
+					},
+				],
+				callee: IdentifierExpr {
+					name: String::from("bump"),
+					position: 0,
+				},
+				position: 0,
+			})
+		);
+	}
+
+	#[test]
+	fn parses_by_reference_function_parameter() {
+		assert_eq!(
+			parse_program("fn bump(value: &int) void { value += 1; }"),
+			Program {
+				functions: vec![
+					FunctionDeclaration {
+						body: BlockStatement {
+							position: 0,
+							statements: vec![
+								Statement::Expression(Expr::Assignment(AssignmentExpr {
+									operator: AssignmentOperator::AddAssign,
+									position: 0,
+									target: AssignmentTarget::Identifier(IdentifierExpr {
+										name: String::from("value"),
+										position: 0,
+									}),
+									value: Box::new(Expr::Integer(IntegerLiteral {
+										position: 0,
+										value: 1,
+									})),
+								})),
+							],
+						},
+						name: String::from("bump"),
+						parameters: vec![
+							FunctionParameter {
+								data_type: DataType::Int,
+								is_by_ref: true,
+								name: String::from("value"),
+								position: 0,
+							},
+						],
+						position: 0,
+						return_type: DataType::Void,
+					},
+				],
+				result: None,
+				statements: vec![],
+			}
+		);
+	}
+
+	#[test]
 	fn parses_compound_assignment_expression() {
 		assert_eq!(
 			parse("x += 1"),
@@ -1577,14 +1676,22 @@ mod tests {
 			parse("add(1, 2)"),
 			Expr::Call(CallExpr {
 				arguments: vec![
-					Expr::Integer(IntegerLiteral {
+					CallArgument {
+						is_by_ref: false,
 						position: 0,
-						value: 1,
-					}),
-					Expr::Integer(IntegerLiteral {
+						value: Expr::Integer(IntegerLiteral {
+							position: 0,
+							value: 1,
+						}),
+					},
+					CallArgument {
+						is_by_ref: false,
 						position: 0,
-						value: 2,
-					}),
+						value: Expr::Integer(IntegerLiteral {
+							position: 0,
+							value: 2,
+						}),
+					},
 				],
 				callee: IdentifierExpr {
 					name: String::from("add"),
@@ -1626,11 +1733,13 @@ mod tests {
 						parameters: vec![
 							FunctionParameter {
 								data_type: DataType::Int,
+								is_by_ref: false,
 								name: String::from("a"),
 								position: 0,
 							},
 							FunctionParameter {
 								data_type: DataType::Int,
+								is_by_ref: false,
 								name: String::from("b"),
 								position: 0,
 							},
@@ -1641,14 +1750,22 @@ mod tests {
 				],
 				result: Some(Expr::Call(CallExpr {
 					arguments: vec![
-						Expr::Integer(IntegerLiteral {
+						CallArgument {
+							is_by_ref: false,
 							position: 0,
-							value: 1,
-						}),
-						Expr::Integer(IntegerLiteral {
+							value: Expr::Integer(IntegerLiteral {
+								position: 0,
+								value: 1,
+							}),
+						},
+						CallArgument {
+							is_by_ref: false,
 							position: 0,
-							value: 2,
-						}),
+							value: Expr::Integer(IntegerLiteral {
+								position: 0,
+								value: 2,
+							}),
+						},
 					],
 					callee: IdentifierExpr {
 						name: String::from("add"),

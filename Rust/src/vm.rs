@@ -9,6 +9,7 @@ use crate::value::DecimalRangeIterator;
 use crate::value::IntegerRange;
 use crate::value::IntegerRangeIterator;
 use crate::value::IteratorState;
+use crate::value::LocalReference;
 use crate::value::Value;
 
 #[derive(Clone, Copy)]
@@ -169,11 +170,13 @@ impl VirtualMachine {
 		self.frames
 			.iter()
 			.rev()
-			.map(|frame| {
+			.enumerate()
+			.map(|(reverse_index, frame)| {
+				let frame_index = self.frames.len() - 1 - reverse_index;
 				let debug_body_index = self.frame_debug_body_index(program, frame);
 				VmStackFrame {
 					instruction_index: frame.instruction_index,
-					locals: resolve_visible_locals(program, debug_body_index, frame.instruction_index, &frame.locals),
+					locals: self.resolve_visible_locals(program, frame_index, debug_body_index, frame.instruction_index),
 					source_location: program.debug_location(debug_body_index, frame.instruction_index),
 				}
 			})
@@ -196,7 +199,7 @@ impl VirtualMachine {
 
 		let instruction = code_body.instructions[instruction_index].clone();
 		let mut locals = std::mem::take(&mut self.frames[frame_index].locals);
-		let outcome = self.execute_instruction(program, &instruction, instruction_index, &mut locals);
+		let outcome = self.execute_instruction(program, frame_index, &instruction, instruction_index, &mut locals);
 		self.frames[frame_index].locals = locals;
 		let outcome = outcome.map_err(|error| self.enrich_vm_error(program, error))?;
 
@@ -222,9 +225,27 @@ impl VirtualMachine {
 		}
 	}
 
+	fn current_code_body<'a>(&self, program: &'a Program, frame: &CallFrame) -> &'a CodeBody {
+		match frame.function_index {
+			Some(function_index) => program.functions()[function_index].body(),
+			None => program.entry_code().expect("code-entry programs must provide entry code"),
+		}
+	}
+
+	fn enrich_vm_error(&self, program: &Program, mut error: VmError) -> VmError {
+		if error.source_location.is_none() {
+			error.source_location = self.current_instruction_site(program)
+				.and_then(|(body_index, instruction_index)| program.debug_location(body_index, instruction_index));
+		}
+
+		error.stack_trace = self.current_stack_frames(program);
+		error
+	}
+
 	fn execute_instruction(
 		&mut self,
 		_program: &Program,
+		frame_index: usize,
 		instruction: &Instruction,
 		instruction_index: usize,
 		locals: &mut Vec<Value>
@@ -349,7 +370,24 @@ impl VirtualMachine {
 					source_location: None,
 					stack_trace: Vec::new(),
 				})?;
-				self.stack.push(value);
+				self.stack.push(self.resolve_runtime_value(value, instruction_index)?);
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::LoadReference(slot) => {
+				let value = locals.get(*slot as usize).cloned().ok_or(VmError {
+					instruction_index,
+					message: format!("Local slot {} has not been initialized.", slot),
+					source_location: None,
+					stack_trace: Vec::new(),
+				})?;
+				let reference = match value {
+					Value::Reference(reference) => reference,
+					_ => LocalReference {
+						frame_index,
+						slot: *slot as usize,
+					},
+				};
+				self.stack.push(Value::Reference(reference));
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::MakeArray(element_count) => {
@@ -455,7 +493,12 @@ impl VirtualMachine {
 					locals.resize(slot + 1, Value::Boolean(false));
 				}
 
-				locals[slot] = value;
+				if let Value::Reference(reference) = locals[slot].clone() {
+					self.store_reference_value(reference, value, instruction_index)?;
+				}
+				else {
+					locals[slot] = value;
+				}
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::Xor => {
@@ -465,6 +508,41 @@ impl VirtualMachine {
 				Ok(ExecutionOutcome::Continue(None))
 			}
 		}
+	}
+
+	fn finish_current_frame(&mut self, result: Option<Value>) -> VmExecutionState {
+		let frame = self.frames.pop().expect("A frame must exist while finishing execution.");
+		self.stack.truncate(frame.base_stack_len);
+
+		if let Some(caller) = self.frames.last_mut() {
+			caller.instruction_index += 1;
+
+			if let Some(result) = result {
+				self.stack.push(result);
+			}
+
+			VmExecutionState::Running
+		}
+		else {
+			self.finished_result = Some(result.clone());
+			VmExecutionState::Completed(result)
+		}
+	}
+
+	fn frame_debug_body_index(&self, program: &Program, frame: &CallFrame) -> usize {
+		frame.function_index.unwrap_or(program.functions().len())
+	}
+
+	fn load_reference_value(&self, reference: LocalReference, instruction_index: usize) -> Result<Value, VmError> {
+		let frame = self.frames.get(reference.frame_index).ok_or(vm_error(
+			instruction_index,
+			String::from("Reference target frame is no longer available."),
+		))?;
+		let value = frame.locals.get(reference.slot).cloned().ok_or(vm_error(
+			instruction_index,
+			format!("Reference target slot {} has not been initialized.", reference.slot),
+		))?;
+		self.resolve_runtime_value(value, instruction_index)
 	}
 
 	fn pop_boolean(&mut self, instruction_index: usize) -> Result<bool, VmError> {
@@ -490,7 +568,12 @@ impl VirtualMachine {
 		let mut arguments = Vec::with_capacity(argument_count);
 
 		for _ in 0..argument_count {
-			arguments.push(self.pop_value(instruction_index)?);
+			arguments.push(self.stack.pop().ok_or(VmError {
+				instruction_index,
+				message: String::from("Stack underflow while reading call argument."),
+				source_location: None,
+				stack_trace: Vec::new(),
+			})?);
 		}
 
 		arguments.reverse();
@@ -498,14 +581,9 @@ impl VirtualMachine {
 	}
 
 	fn pop_numeric(&mut self, instruction_index: usize) -> Result<Value, VmError> {
-		let value = self.stack.pop().ok_or(VmError {
-			instruction_index,
-			message: String::from("Stack underflow while reading numeric operand."),
-			source_location: None,
-			stack_trace: Vec::new(),
-		})?;
+		let value = self.pop_value(instruction_index)?;
 
-		if matches!(value, Value::Array(_) | Value::Boolean(_) | Value::DecimalRange(_) | Value::IntegerRange(_) | Value::Iterator(_) | Value::Text(_)) {
+		if matches!(value, Value::Array(_) | Value::Boolean(_) | Value::DecimalRange(_) | Value::IntegerRange(_) | Value::Iterator(_) | Value::Reference(_) | Value::Text(_)) {
 			return Err(VmError {
 				instruction_index,
 				message: format!("Expected a numeric operand, found a {} value.", type_name(&value)),
@@ -518,12 +596,45 @@ impl VirtualMachine {
 	}
 
 	fn pop_value(&mut self, instruction_index: usize) -> Result<Value, VmError> {
-		self.stack.pop().ok_or(VmError {
+		let value = self.stack.pop().ok_or(VmError {
 			instruction_index,
 			message: String::from("Stack underflow while reading operand."),
 			source_location: None,
 			stack_trace: Vec::new(),
-		})
+		})?;
+
+		self.resolve_runtime_value(value, instruction_index)
+	}
+
+	fn resolve_runtime_value(&self, value: Value, instruction_index: usize) -> Result<Value, VmError> {
+		match value {
+			Value::Reference(reference) => self.load_reference_value(reference, instruction_index),
+			other => Ok(other),
+		}
+	}
+
+	fn resolve_visible_locals(
+		&self,
+		program: &Program,
+		frame_index: usize,
+		debug_body_index: usize,
+		instruction_index: usize,
+	) -> Vec<VmVisibleLocal> {
+		program.visible_locals(debug_body_index, instruction_index)
+			.into_iter()
+			.filter_map(|local| {
+				let value = self.frames.get(frame_index)?.locals.get(local.slot() as usize)?.clone();
+				let value = self.resolve_runtime_value(value, instruction_index).ok()?;
+
+				Some(VmVisibleLocal {
+					declared_type: local.declared_type().to_string(),
+					is_const: local.is_const(),
+					name: local.name().to_string(),
+					slot: local.slot(),
+					value,
+				})
+			})
+			.collect()
 	}
 
 	fn run_built_in_function(
@@ -576,44 +687,29 @@ impl VirtualMachine {
 		}
 	}
 
-	fn current_code_body<'a>(&self, program: &'a Program, frame: &CallFrame) -> &'a CodeBody {
-		match frame.function_index {
-			Some(function_index) => program.functions()[function_index].body(),
-			None => program.entry_code().expect("code-entry programs must provide entry code"),
-		}
-	}
+	fn store_reference_value(&mut self, reference: LocalReference, value: Value, instruction_index: usize) -> Result<(), VmError> {
+		let target = {
+			let frame = self.frames.get(reference.frame_index).ok_or(vm_error(
+				instruction_index,
+				String::from("Reference target frame is no longer available."),
+			))?;
+			frame.locals.get(reference.slot).cloned().ok_or(vm_error(
+				instruction_index,
+				format!("Reference target slot {} has not been initialized.", reference.slot),
+			))?
+		};
 
-	fn enrich_vm_error(&self, program: &Program, mut error: VmError) -> VmError {
-		if error.source_location.is_none() {
-			error.source_location = self.current_instruction_site(program)
-				.and_then(|(body_index, instruction_index)| program.debug_location(body_index, instruction_index));
-		}
-
-		error.stack_trace = self.current_stack_frames(program);
-		error
-	}
-
-	fn finish_current_frame(&mut self, result: Option<Value>) -> VmExecutionState {
-		let frame = self.frames.pop().expect("A frame must exist while finishing execution.");
-		self.stack.truncate(frame.base_stack_len);
-
-		if let Some(caller) = self.frames.last_mut() {
-			caller.instruction_index += 1;
-
-			if let Some(result) = result {
-				self.stack.push(result);
+		match target {
+			Value::Reference(next_reference) => self.store_reference_value(next_reference, value, instruction_index),
+			_ => {
+				let frame = self.frames.get_mut(reference.frame_index).ok_or(vm_error(
+					instruction_index,
+					String::from("Reference target frame is no longer available."),
+				))?;
+				frame.locals[reference.slot] = value;
+				Ok(())
 			}
-
-			VmExecutionState::Running
 		}
-		else {
-			self.finished_result = Some(result.clone());
-			VmExecutionState::Completed(result)
-		}
-	}
-
-	fn frame_debug_body_index(&self, program: &Program, frame: &CallFrame) -> usize {
-		frame.function_index.unwrap_or(program.functions().len())
 	}
 }
 
@@ -1054,6 +1150,7 @@ fn negate_value(value: Value) -> Value {
 		Value::Integer(integer) => Value::Integer(integer.saturating_neg()),
 		Value::IntegerRange(_) => unreachable!("Range values are rejected before numeric negation."),
 		Value::Iterator(_) => unreachable!("Iterator values are rejected before numeric negation."),
+		Value::Reference(_) => unreachable!("Reference values are resolved before numeric negation."),
 		Value::Text(_) => unreachable!("Text values are rejected before numeric negation."),
 	}
 }
@@ -1074,28 +1171,6 @@ fn pow10_i128(exponent: u32) -> Result<i128, String> {
 	}
 
 	Ok(value)
-}
-
-fn resolve_visible_locals(
-	program: &Program,
-	debug_body_index: usize,
-	instruction_index: usize,
-	locals: &[Value],
-) -> Vec<VmVisibleLocal> {
-	program.visible_locals(debug_body_index, instruction_index)
-		.into_iter()
-		.filter_map(|local| {
-			let value = locals.get(local.slot() as usize)?.clone();
-
-			Some(VmVisibleLocal {
-				declared_type: local.declared_type().to_string(),
-				is_const: local.is_const(),
-				name: local.name().to_string(),
-				slot: local.slot(),
-				value,
-			})
-		})
-		.collect()
 }
 
 fn store_index_value(array: Value, index: Value, value: Value, instruction_index: usize) -> Result<(Value, Value), VmError> {
@@ -1166,6 +1241,7 @@ fn stringify_value(value: &Value) -> String {
 		Value::Integer(value) => value.to_string(),
 		Value::IntegerRange(value) => value.to_string(),
 		Value::Iterator(_) => String::from("<iterator>"),
+		Value::Reference(_) => String::from("<reference>"),
 		Value::Text(value) => value.clone(),
 	}
 }
@@ -1185,11 +1261,12 @@ fn type_name(value: &Value) -> &'static str {
 		Value::Array(_) => "array",
 		Value::Boolean(_) => "bool",
 		Value::Decimal(_) => "dec",
-		Value::DecimalRange(_) => "range",
-		Value::Integer(_) => "int",
-		Value::IntegerRange(_) => "range",
-		Value::Iterator(_) => "iterator",
-		Value::Text(_) => "text",
+	Value::DecimalRange(_) => "range",
+	Value::Integer(_) => "int",
+	Value::IntegerRange(_) => "range",
+	Value::Iterator(_) => "iterator",
+	Value::Reference(_) => "reference",
+	Value::Text(_) => "text",
 	}
 }
 

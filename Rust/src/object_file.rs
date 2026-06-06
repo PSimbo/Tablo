@@ -34,30 +34,31 @@ const OPCODE_JUMP_IF_FALSE: u8 = 11;
 const OPCODE_LESS_THAN: u8 = 12;
 const OPCODE_LESS_THAN_OR_EQUAL: u8 = 13;
 const OPCODE_LOAD_LOCAL: u8 = 14;
-const OPCODE_MODULO: u8 = 15;
-const OPCODE_MULTIPLY: u8 = 16;
-const OPCODE_PUSH_BOOLEAN: u8 = 17;
-const OPCODE_PUSH_DECIMAL: u8 = 18;
-const OPCODE_PUSH_INTEGER: u8 = 19;
-const OPCODE_STORE_LOCAL: u8 = 20;
-const OPCODE_SUBTRACT: u8 = 21;
-const OPCODE_NEGATE: u8 = 22;
-const OPCODE_NOT_EQUAL: u8 = 23;
-const OPCODE_NOT: u8 = 24;
-const OPCODE_OR: u8 = 25;
-const OPCODE_XOR: u8 = 26;
-const OPCODE_POP: u8 = 27;
-const OPCODE_PUSH_TEXT: u8 = 28;
-const OPCODE_CALL: u8 = 29;
-const OPCODE_RETURN: u8 = 30;
-const OPCODE_RETURN_VOID: u8 = 31;
-const OPCODE_MAKE_ARRAY: u8 = 32;
-const OPCODE_LOAD_INDEX: u8 = 33;
-const OPCODE_STORE_INDEX: u8 = 34;
-const OPCODE_CALL_BUILT_IN: u8 = 35;
-const OPCODE_DUP2: u8 = 36;
-const OPCODE_MAKE_RANGE: u8 = 37;
-const OPCODE_MAKE_STEPPED_RANGE: u8 = 38;
+const OPCODE_LOAD_REFERENCE: u8 = 15;
+const OPCODE_MODULO: u8 = 16;
+const OPCODE_MULTIPLY: u8 = 17;
+const OPCODE_PUSH_BOOLEAN: u8 = 18;
+const OPCODE_PUSH_DECIMAL: u8 = 19;
+const OPCODE_PUSH_INTEGER: u8 = 20;
+const OPCODE_STORE_LOCAL: u8 = 21;
+const OPCODE_SUBTRACT: u8 = 22;
+const OPCODE_NEGATE: u8 = 23;
+const OPCODE_NOT_EQUAL: u8 = 24;
+const OPCODE_NOT: u8 = 25;
+const OPCODE_OR: u8 = 26;
+const OPCODE_XOR: u8 = 27;
+const OPCODE_POP: u8 = 28;
+const OPCODE_PUSH_TEXT: u8 = 29;
+const OPCODE_CALL: u8 = 30;
+const OPCODE_RETURN: u8 = 31;
+const OPCODE_RETURN_VOID: u8 = 32;
+const OPCODE_MAKE_ARRAY: u8 = 33;
+const OPCODE_LOAD_INDEX: u8 = 34;
+const OPCODE_STORE_INDEX: u8 = 35;
+const OPCODE_CALL_BUILT_IN: u8 = 36;
+const OPCODE_DUP2: u8 = 37;
+const OPCODE_MAKE_RANGE: u8 = 38;
+const OPCODE_MAKE_STEPPED_RANGE: u8 = 39;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectFileError {
@@ -161,6 +162,10 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 		Instruction::LoadIndex => bytes.push(OPCODE_LOAD_INDEX),
 		Instruction::LoadLocal(slot) => {
 			bytes.push(OPCODE_LOAD_LOCAL);
+			bytes.extend_from_slice(&slot.to_le_bytes());
+		}
+		Instruction::LoadReference(slot) => {
+			bytes.push(OPCODE_LOAD_REFERENCE);
 			bytes.extend_from_slice(&slot.to_le_bytes());
 		}
 		Instruction::MakeArray(element_count) => {
@@ -416,6 +421,7 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_LESS_THAN_OR_EQUAL => Ok(Instruction::LessThanOrEqual),
 			OPCODE_LOAD_INDEX => Ok(Instruction::LoadIndex),
 			OPCODE_LOAD_LOCAL => Ok(Instruction::LoadLocal(self.read_u32()?)),
+			OPCODE_LOAD_REFERENCE => Ok(Instruction::LoadReference(self.read_u32()?)),
 			OPCODE_MAKE_ARRAY => Ok(Instruction::MakeArray(self.read_u32()?)),
 			OPCODE_MAKE_RANGE => Ok(Instruction::MakeRange),
 			OPCODE_MAKE_STEPPED_RANGE => Ok(Instruction::MakeSteppedRange),

@@ -274,8 +274,15 @@ impl Compiler {
 				self.emit(emission, Instruction::PushBoolean(*value), expression.position());
 			}
 			Expr::Call(CallExpr { arguments, .. }) => {
-				for argument in arguments {
-					self.compile_into(argument, semantic_program, emission);
+				let reference_slots = semantic_program.call_argument_reference_slots(expression.position());
+
+				for (index, argument) in arguments.iter().enumerate() {
+					if let Some(Some(slot)) = reference_slots.and_then(|slots| slots.get(index)) {
+						self.emit(emission, Instruction::LoadReference(*slot), argument.position);
+					}
+					else {
+						self.compile_into(&argument.value, semantic_program, emission);
+					}
 				}
 
 				if let Some(built_in) = semantic_program.built_in_call_target(expression.position()) {
@@ -678,6 +685,7 @@ mod tests {
 	use crate::ast::BlockStatement;
 	use crate::ast::BooleanLiteral;
 	use crate::ast::BreakStatement;
+	use crate::ast::CallArgument;
 	use crate::ast::CallExpr;
 	use crate::ast::ContinueStatement;
 	use crate::ast::DataType;
@@ -755,19 +763,23 @@ mod tests {
 			statements: vec![],
 			result: Some(Expr::Call(CallExpr {
 				arguments: vec![
-					Expr::Array(ArrayLiteral {
-						elements: vec![
-							Expr::Integer(IntegerLiteral {
-								position: 0,
-								value: 1,
-							}),
-							Expr::Integer(IntegerLiteral {
-								position: 0,
-								value: 2,
-							}),
-						],
+					CallArgument {
+						is_by_ref: false,
 						position: 0,
-					}),
+						value: Expr::Array(ArrayLiteral {
+							elements: vec![
+								Expr::Integer(IntegerLiteral {
+									position: 0,
+									value: 1,
+								}),
+								Expr::Integer(IntegerLiteral {
+									position: 0,
+									value: 2,
+								}),
+							],
+							position: 0,
+						}),
+					},
 				],
 				callee: IdentifierExpr {
 					name: String::from("len"),

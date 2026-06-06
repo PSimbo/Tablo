@@ -128,8 +128,15 @@ pub struct BooleanLiteral {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CallArgument {
+	pub is_by_ref: bool,
+	pub position: usize,
+	pub value: Expr,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallExpr {
-	pub arguments: Vec<Expr>,
+	pub arguments: Vec<CallArgument>,
 	pub callee: IdentifierExpr,
 	pub position: usize,
 }
@@ -165,6 +172,7 @@ pub struct FunctionDeclaration {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FunctionParameter {
 	pub data_type: DataType,
+	pub is_by_ref: bool,
 	pub name: String,
 	pub position: usize,
 }
