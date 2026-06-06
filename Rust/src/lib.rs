@@ -376,6 +376,16 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_disp_with_non_text_argument_source_text() {
+		let error = evaluate_snippet("disp(1)").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Built-in function `disp` does not accept an argument of type `int`."),
+			position: 5,
+		}));
+	}
+
+	#[test]
 	fn rejects_invalid_main_signature_source_text() {
 		let error = run("fn Main() int { return 0; }").unwrap_err();
 
@@ -690,6 +700,20 @@ mod tests {
 		let result = evaluate_snippet("1.25 + .5").unwrap();
 
 		assert_eq!(result, Some(Value::Decimal(crate::value::Decimal::from_literal("1.75").unwrap())));
+	}
+
+	#[test]
+	fn runs_disp_as_expression_statement_source_text() {
+		let result = evaluate_snippet("disp('hello');\n1").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn runs_displn_in_standalone_source_text() {
+		let result = run("fn Main(args: [text]) int { displn('hello'); return 0; }").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(0)));
 	}
 
 	#[test]

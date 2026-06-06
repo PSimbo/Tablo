@@ -249,7 +249,9 @@ impl VirtualMachine {
 			Instruction::CallBuiltIn(built_in, argument_count) => {
 				let arguments = self.pop_call_arguments(*argument_count as usize, instruction_index)?;
 				let result = self.run_built_in_function(*built_in, arguments, instruction_index)?;
-				self.stack.push(result);
+				if let Some(result) = result {
+					self.stack.push(result);
+				}
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::Dup2 => {
@@ -529,10 +531,10 @@ impl VirtualMachine {
 		built_in: BuiltInFunction,
 		arguments: Vec<Value>,
 		instruction_index: usize,
-	) -> Result<Value, VmError> {
+	) -> Result<Option<Value>, VmError> {
 		match built_in {
 			BuiltInFunction::Len => match arguments.as_slice() {
-				[Value::Array(values)] => Ok(Value::Integer(values.len() as i64)),
+				[Value::Array(values)] => Ok(Some(Value::Integer(values.len() as i64))),
 				[value] => Err(vm_error(
 					instruction_index,
 					format!("Built-in function `len` does not accept a `{}` value.", type_name(value)),
@@ -541,7 +543,36 @@ impl VirtualMachine {
 					instruction_index,
 					format!("Built-in function `len` expects 1 argument(s), found {}.", arguments.len()),
 				)),
-			}
+			},
+			BuiltInFunction::Disp => match arguments.as_slice() {
+				[Value::Text(value)] => {
+					print!("{value}");
+					Ok(None)
+				}
+				[value] => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `disp` does not accept a `{}` value.", type_name(value)),
+				)),
+				_ => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `disp` expects 1 argument(s), found {}.", arguments.len()),
+				)),
+			},
+			BuiltInFunction::Displn => match arguments.as_slice() {
+				[Value::Text(value)] => {
+					print!("{value}");
+					println!();
+					Ok(None)
+				}
+				[value] => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `displn` does not accept a `{}` value.", type_name(value)),
+				)),
+				_ => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `displn` expects 1 argument(s), found {}.", arguments.len()),
+				)),
+			},
 		}
 	}
 
@@ -1498,6 +1529,18 @@ mod tests {
 		let result = VirtualMachine::new().run(&program).unwrap();
 
 		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
+	fn runs_built_in_disp_program_without_leaving_stack_value() {
+		let program = Program::new(vec![
+			Instruction::PushText(String::from("hello")),
+			Instruction::CallBuiltIn(BuiltInFunction::Disp, 1),
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, None);
 	}
 
 	#[test]

@@ -1347,6 +1347,14 @@ Returns the date obtained by parsing `d`. If `d` cannot be parsed as a date then
 
 Returns the current date in the time-zone specified by `tz`.
 
+### `disp(fmt: text) void`
+
+Displays the `fmt` text in `stdout`. Note that no new line character is automatically added to the end of `fmt`.
+
+### `displn(fmt: text) void`
+
+Displays the `fmt` text in `stdout`. A new line character is automatically added to the end of `fmt`.
+
 ### `firstof(v1!: any, v2: any, ...): bool!`
 
 Returns `true` when the current iteration of a grouped `for` loop is the first iteration of the group identified by the supplied grouping expression values. Otherwise returns `false`.
