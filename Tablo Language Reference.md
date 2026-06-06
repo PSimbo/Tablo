@@ -491,11 +491,17 @@ The non-null default values for each data type are:
 Objects
 -------
 
-Tablo supports a somewhat struct-like, somewhat JSON-like construct called "objects". Objects are like structs in the sense that they allow the users to create custom data types with a defined structure. Objects are like JSON in the sense that the outermost element may be an array and the internal structure supports deep nesting. You can think of objects as strongly-typed JSON data.
+Tablo supports a somewhat struct-like, somewhat JSON-like construct called "objects". Objects are like structs in the sense that they allow the user to define custom data types with a fixed field structure. Objects are like JSON in the sense that the outermost element may be an array and the internal structure may be nested arbitrarily deeply. You can think of objects as strongly-typed JSON data.
+
+An object type is declared using the `obj` keyword followed by the object name and its field structure.
+
+Each field has a name and a type. A field may also specify an optional default value using `= <literal>`. Default values are limited to literals rather than arbitrary expressions. String literals, numeric literals, boolean literals, `null`, array literals, and object literals composed only of literals are all valid field defaults.
+
+If a field does not specify an explicit default value then it receives the ordinary default value for its type. For example, a nullable field defaults to `null`, a non-null `text!` field defaults to `''`, and a non-null array defaults to `[]`.
 
 ~~~
 obj LocationData {
-  addressLines: [text]! | {
+  addressLines: {
     line1: text,
     line2: text,
     line3: text,
@@ -513,6 +519,29 @@ obj CustomerCollection [
   }
 ];
 ~~~
+
+New instances of a named object type are created by writing the object type name followed by a brace-delimited list of field values:
+
+~~~
+obj Customer {
+  id: int!,
+  name: text! = '',
+  isActive: bool! = true,
+}
+
+var customer: Customer = Customer {
+  id: 1,
+  name: 'Alice',
+};
+~~~
+
+In the example above, the `isActive` field receives its default value because no explicit value was provided.
+
+Each specified field name must exist on the target object type and must not be repeated. Any omitted fields are populated from their explicit field default if one exists, otherwise from the normal default value for the field's data type.
+
+Where the expected type is already known, such as when assigning to an inline object-typed field, the type name may be omitted and only the brace-delimited field list is written.
+
+Tablo does not currently define constructor syntax for objects. Object creation is performed entirely by supplying zero or more field values and allowing the remaining fields to be populated from defaults.
 
 Tablo supports bi-directional conversion between JSON data and objects.
 
@@ -1559,7 +1588,13 @@ Production = <Components>
 ~~~
 
 ~~~
-program = { functionDeclaration }
+program = { objectDeclaration | functionDeclaration }
+
+objectDeclaration = `obj` identifier objectShape `;`
+objectShape = objectFields | `[` objectFields `]`
+objectFields = `{` [ objectField { `,` objectField } [ `,` ] ] `}`
+objectField = identifier `:` objectFieldType [ `=` objectDefaultLiteral ]
+objectFieldType = dataType | objectShape
 
 statement = block | blockStatement | simpleStatement
 
@@ -1591,9 +1626,13 @@ additive = multiplicative { additiveOperator multiplicative }
 multiplicative = unary { multiplicativeOperator unary }
 unary = ( unaryOperator unary ) | postfix
 postfix = primary { callSuffix | indexSuffix }
-primary = literal | groupExpression | identifier
+primary = literal | objectConstruction | groupExpression | identifier
 literal = `null` | arrayLiteral | booleanLiteral | decimalLiteral | hexLiteral | integerLiteral | octalLiteral | stringLiteral
 arrayLiteral = `[` [ expression { `,` expression } ] `]`
+objectConstruction = [ identifier ] objectLiteral
+objectLiteral = `{` [ objectLiteralField { `,` objectLiteralField } [ `,` ] ] `}`
+objectLiteralField = identifier `:` expression
+objectDefaultLiteral = `null` | arrayLiteral | booleanLiteral | decimalLiteral | hexLiteral | integerLiteral | octalLiteral | objectLiteral | stringLiteral
 callSuffix = `(` [ callArgument { `,` callArgument } ] `)`
 callArgument = expression | referenceArgument
 referenceArgument = `&` identifier
