@@ -540,15 +540,24 @@ impl SemanticAnalyzer {
 				let array_type = self.infer_expression_type(array)?;
 				let index_type = self.infer_expression_type(index)?;
 
-				if index_type != DataType::Int {
-					return Err(self.compile_error(
-						index.position(),
-						format!("Array index must be of type `int`, found `{}`.", self.data_type_name(&index_type)),
-					));
-				}
-
 				match array_type {
-					DataType::Array(element_type) => Ok(*element_type),
+					DataType::Array(element_type) => match index_type {
+						DataType::Int => Ok(*element_type),
+						DataType::Range(index_element_type) if *index_element_type == DataType::Int => {
+							Ok(DataType::Array(element_type))
+						}
+						DataType::Range(index_element_type) => Err(self.compile_error(
+							index.position(),
+							format!(
+								"Array slicing requires a range of `int`, found `range<{}>`.",
+								self.data_type_name(&index_element_type),
+							),
+						)),
+						other => Err(self.compile_error(
+							index.position(),
+							format!("Array index must be of type `int`, found `{}`.", self.data_type_name(&other)),
+						)),
+					},
 					DataType::EmptyArray => Err(self.compile_error(
 						array.position(),
 						String::from("Cannot index an empty array literal without a known element type."),

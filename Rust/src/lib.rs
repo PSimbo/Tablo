@@ -366,6 +366,16 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_decimal_range_array_slice_source_text() {
+		let error = evaluate_snippet("var xs: [int] = [10, 20, 30];\nxs[1.0:2.0]").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Array slicing requires a range of `int`, found `range<dec>`."),
+			position: 36,
+		}));
+	}
+
+	#[test]
 	fn rejects_invalid_main_signature_source_text() {
 		let error = run("fn Main() int { return 0; }").unwrap_err();
 
@@ -574,6 +584,17 @@ mod tests {
 		let _ = std::fs::remove_file(&output_path);
 
 		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn runs_array_slice_source_text() {
+		let result = evaluate_snippet("var xs: [int] = [10, 20, 30, 40];\nxs[2:4]").unwrap();
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Integer(20),
+			Value::Integer(30),
+			Value::Integer(40),
+		])));
 	}
 
 	#[test]

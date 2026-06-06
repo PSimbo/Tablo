@@ -825,16 +825,6 @@ fn iterator_next_value(iterator: Value, instruction_index: usize) -> Result<(Val
 }
 
 fn load_index_value(array: Value, index: Value, instruction_index: usize) -> Result<Value, VmError> {
-	let index = match index {
-		Value::Integer(value) => value,
-		other => {
-			return Err(vm_error(
-				instruction_index,
-				format!("Array index must be an `int`, found `{}`.", type_name(&other)),
-			));
-		}
-	};
-
 	let values = match array {
 		Value::Array(values) => values,
 		other => {
@@ -845,14 +835,63 @@ fn load_index_value(array: Value, index: Value, instruction_index: usize) -> Res
 		}
 	};
 
-	if index < 1 || index as usize > values.len() {
-		return Err(vm_error(
+	match index {
+		Value::Integer(index) => {
+			if index < 1 || index as usize > values.len() {
+				return Err(vm_error(
+					instruction_index,
+					format!("Array index {} is out of bounds for length {}.", index, values.len()),
+				));
+			}
+
+			Ok(values[index as usize - 1].clone())
+		}
+		Value::IntegerRange(range) => load_range_slice_value(values, range, instruction_index),
+		Value::DecimalRange(_) => Err(vm_error(
 			instruction_index,
-			format!("Array index {} is out of bounds for length {}.", index, values.len()),
-		));
+			String::from("Array slicing requires a range of `int`."),
+		)),
+		other => Err(vm_error(
+			instruction_index,
+			format!("Array index must be an `int`, found `{}`.", type_name(&other)),
+		)),
+	}
+}
+
+fn load_range_slice_value(values: Vec<Value>, range: IntegerRange, instruction_index: usize) -> Result<Value, VmError> {
+	let step = range.step.unwrap_or(1);
+
+	if step == 0 {
+		return Err(vm_error(instruction_index, String::from("Range step cannot be zero.")));
 	}
 
-	Ok(values[index as usize - 1].clone())
+	let mut result = Vec::new();
+	let mut current = Some(range.start);
+
+	while let Some(index) = current {
+		let in_bounds = if step > 0 {
+			index <= range.end
+		}
+		else {
+			index >= range.end
+		};
+
+		if !in_bounds {
+			break;
+		}
+
+		if index < 1 || index as usize > values.len() {
+			return Err(vm_error(
+				instruction_index,
+				format!("Array index {} is out of bounds for length {}.", index, values.len()),
+			));
+		}
+
+		result.push(values[index as usize - 1].clone());
+		current = index.checked_add(step);
+	}
+
+	Ok(Value::Array(result))
 }
 
 fn make_iterator_value(iterable: Value, instruction_index: usize) -> Result<Value, VmError> {
@@ -1407,6 +1446,28 @@ mod tests {
 		let result = VirtualMachine::new().run(&program).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(20)));
+	}
+
+	#[test]
+	fn runs_array_slice_program() {
+		let program = Program::new(vec![
+			Instruction::PushInteger(10),
+			Instruction::PushInteger(20),
+			Instruction::PushInteger(30),
+			Instruction::PushInteger(40),
+			Instruction::MakeArray(4),
+			Instruction::PushInteger(2),
+			Instruction::PushInteger(3),
+			Instruction::MakeRange,
+			Instruction::LoadIndex,
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Integer(20),
+			Value::Integer(30),
+		])));
 	}
 
 	#[test]

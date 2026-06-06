@@ -1252,6 +1252,35 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_array_slice_expression() {
+		let program = parse_program("xs[2:4]");
+
+		assert_eq!(normalize_program(program), Program {
+			functions: vec![],
+			result: Some(Expr::Index(IndexExpr {
+				array: Box::new(Expr::Identifier(IdentifierExpr {
+					name: String::from("xs"),
+					position: 0,
+				})),
+				index: Box::new(Expr::Range(RangeExpr {
+					start: Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
+						value: 2,
+					})),
+					step: None,
+					end: Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
+						value: 4,
+					})),
+					position: 0,
+				})),
+				position: 0,
+			})),
+			statements: vec![],
+		});
+	}
+
+	#[test]
 	fn parses_array_variable_declaration() {
 		let program = parse_program("var xs: [int] = [];");
 
