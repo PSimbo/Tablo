@@ -7,6 +7,7 @@ pub mod bytecode;
 pub mod compiler;
 pub mod debugger;
 pub mod object_file;
+pub mod schema;
 pub mod semantic;
 pub mod source;
 pub mod syntax;
