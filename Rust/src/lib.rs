@@ -8,6 +8,7 @@ pub mod compiler;
 pub mod debugger;
 pub mod object_file;
 pub mod query;
+pub mod runtime_config;
 pub mod schema;
 pub mod schema_fixture;
 pub mod semantic;
@@ -129,6 +130,22 @@ pub fn compile_with_source_name(
 ) -> Result<(), TabloError> {
 	let source_name = source_name.into();
 	let program = compile_to_program_with_name(source, Some(source_name.as_str()))?;
+	write_program_to_path(output_path, &program).map_err(TabloError::ObjectFile)
+}
+
+pub fn compile_with_source_name_and_schema(
+	source: impl Into<String>,
+	source_name: impl Into<String>,
+	output_path: impl AsRef<Path>,
+	schema_catalog: &SchemaCatalog,
+) -> Result<(), TabloError> {
+	let source_name = source_name.into();
+	let program = compile_source_to_program_with_name_and_schema(
+		source,
+		Some(source_name.as_str()),
+		CompilationTarget::Standalone,
+		Some(schema_catalog),
+	)?;
 	write_program_to_path(output_path, &program).map_err(TabloError::ObjectFile)
 }
 
