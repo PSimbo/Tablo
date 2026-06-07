@@ -55,6 +55,7 @@ pub enum Expr {
 	Binary(BinaryExpr),
 	Boolean(BooleanLiteral),
 	Call(CallExpr),
+	Count(CountExpr),
 	Decimal(DecimalLiteral),
 	FieldAccess(FieldAccessExpr),
 	Identifier(IdentifierExpr),
@@ -149,6 +150,13 @@ pub struct CallExpr {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContinueStatement {
 	pub position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CountExpr {
+	pub position: usize,
+	pub table: TableReference,
+	pub where_clause: Option<Box<Expr>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -276,6 +284,12 @@ pub struct ReturnStatement {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TableReference {
+	pub components: Vec<IdentifierExpr>,
+	pub position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TextLiteral {
 	pub position: usize,
 	pub value: String,
@@ -318,6 +332,7 @@ impl Expr {
 			Expr::Binary(expression) => expression.position,
 			Expr::Boolean(expression) => expression.position,
 			Expr::Call(expression) => expression.position,
+			Expr::Count(expression) => expression.position,
 			Expr::Decimal(expression) => expression.position,
 			Expr::FieldAccess(expression) => expression.position,
 			Expr::Identifier(expression) => expression.position,

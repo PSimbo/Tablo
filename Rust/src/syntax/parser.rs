@@ -11,6 +11,7 @@ use crate::ast::BreakStatement;
 use crate::ast::CallArgument;
 use crate::ast::CallExpr;
 use crate::ast::ContinueStatement;
+use crate::ast::CountExpr;
 use crate::ast::DataType;
 use crate::ast::DecimalLiteral;
 use crate::ast::Expr;
@@ -31,6 +32,7 @@ use crate::ast::Program;
 use crate::ast::RangeExpr;
 use crate::ast::ReturnStatement;
 use crate::ast::Statement;
+use crate::ast::TableReference;
 use crate::ast::TextLiteral;
 use crate::ast::UnaryExpr;
 use crate::ast::UnaryOperator;
@@ -412,6 +414,23 @@ impl Parser {
 		}))
 	}
 
+	fn parse_count_expression(&mut self, start: usize) -> Result<Expr, ParseError> {
+		let table = self.parse_table_reference()?;
+		let where_clause = if self.current().is_some_and(|token| token.kind == TokenKind::WhereKeyword) {
+			self.next();
+			Some(Box::new(self.parse_expression_with_binding_power(BindingPower::Default, true)?))
+		}
+		else {
+			None
+		};
+
+		Ok(Expr::Count(CountExpr {
+			position: start,
+			table,
+			where_clause,
+		}))
+	}
+
 	fn parse_data_type(&mut self) -> Result<DataType, ParseError> {
 		let token = self.next().ok_or(ParseError {
 			message: String::from("Expected a data type."),
@@ -449,7 +468,11 @@ impl Parser {
 		}))
 	}
 
-	fn parse_expression_with_binding_power(&mut self, binding_power: BindingPower) -> Result<Expr, ParseError> {
+	fn parse_expression_with_binding_power(
+		&mut self,
+		binding_power: BindingPower,
+		treat_equal_as_equality: bool,
+	) -> Result<Expr, ParseError> {
 		let mut left = self.parse_prefix()?;
 
 		while let Some(token) = self.current() {
@@ -459,6 +482,7 @@ impl Parser {
 				TokenKind::BangEqual => BindingPower::Equality,
 				TokenKind::Dash => BindingPower::Additive,
 				TokenKind::Dot => BindingPower::Call,
+				TokenKind::Equal if treat_equal_as_equality => BindingPower::Equality,
 				TokenKind::EqualEqual => BindingPower::Equality,
 				TokenKind::ForwardSlash => BindingPower::Multiplicative,
 				TokenKind::GreaterThan => BindingPower::Comparison,
@@ -480,7 +504,7 @@ impl Parser {
 			}
 
 			let operator = self.next().unwrap();
-			left = self.parse_infix(left, operator, next_binding_power)?;
+			left = self.parse_infix(left, operator, next_binding_power, treat_equal_as_equality)?;
 		}
 
 		Ok(left)
@@ -577,7 +601,7 @@ impl Parser {
 	}
 
 	fn parse_group_expression(&mut self, start: usize) -> Result<Expr, ParseError> {
-		let expression = self.parse_expression_with_binding_power(BindingPower::Default)?;
+		let expression = self.parse_expression_with_binding_power(BindingPower::Default, false)?;
 		let closing = self.next().ok_or(ParseError {
 			message: String::from("Expected `)` to close grouped expression."),
 			position: start,
@@ -651,10 +675,16 @@ impl Parser {
 		}))
 	}
 
-	fn parse_infix(&mut self, left: Expr, operator: Token, binding_power: BindingPower) -> Result<Expr, ParseError> {
+	fn parse_infix(
+		&mut self,
+		left: Expr,
+		operator: Token,
+		binding_power: BindingPower,
+		treat_equal_as_equality: bool,
+	) -> Result<Expr, ParseError> {
 		match operator.kind {
 			TokenKind::AndKeyword => {
-				let right = self.parse_expression_with_binding_power(binding_power)?;
+				let right = self.parse_expression_with_binding_power(binding_power, treat_equal_as_equality)?;
 
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
@@ -664,7 +694,7 @@ impl Parser {
 				}))
 			}
 			TokenKind::Asterisk => {
-				let right = self.parse_expression_with_binding_power(binding_power)?;
+				let right = self.parse_expression_with_binding_power(binding_power, treat_equal_as_equality)?;
 
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
@@ -674,7 +704,7 @@ impl Parser {
 				}))
 			}
 			TokenKind::BangEqual => {
-				let right = self.parse_expression_with_binding_power(binding_power)?;
+				let right = self.parse_expression_with_binding_power(binding_power, treat_equal_as_equality)?;
 
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
@@ -684,7 +714,7 @@ impl Parser {
 				}))
 			}
 			TokenKind::Dash => {
-				let right = self.parse_expression_with_binding_power(binding_power)?;
+				let right = self.parse_expression_with_binding_power(binding_power, treat_equal_as_equality)?;
 
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
@@ -694,8 +724,18 @@ impl Parser {
 				}))
 			}
 			TokenKind::Dot => self.parse_field_access_expression(left, operator.start),
+			TokenKind::Equal if treat_equal_as_equality => {
+				let right = self.parse_expression_with_binding_power(binding_power, treat_equal_as_equality)?;
+
+				Ok(Expr::Binary(BinaryExpr {
+					left: Box::new(left),
+					operator: BinaryOperator::Equal,
+					position: operator.start,
+					right: Box::new(right),
+				}))
+			}
 			TokenKind::EqualEqual => {
-				let right = self.parse_expression_with_binding_power(binding_power)?;
+				let right = self.parse_expression_with_binding_power(binding_power, treat_equal_as_equality)?;
 
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
@@ -705,7 +745,7 @@ impl Parser {
 				}))
 			}
 			TokenKind::ForwardSlash => {
-				let right = self.parse_expression_with_binding_power(binding_power)?;
+				let right = self.parse_expression_with_binding_power(binding_power, treat_equal_as_equality)?;
 
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
@@ -715,7 +755,7 @@ impl Parser {
 				}))
 			}
 			TokenKind::GreaterThan => {
-				let right = self.parse_expression_with_binding_power(binding_power)?;
+				let right = self.parse_expression_with_binding_power(binding_power, treat_equal_as_equality)?;
 
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
@@ -725,7 +765,7 @@ impl Parser {
 				}))
 			}
 			TokenKind::GreaterThanOrEqual => {
-				let right = self.parse_expression_with_binding_power(binding_power)?;
+				let right = self.parse_expression_with_binding_power(binding_power, treat_equal_as_equality)?;
 
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
@@ -738,7 +778,7 @@ impl Parser {
 			TokenKind::LeftBracket => self.parse_index_expression(left, operator.start),
 			TokenKind::LeftParenthesis => self.parse_call_expression(left, operator.start),
 			TokenKind::LessThan => {
-				let right = self.parse_expression_with_binding_power(binding_power)?;
+				let right = self.parse_expression_with_binding_power(binding_power, treat_equal_as_equality)?;
 
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
@@ -748,7 +788,7 @@ impl Parser {
 				}))
 			}
 			TokenKind::LessThanOrEqual => {
-				let right = self.parse_expression_with_binding_power(binding_power)?;
+				let right = self.parse_expression_with_binding_power(binding_power, treat_equal_as_equality)?;
 
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
@@ -758,7 +798,7 @@ impl Parser {
 				}))
 			}
 			TokenKind::OrKeyword => {
-				let right = self.parse_expression_with_binding_power(binding_power)?;
+				let right = self.parse_expression_with_binding_power(binding_power, treat_equal_as_equality)?;
 
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
@@ -768,7 +808,7 @@ impl Parser {
 				}))
 			}
 			TokenKind::Percent => {
-				let right = self.parse_expression_with_binding_power(binding_power)?;
+				let right = self.parse_expression_with_binding_power(binding_power, treat_equal_as_equality)?;
 
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
@@ -778,7 +818,7 @@ impl Parser {
 				}))
 			}
 			TokenKind::Plus => {
-				let right = self.parse_expression_with_binding_power(binding_power)?;
+				let right = self.parse_expression_with_binding_power(binding_power, treat_equal_as_equality)?;
 
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
@@ -788,7 +828,7 @@ impl Parser {
 				}))
 			}
 			TokenKind::XorKeyword => {
-				let right = self.parse_expression_with_binding_power(binding_power)?;
+				let right = self.parse_expression_with_binding_power(binding_power, treat_equal_as_equality)?;
 
 				Ok(Expr::Binary(BinaryExpr {
 					left: Box::new(left),
@@ -872,7 +912,7 @@ impl Parser {
 	}
 
 	fn parse_negation_expression_with_position(&mut self, position: usize) -> Result<Expr, ParseError> {
-		let operand = self.parse_expression_with_binding_power(BindingPower::Unary)?;
+		let operand = self.parse_expression_with_binding_power(BindingPower::Unary, false)?;
 
 		Ok(Expr::Unary(UnaryExpr {
 			operand: Box::new(operand),
@@ -882,7 +922,7 @@ impl Parser {
 	}
 
 	fn parse_not_expression(&mut self, position: usize) -> Result<Expr, ParseError> {
-		let operand = self.parse_expression_with_binding_power(BindingPower::Unary)?;
+		let operand = self.parse_expression_with_binding_power(BindingPower::Unary, false)?;
 
 		Ok(Expr::Unary(UnaryExpr {
 			operand: Box::new(operand),
@@ -998,6 +1038,7 @@ impl Parser {
 		})?;
 
 		match token.kind {
+			TokenKind::CountKeyword => self.parse_count_expression(token.start),
 			TokenKind::Dash => self.parse_negation_expression_with_position(token.start),
 			TokenKind::DecimalLiteral => self.parse_decimal_literal(token),
 			TokenKind::EndOfFile => Err(ParseError {
@@ -1020,18 +1061,18 @@ impl Parser {
 	}
 
 	fn parse_range_expression(&mut self) -> Result<Expr, ParseError> {
-		let start = self.parse_expression_with_binding_power(BindingPower::Default)?;
+		let start = self.parse_expression_with_binding_power(BindingPower::Default, false)?;
 
 		if !self.current().is_some_and(|token| token.kind == TokenKind::Colon) {
 			return Ok(start);
 		}
 
 		let colon = self.next().unwrap();
-		let middle = self.parse_expression_with_binding_power(BindingPower::Default)?;
+		let middle = self.parse_expression_with_binding_power(BindingPower::Default, false)?;
 
 		if self.current().is_some_and(|token| token.kind == TokenKind::Colon) {
 			self.next();
-			let end = self.parse_expression_with_binding_power(BindingPower::Default)?;
+			let end = self.parse_expression_with_binding_power(BindingPower::Default, false)?;
 
 			return Ok(Expr::Range(RangeExpr {
 				end: Box::new(end),
@@ -1091,6 +1132,35 @@ impl Parser {
 				position: 0,
 			}),
 		}
+	}
+
+	fn parse_table_reference(&mut self) -> Result<TableReference, ParseError> {
+		let first = self.expect_token(TokenKind::Identifier, "Expected table name.")?;
+		let mut components = vec![IdentifierExpr {
+			name: first.lexeme,
+			position: first.start,
+		}];
+
+		while self.current().is_some_and(|token| token.kind == TokenKind::Dot) {
+			self.next();
+			let next = self.expect_token(TokenKind::Identifier, "Expected identifier after `.` in table reference.")?;
+			components.push(IdentifierExpr {
+				name: next.lexeme,
+				position: next.start,
+			});
+		}
+
+		if components.len() > 3 {
+			return Err(ParseError {
+				message: String::from("Table references may contain at most three identifier components."),
+				position: components[3].position,
+			});
+		}
+
+		Ok(TableReference {
+			position: components[0].position,
+			components,
+		})
 	}
 
 	fn parse_text_literal(&self, token: Token) -> Expr {
@@ -1195,6 +1265,7 @@ mod tests {
 	use crate::ast::CallArgument;
 	use crate::ast::CallExpr;
 	use crate::ast::ContinueStatement;
+	use crate::ast::CountExpr;
 	use crate::ast::DataType;
 	use crate::ast::DecimalLiteral;
 	use crate::ast::Expr;
@@ -1215,6 +1286,7 @@ mod tests {
 	use crate::ast::RangeExpr;
 	use crate::ast::ReturnStatement;
 	use crate::ast::Statement;
+	use crate::ast::TableReference;
 	use crate::ast::TextLiteral;
 	use crate::ast::UnaryExpr;
 	use crate::ast::UnaryOperator;
@@ -1298,6 +1370,11 @@ mod tests {
 				arguments: arguments.into_iter().map(normalize_call_argument).collect(),
 				callee: normalize_identifier(callee),
 				position: 0,
+			}),
+			Expr::Count(CountExpr { table, where_clause, .. }) => Expr::Count(CountExpr {
+				position: 0,
+				table: normalize_table_reference(table),
+				where_clause: where_clause.map(|where_clause| Box::new(normalize_expr(*where_clause))),
 			}),
 			Expr::Decimal(DecimalLiteral { value, .. }) => Expr::Decimal(DecimalLiteral {
 				position: 0,
@@ -1389,6 +1466,15 @@ mod tests {
 		}
 	}
 
+	fn normalize_if_statement(if_statement: IfStatement) -> IfStatement {
+		IfStatement {
+			condition: normalize_expr(if_statement.condition),
+			else_branch: if_statement.else_branch.map(|branch| Box::new(normalize_statement(*branch))),
+			position: 0,
+			then_branch: normalize_block(if_statement.then_branch),
+		}
+	}
+
 	fn normalize_object_construction_field(field: ObjectConstructionField) -> ObjectConstructionField {
 		ObjectConstructionField {
 			name: field.name,
@@ -1447,19 +1533,17 @@ mod tests {
 		}
 	}
 
-	fn normalize_if_statement(if_statement: IfStatement) -> IfStatement {
-		IfStatement {
-			condition: normalize_expr(if_statement.condition),
-			else_branch: if_statement.else_branch.map(|branch| Box::new(normalize_statement(*branch))),
-			position: 0,
-			then_branch: normalize_block(if_statement.then_branch),
-		}
-	}
-
 	fn normalize_return_statement(return_statement: ReturnStatement) -> ReturnStatement {
 		ReturnStatement {
 			position: 0,
 			value: return_statement.value.map(normalize_expr),
+		}
+	}
+
+	fn normalize_table_reference(table: TableReference) -> TableReference {
+		TableReference {
+			components: table.components.into_iter().map(normalize_identifier).collect(),
+			position: 0,
 		}
 	}
 
@@ -1856,6 +1940,46 @@ mod tests {
 				with_declarations: vec![],
 			}
 		);
+	}
+
+	#[test]
+	fn parses_count_expression_with_where_clause() {
+		let program = parse_program("count sales.customers where active = true");
+
+		assert_eq!(normalize_program(program), Program {
+			functions: vec![],
+			objects: vec![],
+			result: Some(Expr::Count(CountExpr {
+				position: 0,
+				table: TableReference {
+					components: vec![
+						IdentifierExpr {
+							name: String::from("sales"),
+							position: 0,
+						},
+						IdentifierExpr {
+							name: String::from("customers"),
+							position: 0,
+						},
+					],
+					position: 0,
+				},
+				where_clause: Some(Box::new(Expr::Binary(BinaryExpr {
+					left: Box::new(Expr::Identifier(IdentifierExpr {
+						name: String::from("active"),
+						position: 0,
+					})),
+					operator: BinaryOperator::Equal,
+					position: 0,
+					right: Box::new(Expr::Boolean(BooleanLiteral {
+						position: 0,
+						value: true,
+					})),
+				}))),
+			})),
+			statements: vec![],
+			with_declarations: vec![],
+		});
 	}
 
 	#[test]

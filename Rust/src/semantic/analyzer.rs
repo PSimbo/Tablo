@@ -10,6 +10,7 @@ use crate::ast::BreakStatement;
 use crate::ast::CallArgument;
 use crate::ast::CallExpr;
 use crate::ast::ContinueStatement;
+use crate::ast::CountExpr;
 use crate::ast::DataType;
 use crate::ast::Expr;
 use crate::ast::FieldAccessExpr;
@@ -25,6 +26,7 @@ use crate::ast::Program;
 use crate::ast::RangeExpr;
 use crate::ast::ReturnStatement;
 use crate::ast::Statement;
+use crate::ast::TableReference;
 use crate::ast::UnaryExpr;
 use crate::ast::UnaryOperator;
 use crate::ast::VariableDeclaration;
@@ -33,6 +35,8 @@ use crate::ast::WithDeclaration;
 use crate::builtins::BuiltInFunction;
 use crate::compiler::CompileError;
 use crate::schema::SchemaCatalog;
+use crate::schema::SchemaDataType;
+use crate::schema::SchemaError;
 
 use super::scope::ScopeStack;
 
@@ -42,6 +46,7 @@ use super::scope::ScopeStack;
 #[derive(Default)]
 pub struct SemanticAnalyzer {
 	current_return_type: Option<DataType>,
+	current_schema_catalog: Option<SchemaCatalog>,
 	functions: ScopeStack<FunctionSignature>,
 	locals: ScopeStack<LocalBinding>,
 	loop_depth: usize,
@@ -71,6 +76,13 @@ struct LocalBinding {
 	slot: u32,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedTableReference {
+	pub database_name: String,
+	pub schema_name: String,
+	pub table_name: String,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SemanticProgram {
 	active_databases: Vec<String>,
@@ -86,6 +98,7 @@ pub struct SemanticProgram {
 	identifier_slots: BTreeMap<usize, u32>,
 	iterator_slots: BTreeMap<usize, u32>,
 	object_declarations: BTreeMap<String, ObjectDeclaration>,
+	resolved_tables: BTreeMap<usize, ResolvedTableReference>,
 }
 
 impl SemanticProgram {
@@ -140,12 +153,17 @@ impl SemanticProgram {
 	pub fn object_declaration(&self, name: &str) -> Option<&ObjectDeclaration> {
 		self.object_declarations.get(name)
 	}
+
+	pub fn resolved_table(&self, position: usize) -> Option<&ResolvedTableReference> {
+		self.resolved_tables.get(&position)
+	}
 }
 
 impl SemanticAnalyzer {
 	pub fn new() -> Self {
 		Self {
 			current_return_type: None,
+			current_schema_catalog: None,
 			functions: ScopeStack::default(),
 			locals: ScopeStack::default(),
 			loop_depth: 0,
@@ -170,6 +188,7 @@ impl SemanticAnalyzer {
 		self.loop_depth = 0;
 		self.next_function_index = 0;
 		self.next_local_slot = 0;
+		self.current_schema_catalog = schema_catalog.cloned();
 		self.semantic_program = SemanticProgram::default();
 
 		self.validate_with_declarations(&program.with_declarations, schema_catalog)?;
@@ -409,6 +428,20 @@ impl SemanticAnalyzer {
 		self.locals.contains_in_current_scope(name)
 	}
 
+	fn data_type_from_schema_type(&self, data_type: &SchemaDataType) -> Result<DataType, CompileError> {
+		match data_type {
+			SchemaDataType::Array(element_type) => Ok(DataType::Array(Box::new(self.data_type_from_schema_type(element_type)?))),
+			SchemaDataType::Bool => Ok(DataType::Bool),
+			SchemaDataType::Dec | SchemaDataType::Float => Ok(DataType::Dec),
+			SchemaDataType::Int => Ok(DataType::Int),
+			SchemaDataType::Text => Ok(DataType::Text),
+			other => Err(self.compile_error(
+				0,
+				format!("Schema data type `{:?}` is not yet supported by database query semantic analysis.", other),
+			)),
+		}
+	}
+
 	fn data_type_has_implicit_default(&self, data_type: &DataType) -> bool {
 		match data_type {
 			DataType::Array(_) | DataType::Bool | DataType::Dec | DataType::Int | DataType::Object(_) | DataType::Text => true,
@@ -518,6 +551,71 @@ impl SemanticAnalyzer {
 		self.semantic_program.built_in_call_targets.insert(position, built_in);
 		self.semantic_program.call_return_types.insert(position, return_type.clone());
 		Ok(return_type)
+	}
+
+	fn infer_built_in_call_type_for_query(
+		&mut self,
+		built_in: BuiltInFunction,
+		arguments: &[CallArgument],
+		position: usize,
+		table: &TableReference,
+	) -> Result<DataType, CompileError> {
+		if !built_in.supports_arity(arguments.len()) {
+			return Err(self.compile_error(
+				position,
+				format!(
+					"Built-in function `{}` expects 1 argument(s), found {}.",
+					built_in.name(),
+					arguments.len(),
+				),
+			));
+		}
+
+		for argument in arguments {
+			if argument.is_by_ref {
+				return Err(self.compile_error(
+					argument.position,
+					format!("Built-in function `{}` does not accept by-reference arguments.", built_in.name()),
+				));
+			}
+		}
+
+		let argument_types = arguments.iter()
+			.map(|argument| self.infer_query_expression_type(&argument.value, table))
+			.collect::<Result<Vec<_>, _>>()?;
+
+		let return_type = built_in.return_type(&argument_types).ok_or(self.compile_error(
+			arguments.first().map_or(position, |argument| argument.value.position()),
+			format!(
+				"Built-in function `{}` does not accept an argument of type `{}`.",
+				built_in.name(),
+				self.data_type_name(argument_types.first().unwrap()),
+			),
+		))?;
+
+		self.semantic_program.built_in_call_targets.insert(position, built_in);
+		self.semantic_program.call_return_types.insert(position, return_type.clone());
+		Ok(return_type)
+	}
+
+	fn infer_count_expression_type(&mut self, count: &CountExpr) -> Result<DataType, CompileError> {
+		self.resolve_table_reference(&count.table)?;
+
+		if let Some(where_clause) = &count.where_clause {
+			let where_type = self.infer_query_expression_type(where_clause, &count.table)?;
+
+			if where_type != DataType::Bool {
+				return Err(self.compile_error(
+					where_clause.position(),
+					format!("`where` clause must evaluate to `bool`, found `{}`.", self.data_type_name(&where_type)),
+				));
+			}
+		}
+
+		Err(self.compile_error(
+			count.position,
+			String::from("Database query execution is not implemented yet."),
+		))
 	}
 
 	fn infer_expression_type(&mut self, expression: &Expr) -> Result<DataType, CompileError> {
@@ -733,6 +831,7 @@ impl SemanticAnalyzer {
 					))
 				}
 			}
+			Expr::Count(count) => self.infer_count_expression_type(count),
 			Expr::Decimal(_) => Ok(DataType::Dec),
 			Expr::FieldAccess(FieldAccessExpr { field, object, .. }) => {
 				let object_type = self.infer_expression_type(object)?;
@@ -910,6 +1009,195 @@ impl SemanticAnalyzer {
 		}
 	}
 
+	fn infer_query_expression_type(
+		&mut self,
+		expression: &Expr,
+		table: &TableReference,
+	) -> Result<DataType, CompileError> {
+		match expression {
+			Expr::Array(_) => Err(self.compile_error(
+				expression.position(),
+				String::from("Array literals are not yet supported in `where` clauses."),
+			)),
+			Expr::Assignment(_) => Err(self.compile_error(
+				expression.position(),
+				String::from("Assignments are not permitted in `where` clauses."),
+			)),
+			Expr::Binary(BinaryExpr { left, operator, right, .. }) => {
+				let left_type = self.infer_query_expression_type(left, table)?;
+				let right_type = self.infer_query_expression_type(right, table)?;
+				self.binary_result_type(*operator, &left_type, &right_type, expression.position())
+			}
+			Expr::Boolean(_) => Ok(DataType::Bool),
+			Expr::Call(CallExpr { arguments, callee, .. }) => {
+				if let Some(signature) = self.lookup_function(&callee.name).cloned() {
+					if arguments.len() != signature.parameters.len() {
+						return Err(self.compile_error(
+							expression.position(),
+							format!(
+								"Function `{}` expects {} argument(s), found {}.",
+								callee.name,
+								signature.parameters.len(),
+								arguments.len(),
+							),
+						));
+					}
+
+					for (argument, parameter) in arguments.iter().zip(signature.parameters.iter()) {
+						if argument.is_by_ref {
+							return Err(self.compile_error(
+								argument.position,
+								String::from("By-reference arguments are not permitted in `where` clauses."),
+							));
+						}
+
+						let argument_type = self.infer_query_expression_type(&argument.value, table)?;
+						self.ensure_assignable(&parameter.data_type, &argument_type, argument.value.position())?;
+					}
+
+					Ok(signature.return_type)
+				}
+				else if let Some(built_in) = BuiltInFunction::from_name(&callee.name) {
+					let query_arguments = arguments.iter().map(|argument| CallArgument {
+						is_by_ref: argument.is_by_ref,
+						position: argument.position,
+						value: argument.value.clone(),
+					}).collect::<Vec<_>>();
+
+					self.infer_built_in_call_type_for_query(built_in, &query_arguments, expression.position(), table)
+				}
+				else {
+					Err(self.compile_error(
+						callee.position,
+						format!("Function `{}` is not declared in this scope.", callee.name),
+					))
+				}
+			}
+			Expr::Count(_) => Err(self.compile_error(
+				expression.position(),
+				String::from("Nested database queries are not yet supported in `where` clauses."),
+			)),
+			Expr::Decimal(_) => Ok(DataType::Dec),
+			Expr::FieldAccess(field_access) => self.infer_query_field_access_type(field_access, table),
+			Expr::Identifier(identifier) => {
+				if let Some(local) = self.lookup_local(&identifier.name) {
+					self.semantic_program.identifier_slots.insert(identifier.position, local.slot);
+					return Ok(local.data_type);
+				}
+
+				let (table_name, column_type) = {
+					let resolved_table = self.resolve_table_reference(table)?;
+					let table_name = resolved_table.table().name().to_string();
+					let column_type = resolved_table.table().column(&identifier.name)
+						.map(|column| column.data_type().clone())
+						.ok_or(self.compile_error(
+							identifier.position,
+							format!("Field `{}` does not exist on table `{table_name}`.", identifier.name),
+						))?;
+					(table_name, column_type)
+				};
+
+				let _ = table_name;
+				self.data_type_from_schema_type(&column_type)
+			}
+			Expr::Index(_) | Expr::ObjectConstruction(_) | Expr::Range(_) => Err(self.compile_error(
+				expression.position(),
+				String::from("This expression form is not yet supported in `where` clauses."),
+			)),
+			Expr::Integer(_) => Ok(DataType::Int),
+			Expr::Text(_) => Ok(DataType::Text),
+			Expr::Unary(UnaryExpr { operand, operator, .. }) => {
+				let operand_type = self.infer_query_expression_type(operand, table)?;
+
+				match operator {
+					UnaryOperator::Negate => {
+						if !matches!(operand_type, DataType::Int | DataType::Dec) {
+							return Err(self.compile_error(
+								operand.position(),
+								format!("Unary `-` requires a numeric operand, found `{}`.", self.data_type_name(&operand_type)),
+							));
+						}
+
+						Ok(operand_type)
+					}
+					UnaryOperator::Not => {
+						if operand_type != DataType::Bool {
+							return Err(self.compile_error(
+								operand.position(),
+								format!("Logical `not` requires a `bool` operand, found `{}`.", self.data_type_name(&operand_type)),
+							));
+						}
+
+						Ok(DataType::Bool)
+					}
+				}
+			}
+		}
+	}
+
+	fn infer_query_field_access_type(
+		&mut self,
+		field_access: &FieldAccessExpr,
+		table: &TableReference,
+	) -> Result<DataType, CompileError> {
+		if let Expr::Identifier(identifier) = field_access.object.as_ref() {
+			if let Some(local) = self.lookup_local(&identifier.name) {
+				self.semantic_program.identifier_slots.insert(identifier.position, local.slot);
+
+				return match &local.data_type {
+					DataType::Object(name) => {
+						let field_type = self.lookup_object_field(name, &field_access.field.name)
+							.ok_or(self.compile_error(
+								field_access.field.position,
+								format!("Object `{name}` does not contain a field named `{}`.", field_access.field.name),
+							))?
+							.data_type
+							.clone();
+						Ok(field_type)
+					}
+					other => Err(self.compile_error(
+						identifier.position,
+						format!("Field access requires an object operand, found `{}`.", self.data_type_name(other)),
+					)),
+				};
+			}
+
+			let (resolved_table_name, column_type) = {
+				let resolved_table = self.resolve_table_reference(table)?;
+				let resolved_table_name = resolved_table.table().name().to_string();
+
+				if !identifier.name.eq_ignore_ascii_case(&resolved_table_name) {
+					return Err(self.compile_error(
+						identifier.position,
+						format!(
+							"Qualified field reference must use the target table name `{resolved_table_name}`.",
+						),
+					));
+				}
+
+				let column_type = resolved_table.table().column(&field_access.field.name)
+					.map(|column| column.data_type().clone())
+					.ok_or(self.compile_error(
+						field_access.field.position,
+						format!(
+							"Field `{}` does not exist on table `{resolved_table_name}`.",
+							field_access.field.name,
+						),
+					))?;
+
+				(resolved_table_name, column_type)
+			};
+
+			let _ = resolved_table_name;
+			return self.data_type_from_schema_type(&column_type);
+		}
+
+		Err(self.compile_error(
+			field_access.position,
+			String::from("Only simple `table.field` or local object field access is supported in `where` clauses."),
+		))
+	}
+
 	fn is_numeric_type(&self, data_type: &DataType) -> bool {
 		matches!(data_type, DataType::Dec | DataType::Int)
 	}
@@ -1054,6 +1342,102 @@ impl SemanticAnalyzer {
 				self.data_type_name(rhs),
 			),
 		))
+	}
+
+	fn resolve_table_reference(
+		&mut self,
+		table: &TableReference,
+	) -> Result<crate::schema::ResolvedTable<'_>, CompileError> {
+		if let Some(resolved) = self.semantic_program.resolved_tables.get(&table.position) {
+			let schema_catalog = self.current_schema_catalog.as_ref().ok_or(self.compile_error(
+				table.position,
+				String::from("Database queries require schema metadata, but none was supplied."),
+			))?;
+
+			return schema_catalog
+				.resolve_database_schema_table(
+					&self.semantic_program.active_databases.iter().map(String::as_str).collect::<Vec<_>>(),
+					&resolved.database_name,
+					&resolved.schema_name,
+					&resolved.table_name,
+				)
+				.map_err(|error| self.schema_error_to_compile_error(table.position, error));
+		}
+
+		let schema_catalog = self.current_schema_catalog.as_ref().ok_or(self.compile_error(
+			table.position,
+			String::from("Database queries require schema metadata, but none was supplied."),
+		))?;
+		let active_databases = self.semantic_program.active_databases.iter().map(String::as_str).collect::<Vec<_>>();
+
+		let resolved = match table.components.as_slice() {
+			[table_name] => schema_catalog.resolve_table(&active_databases, &table_name.name),
+			[first, table_name] => {
+				match schema_catalog.resolve_database_table(&active_databases, &first.name, &table_name.name) {
+					Ok(resolved) => Ok(resolved),
+					Err(SchemaError::UnknownDatabase { .. }) | Err(SchemaError::AmbiguousDatabaseQualifiedTableName { .. }) => {
+						schema_catalog.resolve_schema_table(&active_databases, &first.name, &table_name.name)
+					}
+					Err(other) => Err(other),
+				}
+			}
+			[database, schema, table_name] => {
+				schema_catalog.resolve_database_schema_table(&active_databases, &database.name, &schema.name, &table_name.name)
+			}
+			_ => Err(SchemaError::UnknownTable {
+				table_name: String::from("<invalid table reference>"),
+			}),
+		}.map_err(|error| self.schema_error_to_compile_error(table.position, error))?;
+
+		self.semantic_program.resolved_tables.insert(table.position, ResolvedTableReference {
+			database_name: resolved.database().name().to_string(),
+			schema_name: resolved.schema().name().to_string(),
+			table_name: resolved.table().name().to_string(),
+		});
+
+		Ok(resolved)
+	}
+
+	fn schema_error_to_compile_error(&self, position: usize, error: SchemaError) -> CompileError {
+		self.compile_error(position, match error {
+			SchemaError::AmbiguousDatabaseQualifiedTableName { database_name, table_name } => {
+				format!(
+					"Table reference `{database_name}.{table_name}` is ambiguous because database `{database_name}` contains multiple schemas."
+				)
+			}
+			SchemaError::AmbiguousSchemaQualifiedTableName { active_databases, schema_name, table_name } => {
+				format!(
+					"Table reference `{schema_name}.{table_name}` is ambiguous across active databases: {}.",
+					active_databases.join(", ")
+				)
+			}
+			SchemaError::AmbiguousTableName { active_databases, table_name } => {
+				format!(
+					"Table reference `{table_name}` is ambiguous across active databases: {}.",
+					active_databases.join(", ")
+				)
+			}
+			SchemaError::DuplicateColumn { .. }
+			| SchemaError::DuplicateDatabase { .. }
+			| SchemaError::DuplicateSchema { .. }
+			| SchemaError::DuplicateTable { .. } => {
+				String::from("The supplied schema catalog is internally inconsistent.")
+			}
+			SchemaError::UnknownDatabase { database_name } => {
+				format!("Database `{database_name}` is not present in the supplied schema catalog.")
+			}
+			SchemaError::UnknownSchema { database_name, schema_name } => {
+				match database_name {
+					Some(database_name) => {
+						format!("Schema `{schema_name}` does not exist in database `{database_name}`.")
+					}
+					None => format!("Schema `{schema_name}` does not exist in the active databases."),
+				}
+			}
+			SchemaError::UnknownTable { table_name } => {
+				format!("Table `{table_name}` is not present in the active databases.")
+			}
+		})
 	}
 
 	fn statement_guarantees_return(&self, statement: &Statement) -> bool {

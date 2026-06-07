@@ -318,6 +318,9 @@ impl Compiler {
 					self.emit(emission, Instruction::Call(function_index, arguments.len() as u32), expression.position());
 				}
 			}
+			Expr::Count(_) => {
+				panic!("Database queries should not reach bytecode generation before runtime support exists.");
+			}
 			Expr::Decimal(DecimalLiteral { value, .. }) => {
 				self.emit(emission, Instruction::PushDecimal(value.clone()), expression.position());
 			}

@@ -406,6 +406,34 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_ambiguous_unqualified_table_in_count_expression() {
+		let error = compile_snippet_with_schema_fixture(
+			"with sales, archive;\ncount customers where true",
+			r#"{
+				"databases": [
+					{
+						"name": "Sales",
+						"schemas": [
+							{ "name": "Public", "tables": [{ "name": "Customers", "columns": [] }] }
+						]
+					},
+					{
+						"name": "Archive",
+						"schemas": [
+							{ "name": "Public", "tables": [{ "name": "Customers", "columns": [] }] }
+						]
+					}
+				]
+			}"#,
+		).unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Table reference `customers` is ambiguous across active databases: sales, archive."),
+			position: 27,
+		}));
+	}
+
+	#[test]
 	fn rejects_assignment_to_const_source_text() {
 		let error = evaluate_snippet("const x: int = 5;\nx = 3").unwrap_err();
 
@@ -422,6 +450,38 @@ mod tests {
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Built-in function `len` does not accept by-reference arguments."),
 			position: 25,
+		}));
+	}
+
+	#[test]
+	fn rejects_count_expression_until_database_runtime_exists() {
+		let error = compile_snippet_with_schema_fixture(
+			"with exampledb;\ncount customers where active = true",
+			r#"{
+				"databases": [
+					{
+						"name": "ExampleDb",
+						"schemas": [
+							{
+								"name": "Public",
+								"tables": [
+									{
+										"name": "Customers",
+										"columns": [
+											{ "name": "Active", "data_type": "bool", "is_nullable": false }
+										]
+									}
+								]
+							}
+						]
+					}
+				]
+			}"#,
+		).unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Database query execution is not implemented yet."),
+			position: 16,
 		}));
 	}
 
@@ -594,6 +654,38 @@ mod tests {
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Database `missingdb` is not present in the supplied schema catalog."),
 			position: 5,
+		}));
+	}
+
+	#[test]
+	fn rejects_unknown_table_in_count_expression() {
+		let error = compile_snippet_with_schema_fixture(
+			"with exampledb;\ncount missing where true",
+			r#"{
+				"databases": [
+					{
+						"name": "ExampleDb",
+						"schemas": [
+							{
+								"name": "Public",
+								"tables": [
+									{
+										"name": "Customers",
+										"columns": [
+											{ "name": "Active", "data_type": "bool", "is_nullable": false }
+										]
+									}
+								]
+							}
+						]
+					}
+				]
+			}"#,
+		).unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Table `missing` is not present in the active databases."),
+			position: 22,
 		}));
 	}
 
