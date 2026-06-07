@@ -1945,7 +1945,7 @@ mod tests {
 
 		let error = Compiler::new().compile_program(&program).unwrap_err();
 
-		assert_eq!(error.message, "`if` condition must be of type `bool`, found `int`.");
+		assert_eq!(error.message, "`if` condition must be of type `bool` or `record pointer`, found `int`.");
 		assert_eq!(error.position, 3);
 	}
 

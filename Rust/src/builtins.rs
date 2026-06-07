@@ -4,7 +4,9 @@ use crate::ast::DataType;
 pub enum BuiltInFunction {
 	Disp,
 	Displn,
+	Exists,
 	Len,
+	Locked,
 }
 
 impl BuiltInFunction {
@@ -13,6 +15,8 @@ impl BuiltInFunction {
 			1 => Some(Self::Len),
 			2 => Some(Self::Disp),
 			3 => Some(Self::Displn),
+			4 => Some(Self::Exists),
+			5 => Some(Self::Locked),
 			_ => None,
 		}
 	}
@@ -22,6 +26,8 @@ impl BuiltInFunction {
 			"len" => Some(Self::Len),
 			"disp" => Some(Self::Disp),
 			"displn" => Some(Self::Displn),
+			"exists" => Some(Self::Exists),
+			"locked" => Some(Self::Locked),
 			_ => None,
 		}
 	}
@@ -31,6 +37,8 @@ impl BuiltInFunction {
 			Self::Len => 1,
 			Self::Disp => 2,
 			Self::Displn => 3,
+			Self::Exists => 4,
+			Self::Locked => 5,
 		}
 	}
 
@@ -39,6 +47,8 @@ impl BuiltInFunction {
 			Self::Len => "len",
 			Self::Disp => "disp",
 			Self::Displn => "displn",
+			Self::Exists => "exists",
+			Self::Locked => "locked",
 		}
 	}
 
@@ -52,18 +62,22 @@ impl BuiltInFunction {
 				[DataType::Text] => Some(DataType::Void),
 				_ => None,
 			},
+			Self::Exists | Self::Locked => match argument_types {
+				[DataType::RecordPointer(_)] => Some(DataType::Bool),
+				_ => None,
+			},
 		}
 	}
 
 	pub fn supports_arity(self, argument_count: usize) -> bool {
 		match self {
-			Self::Len | Self::Disp | Self::Displn => argument_count == 1,
+			Self::Len | Self::Disp | Self::Displn | Self::Exists | Self::Locked => argument_count == 1,
 		}
 	}
 
 	pub fn produces_runtime_value(self) -> bool {
 		match self {
-			Self::Len => true,
+			Self::Len | Self::Exists | Self::Locked => true,
 			Self::Disp | Self::Displn => false,
 		}
 	}

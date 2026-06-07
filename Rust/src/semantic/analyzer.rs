@@ -1307,6 +1307,10 @@ impl SemanticAnalyzer {
 		matches!(data_type, DataType::Dec | DataType::Int)
 	}
 
+	fn is_truthy_condition_type(&self, data_type: &DataType) -> bool {
+		matches!(data_type, DataType::Bool | DataType::RecordPointer(_))
+	}
+
 	fn lookup_function(&self, name: &str) -> Option<&FunctionSignature> {
 		self.functions.lookup(name)
 	}
@@ -1987,10 +1991,10 @@ impl SemanticAnalyzer {
 			Statement::If(IfStatement { condition, else_branch, position, then_branch }) => {
 				let condition_type = self.infer_expression_type(condition)?;
 
-				if condition_type != DataType::Bool {
+				if !self.is_truthy_condition_type(&condition_type) {
 					return Err(self.compile_error(
 						condition.position().max(*position),
-						format!("`if` condition must be of type `bool`, found `{}`.", self.data_type_name(&condition_type)),
+						format!("`if` condition must be of type `bool` or `record pointer`, found `{}`.", self.data_type_name(&condition_type)),
 					));
 				}
 
@@ -2190,8 +2194,12 @@ fn statement_position(statement: &Statement) -> usize {
 
 #[cfg(test)]
 mod tests {
+	use crate::ast::BlockStatement;
 	use crate::ast::Expr;
+	use crate::ast::IdentifierExpr;
+	use crate::ast::IfStatement;
 	use crate::ast::RecordPointerType;
+	use crate::ast::Statement;
 	use crate::query::QueryBinaryExpr;
 	use crate::query::QueryBinaryOperator;
 	use crate::query::QueryColumnReference;
@@ -2229,6 +2237,61 @@ mod tests {
 			Expr::Find(find) => find,
 			other => panic!("Expected find expression, found {other:?}."),
 		}
+	}
+
+	#[test]
+	fn accepts_record_pointer_as_if_condition() {
+		let statement = Statement::If(IfStatement {
+			condition: Expr::Identifier(IdentifierExpr {
+				name: String::from("cust"),
+				position: 3,
+			}),
+			else_branch: None,
+			position: 0,
+			then_branch: BlockStatement {
+				position: 8,
+				statements: vec![],
+			},
+		});
+		let mut analyzer = SemanticAnalyzer::new();
+		analyzer.enter_scope();
+		analyzer.declare_local(
+			String::from("cust"),
+			LocalBinding {
+				data_type: DataType::RecordPointer(RecordPointerType {
+					database_name: String::from("ExampleDb"),
+					schema_name: String::from("Main"),
+					table_name: String::from("Customers"),
+				}),
+				is_const: false,
+				slot: 2,
+			},
+		);
+
+		analyzer.validate_statement(&statement).unwrap();
+	}
+
+	#[test]
+	fn infers_exists_call_type_for_record_pointer() {
+		let expression = parse_expression("exists(cust)");
+		let mut analyzer = SemanticAnalyzer::new();
+		analyzer.enter_scope();
+		analyzer.declare_local(
+			String::from("cust"),
+			LocalBinding {
+				data_type: DataType::RecordPointer(RecordPointerType {
+					database_name: String::from("ExampleDb"),
+					schema_name: String::from("Main"),
+					table_name: String::from("Customers"),
+				}),
+				is_const: false,
+				slot: 2,
+			},
+		);
+
+		let data_type = analyzer.infer_expression_type(&expression).unwrap();
+
+		assert_eq!(data_type, DataType::Bool);
 	}
 
 	#[test]

@@ -849,6 +849,14 @@ impl VirtualMachine {
 					format!("Built-in function `displn` expects 1 argument(s), found {}.", arguments.len()),
 				)),
 			},
+			BuiltInFunction::Exists => Err(vm_error(
+				instruction_index,
+				String::from("Built-in function `exists` is not executable yet."),
+			)),
+			BuiltInFunction::Locked => Err(vm_error(
+				instruction_index,
+				String::from("Built-in function `locked` is not executable yet."),
+			)),
 		}
 	}
 

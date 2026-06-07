@@ -383,7 +383,7 @@ mod tests {
 
 		assert_eq!(
 			error.format_with_source(&source),
-			"Compile error at line 2, column 4: `if` condition must be of type `bool`, found `int`.\n  |\n2 | if 1 {\n  |    ^"
+			"Compile error at line 2, column 4: `if` condition must be of type `bool` or `record pointer`, found `int`.\n  |\n2 | if 1 {\n  |    ^"
 		);
 	}
 
