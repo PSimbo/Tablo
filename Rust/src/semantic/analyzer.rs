@@ -29,8 +29,10 @@ use crate::ast::UnaryExpr;
 use crate::ast::UnaryOperator;
 use crate::ast::VariableDeclaration;
 use crate::ast::WhileStatement;
+use crate::ast::WithDeclaration;
 use crate::builtins::BuiltInFunction;
 use crate::compiler::CompileError;
+use crate::schema::SchemaCatalog;
 
 use super::scope::ScopeStack;
 
@@ -71,6 +73,7 @@ struct LocalBinding {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SemanticProgram {
+	active_databases: Vec<String>,
 	built_in_call_targets: BTreeMap<usize, BuiltInFunction>,
 	call_argument_reference_slots: BTreeMap<usize, Vec<Option<u32>>>,
 	call_return_types: BTreeMap<usize, DataType>,
@@ -86,6 +89,10 @@ pub struct SemanticProgram {
 }
 
 impl SemanticProgram {
+	pub fn active_databases(&self) -> &[String] {
+		&self.active_databases
+	}
+
 	pub fn built_in_call_target(&self, position: usize) -> Option<BuiltInFunction> {
 		self.built_in_call_targets.get(&position).copied()
 	}
@@ -149,6 +156,14 @@ impl SemanticAnalyzer {
 	}
 
 	pub fn analyze_program(&mut self, program: &Program) -> Result<SemanticProgram, CompileError> {
+		self.analyze_program_with_schema(program, None)
+	}
+
+	pub fn analyze_program_with_schema(
+		&mut self,
+		program: &Program,
+		schema_catalog: Option<&SchemaCatalog>,
+	) -> Result<SemanticProgram, CompileError> {
 		self.current_return_type = None;
 		self.functions = ScopeStack::default();
 		self.locals = ScopeStack::default();
@@ -157,6 +172,7 @@ impl SemanticAnalyzer {
 		self.next_local_slot = 0;
 		self.semantic_program = SemanticProgram::default();
 
+		self.validate_with_declarations(&program.with_declarations, schema_catalog)?;
 		self.collect_object_declarations(&program.objects)?;
 		self.functions.enter_scope();
 		self.collect_scope_function_signatures(&program.functions, &program.statements)?;
@@ -186,7 +202,15 @@ impl SemanticAnalyzer {
 	}
 
 	pub fn analyze_standalone_program(&mut self, program: &Program) -> Result<SemanticProgram, CompileError> {
-		let semantic_program = self.analyze_program(program)?;
+		self.analyze_standalone_program_with_schema(program, None)
+	}
+
+	pub fn analyze_standalone_program_with_schema(
+		&mut self,
+		program: &Program,
+		schema_catalog: Option<&SchemaCatalog>,
+	) -> Result<SemanticProgram, CompileError> {
+		let semantic_program = self.analyze_program_with_schema(program, schema_catalog)?;
 		let Some(main_function) = program.functions.iter().find(|function| function.name == "Main") else {
 			return Err(self.compile_error(
 				0,
@@ -1398,6 +1422,49 @@ impl SemanticAnalyzer {
 				Ok(())
 			}
 		}
+	}
+
+	fn validate_with_declarations(
+		&mut self,
+		with_declarations: &[WithDeclaration],
+		schema_catalog: Option<&SchemaCatalog>,
+	) -> Result<(), CompileError> {
+		for with_declaration in with_declarations {
+			if with_declaration.databases.is_empty() {
+				return Err(self.compile_error(
+					with_declaration.position,
+					String::from("`with` declaration must include at least one database name."),
+				));
+			}
+
+			for database in &with_declaration.databases {
+				if self.semantic_program.active_databases.iter().any(|active| active.eq_ignore_ascii_case(&database.name)) {
+					return Err(self.compile_error(
+						database.position,
+						format!("Database `{}` is already active in this module.", database.name),
+					));
+				}
+
+				if let Some(schema_catalog) = schema_catalog {
+					if schema_catalog.database(&database.name).is_none() {
+						return Err(self.compile_error(
+							database.position,
+							format!("Database `{}` is not present in the supplied schema catalog.", database.name),
+						));
+					}
+				}
+				else {
+					return Err(self.compile_error(
+						database.position,
+						String::from("Cannot validate `with` declarations without a supplied schema catalog."),
+					));
+				}
+
+				self.semantic_program.active_databases.push(database.name.clone());
+			}
+		}
+
+		Ok(())
 	}
 }
 

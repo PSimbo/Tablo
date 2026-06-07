@@ -36,6 +36,7 @@ use crate::ast::UnaryExpr;
 use crate::ast::UnaryOperator;
 use crate::ast::VariableDeclaration;
 use crate::ast::WhileStatement;
+use crate::ast::WithDeclaration;
 use crate::value::Decimal;
 
 use super::token::Token;
@@ -87,6 +88,7 @@ impl Parser {
 		let mut objects = Vec::new();
 		let mut statements = Vec::new();
 		let mut result = None;
+		let mut with_declarations = Vec::new();
 
 		loop {
 			match self.current() {
@@ -96,6 +98,9 @@ impl Parser {
 				}
 				Some(token) if token.kind == TokenKind::ObjKeyword => {
 					objects.push(self.parse_object_declaration()?);
+				}
+				Some(token) if token.kind == TokenKind::WithKeyword => {
+					with_declarations.push(self.parse_with_declaration()?);
 				}
 				Some(token) if matches!(token.kind, TokenKind::BreakKeyword | TokenKind::ConstKeyword | TokenKind::ContinueKeyword | TokenKind::ForKeyword | TokenKind::IfKeyword | TokenKind::LeftBrace | TokenKind::ReturnKeyword | TokenKind::VarKeyword | TokenKind::WhileKeyword) => {
 					statements.push(self.parse_statement()?);
@@ -123,6 +128,7 @@ impl Parser {
 			objects,
 			result,
 			statements,
+			with_declarations,
 		})
 	}
 
@@ -1145,6 +1151,33 @@ impl Parser {
 			position: while_keyword.start,
 		}))
 	}
+
+	fn parse_with_declaration(&mut self) -> Result<WithDeclaration, ParseError> {
+		let with_keyword = self.expect_token(TokenKind::WithKeyword, "Expected `with` to start database declaration.")?;
+		let mut databases = Vec::new();
+
+		loop {
+			let database = self.expect_token(TokenKind::Identifier, "Expected database name after `with`.")?;
+			databases.push(IdentifierExpr {
+				name: database.lexeme,
+				position: database.start,
+			});
+
+			match self.current() {
+				Some(token) if token.kind == TokenKind::Comma => {
+					self.next();
+				}
+				_ => break,
+			}
+		}
+
+		self.expect_token(TokenKind::Semicolon, "Expected `;` after `with` declaration.")?;
+
+		Ok(WithDeclaration {
+			databases,
+			position: with_keyword.start,
+		})
+	}
 }
 
 #[cfg(test)]
@@ -1187,6 +1220,7 @@ mod tests {
 	use crate::ast::UnaryOperator;
 	use crate::ast::VariableDeclaration;
 	use crate::ast::WhileStatement;
+	use crate::ast::WithDeclaration;
 	use crate::source::SourceText;
 	use crate::value::Decimal;
 
@@ -1386,6 +1420,7 @@ mod tests {
 			objects: program.objects.into_iter().map(normalize_object_declaration).collect(),
 			result: program.result.map(normalize_expr),
 			statements: program.statements.into_iter().map(normalize_statement).collect(),
+			with_declarations: program.with_declarations.into_iter().map(normalize_with_declaration).collect(),
 		}
 	}
 
@@ -1446,6 +1481,13 @@ mod tests {
 		}
 	}
 
+	fn normalize_with_declaration(with_declaration: WithDeclaration) -> WithDeclaration {
+		WithDeclaration {
+			databases: with_declaration.databases.into_iter().map(normalize_identifier).collect(),
+			position: 0,
+		}
+	}
+
 	fn parse(source: &str) -> Expr {
 		let mut lexer = Lexer::new(SourceText::new(source));
 		let tokens = lexer.tokenize().unwrap();
@@ -1479,6 +1521,7 @@ mod tests {
 				position: 0,
 			})),
 			statements: vec![],
+			with_declarations: vec![],
 		});
 	}
 
@@ -1503,6 +1546,7 @@ mod tests {
 				position: 0,
 			})),
 			statements: vec![],
+			with_declarations: vec![],
 		});
 	}
 
@@ -1533,6 +1577,7 @@ mod tests {
 				position: 0,
 			})),
 			statements: vec![],
+			with_declarations: vec![],
 		});
 	}
 
@@ -1556,6 +1601,7 @@ mod tests {
 					position: 0,
 				}),
 			],
+			with_declarations: vec![],
 		});
 	}
 
@@ -1593,6 +1639,7 @@ mod tests {
 			Program {
 				functions: vec![],
 				objects: vec![],
+				result: None,
 				statements: vec![
 					Statement::Block(BlockStatement {
 						position: 0,
@@ -1622,7 +1669,7 @@ mod tests {
 						],
 					}),
 				],
-				result: None,
+				with_declarations: vec![],
 			}
 		);
 	}
@@ -1702,6 +1749,7 @@ mod tests {
 				objects: vec![],
 				result: None,
 				statements: vec![],
+				with_declarations: vec![],
 			}
 		);
 	}
@@ -1781,6 +1829,7 @@ mod tests {
 					})),
 				})),
 			],
+			with_declarations: vec![],
 		});
 	}
 
@@ -1791,6 +1840,7 @@ mod tests {
 			Program {
 				functions: vec![],
 				objects: vec![],
+				result: None,
 				statements: vec![
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Text,
@@ -1803,7 +1853,7 @@ mod tests {
 						position: 0,
 					}),
 				],
-				result: None,
+				with_declarations: vec![],
 			}
 		);
 	}
@@ -1826,6 +1876,10 @@ mod tests {
 			Program {
 				functions: vec![],
 				objects: vec![],
+				result: Some(Expr::Identifier(IdentifierExpr {
+					position: 0,
+					name: String::from("x"),
+				})),
 				statements: vec![
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Int,
@@ -1850,10 +1904,7 @@ mod tests {
 						})),
 					})),
 				],
-				result: Some(Expr::Identifier(IdentifierExpr {
-					position: 0,
-					name: String::from("x"),
-				})),
+				with_declarations: vec![],
 			}
 		);
 	}
@@ -1865,6 +1916,7 @@ mod tests {
 			Program {
 				functions: vec![],
 				objects: vec![],
+				result: None,
 				statements: vec![
 					Statement::For(ForStatement {
 						body: BlockStatement {
@@ -1896,7 +1948,7 @@ mod tests {
 						},
 					}),
 				],
-				result: None,
+				with_declarations: vec![],
 			}
 		);
 	}
@@ -2006,6 +2058,7 @@ mod tests {
 					position: 0,
 				})),
 				statements: vec![],
+				with_declarations: vec![],
 			}
 		);
 	}
@@ -2044,6 +2097,7 @@ mod tests {
 			Program {
 				functions: vec![],
 				objects: vec![],
+				result: None,
 				statements: vec![
 					Statement::If(IfStatement {
 						condition: Expr::Boolean(BooleanLiteral {
@@ -2091,7 +2145,7 @@ mod tests {
 						},
 					}),
 				],
-				result: None,
+				with_declarations: vec![],
 			}
 		);
 	}
@@ -2103,6 +2157,7 @@ mod tests {
 			Program {
 				functions: vec![],
 				objects: vec![],
+				result: None,
 				statements: vec![
 					Statement::If(IfStatement {
 						condition: Expr::Boolean(BooleanLiteral {
@@ -2142,7 +2197,7 @@ mod tests {
 						},
 					}),
 				],
-				result: None,
+				with_declarations: vec![],
 			}
 		);
 	}
@@ -2154,6 +2209,7 @@ mod tests {
 			Program {
 				functions: vec![],
 				objects: vec![],
+				result: None,
 				statements: vec![
 					Statement::If(IfStatement {
 						condition: Expr::Boolean(BooleanLiteral {
@@ -2179,7 +2235,7 @@ mod tests {
 						},
 					}),
 				],
-				result: None,
+				with_declarations: vec![],
 			}
 		);
 	}
@@ -2213,6 +2269,7 @@ mod tests {
 					})),
 				})),
 			],
+			with_declarations: vec![],
 		});
 	}
 
@@ -2445,6 +2502,7 @@ mod tests {
 				objects: vec![],
 				result: None,
 				statements: vec![],
+				with_declarations: vec![],
 			}
 		);
 	}
@@ -2515,6 +2573,7 @@ mod tests {
 					position: 0,
 				})),
 				statements: vec![],
+				with_declarations: vec![],
 			}
 		);
 	}
@@ -2554,6 +2613,7 @@ mod tests {
 					})),
 				})),
 			],
+			with_declarations: vec![],
 		});
 	}
 
@@ -2564,6 +2624,18 @@ mod tests {
 			Program {
 				functions: vec![],
 				objects: vec![],
+				result: Some(Expr::Binary(BinaryExpr {
+					left: Box::new(Expr::Identifier(IdentifierExpr {
+						name: String::from("x"),
+						position: 0,
+					})),
+					operator: BinaryOperator::Add,
+					position: 0,
+					right: Box::new(Expr::Identifier(IdentifierExpr {
+						name: String::from("y"),
+						position: 0,
+					})),
+				})),
 				statements: vec![
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Int,
@@ -2586,18 +2658,7 @@ mod tests {
 						position: 0,
 					}),
 				],
-				result: Some(Expr::Binary(BinaryExpr {
-					left: Box::new(Expr::Identifier(IdentifierExpr {
-						name: String::from("x"),
-						position: 0,
-					})),
-					operator: BinaryOperator::Add,
-					position: 0,
-					right: Box::new(Expr::Identifier(IdentifierExpr {
-						name: String::from("y"),
-						position: 0,
-					})),
-				})),
+				with_declarations: vec![],
 			}
 		);
 	}
@@ -2688,6 +2749,7 @@ mod tests {
 			Program {
 				functions: vec![],
 				objects: vec![],
+				result: None,
 				statements: vec![
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Text,
@@ -2700,7 +2762,7 @@ mod tests {
 						position: 0,
 					}),
 				],
-				result: None,
+				with_declarations: vec![],
 			}
 		);
 	}
@@ -2750,6 +2812,7 @@ mod tests {
 			Program {
 				functions: vec![],
 				objects: vec![],
+				result: None,
 				statements: vec![
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Int,
@@ -2759,7 +2822,7 @@ mod tests {
 						position: 0,
 					}),
 				],
-				result: None,
+				with_declarations: vec![],
 			}
 		);
 	}
@@ -2771,6 +2834,7 @@ mod tests {
 			Program {
 				functions: vec![],
 				objects: vec![],
+				result: None,
 				statements: vec![
 					Statement::While(WhileStatement {
 						body: BlockStatement {
@@ -2805,7 +2869,7 @@ mod tests {
 						position: 0,
 					}),
 				],
-				result: None,
+				with_declarations: vec![],
 			}
 		);
 	}
@@ -2837,6 +2901,74 @@ mod tests {
 						}),
 						position: 0,
 					}),
+				],
+				with_declarations: vec![],
+			}
+		);
+	}
+
+	#[test]
+	fn parses_with_declaration_before_objects_and_functions() {
+		assert_eq!(
+			parse_program("with exampledb, archivedb;\nobj Person { name: text, };\nfn Main(args: [text]) int { return 0; }"),
+			Program {
+				functions: vec![
+					FunctionDeclaration {
+						body: BlockStatement {
+							position: 0,
+							statements: vec![
+								Statement::Return(ReturnStatement {
+									position: 0,
+									value: Some(Expr::Integer(IntegerLiteral {
+										position: 0,
+										value: 0,
+									})),
+								}),
+							],
+						},
+						name: String::from("Main"),
+						parameters: vec![
+							FunctionParameter {
+								data_type: DataType::Array(Box::new(DataType::Text)),
+								is_by_ref: false,
+								name: String::from("args"),
+								position: 0,
+							},
+						],
+						position: 0,
+						return_type: DataType::Int,
+					},
+				],
+				objects: vec![
+					ObjectDeclaration {
+						fields: vec![
+							ObjectFieldDeclaration {
+								data_type: DataType::Text,
+								default_value: None,
+								name: String::from("name"),
+								position: 0,
+							},
+						],
+						name: String::from("Person"),
+						position: 0,
+					},
+				],
+				result: None,
+				statements: vec![],
+				with_declarations: vec![
+					WithDeclaration {
+						databases: vec![
+							IdentifierExpr {
+								name: String::from("exampledb"),
+								position: 0,
+							},
+							IdentifierExpr {
+								name: String::from("archivedb"),
+								position: 0,
+							},
+						],
+						position: 0,
+					},
 				],
 			}
 		);

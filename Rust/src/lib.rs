@@ -22,6 +22,7 @@ use compiler::Compiler;
 use object_file::ObjectFileError;
 use object_file::read_program_from_path;
 use object_file::write_program_to_path;
+use schema::SchemaCatalog;
 use source::SourceText;
 use syntax::lexer::LexError;
 use syntax::lexer::Lexer;
@@ -145,7 +146,7 @@ pub fn run_program(program: &Program) -> Result<Option<Value>, TabloError> {
 }
 
 pub(crate) fn compile_to_program_with_name(source: impl Into<String>, source_name: Option<&str>) -> Result<Program, TabloError> {
-	compile_source_to_program_with_name(source, source_name, CompilationTarget::Standalone)
+	compile_source_to_program_with_name_and_schema(source, source_name, CompilationTarget::Standalone, None)
 }
 
 fn attach_source_debug_info(program: &mut Program, source: &SourceText, source_name: Option<&str>) {
@@ -156,23 +157,28 @@ fn attach_source_debug_info(program: &mut Program, source: &SourceText, source_n
 	program.debug_info_mut().attach_source_file(source_file);
 }
 
-fn compile_ast_program(program: &ast::Program, target: CompilationTarget) -> Result<Program, TabloError> {
+fn compile_ast_program_with_schema(
+	program: &ast::Program,
+	target: CompilationTarget,
+	schema_catalog: Option<&SchemaCatalog>,
+) -> Result<Program, TabloError> {
 	let mut compiler = Compiler::new();
 
 	match target {
-		CompilationTarget::Snippet => compiler.compile_program(program).map_err(TabloError::Compile),
-		CompilationTarget::Standalone => compiler.compile_standalone_program(program).map_err(TabloError::Compile),
+		CompilationTarget::Snippet => compiler.compile_program_with_schema(program, schema_catalog).map_err(TabloError::Compile),
+		CompilationTarget::Standalone => compiler.compile_standalone_program_with_schema(program, schema_catalog).map_err(TabloError::Compile),
 	}
 }
 
-fn compile_source_to_program_with_name(
+fn compile_source_to_program_with_name_and_schema(
 	source: impl Into<String>,
 	source_name: Option<&str>,
 	target: CompilationTarget,
+	schema_catalog: Option<&SchemaCatalog>,
 ) -> Result<Program, TabloError> {
 	let source = SourceText::new(source);
 	let program = parse_source_text(&source)?;
-	let mut program = compile_ast_program(&program, target)?;
+	let mut program = compile_ast_program_with_schema(&program, target, schema_catalog)?;
 	attach_source_debug_info(&mut program, &source, source_name);
 	Ok(program)
 }
@@ -195,7 +201,7 @@ mod tests {
 	use crate::schema_fixture::read_schema_catalog_from_str;
 	use crate::value::Value;
 
-	use super::compile_source_to_program_with_name;
+	use super::compile_source_to_program_with_name_and_schema;
 	use super::compile;
 	use super::compile_with_source_name;
 	use super::run;
@@ -213,12 +219,12 @@ mod tests {
 	}
 
 	fn evaluate_snippet(source: &str) -> Result<Option<Value>, TabloError> {
-		let program = compile_source_to_program_with_name(source, None, CompilationTarget::Snippet)?;
+		let program = compile_source_to_program_with_name_and_schema(source, None, CompilationTarget::Snippet, None)?;
 		run_program(&program)
 	}
 
 	fn compile_snippet_to_object_file(source: &str, output_path: &std::path::Path) -> Result<(), TabloError> {
-		let program = compile_source_to_program_with_name(source, None, CompilationTarget::Snippet)?;
+		let program = compile_source_to_program_with_name_and_schema(source, None, CompilationTarget::Snippet, None)?;
 		write_program_to_path(output_path, &program).map_err(TabloError::ObjectFile)
 	}
 
@@ -228,7 +234,7 @@ mod tests {
 				message: error.message,
 				position: 0,
 			}))?;
-		let program = compile_source_to_program_with_name(source, None, CompilationTarget::Snippet)?;
+		let program = compile_source_to_program_with_name_and_schema(source, None, CompilationTarget::Snippet, Some(&schema))?;
 		Ok((program, schema))
 	}
 
@@ -566,6 +572,33 @@ mod tests {
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Top-level executable statements are not permitted when `Main` is defined."),
 			position: 42,
+		}));
+	}
+
+	#[test]
+	fn rejects_unknown_database_in_with_declaration() {
+		let error = compile_snippet_with_schema_fixture(
+			"with missingdb;\n1 + 2",
+			r#"{
+				"databases": [
+					{ "name": "ExampleDb", "tables": [] }
+				]
+			}"#,
+		).unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Database `missingdb` is not present in the supplied schema catalog."),
+			position: 5,
+		}));
+	}
+
+	#[test]
+	fn rejects_with_declaration_without_schema_catalog() {
+		let error = evaluate_snippet("with exampledb;\n1 + 2").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Cannot validate `with` declarations without a supplied schema catalog."),
+			position: 5,
 		}));
 	}
 

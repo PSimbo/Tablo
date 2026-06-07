@@ -35,6 +35,7 @@ use crate::bytecode::DebugInfo;
 use crate::bytecode::Instruction;
 use crate::bytecode::LocalVariableDebugInfo;
 use crate::bytecode::Program;
+use crate::schema::SchemaCatalog;
 use crate::semantic::analyzer::SemanticAnalyzer;
 use crate::semantic::analyzer::SemanticProgram;
 
@@ -123,14 +124,30 @@ impl Compiler {
 	}
 
 	pub fn compile_program(&mut self, program: &AstProgram) -> Result<Program, CompileError> {
+		self.compile_program_with_schema(program, None)
+	}
+
+	pub fn compile_program_with_schema(
+		&mut self,
+		program: &AstProgram,
+		schema_catalog: Option<&SchemaCatalog>,
+	) -> Result<Program, CompileError> {
 		self.loop_stack.clear();
-		let semantic_program = SemanticAnalyzer::new().analyze_program(program)?;
+		let semantic_program = SemanticAnalyzer::new().analyze_program_with_schema(program, schema_catalog)?;
 		self.compile_program_with_semantics(program, &semantic_program)
 	}
 
 	pub fn compile_standalone_program(&mut self, program: &AstProgram) -> Result<Program, CompileError> {
+		self.compile_standalone_program_with_schema(program, None)
+	}
+
+	pub fn compile_standalone_program_with_schema(
+		&mut self,
+		program: &AstProgram,
+		schema_catalog: Option<&SchemaCatalog>,
+	) -> Result<Program, CompileError> {
 		self.loop_stack.clear();
-		let semantic_program = SemanticAnalyzer::new().analyze_standalone_program(program)?;
+		let semantic_program = SemanticAnalyzer::new().analyze_standalone_program_with_schema(program, schema_catalog)?;
 		self.compile_program_with_semantics(program, &semantic_program)
 	}
 
@@ -927,7 +944,6 @@ mod tests {
 		let program = AstProgram {
 			functions: vec![],
 			objects: vec![],
-			statements: vec![],
 			result: Some(Expr::Call(CallExpr {
 				arguments: vec![
 					CallArgument {
@@ -954,6 +970,8 @@ mod tests {
 				},
 				position: 0,
 			})),
+			statements: vec![],
+			with_declarations: vec![],
 		};
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
@@ -971,18 +989,6 @@ mod tests {
 		let program = AstProgram {
 			functions: vec![],
 			objects: vec![],
-			statements: vec![
-				Statement::VariableDeclaration(VariableDeclaration {
-					data_type: DataType::Int,
-					initial_value: Some(Expr::Integer(IntegerLiteral {
-						position: 0,
-						value: 5,
-					})),
-					is_const: false,
-					name: String::from("x"),
-					position: 0,
-				}),
-			],
 			result: Some(Expr::Assignment(AssignmentExpr {
 				operator: AssignmentOperator::AddAssign,
 				position: 0,
@@ -995,6 +1001,19 @@ mod tests {
 					value: 3,
 				})),
 			})),
+			statements: vec![
+				Statement::VariableDeclaration(VariableDeclaration {
+					data_type: DataType::Int,
+					initial_value: Some(Expr::Integer(IntegerLiteral {
+						position: 0,
+						value: 5,
+					})),
+					is_const: false,
+					name: String::from("x"),
+					position: 0,
+				}),
+			],
+			with_declarations: vec![],
 		};
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
@@ -1015,6 +1034,25 @@ mod tests {
 		let program = AstProgram {
 			functions: vec![],
 			objects: vec![],
+			result: Some(Expr::Assignment(AssignmentExpr {
+				operator: AssignmentOperator::AddAssign,
+				position: 0,
+				target: AssignmentTarget::Index(crate::ast::ArrayIndexAssignmentTarget {
+					array: IdentifierExpr {
+						name: String::from("xs"),
+						position: 0,
+					},
+					index: Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
+						value: 2,
+					})),
+					position: 0,
+				}),
+				value: Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
+					value: 3,
+				})),
+			})),
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Array(Box::new(DataType::Int)),
@@ -1036,25 +1074,7 @@ mod tests {
 					position: 0,
 				}),
 			],
-			result: Some(Expr::Assignment(AssignmentExpr {
-				operator: AssignmentOperator::AddAssign,
-				position: 0,
-				target: AssignmentTarget::Index(crate::ast::ArrayIndexAssignmentTarget {
-					array: IdentifierExpr {
-						name: String::from("xs"),
-						position: 0,
-					},
-					index: Box::new(Expr::Integer(IntegerLiteral {
-						position: 0,
-						value: 2,
-					})),
-					position: 0,
-				}),
-				value: Box::new(Expr::Integer(IntegerLiteral {
-					position: 0,
-					value: 3,
-				})),
-			})),
+			with_declarations: vec![],
 		};
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
@@ -1080,6 +1100,10 @@ mod tests {
 		let program = AstProgram {
 			functions: vec![],
 			objects: vec![],
+			result: Some(Expr::Identifier(IdentifierExpr {
+				name: String::from("x"),
+				position: 0,
+			})),
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
@@ -1092,10 +1116,7 @@ mod tests {
 					position: 0,
 				}),
 			],
-			result: Some(Expr::Identifier(IdentifierExpr {
-				name: String::from("x"),
-				position: 0,
-			})),
+			with_declarations: vec![],
 		};
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
@@ -1150,6 +1171,10 @@ mod tests {
 		let program = AstProgram {
 			functions: vec![],
 			objects: vec![],
+			result: Some(Expr::Identifier(IdentifierExpr {
+				name: String::from("x"),
+				position: 0,
+			})),
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
@@ -1174,10 +1199,7 @@ mod tests {
 					})),
 				})),
 			],
-			result: Some(Expr::Identifier(IdentifierExpr {
-				name: String::from("x"),
-				position: 0,
-			})),
+			with_declarations: vec![],
 		};
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
@@ -1200,6 +1222,7 @@ mod tests {
 		let program = AstProgram {
 			functions: vec![],
 			objects: vec![],
+			result: None,
 			statements: vec![
 				Statement::For(ForStatement {
 					body: BlockStatement {
@@ -1231,7 +1254,7 @@ mod tests {
 					},
 				}),
 			],
-			result: None,
+			with_declarations: vec![],
 		};
 
 		let program = Compiler::new().compile_program(&program).unwrap();
@@ -1260,6 +1283,10 @@ mod tests {
 		let program = AstProgram {
 			functions: vec![],
 			objects: vec![],
+			result: Some(Expr::Identifier(IdentifierExpr {
+				name: String::from("x"),
+				position: 0,
+			})),
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
@@ -1313,10 +1340,7 @@ mod tests {
 					},
 				}),
 			],
-			result: Some(Expr::Identifier(IdentifierExpr {
-				name: String::from("x"),
-				position: 0,
-			})),
+			with_declarations: vec![],
 		};
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
@@ -1344,6 +1368,7 @@ mod tests {
 		let program = AstProgram {
 			functions: vec![],
 			objects: vec![],
+			result: None,
 			statements: vec![
 				Statement::If(IfStatement {
 					condition: Expr::Boolean(BooleanLiteral {
@@ -1363,7 +1388,7 @@ mod tests {
 					},
 				}),
 			],
-			result: None,
+			with_declarations: vec![],
 		};
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
@@ -1472,18 +1497,6 @@ mod tests {
 		let program = AstProgram {
 			functions: vec![],
 			objects: vec![],
-			statements: vec![
-				Statement::VariableDeclaration(VariableDeclaration {
-					data_type: DataType::Int,
-					initial_value: Some(Expr::Integer(IntegerLiteral {
-						position: 0,
-						value: 1,
-					})),
-					is_const: false,
-					name: String::from("x"),
-					position: 0,
-				}),
-			],
 			result: Some(Expr::Binary(BinaryExpr {
 				left: Box::new(Expr::Identifier(IdentifierExpr {
 					name: String::from("x"),
@@ -1496,6 +1509,19 @@ mod tests {
 					value: 2,
 				})),
 			})),
+			statements: vec![
+				Statement::VariableDeclaration(VariableDeclaration {
+					data_type: DataType::Int,
+					initial_value: Some(Expr::Integer(IntegerLiteral {
+						position: 0,
+						value: 1,
+					})),
+					is_const: false,
+					name: String::from("x"),
+					position: 0,
+				}),
+			],
+			with_declarations: vec![],
 		};
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
@@ -1571,6 +1597,10 @@ mod tests {
 		let program = AstProgram {
 			functions: vec![],
 			objects: vec![],
+			result: Some(Expr::Identifier(IdentifierExpr {
+				name: String::from("x"),
+				position: 0,
+			})),
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
@@ -1615,10 +1645,7 @@ mod tests {
 					position: 0,
 				}),
 			],
-			result: Some(Expr::Identifier(IdentifierExpr {
-				name: String::from("x"),
-				position: 0,
-			})),
+			with_declarations: vec![],
 		};
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
@@ -1646,6 +1673,10 @@ mod tests {
 		let program = AstProgram {
 			functions: vec![],
 			objects: vec![],
+			result: Some(Expr::Identifier(IdentifierExpr {
+				name: String::from("x"),
+				position: 0,
+			})),
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
@@ -1709,10 +1740,7 @@ mod tests {
 					position: 0,
 				}),
 			],
-			result: Some(Expr::Identifier(IdentifierExpr {
-				name: String::from("x"),
-				position: 0,
-			})),
+			with_declarations: vec![],
 		};
 
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
@@ -1744,18 +1772,6 @@ mod tests {
 		let program = AstProgram {
 			functions: vec![],
 			objects: vec![],
-			statements: vec![
-				Statement::VariableDeclaration(VariableDeclaration {
-					data_type: DataType::Int,
-					initial_value: Some(Expr::Integer(IntegerLiteral {
-						position: 0,
-						value: 5,
-					})),
-					is_const: true,
-					name: String::from("x"),
-					position: 0,
-				}),
-			],
 			result: Some(Expr::Assignment(AssignmentExpr {
 				operator: AssignmentOperator::Assign,
 				position: 0,
@@ -1768,6 +1784,19 @@ mod tests {
 					value: 3,
 				})),
 			})),
+			statements: vec![
+				Statement::VariableDeclaration(VariableDeclaration {
+					data_type: DataType::Int,
+					initial_value: Some(Expr::Integer(IntegerLiteral {
+						position: 0,
+						value: 5,
+					})),
+					is_const: true,
+					name: String::from("x"),
+					position: 0,
+				}),
+			],
+			with_declarations: vec![],
 		};
 
 		let error = Compiler::new().compile_program(&program).unwrap_err();
@@ -1780,18 +1809,6 @@ mod tests {
 		let program = AstProgram {
 			functions: vec![],
 			objects: vec![],
-			statements: vec![
-				Statement::VariableDeclaration(VariableDeclaration {
-					data_type: DataType::Int,
-					initial_value: Some(Expr::Integer(IntegerLiteral {
-						position: 0,
-						value: 5,
-					})),
-					is_const: false,
-					name: String::from("x"),
-					position: 0,
-				}),
-			],
 			result: Some(Expr::Assignment(AssignmentExpr {
 				operator: AssignmentOperator::AddAssign,
 				position: 0,
@@ -1804,6 +1821,19 @@ mod tests {
 					value: Decimal::from_literal("1.5").unwrap(),
 				})),
 			})),
+			statements: vec![
+				Statement::VariableDeclaration(VariableDeclaration {
+					data_type: DataType::Int,
+					initial_value: Some(Expr::Integer(IntegerLiteral {
+						position: 0,
+						value: 5,
+					})),
+					is_const: false,
+					name: String::from("x"),
+					position: 0,
+				}),
+			],
+			with_declarations: vec![],
 		};
 
 		let error = Compiler::new().compile_program(&program).unwrap_err();
@@ -1816,6 +1846,7 @@ mod tests {
 		let program = AstProgram {
 			functions: vec![],
 			objects: vec![],
+			result: None,
 			statements: vec![
 				Statement::If(IfStatement {
 					condition: Expr::Integer(IntegerLiteral {
@@ -1830,7 +1861,7 @@ mod tests {
 					},
 				}),
 			],
-			result: None,
+			with_declarations: vec![],
 		};
 
 		let error = Compiler::new().compile_program(&program).unwrap_err();
@@ -1844,6 +1875,7 @@ mod tests {
 		let program = AstProgram {
 			functions: vec![],
 			objects: vec![],
+			result: None,
 			statements: vec![
 				Statement::While(WhileStatement {
 					body: BlockStatement {
@@ -1857,7 +1889,7 @@ mod tests {
 					position: 0,
 				}),
 			],
-			result: None,
+			with_declarations: vec![],
 		};
 
 		let error = Compiler::new().compile_program(&program).unwrap_err();
@@ -1871,18 +1903,6 @@ mod tests {
 		let program = AstProgram {
 			functions: vec![],
 			objects: vec![],
-			statements: vec![
-				Statement::VariableDeclaration(VariableDeclaration {
-					data_type: DataType::Int,
-					initial_value: Some(Expr::Integer(IntegerLiteral {
-						position: 0,
-						value: 5,
-					})),
-					is_const: false,
-					name: String::from("x"),
-					position: 0,
-				}),
-			],
 			result: Some(Expr::Assignment(AssignmentExpr {
 				operator: AssignmentOperator::Assign,
 				position: 0,
@@ -1895,6 +1915,19 @@ mod tests {
 					value: String::from("hello"),
 				})),
 			})),
+			statements: vec![
+				Statement::VariableDeclaration(VariableDeclaration {
+					data_type: DataType::Int,
+					initial_value: Some(Expr::Integer(IntegerLiteral {
+						position: 0,
+						value: 5,
+					})),
+					is_const: false,
+					name: String::from("x"),
+					position: 0,
+				}),
+			],
+			with_declarations: vec![],
 		};
 
 		let error = Compiler::new().compile_program(&program).unwrap_err();
@@ -1907,6 +1940,7 @@ mod tests {
 		let program = AstProgram {
 			functions: vec![],
 			objects: vec![],
+			result: None,
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
@@ -1919,7 +1953,7 @@ mod tests {
 					position: 0,
 				}),
 			],
-			result: None,
+			with_declarations: vec![],
 		};
 
 		let error = Compiler::new().compile_program(&program).unwrap_err();

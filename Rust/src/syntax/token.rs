@@ -58,6 +58,7 @@ pub enum TokenKind {
 	VarKeyword,
 	VoidKeyword,
 	WhileKeyword,
+	WithKeyword,
 	XorKeyword,
 }
 

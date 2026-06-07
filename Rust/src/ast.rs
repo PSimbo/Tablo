@@ -258,6 +258,7 @@ pub struct Program {
 	pub objects: Vec<ObjectDeclaration>,
 	pub result: Option<Expr>,
 	pub statements: Vec<Statement>,
+	pub with_declarations: Vec<WithDeclaration>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -300,6 +301,12 @@ pub struct VariableDeclaration {
 pub struct WhileStatement {
 	pub body: BlockStatement,
 	pub condition: Expr,
+	pub position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithDeclaration {
+	pub databases: Vec<IdentifierExpr>,
 	pub position: usize,
 }
 
