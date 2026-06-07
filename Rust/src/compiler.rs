@@ -47,6 +47,7 @@ pub struct CompileError {
 
 #[derive(Default)]
 pub struct Compiler {
+	compiled_queries: Vec<crate::query::LoweredBackendQuery>,
 	loop_stack: Vec<LoopContext>,
 }
 
@@ -111,6 +112,7 @@ impl crate::ast::UnaryOperator {
 impl Compiler {
 	pub fn compile_expression(&mut self, expression: &Expr) -> Program {
 		self.loop_stack.clear();
+		self.compiled_queries.clear();
 		let mut emission = EmissionState::default();
 		self.compile_into(expression, &SemanticProgram::default(), &mut emission);
 		Program::from_parts_with_debug(
@@ -133,6 +135,7 @@ impl Compiler {
 		schema_catalog: Option<&SchemaCatalog>,
 	) -> Result<Program, CompileError> {
 		self.loop_stack.clear();
+		self.compiled_queries.clear();
 		let semantic_program = SemanticAnalyzer::new().analyze_program_with_schema(program, schema_catalog)?;
 		self.compile_program_with_semantics(program, &semantic_program)
 	}
@@ -147,12 +150,14 @@ impl Compiler {
 		schema_catalog: Option<&SchemaCatalog>,
 	) -> Result<Program, CompileError> {
 		self.loop_stack.clear();
+		self.compiled_queries.clear();
 		let semantic_program = SemanticAnalyzer::new().analyze_standalone_program_with_schema(program, schema_catalog)?;
 		self.compile_program_with_semantics(program, &semantic_program)
 	}
 
 	pub fn new() -> Self {
 		Self {
+			compiled_queries: Vec::new(),
 			loop_stack: Vec::new(),
 		}
 	}
@@ -319,7 +324,12 @@ impl Compiler {
 				}
 			}
 			Expr::Count(_) => {
-				panic!("Database queries should not reach bytecode generation before runtime support exists.");
+				let query = semantic_program.compiled_count_query(expression.position())
+					.unwrap_or_else(|| panic!("Missing compiled database query for count expression."))
+					.clone();
+				let query_index = self.compiled_queries.len() as u32;
+				self.compiled_queries.push(query);
+				self.emit(emission, Instruction::ExecuteQuery(query_index), expression.position());
 			}
 			Expr::Decimal(DecimalLiteral { value, .. }) => {
 				self.emit(emission, Instruction::PushDecimal(value.clone()), expression.position());
@@ -438,10 +448,11 @@ impl Compiler {
 		}
 
 		if let Some(function_index) = semantic_program.entry_point_function_index() {
-			return Ok(Program::from_entry_function(
+			return Ok(Program::from_entry_function_with_queries(
 				crate::bytecode::ConstantPool::default(),
 				function_index,
 				functions,
+				self.compiled_queries.clone(),
 				DebugInfo::new(code_body_debug, vec![]),
 			));
 		}
@@ -453,10 +464,11 @@ impl Compiler {
 		self.close_all_debug_scopes(&mut emission);
 		code_body_debug.push(CodeBodyDebugInfo::new(None, emission.positions, emission.locals, None));
 
-		Ok(Program::from_parts_with_functions_and_debug(
+		Ok(Program::from_parts_with_functions_queries_and_debug(
 			crate::bytecode::ConstantPool::default(),
 			CodeBody::new(emission.instructions),
 			functions,
+			self.compiled_queries.clone(),
 			DebugInfo::new(code_body_debug, vec![]),
 		))
 	}

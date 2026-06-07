@@ -34,12 +34,14 @@ use crate::ast::WhileStatement;
 use crate::ast::WithDeclaration;
 use crate::builtins::BuiltInFunction;
 use crate::compiler::CompileError;
+use crate::query::LoweredBackendQuery;
 use crate::query::QueryBinaryExpr;
 use crate::query::QueryBinaryOperator;
 use crate::query::QueryColumnReference;
 use crate::query::QueryCountPlan;
 use crate::query::QueryExpr;
 use crate::query::QueryLiteral;
+use crate::query::QueryLoweringError;
 use crate::query::QueryParameter;
 use crate::query::QueryUnaryExpr;
 use crate::query::QueryUnaryOperator;
@@ -100,6 +102,7 @@ pub struct SemanticProgram {
 	call_argument_reference_slots: BTreeMap<usize, Vec<Option<u32>>>,
 	call_return_types: BTreeMap<usize, DataType>,
 	call_targets: BTreeMap<usize, u32>,
+	compiled_count_queries: BTreeMap<usize, LoweredBackendQuery>,
 	declaration_slots: BTreeMap<usize, u32>,
 	declaration_types: BTreeMap<usize, DataType>,
 	entry_point_function_index: Option<u32>,
@@ -131,6 +134,10 @@ impl SemanticProgram {
 
 	pub fn call_target(&self, position: usize) -> Option<u32> {
 		self.call_targets.get(&position).copied()
+	}
+
+	pub fn compiled_count_query(&self, position: usize) -> Option<&LoweredBackendQuery> {
+		self.compiled_count_queries.get(&position)
 	}
 
 	pub fn declaration_slot(&self, position: usize) -> Option<u32> {
@@ -627,12 +634,14 @@ impl SemanticAnalyzer {
 			}
 		}
 
-		self.semantic_program.lowered_count_queries.insert(count.position, lowered_query);
-
-		Err(self.compile_error(
+		let compiled_query = lowered_query.lower_to_backend().map_err(|error| self.compile_error(
 			count.position,
-			String::from("Database query execution is not implemented yet."),
-		))
+			query_lowering_error_message(error),
+		))?;
+
+		self.semantic_program.compiled_count_queries.insert(count.position, compiled_query);
+		self.semantic_program.lowered_count_queries.insert(count.position, lowered_query);
+		Ok(DataType::Int)
 	}
 
 	fn infer_expression_type(&mut self, expression: &Expr) -> Result<DataType, CompileError> {
@@ -2036,6 +2045,51 @@ impl SemanticAnalyzer {
 		}
 
 		Ok(())
+	}
+}
+
+fn database_backend_name(backend: DatabaseBackend) -> &'static str {
+	match backend {
+		DatabaseBackend::MySql => "mysql",
+		DatabaseBackend::PostgreSql => "postgresql",
+		DatabaseBackend::Sqlite => "sqlite",
+	}
+}
+
+fn query_binary_operator_name(operator: QueryBinaryOperator) -> &'static str {
+	match operator {
+		QueryBinaryOperator::Add => "+",
+		QueryBinaryOperator::And => "and",
+		QueryBinaryOperator::Divide => "/",
+		QueryBinaryOperator::Equal => "=",
+		QueryBinaryOperator::GreaterThan => ">",
+		QueryBinaryOperator::GreaterThanOrEqual => ">=",
+		QueryBinaryOperator::LessThan => "<",
+		QueryBinaryOperator::LessThanOrEqual => "<=",
+		QueryBinaryOperator::Modulo => "%",
+		QueryBinaryOperator::Multiply => "*",
+		QueryBinaryOperator::NotEqual => "!=",
+		QueryBinaryOperator::Or => "or",
+		QueryBinaryOperator::Subtract => "-",
+		QueryBinaryOperator::Xor => "xor",
+	}
+}
+
+fn query_lowering_error_message(error: QueryLoweringError) -> String {
+	match error {
+		QueryLoweringError::UnsupportedBackend { backend } => {
+			format!(
+				"Database query execution is not implemented yet for the `{}` backend.",
+				database_backend_name(backend),
+			)
+		}
+		QueryLoweringError::UnsupportedOperator { backend, operator } => {
+			format!(
+				"Database query operator `{}` is not implemented yet for the `{}` backend.",
+				query_binary_operator_name(operator),
+				database_backend_name(backend),
+			)
+		}
 	}
 }
 

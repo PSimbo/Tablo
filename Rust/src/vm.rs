@@ -1,8 +1,18 @@
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use rusqlite::Connection;
+use rusqlite::params_from_iter;
+use rusqlite::types::Value as SqlValue;
+
 use crate::builtins::BuiltInFunction;
 use crate::bytecode::CodeBody;
 use crate::bytecode::Instruction;
 use crate::bytecode::Program;
 use crate::bytecode::SourceLocation;
+use crate::query::LoweredBackendQuery;
+use crate::query::SqlDialect;
+use crate::query::SqlQuery;
 use crate::value::Decimal;
 use crate::value::DecimalRange;
 use crate::value::DecimalRangeIterator;
@@ -33,8 +43,66 @@ enum ExecutionOutcome {
 	Return(Option<Value>),
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RuntimeDatabaseConfig {
+	sqlite_databases: BTreeMap<String, PathBuf>,
+}
+
+impl RuntimeDatabaseConfig {
+	pub fn new() -> Self {
+		Self::default()
+	}
+
+	pub fn set_database_connection_string(
+		&mut self,
+		database_name: impl Into<String>,
+		connection_string: &str,
+	) -> Result<(), String> {
+		let database_name = database_name.into();
+		let (scheme, value) = connection_string.split_once(':').ok_or_else(|| {
+			format!(
+				"Connection string for database `{database_name}` must use the form `<backend>:<value>`."
+			)
+		})?;
+
+		match scheme.to_ascii_lowercase().as_str() {
+			"sqlite" => {
+				let path = sqlite_path_from_connection_string(&database_name, value)?;
+				self.set_sqlite_database(database_name, path);
+				Ok(())
+			}
+			other => Err(format!(
+				"Connection string for database `{database_name}` uses unsupported backend `{other}`."
+			)),
+		}
+	}
+
+	pub fn set_sqlite_database(&mut self, database_name: impl Into<String>, path: impl Into<PathBuf>) {
+		self.sqlite_databases.insert(normalize_database_name(&database_name.into()), path.into());
+	}
+
+	pub fn sqlite_database_path(&self, database_name: &str) -> Option<&Path> {
+		self.sqlite_databases.get(&normalize_database_name(database_name)).map(PathBuf::as_path)
+	}
+
+	pub fn with_database_connection_string(
+		mut self,
+		database_name: impl Into<String>,
+		connection_string: &str,
+	) -> Result<Self, String> {
+		self.set_database_connection_string(database_name, connection_string)?;
+		Ok(self)
+	}
+
+	pub fn with_sqlite_database(mut self, database_name: impl Into<String>, path: impl Into<PathBuf>) -> Self {
+		self.set_sqlite_database(database_name, path);
+		self
+	}
+}
+
 #[derive(Default)]
 pub struct VirtualMachine {
+	database_config: RuntimeDatabaseConfig,
 	finished_result: Option<Option<Value>>,
 	frames: Vec<CallFrame>,
 	stack: Vec<Value>,
@@ -122,6 +190,7 @@ impl VmVisibleLocal {
 impl VirtualMachine {
 	pub fn new() -> Self {
 		Self {
+			database_config: RuntimeDatabaseConfig::default(),
 			finished_result: None,
 			frames: Vec::new(),
 			stack: Vec::new(),
@@ -136,6 +205,13 @@ impl VirtualMachine {
 				VmExecutionState::Completed(result) => return Ok(result),
 				VmExecutionState::Running => {}
 			}
+		}
+	}
+
+	pub fn with_database_config(database_config: RuntimeDatabaseConfig) -> Self {
+		Self {
+			database_config,
+			..Self::new()
 		}
 	}
 
@@ -301,6 +377,15 @@ impl VirtualMachine {
 				let rhs = self.pop_value(instruction_index)?;
 				let lhs = self.pop_value(instruction_index)?;
 				self.stack.push(equals_value(lhs, rhs, instruction_index)?);
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::ExecuteQuery(query_index) => {
+				let query = _program.queries().get(*query_index as usize).ok_or(vm_error(
+					instruction_index,
+					format!("Compiled query index {} does not exist.", query_index),
+				))?;
+				let result = self.execute_query(query, locals, instruction_index)?;
+				self.stack.push(Value::Integer(result));
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::GreaterThan => {
@@ -540,6 +625,56 @@ impl VirtualMachine {
 		}
 	}
 
+	fn execute_query(
+		&self,
+		query: &LoweredBackendQuery,
+		locals: &[Value],
+		instruction_index: usize,
+	) -> Result<i64, VmError> {
+		match query {
+			LoweredBackendQuery::Sql(query) => self.execute_sql_query(query, locals, instruction_index),
+		}
+	}
+
+	fn execute_sql_query(
+		&self,
+		query: &SqlQuery,
+		locals: &[Value],
+		instruction_index: usize,
+	) -> Result<i64, VmError> {
+		match query.dialect {
+			SqlDialect::Sqlite => self.execute_sqlite_query(query, locals, instruction_index),
+		}
+	}
+
+	fn execute_sqlite_query(
+		&self,
+		query: &SqlQuery,
+		locals: &[Value],
+		instruction_index: usize,
+	) -> Result<i64, VmError> {
+		let database_path = self.database_config.sqlite_database_path(&query.database_name).ok_or(vm_error(
+			instruction_index,
+			format!("SQLite database `{}` is not configured at runtime.", query.database_name),
+		))?;
+		let connection = Connection::open(database_path).map_err(|error| vm_error(
+			instruction_index,
+			format!("Failed to open SQLite database `{}`: {error}", database_path.display()),
+		))?;
+		let mut statement = connection.prepare(&query.statement).map_err(|error| vm_error(
+			instruction_index,
+			format!("Failed to prepare SQLite query: {error}"),
+		))?;
+		let parameter_values = query.parameters.iter()
+			.map(|parameter| self.sqlite_parameter_value(parameter.slot, locals, instruction_index))
+			.collect::<Result<Vec<_>, _>>()?;
+
+		statement.query_row(params_from_iter(parameter_values), |row| row.get::<_, i64>(0)).map_err(|error| vm_error(
+			instruction_index,
+			format!("Failed to execute SQLite query: {error}"),
+		))
+	}
+
 	fn finish_current_frame(&mut self, result: Option<Value>) -> VmExecutionState {
 		let frame = self.frames.pop().expect("A frame must exist while finishing execution.");
 		self.stack.truncate(frame.base_stack_len);
@@ -714,6 +849,30 @@ impl VirtualMachine {
 					format!("Built-in function `displn` expects 1 argument(s), found {}.", arguments.len()),
 				)),
 			},
+		}
+	}
+
+	fn sqlite_parameter_value(
+		&self,
+		slot: u32,
+		locals: &[Value],
+		instruction_index: usize,
+	) -> Result<SqlValue, VmError> {
+		let value = locals.get(slot as usize).cloned().ok_or(vm_error(
+			instruction_index,
+			format!("Local slot {} has not been initialized.", slot),
+		))?;
+		let value = self.resolve_runtime_value(value, instruction_index)?;
+
+		match value {
+			Value::Boolean(value) => Ok(SqlValue::Integer(if value { 1 } else { 0 })),
+			Value::Decimal(value) => Ok(SqlValue::Text(value.to_string())),
+			Value::Integer(value) => Ok(SqlValue::Integer(value)),
+			Value::Text(value) => Ok(SqlValue::Text(value)),
+			other => Err(vm_error(
+				instruction_index,
+				format!("Cannot bind a `{}` value into a SQLite query parameter.", type_name(&other)),
+			)),
 		}
 	}
 
@@ -1216,6 +1375,10 @@ fn negate_value(value: Value) -> Value {
 	}
 }
 
+fn normalize_database_name(name: &str) -> String {
+	name.to_ascii_lowercase()
+}
+
 fn not_equals_value(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
 	match equals_value(lhs, rhs, instruction_index)? {
 		Value::Boolean(value) => Ok(Value::Boolean(!value)),
@@ -1232,6 +1395,29 @@ fn pow10_i128(exponent: u32) -> Result<i128, String> {
 	}
 
 	Ok(value)
+}
+
+fn sqlite_path_from_connection_string(database_name: &str, value: &str) -> Result<PathBuf, String> {
+	if value.is_empty() {
+		return Err(format!(
+			"SQLite connection string for database `{database_name}` must include a database path."
+		));
+	}
+
+	if value.starts_with("//") && !value.starts_with("///") {
+		return Err(format!(
+			"SQLite connection string for database `{database_name}` must use `sqlite:/path/to.db`, `sqlite:relative.db`, or `sqlite::memory:`."
+		));
+	}
+
+	let normalized = if value.starts_with("///") {
+		&value[2..]
+	}
+	else {
+		value
+	};
+
+	Ok(PathBuf::from(normalized))
 }
 
 fn store_field_path_into_object(
@@ -1422,6 +1608,7 @@ mod tests {
 	use crate::value::DecimalRange;
 	use crate::value::Value;
 
+	use super::RuntimeDatabaseConfig;
 	use super::VirtualMachine;
 	use super::VmError;
 
@@ -1465,6 +1652,30 @@ mod tests {
 		assert_eq!(error.current_frame().unwrap().local("x").unwrap().declared_type(), "int");
 		assert_eq!(error.current_frame().unwrap().local("x").unwrap().value(), &Value::Integer(0));
 		assert!(error.current_frame().unwrap().local("missing").is_none());
+	}
+
+	#[test]
+	fn parses_absolute_sqlite_connection_string() {
+		let config = RuntimeDatabaseConfig::new()
+			.with_database_connection_string("ExampleDb", "sqlite:///tmp/example.sqlite")
+			.unwrap();
+
+		assert_eq!(
+			config.sqlite_database_path("ExampleDb"),
+			Some(std::path::Path::new("/tmp/example.sqlite")),
+		);
+	}
+
+	#[test]
+	fn parses_relative_sqlite_connection_string() {
+		let config = RuntimeDatabaseConfig::new()
+			.with_database_connection_string("ExampleDb", "sqlite:db/example.sqlite")
+			.unwrap();
+
+		assert_eq!(
+			config.sqlite_database_path("exampledb"),
+			Some(std::path::Path::new("db/example.sqlite")),
+		);
 	}
 
 	#[test]
@@ -1512,6 +1723,20 @@ mod tests {
 				},
 			],
 		});
+	}
+
+	#[test]
+	fn rejects_invalid_sqlite_connection_string_shape() {
+		let error = RuntimeDatabaseConfig::new()
+			.with_database_connection_string("ExampleDb", "sqlite://example.sqlite")
+			.unwrap_err();
+
+		assert_eq!(
+			error,
+			String::from(
+				"SQLite connection string for database `ExampleDb` must use `sqlite:/path/to.db`, `sqlite:relative.db`, or `sqlite::memory:`."
+			),
+		);
 	}
 
 	#[test]
@@ -1608,6 +1833,18 @@ mod tests {
 				},
 			],
 		});
+	}
+
+	#[test]
+	fn rejects_unsupported_connection_string_backend() {
+		let error = RuntimeDatabaseConfig::new()
+			.with_database_connection_string("ExampleDb", "postgresql:host=localhost")
+			.unwrap_err();
+
+		assert_eq!(
+			error,
+			String::from("Connection string for database `ExampleDb` uses unsupported backend `postgresql`."),
+		);
 	}
 
 	#[test]

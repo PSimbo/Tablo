@@ -30,6 +30,7 @@ use syntax::lexer::Lexer;
 use syntax::parser::ParseError;
 use syntax::parser::Parser;
 use value::Value;
+use vm::RuntimeDatabaseConfig;
 use vm::VirtualMachine;
 use vm::VmError;
 
@@ -141,9 +142,33 @@ pub fn run_file(path: impl AsRef<Path>) -> Result<Option<Value>, TabloError> {
 	run_program(&program)
 }
 
+pub fn run_file_with_database_config(
+	path: impl AsRef<Path>,
+	database_config: RuntimeDatabaseConfig,
+) -> Result<Option<Value>, TabloError> {
+	let program = read_program_from_path(path).map_err(TabloError::ObjectFile)?;
+	run_program_with_database_config(&program, database_config)
+}
+
 pub fn run_program(program: &Program) -> Result<Option<Value>, TabloError> {
 	let mut vm = VirtualMachine::new();
 	vm.run(&program).map_err(TabloError::Runtime)
+}
+
+pub fn run_program_with_database_config(
+	program: &Program,
+	database_config: RuntimeDatabaseConfig,
+) -> Result<Option<Value>, TabloError> {
+	let mut vm = VirtualMachine::with_database_config(database_config);
+	vm.run(program).map_err(TabloError::Runtime)
+}
+
+pub fn run_with_database_config(
+	source: impl Into<String>,
+	database_config: RuntimeDatabaseConfig,
+) -> Result<Option<Value>, TabloError> {
+	let program = compile_to_program_with_name(source, None)?;
+	run_program_with_database_config(&program, database_config)
 }
 
 pub(crate) fn compile_to_program_with_name(source: impl Into<String>, source_name: Option<&str>) -> Result<Program, TabloError> {
@@ -195,12 +220,15 @@ fn parse_source_text(source: &SourceText) -> Result<ast::Program, TabloError> {
 mod tests {
 	use std::path::PathBuf;
 
+	use rusqlite::Connection;
+
 	use crate::bytecode::Instruction;
 	use crate::object_file::read_program_from_path;
 	use crate::object_file::write_program_to_path;
 	use crate::schema::SchemaCatalog;
 	use crate::schema_fixture::read_schema_catalog_from_str;
 	use crate::value::Value;
+	use crate::vm::RuntimeDatabaseConfig;
 
 	use super::compile_source_to_program_with_name_and_schema;
 	use super::compile;
@@ -208,6 +236,7 @@ mod tests {
 	use super::run;
 	use super::run_file;
 	use super::run_program;
+	use super::run_program_with_database_config;
 	use super::CompilationTarget;
 	use super::TabloError;
 
@@ -237,6 +266,23 @@ mod tests {
 			}))?;
 		let program = compile_source_to_program_with_name_and_schema(source, None, CompilationTarget::Snippet, Some(&schema))?;
 		Ok((program, schema))
+	}
+
+	fn compile_standalone_with_schema_fixture(source: &str, schema_fixture: &str) -> Result<(crate::bytecode::Program, SchemaCatalog), TabloError> {
+		let schema = read_schema_catalog_from_str(schema_fixture)
+			.map_err(|error| TabloError::Compile(crate::compiler::CompileError {
+				message: error.message,
+				position: 0,
+			}))?;
+		let program = compile_source_to_program_with_name_and_schema(source, None, CompilationTarget::Standalone, Some(&schema))?;
+		Ok((program, schema))
+	}
+
+	fn create_sqlite_test_database(name: &str, setup_sql: &str) -> PathBuf {
+		let path = unique_test_output_path(name).with_extension("sqlite");
+		let connection = Connection::open(&path).unwrap();
+		connection.execute_batch(setup_sql).unwrap();
+		path
 	}
 
 	#[test]
@@ -458,7 +504,7 @@ mod tests {
 	}
 
 	#[test]
-	fn rejects_count_expression_until_database_runtime_exists() {
+	fn rejects_count_expression_for_unsupported_backend() {
 		let error = compile_snippet_with_schema_fixture(
 			"with exampledb;\ncount customers where active = true",
 			r#"{
@@ -485,7 +531,7 @@ mod tests {
 		).unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
-			message: String::from("Database query execution is not implemented yet."),
+			message: String::from("Database query execution is not implemented yet for the `mysql` backend."),
 			position: 16,
 		}));
 	}
@@ -1264,6 +1310,102 @@ mod tests {
 		let result = run(standalone_body("var x: int = 1;\nvar y: int = 2;\nreturn x + y;")).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
+	fn runs_sqlite_count_query_from_snippet() {
+		let database_path = create_sqlite_test_database(
+			"runs_sqlite_count_query_from_snippet",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Active INTEGER NOT NULL
+				);
+				INSERT INTO Customers (Id, Active) VALUES (1, 1), (2, 0), (3, 1);
+			"#,
+		);
+		let (program, _) = compile_snippet_with_schema_fixture(
+			"with exampledb;\ncount customers where active = true",
+			r#"{
+				"databases": [
+					{
+						"backend": "sqlite",
+						"name": "ExampleDb",
+						"schemas": [
+							{
+								"name": "Main",
+								"is_implicit": true,
+								"tables": [
+									{
+										"name": "Customers",
+										"columns": [
+											{ "name": "Id", "data_type": "int", "is_nullable": false },
+											{ "name": "Active", "data_type": "bool", "is_nullable": false }
+										]
+									}
+								]
+							}
+						]
+					}
+				]
+			}"#,
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(2)));
+	}
+
+	#[test]
+	fn runs_sqlite_count_query_with_local_parameter_after_object_round_trip() {
+		let database_path = create_sqlite_test_database(
+			"runs_sqlite_count_query_with_local_parameter_after_object_round_trip",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Active INTEGER NOT NULL
+				);
+				INSERT INTO Customers (Id, Active) VALUES (1, 1), (2, 0), (3, 1);
+			"#,
+		);
+		let output_path = unique_test_output_path("sqlite_count_query_program");
+		let (program, _) = compile_standalone_with_schema_fixture(
+			"with exampledb;\nfn Main(args: [text]) int { var targetId: int = 2; return count customers where id = targetId; }",
+			r#"{
+				"databases": [
+					{
+						"backend": "sqlite",
+						"name": "ExampleDb",
+						"schemas": [
+							{
+								"name": "Main",
+								"is_implicit": true,
+								"tables": [
+									{
+										"name": "Customers",
+										"columns": [
+											{ "name": "Id", "data_type": "int", "is_nullable": false },
+											{ "name": "Active", "data_type": "bool", "is_nullable": false }
+										]
+									}
+								]
+							}
+						]
+					}
+				]
+			}"#,
+		).unwrap();
+		write_program_to_path(&output_path, &program).unwrap();
+		let decoded = read_program_from_path(&output_path).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&decoded, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+		let _ = std::fs::remove_file(&output_path);
+
+		assert_eq!(result, Some(Value::Integer(1)));
 	}
 
 	#[test]

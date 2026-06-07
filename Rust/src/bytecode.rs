@@ -4,6 +4,7 @@
 // are introduced.
 
 use crate::builtins::BuiltInFunction;
+use crate::query::LoweredBackendQuery;
 use crate::source::SourceText;
 use crate::value::Decimal;
 
@@ -24,6 +25,7 @@ pub enum Instruction {
 	Divide,
 	Dup2,
 	Equal,
+	ExecuteQuery(u32),
 	GreaterThan,
 	GreaterThanOrEqual,
 	IterHasNext,
@@ -124,6 +126,7 @@ pub struct Program {
 	debug: DebugInfo,
 	entry_point: EntryPoint,
 	functions: Vec<CompiledFunction>,
+	queries: Vec<LoweredBackendQuery>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -217,11 +220,22 @@ impl Program {
 		functions: Vec<CompiledFunction>,
 		debug: DebugInfo,
 	) -> Self {
+		Self::from_entry_function_with_queries(constants, entry_function_index, functions, Vec::new(), debug)
+	}
+
+	pub fn from_entry_function_with_queries(
+		constants: ConstantPool,
+		entry_function_index: u32,
+		functions: Vec<CompiledFunction>,
+		queries: Vec<LoweredBackendQuery>,
+		debug: DebugInfo,
+	) -> Self {
 		Self {
 			constants,
 			debug,
 			entry_point: EntryPoint::Function(entry_function_index),
 			functions,
+			queries,
 		}
 	}
 
@@ -243,11 +257,22 @@ impl Program {
 		functions: Vec<CompiledFunction>,
 		debug: DebugInfo
 	) -> Self {
+		Self::from_parts_with_functions_queries_and_debug(constants, entry, functions, Vec::new(), debug)
+	}
+
+	pub fn from_parts_with_functions_queries_and_debug(
+		constants: ConstantPool,
+		entry: CodeBody,
+		functions: Vec<CompiledFunction>,
+		queries: Vec<LoweredBackendQuery>,
+		debug: DebugInfo
+	) -> Self {
 		Self {
 			constants,
 			debug,
 			entry_point: EntryPoint::Code(entry),
 			functions,
+			queries,
 		}
 	}
 
@@ -325,6 +350,10 @@ impl Program {
 			EntryPoint::Code(code_body) => &code_body.instructions,
 			EntryPoint::Function(_) => &[],
 		}
+	}
+
+	pub fn queries(&self) -> &[LoweredBackendQuery] {
+		&self.queries
 	}
 
 	pub fn visible_locals(&self, body_index: usize, instruction_index: usize) -> Vec<LocalVariableDebugInfo> {

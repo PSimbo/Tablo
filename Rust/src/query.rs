@@ -119,6 +119,7 @@ impl QueryCountPlan {
 		}
 
 		SqlQuery {
+			database_name: self.database_name.clone(),
 			dialect: SqlDialect::Sqlite,
 			parameters,
 			statement,
@@ -147,6 +148,7 @@ pub struct SqlParameter {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SqlQuery {
+	pub database_name: String,
 	pub dialect: SqlDialect,
 	pub parameters: Vec<SqlParameter>,
 	pub statement: String,
@@ -280,6 +282,7 @@ mod tests {
 		}.lower_to_backend().unwrap();
 
 		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
+			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::Sqlite,
 			parameters: vec![
 				SqlParameter {
@@ -312,6 +315,7 @@ mod tests {
 		}.lower_to_backend().unwrap();
 
 		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
+			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::Sqlite,
 			parameters: vec![],
 			statement: String::from(

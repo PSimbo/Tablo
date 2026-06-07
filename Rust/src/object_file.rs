@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use crate::ast::DataType;
 use crate::builtins::BuiltInFunction;
 use crate::bytecode::CodeBody;
 use crate::bytecode::CodeBodyDebugInfo;
@@ -16,6 +17,10 @@ use crate::bytecode::Instruction;
 use crate::bytecode::LocalVariableDebugInfo;
 use crate::bytecode::Program;
 use crate::bytecode::SourceFileDebugInfo;
+use crate::query::LoweredBackendQuery;
+use crate::query::SqlDialect;
+use crate::query::SqlParameter;
+use crate::query::SqlQuery;
 use crate::value::Decimal;
 
 const MAGIC_BYTES: [u8; 4] = *b"TBO0";
@@ -63,27 +68,14 @@ const OPCODE_MAKE_OBJECT: u8 = 40;
 const OPCODE_LOAD_FIELD: u8 = 41;
 const OPCODE_LOAD_FIELD_PATH: u8 = 42;
 const OPCODE_STORE_FIELD_PATH: u8 = 43;
+const OPCODE_EXECUTE_QUERY: u8 = 44;
+const QUERY_KIND_SQL: u8 = 1;
+const SQL_DIALECT_SQLITE: u8 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectFileError {
 	pub offset: usize,
 	pub message: String,
-}
-
-// The on-disk format is still effectively "header plus one entry code body",
-// but representing it as a layout with sections now gives us a much cleaner
-// path toward additional code bodies and embedded debug metadata later on.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ObjectFileLayout {
-	debug: DebugInfo,
-	sections: Vec<ObjectFileSection>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum ObjectFileSection {
-	EntryFunction(u32),
-	Function(CompiledFunction),
-	EntryCode(CodeBody),
 }
 
 pub fn read_program(bytes: &[u8]) -> Result<Program, ObjectFileError> {
@@ -123,131 +115,6 @@ pub fn write_program(program: &Program) -> Vec<u8> {
 	bytes
 }
 
-fn write_code_body(bytes: &mut Vec<u8>, code_body: &CodeBody) {
-	bytes.extend_from_slice(&(code_body.instructions.len() as u32).to_le_bytes());
-
-	for instruction in &code_body.instructions {
-		write_instruction(bytes, instruction);
-	}
-}
-
-fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
-	match instruction {
-		Instruction::Add => bytes.push(OPCODE_ADD),
-		Instruction::And => bytes.push(OPCODE_AND),
-		Instruction::Call(function_index, argument_count) => {
-			bytes.push(OPCODE_CALL);
-			bytes.extend_from_slice(&function_index.to_le_bytes());
-			bytes.extend_from_slice(&argument_count.to_le_bytes());
-		}
-		Instruction::CallBuiltIn(built_in, argument_count) => {
-			bytes.push(OPCODE_CALL_BUILT_IN);
-			bytes.push(built_in.id());
-			bytes.extend_from_slice(&argument_count.to_le_bytes());
-		}
-		Instruction::Divide => bytes.push(OPCODE_DIVIDE),
-		Instruction::Dup2 => bytes.push(OPCODE_DUP2),
-		Instruction::Equal => bytes.push(OPCODE_EQUAL),
-		Instruction::GreaterThan => bytes.push(OPCODE_GREATER_THAN),
-		Instruction::GreaterThanOrEqual => bytes.push(OPCODE_GREATER_THAN_OR_EQUAL),
-		Instruction::IterHasNext => bytes.push(OPCODE_ITER_HAS_NEXT),
-		Instruction::IterInit => bytes.push(OPCODE_ITER_INIT),
-		Instruction::IterNext => bytes.push(OPCODE_ITER_NEXT),
-		Instruction::Jump(target) => {
-			bytes.push(OPCODE_JUMP);
-			bytes.extend_from_slice(&target.to_le_bytes());
-		}
-		Instruction::JumpIfFalse(target) => {
-			bytes.push(OPCODE_JUMP_IF_FALSE);
-			bytes.extend_from_slice(&target.to_le_bytes());
-		}
-		Instruction::LessThan => bytes.push(OPCODE_LESS_THAN),
-		Instruction::LessThanOrEqual => bytes.push(OPCODE_LESS_THAN_OR_EQUAL),
-		Instruction::LoadField(field_name) => {
-			bytes.push(OPCODE_LOAD_FIELD);
-			bytes.extend_from_slice(&(field_name.len() as u32).to_le_bytes());
-			bytes.extend_from_slice(field_name.as_bytes());
-		}
-		Instruction::LoadFieldPath(field_path) => {
-			bytes.push(OPCODE_LOAD_FIELD_PATH);
-			bytes.extend_from_slice(&(field_path.len() as u32).to_le_bytes());
-
-			for field_name in field_path {
-				bytes.extend_from_slice(&(field_name.len() as u32).to_le_bytes());
-				bytes.extend_from_slice(field_name.as_bytes());
-			}
-		}
-		Instruction::LoadIndex => bytes.push(OPCODE_LOAD_INDEX),
-		Instruction::LoadLocal(slot) => {
-			bytes.push(OPCODE_LOAD_LOCAL);
-			bytes.extend_from_slice(&slot.to_le_bytes());
-		}
-		Instruction::LoadReference(slot) => {
-			bytes.push(OPCODE_LOAD_REFERENCE);
-			bytes.extend_from_slice(&slot.to_le_bytes());
-		}
-		Instruction::MakeArray(element_count) => {
-			bytes.push(OPCODE_MAKE_ARRAY);
-			bytes.extend_from_slice(&element_count.to_le_bytes());
-		}
-		Instruction::MakeObject(field_names) => {
-			bytes.push(OPCODE_MAKE_OBJECT);
-			bytes.extend_from_slice(&(field_names.len() as u32).to_le_bytes());
-
-			for field_name in field_names {
-				bytes.extend_from_slice(&(field_name.len() as u32).to_le_bytes());
-				bytes.extend_from_slice(field_name.as_bytes());
-			}
-		}
-		Instruction::MakeRange => bytes.push(OPCODE_MAKE_RANGE),
-		Instruction::MakeSteppedRange => bytes.push(OPCODE_MAKE_STEPPED_RANGE),
-		Instruction::Modulo => bytes.push(OPCODE_MODULO),
-		Instruction::Multiply => bytes.push(OPCODE_MULTIPLY),
-		Instruction::Negate => bytes.push(OPCODE_NEGATE),
-		Instruction::Not => bytes.push(OPCODE_NOT),
-		Instruction::NotEqual => bytes.push(OPCODE_NOT_EQUAL),
-		Instruction::Or => bytes.push(OPCODE_OR),
-		Instruction::Pop => bytes.push(OPCODE_POP),
-		Instruction::PushBoolean(value) => {
-			bytes.push(OPCODE_PUSH_BOOLEAN);
-			bytes.push(u8::from(*value));
-		}
-		Instruction::PushDecimal(value) => {
-			bytes.push(OPCODE_PUSH_DECIMAL);
-			bytes.extend_from_slice(&value.coefficient.to_le_bytes());
-			bytes.push(value.precision);
-			bytes.push(value.scale);
-		}
-		Instruction::PushInteger(value) => {
-			bytes.push(OPCODE_PUSH_INTEGER);
-			bytes.extend_from_slice(&value.to_le_bytes());
-		}
-		Instruction::PushText(value) => {
-			bytes.push(OPCODE_PUSH_TEXT);
-			bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
-			bytes.extend_from_slice(value.as_bytes());
-		}
-		Instruction::Return => bytes.push(OPCODE_RETURN),
-		Instruction::ReturnVoid => bytes.push(OPCODE_RETURN_VOID),
-		Instruction::StoreFieldPath(field_path) => {
-			bytes.push(OPCODE_STORE_FIELD_PATH);
-			bytes.extend_from_slice(&(field_path.len() as u32).to_le_bytes());
-
-			for field_name in field_path {
-				bytes.extend_from_slice(&(field_name.len() as u32).to_le_bytes());
-				bytes.extend_from_slice(field_name.as_bytes());
-			}
-		}
-		Instruction::StoreIndex => bytes.push(OPCODE_STORE_INDEX),
-		Instruction::StoreLocal(slot) => {
-			bytes.push(OPCODE_STORE_LOCAL);
-			bytes.extend_from_slice(&slot.to_le_bytes());
-		}
-		Instruction::Subtract => bytes.push(OPCODE_SUBTRACT),
-		Instruction::Xor => bytes.push(OPCODE_XOR),
-	}
-}
-
 pub fn write_program_to_path(path: impl AsRef<Path>, program: &Program) -> Result<(), ObjectFileError> {
 	let bytes = write_program(program);
 
@@ -255,6 +122,20 @@ pub fn write_program_to_path(path: impl AsRef<Path>, program: &Program) -> Resul
 		offset: 0,
 		message: format!("Failed to write object file: {error}"),
 	})
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ObjectFileSection {
+	EntryCode(CodeBody),
+	EntryFunction(u32),
+	Function(CompiledFunction),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ObjectFileLayout {
+	debug: DebugInfo,
+	queries: Vec<LoweredBackendQuery>,
+	sections: Vec<ObjectFileSection>,
 }
 
 struct ObjectFileReader<'a> {
@@ -320,6 +201,25 @@ impl<'a> ObjectFileReader<'a> {
 		}
 
 		Ok(CodeBody::new(instructions))
+	}
+
+	fn read_data_type(&mut self) -> Result<DataType, ObjectFileError> {
+		let tag_offset = self.offset;
+		match self.read_u8()? {
+			1 => Ok(DataType::Array(Box::new(self.read_data_type()?))),
+			2 => Ok(DataType::Bool),
+			3 => Ok(DataType::Dec),
+			4 => Ok(DataType::EmptyArray),
+			5 => Ok(DataType::Int),
+			6 => Ok(DataType::Object(self.read_string()?)),
+			7 => Ok(DataType::Range(Box::new(self.read_data_type()?))),
+			8 => Ok(DataType::Text),
+			9 => Ok(DataType::Void),
+			tag => Err(ObjectFileError {
+				offset: tag_offset,
+				message: format!("Unknown data type tag {tag}."),
+			}),
+		}
 	}
 
 	fn read_debug_info(&mut self) -> Result<DebugInfo, ObjectFileError> {
@@ -446,6 +346,7 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_DIVIDE => Ok(Instruction::Divide),
 			OPCODE_DUP2 => Ok(Instruction::Dup2),
 			OPCODE_EQUAL => Ok(Instruction::Equal),
+			OPCODE_EXECUTE_QUERY => Ok(Instruction::ExecuteQuery(self.read_u32()?)),
 			OPCODE_GREATER_THAN => Ok(Instruction::GreaterThan),
 			OPCODE_GREATER_THAN_OR_EQUAL => Ok(Instruction::GreaterThanOrEqual),
 			OPCODE_ITER_HAS_NEXT => Ok(Instruction::IterHasNext),
@@ -520,6 +421,13 @@ impl<'a> ObjectFileReader<'a> {
 			}
 		}
 
+		let query_count = self.read_u32()? as usize;
+		let mut queries = Vec::with_capacity(query_count);
+
+		for _ in 0..query_count {
+			queries.push(self.read_lowered_query()?);
+		}
+
 		let debug = if self.is_at_end() {
 			DebugInfo::default()
 		}
@@ -529,7 +437,51 @@ impl<'a> ObjectFileReader<'a> {
 
 		Ok(ObjectFileLayout {
 			debug,
+			queries,
 			sections,
+		})
+	}
+
+	fn read_lowered_query(&mut self) -> Result<LoweredBackendQuery, ObjectFileError> {
+		let kind_offset = self.offset;
+		match self.read_u8()? {
+			QUERY_KIND_SQL => Ok(LoweredBackendQuery::Sql(self.read_sql_query()?)),
+			kind => Err(ObjectFileError {
+				offset: kind_offset,
+				message: format!("Unknown query kind {kind}."),
+			}),
+		}
+	}
+
+	fn read_sql_query(&mut self) -> Result<SqlQuery, ObjectFileError> {
+		let dialect_offset = self.offset;
+		let dialect = match self.read_u8()? {
+			SQL_DIALECT_SQLITE => SqlDialect::Sqlite,
+			dialect => {
+				return Err(ObjectFileError {
+					offset: dialect_offset,
+					message: format!("Unknown SQL dialect {dialect}."),
+				});
+			}
+		};
+		let database_name = self.read_string()?;
+		let statement = self.read_string()?;
+		let parameter_count = self.read_u32()? as usize;
+		let mut parameters = Vec::with_capacity(parameter_count);
+
+		for _ in 0..parameter_count {
+			parameters.push(SqlParameter {
+				data_type: self.read_data_type()?,
+				index: self.read_u32()?,
+				slot: self.read_u32()?,
+			});
+		}
+
+		Ok(SqlQuery {
+			database_name,
+			dialect,
+			parameters,
+			statement,
 		})
 	}
 
@@ -570,6 +522,185 @@ impl<'a> ObjectFileReader<'a> {
 	}
 }
 
+fn write_code_body(bytes: &mut Vec<u8>, code_body: &CodeBody) {
+	bytes.extend_from_slice(&(code_body.instructions.len() as u32).to_le_bytes());
+
+	for instruction in &code_body.instructions {
+		write_instruction(bytes, instruction);
+	}
+}
+
+fn write_data_type(bytes: &mut Vec<u8>, data_type: &DataType) {
+	match data_type {
+		DataType::Array(element_type) => {
+			bytes.push(1);
+			write_data_type(bytes, element_type);
+		}
+		DataType::Bool => bytes.push(2),
+		DataType::Dec => bytes.push(3),
+		DataType::EmptyArray => bytes.push(4),
+		DataType::Int => bytes.push(5),
+		DataType::Object(name) => {
+			bytes.push(6);
+			bytes.extend_from_slice(&(name.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(name.as_bytes());
+		}
+		DataType::Range(element_type) => {
+			bytes.push(7);
+			write_data_type(bytes, element_type);
+		}
+		DataType::Text => bytes.push(8),
+		DataType::Void => bytes.push(9),
+	}
+}
+
+fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
+	match instruction {
+		Instruction::Add => bytes.push(OPCODE_ADD),
+		Instruction::And => bytes.push(OPCODE_AND),
+		Instruction::Call(function_index, argument_count) => {
+			bytes.push(OPCODE_CALL);
+			bytes.extend_from_slice(&function_index.to_le_bytes());
+			bytes.extend_from_slice(&argument_count.to_le_bytes());
+		}
+		Instruction::CallBuiltIn(built_in, argument_count) => {
+			bytes.push(OPCODE_CALL_BUILT_IN);
+			bytes.push(built_in.id());
+			bytes.extend_from_slice(&argument_count.to_le_bytes());
+		}
+		Instruction::Divide => bytes.push(OPCODE_DIVIDE),
+		Instruction::Dup2 => bytes.push(OPCODE_DUP2),
+		Instruction::Equal => bytes.push(OPCODE_EQUAL),
+		Instruction::ExecuteQuery(query_index) => {
+			bytes.push(OPCODE_EXECUTE_QUERY);
+			bytes.extend_from_slice(&query_index.to_le_bytes());
+		}
+		Instruction::GreaterThan => bytes.push(OPCODE_GREATER_THAN),
+		Instruction::GreaterThanOrEqual => bytes.push(OPCODE_GREATER_THAN_OR_EQUAL),
+		Instruction::IterHasNext => bytes.push(OPCODE_ITER_HAS_NEXT),
+		Instruction::IterInit => bytes.push(OPCODE_ITER_INIT),
+		Instruction::IterNext => bytes.push(OPCODE_ITER_NEXT),
+		Instruction::Jump(target) => {
+			bytes.push(OPCODE_JUMP);
+			bytes.extend_from_slice(&target.to_le_bytes());
+		}
+		Instruction::JumpIfFalse(target) => {
+			bytes.push(OPCODE_JUMP_IF_FALSE);
+			bytes.extend_from_slice(&target.to_le_bytes());
+		}
+		Instruction::LessThan => bytes.push(OPCODE_LESS_THAN),
+		Instruction::LessThanOrEqual => bytes.push(OPCODE_LESS_THAN_OR_EQUAL),
+		Instruction::LoadField(field_name) => {
+			bytes.push(OPCODE_LOAD_FIELD);
+			bytes.extend_from_slice(&(field_name.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(field_name.as_bytes());
+		}
+		Instruction::LoadFieldPath(field_path) => {
+			bytes.push(OPCODE_LOAD_FIELD_PATH);
+			bytes.extend_from_slice(&(field_path.len() as u32).to_le_bytes());
+
+			for field_name in field_path {
+				bytes.extend_from_slice(&(field_name.len() as u32).to_le_bytes());
+				bytes.extend_from_slice(field_name.as_bytes());
+			}
+		}
+		Instruction::LoadIndex => bytes.push(OPCODE_LOAD_INDEX),
+		Instruction::LoadLocal(slot) => {
+			bytes.push(OPCODE_LOAD_LOCAL);
+			bytes.extend_from_slice(&slot.to_le_bytes());
+		}
+		Instruction::LoadReference(slot) => {
+			bytes.push(OPCODE_LOAD_REFERENCE);
+			bytes.extend_from_slice(&slot.to_le_bytes());
+		}
+		Instruction::MakeArray(element_count) => {
+			bytes.push(OPCODE_MAKE_ARRAY);
+			bytes.extend_from_slice(&element_count.to_le_bytes());
+		}
+		Instruction::MakeObject(field_names) => {
+			bytes.push(OPCODE_MAKE_OBJECT);
+			bytes.extend_from_slice(&(field_names.len() as u32).to_le_bytes());
+
+			for field_name in field_names {
+				bytes.extend_from_slice(&(field_name.len() as u32).to_le_bytes());
+				bytes.extend_from_slice(field_name.as_bytes());
+			}
+		}
+		Instruction::MakeRange => bytes.push(OPCODE_MAKE_RANGE),
+		Instruction::MakeSteppedRange => bytes.push(OPCODE_MAKE_STEPPED_RANGE),
+		Instruction::Modulo => bytes.push(OPCODE_MODULO),
+		Instruction::Multiply => bytes.push(OPCODE_MULTIPLY),
+		Instruction::Negate => bytes.push(OPCODE_NEGATE),
+		Instruction::Not => bytes.push(OPCODE_NOT),
+		Instruction::NotEqual => bytes.push(OPCODE_NOT_EQUAL),
+		Instruction::Or => bytes.push(OPCODE_OR),
+		Instruction::Pop => bytes.push(OPCODE_POP),
+		Instruction::PushBoolean(value) => {
+			bytes.push(OPCODE_PUSH_BOOLEAN);
+			bytes.push(u8::from(*value));
+		}
+		Instruction::PushDecimal(value) => {
+			bytes.push(OPCODE_PUSH_DECIMAL);
+			bytes.extend_from_slice(&value.coefficient.to_le_bytes());
+			bytes.push(value.precision);
+			bytes.push(value.scale);
+		}
+		Instruction::PushInteger(value) => {
+			bytes.push(OPCODE_PUSH_INTEGER);
+			bytes.extend_from_slice(&value.to_le_bytes());
+		}
+		Instruction::PushText(value) => {
+			bytes.push(OPCODE_PUSH_TEXT);
+			bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(value.as_bytes());
+		}
+		Instruction::Return => bytes.push(OPCODE_RETURN),
+		Instruction::ReturnVoid => bytes.push(OPCODE_RETURN_VOID),
+		Instruction::StoreFieldPath(field_path) => {
+			bytes.push(OPCODE_STORE_FIELD_PATH);
+			bytes.extend_from_slice(&(field_path.len() as u32).to_le_bytes());
+
+			for field_name in field_path {
+				bytes.extend_from_slice(&(field_name.len() as u32).to_le_bytes());
+				bytes.extend_from_slice(field_name.as_bytes());
+			}
+		}
+		Instruction::StoreIndex => bytes.push(OPCODE_STORE_INDEX),
+		Instruction::StoreLocal(slot) => {
+			bytes.push(OPCODE_STORE_LOCAL);
+			bytes.extend_from_slice(&slot.to_le_bytes());
+		}
+		Instruction::Subtract => bytes.push(OPCODE_SUBTRACT),
+		Instruction::Xor => bytes.push(OPCODE_XOR),
+	}
+}
+
+fn write_lowered_query(bytes: &mut Vec<u8>, query: &LoweredBackendQuery) {
+	match query {
+		LoweredBackendQuery::Sql(query) => {
+			bytes.push(QUERY_KIND_SQL);
+			write_sql_query(bytes, query);
+		}
+	}
+}
+
+fn write_sql_query(bytes: &mut Vec<u8>, query: &SqlQuery) {
+	bytes.push(match query.dialect {
+		SqlDialect::Sqlite => SQL_DIALECT_SQLITE,
+	});
+	bytes.extend_from_slice(&(query.database_name.len() as u32).to_le_bytes());
+	bytes.extend_from_slice(query.database_name.as_bytes());
+	bytes.extend_from_slice(&(query.statement.len() as u32).to_le_bytes());
+	bytes.extend_from_slice(query.statement.as_bytes());
+	bytes.extend_from_slice(&(query.parameters.len() as u32).to_le_bytes());
+
+	for parameter in &query.parameters {
+		write_data_type(bytes, &parameter.data_type);
+		bytes.extend_from_slice(&parameter.index.to_le_bytes());
+		bytes.extend_from_slice(&parameter.slot.to_le_bytes());
+	}
+}
+
 impl ObjectFileLayout {
 	fn from_program(program: &Program) -> Self {
 		debug_assert!(
@@ -590,6 +721,7 @@ impl ObjectFileLayout {
 
 		Self {
 			debug: program.debug_info().clone(),
+			queries: program.queries().to_vec(),
 			sections,
 		}
 	}
@@ -628,10 +760,11 @@ impl ObjectFileLayout {
 		}
 
 		if let Some(function_index) = entry_function {
-			return Ok(Program::from_entry_function(
+			return Ok(Program::from_entry_function_with_queries(
 				ConstantPool::default(),
 				function_index,
 				functions,
+				self.queries,
 				self.debug,
 			));
 		}
@@ -641,10 +774,11 @@ impl ObjectFileLayout {
 			message: String::from("Object file does not contain an entry point section."),
 		})?;
 
-		Ok(Program::from_parts_with_functions_and_debug(
+		Ok(Program::from_parts_with_functions_queries_and_debug(
 			ConstantPool::default(),
 			entry_code,
 			functions,
+			self.queries,
 			self.debug,
 		))
 	}
@@ -673,6 +807,11 @@ impl ObjectFileLayout {
 				bytes.extend_from_slice(&function_index.to_le_bytes());
 			}
 			Some(ObjectFileSection::Function(_)) | None => unreachable!("Object file layout must include a non-function entry point section."),
+		}
+
+		bytes.extend_from_slice(&(self.queries.len() as u32).to_le_bytes());
+		for query in &self.queries {
+			write_lowered_query(bytes, query);
 		}
 
 		bytes.extend_from_slice(&(self.debug.source_files().len() as u32).to_le_bytes());
