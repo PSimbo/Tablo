@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt::Display;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -16,6 +17,7 @@ pub enum Value {
 	Integer(i64),
 	IntegerRange(IntegerRange),
 	Iterator(IteratorState),
+	Object(BTreeMap<String, Value>),
 	Reference(LocalReference),
 	Text(String),
 }
@@ -42,6 +44,19 @@ impl Display for Value {
 			Value::Integer(value) => write!(f, "{value}"),
 			Value::IntegerRange(range) => write!(f, "{range}"),
 			Value::Iterator(_) => write!(f, "<iterator>"),
+			Value::Object(fields) => {
+				write!(f, "{{")?;
+
+				for (index, (name, value)) in fields.iter().enumerate() {
+					if index > 0 {
+						write!(f, ", ")?;
+					}
+
+					write!(f, "{name}: {value}")?;
+				}
+
+				write!(f, "}}")
+			}
 			Value::Reference(_) => write!(f, "<reference>"),
 			Value::Text(value) => write!(f, "{value}"),
 		}

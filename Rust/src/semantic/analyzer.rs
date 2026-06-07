@@ -12,12 +12,15 @@ use crate::ast::CallExpr;
 use crate::ast::ContinueStatement;
 use crate::ast::DataType;
 use crate::ast::Expr;
+use crate::ast::FieldAccessExpr;
 use crate::ast::ForStatement;
 use crate::ast::FunctionDeclaration;
 use crate::ast::FunctionParameter;
 use crate::ast::IdentifierExpr;
 use crate::ast::IfStatement;
 use crate::ast::IndexExpr;
+use crate::ast::ObjectConstructionExpr;
+use crate::ast::ObjectDeclaration;
 use crate::ast::Program;
 use crate::ast::RangeExpr;
 use crate::ast::ReturnStatement;
@@ -79,6 +82,7 @@ pub struct SemanticProgram {
 	function_declaration_targets: BTreeMap<usize, u32>,
 	identifier_slots: BTreeMap<usize, u32>,
 	iterator_slots: BTreeMap<usize, u32>,
+	object_declarations: BTreeMap<String, ObjectDeclaration>,
 }
 
 impl SemanticProgram {
@@ -125,6 +129,10 @@ impl SemanticProgram {
 	pub fn iterator_slot(&self, position: usize) -> Option<u32> {
 		self.iterator_slots.get(&position).copied()
 	}
+
+	pub fn object_declaration(&self, name: &str) -> Option<&ObjectDeclaration> {
+		self.object_declarations.get(name)
+	}
 }
 
 impl SemanticAnalyzer {
@@ -149,8 +157,13 @@ impl SemanticAnalyzer {
 		self.next_local_slot = 0;
 		self.semantic_program = SemanticProgram::default();
 
+		self.collect_object_declarations(&program.objects)?;
 		self.functions.enter_scope();
 		self.collect_scope_function_signatures(&program.functions, &program.statements)?;
+
+		for object in &program.objects {
+			self.validate_object_declaration(object)?;
+		}
 
 		for function in &program.functions {
 			self.validate_function_declaration(function)?;
@@ -286,6 +299,21 @@ impl SemanticAnalyzer {
 		block.statements.iter().any(|statement| self.statement_guarantees_return(statement))
 	}
 
+	fn collect_object_declarations(&mut self, objects: &[ObjectDeclaration]) -> Result<(), CompileError> {
+		for object in objects {
+			if self.semantic_program.object_declarations.contains_key(&object.name) {
+				return Err(self.compile_error(
+					object.position,
+					format!("Object `{}` is already declared in this module.", object.name),
+				));
+			}
+
+			self.semantic_program.object_declarations.insert(object.name.clone(), object.clone());
+		}
+
+		Ok(())
+	}
+
 	fn collect_scope_function_signatures(&mut self, functions: &[FunctionDeclaration], statements: &[Statement]) -> Result<(), CompileError> {
 		for function in functions {
 			self.declare_function_signature(function)?;
@@ -357,6 +385,13 @@ impl SemanticAnalyzer {
 		self.locals.contains_in_current_scope(name)
 	}
 
+	fn data_type_has_implicit_default(&self, data_type: &DataType) -> bool {
+		match data_type {
+			DataType::Array(_) | DataType::Bool | DataType::Dec | DataType::Int | DataType::Object(_) | DataType::Text => true,
+			DataType::EmptyArray | DataType::Range(_) | DataType::Void => false,
+		}
+	}
+
 	fn data_type_name(&self, data_type: &DataType) -> String {
 		match data_type {
 			DataType::Array(element_type) => format!("[{}]", self.data_type_name(element_type)),
@@ -364,6 +399,7 @@ impl SemanticAnalyzer {
 			DataType::Dec => String::from("dec"),
 			DataType::EmptyArray => String::from("empty array"),
 			DataType::Int => String::from("int"),
+			DataType::Object(name) => name.clone(),
 			DataType::Range(element_type) => format!("range<{}>", self.data_type_name(element_type)),
 			DataType::Text => String::from("text"),
 			DataType::Void => String::from("void"),
@@ -626,6 +662,26 @@ impl SemanticAnalyzer {
 				}
 			}
 			Expr::Decimal(_) => Ok(DataType::Dec),
+			Expr::FieldAccess(FieldAccessExpr { field, object, .. }) => {
+				let object_type = self.infer_expression_type(object)?;
+
+				match object_type {
+					DataType::Object(name) => {
+						let field_type = self.lookup_object_field(&name, &field.name)
+							.ok_or(self.compile_error(
+								field.position,
+								format!("Object `{name}` does not contain a field named `{}`.", field.name),
+							))?
+							.data_type
+							.clone();
+						Ok(field_type)
+					}
+					other => Err(self.compile_error(
+						object.position(),
+						format!("Field access requires an object operand, found `{}`.", self.data_type_name(&other)),
+					)),
+				}
+			}
 			Expr::Identifier(IdentifierExpr { name, .. }) => {
 				let local = self.lookup_local(name).ok_or(self.compile_error(
 					expression.position(),
@@ -667,6 +723,52 @@ impl SemanticAnalyzer {
 				}
 			}
 			Expr::Integer(_) => Ok(DataType::Int),
+			Expr::ObjectConstruction(ObjectConstructionExpr {
+				fields,
+				object_type_name,
+				position,
+			}) => {
+				let object_declaration = self.semantic_program.object_declaration(object_type_name)
+					.cloned()
+					.ok_or(self.compile_error(
+						*position,
+						format!("Object `{object_type_name}` is not declared in this module."),
+					))?;
+				let mut provided_fields = BTreeMap::new();
+
+				for field in fields {
+					let Some(object_field) = object_declaration.fields.iter().find(|object_field| object_field.name == field.name) else {
+						return Err(self.compile_error(
+							field.position,
+							format!("Object `{object_type_name}` does not contain a field named `{}`.", field.name),
+						));
+					};
+
+					if provided_fields.insert(field.name.clone(), ()).is_some() {
+						return Err(self.compile_error(
+							field.position,
+							format!("Field `{}` is specified more than once when constructing `{object_type_name}`.", field.name),
+						));
+					}
+
+					let value_type = self.infer_expression_type(&field.value)?;
+					self.ensure_assignable(&object_field.data_type, &value_type, field.value.position())?;
+				}
+
+				for object_field in &object_declaration.fields {
+					if !provided_fields.contains_key(&object_field.name)
+						&& object_field.default_value.is_none()
+						&& !self.data_type_has_implicit_default(&object_field.data_type)
+					{
+						return Err(self.compile_error(
+							*position,
+							format!("Field `{}` must be specified when constructing `{object_type_name}`.", object_field.name),
+						));
+					}
+				}
+
+				Ok(DataType::Object(object_type_name.clone()))
+			}
 			Expr::Range(RangeExpr { start, step, end, position }) => {
 				let start_type = self.infer_expression_type(start)?;
 				let end_type = self.infer_expression_type(end)?;
@@ -746,6 +848,13 @@ impl SemanticAnalyzer {
 
 	fn lookup_local(&self, name: &str) -> Option<LocalBinding> {
 		self.locals.lookup(name).cloned()
+	}
+
+	fn lookup_object_field(&self, object_name: &str, field_name: &str) -> Option<&crate::ast::ObjectFieldDeclaration> {
+		self.semantic_program.object_declaration(object_name)?
+			.fields
+			.iter()
+			.find(|field| field.name == field_name)
 	}
 
 	fn merge_array_element_types(&self, lhs: &DataType, rhs: &DataType, position: usize) -> Result<DataType, CompileError> {
@@ -968,6 +1077,28 @@ impl SemanticAnalyzer {
 		Ok(())
 	}
 
+	fn validate_literal_expression(&mut self, expression: &Expr) -> Result<(), CompileError> {
+		match expression {
+			Expr::Array(array) => {
+				for element in &array.elements {
+					self.validate_literal_expression(element)?;
+				}
+				Ok(())
+			}
+			Expr::Boolean(_) | Expr::Decimal(_) | Expr::Integer(_) | Expr::Text(_) => Ok(()),
+			Expr::ObjectConstruction(construction) => {
+				for field in &construction.fields {
+					self.validate_literal_expression(&field.value)?;
+				}
+				Ok(())
+			}
+			_ => Err(self.compile_error(
+				expression.position(),
+				String::from("Object field defaults must be literals."),
+			)),
+		}
+	}
+
 	fn validate_main_entry_point(&self, program: &Program, main_function: &FunctionDeclaration) -> Result<(), CompileError> {
 		if let Some(statement) = program.statements.first() {
 			return Err(self.compile_error(
@@ -1002,8 +1133,46 @@ impl SemanticAnalyzer {
 		match data_type {
 			DataType::Void | DataType::EmptyArray => Err(self.compile_error(position, message)),
 			DataType::Array(element_type) => self.validate_non_void_data_type(element_type, position, message),
+			DataType::Object(name) => {
+				if self.semantic_program.object_declarations.contains_key(name) {
+					Ok(())
+				}
+				else {
+					Err(self.compile_error(
+						position,
+						format!("Object type `{name}` is not declared in this module."),
+					))
+				}
+			}
 			_ => Ok(()),
 		}
+	}
+
+	fn validate_object_declaration(&mut self, object: &ObjectDeclaration) -> Result<(), CompileError> {
+		let mut field_names = BTreeMap::new();
+
+		for field in &object.fields {
+			if field_names.insert(field.name.clone(), ()).is_some() {
+				return Err(self.compile_error(
+					field.position,
+					format!("Field `{}` is already declared on object `{}`.", field.name, object.name),
+				));
+			}
+
+			self.validate_non_void_data_type(
+				&field.data_type,
+				field.position,
+				format!("Field `{}` cannot have type `{}`.", field.name, self.data_type_name(&field.data_type)),
+			)?;
+
+			if let Some(default_value) = &field.default_value {
+				self.validate_literal_expression(default_value)?;
+				let default_type = self.infer_expression_type(default_value)?;
+				self.ensure_assignable(&field.data_type, &default_type, default_value.position())?;
+			}
+		}
+
+		Ok(())
 	}
 
 	fn validate_statement(&mut self, statement: &Statement) -> Result<(), CompileError> {

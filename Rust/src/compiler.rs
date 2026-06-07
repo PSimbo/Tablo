@@ -13,11 +13,13 @@ use crate::ast::CallExpr;
 use crate::ast::ContinueStatement;
 use crate::ast::DecimalLiteral;
 use crate::ast::Expr;
+use crate::ast::FieldAccessExpr;
 use crate::ast::ForStatement;
 use crate::ast::FunctionDeclaration;
 use crate::ast::IdentifierExpr;
 use crate::ast::IfStatement;
 use crate::ast::IndexExpr;
+use crate::ast::ObjectConstructionExpr;
 use crate::ast::Program as AstProgram;
 use crate::ast::RangeExpr;
 use crate::ast::ReturnStatement;
@@ -297,6 +299,10 @@ impl Compiler {
 			Expr::Decimal(DecimalLiteral { value, .. }) => {
 				self.emit(emission, Instruction::PushDecimal(value.clone()), expression.position());
 			}
+			Expr::FieldAccess(FieldAccessExpr { field, object, .. }) => {
+				self.compile_into(object, semantic_program, emission);
+				self.emit(emission, Instruction::LoadField(field.name.clone()), expression.position());
+			}
 			Expr::Identifier(IdentifierExpr { name, .. }) => {
 				let slot = semantic_program.identifier_slot(expression.position())
 					.unwrap_or_else(|| panic!("Missing slot for identifier `{name}`."));
@@ -309,6 +315,40 @@ impl Compiler {
 			}
 			Expr::Integer(integer) => {
 				self.emit(emission, Instruction::PushInteger(integer.value), expression.position());
+			}
+			Expr::ObjectConstruction(ObjectConstructionExpr { fields, object_type_name, .. }) => {
+				let object_declaration = semantic_program.object_declaration(object_type_name);
+
+				if let Some(object_declaration) = object_declaration {
+					for field in &object_declaration.fields {
+						if let Some(provided_field) = fields.iter().find(|provided_field| provided_field.name == field.name) {
+							self.compile_into(&provided_field.value, semantic_program, emission);
+						}
+						else if let Some(default_value) = &field.default_value {
+							self.compile_into(default_value, semantic_program, emission);
+						}
+						else {
+							self.emit_default_value(&field.data_type, semantic_program, emission, expression.position());
+						}
+					}
+
+					self.emit(
+						emission,
+						Instruction::MakeObject(object_declaration.fields.iter().map(|field| field.name.clone()).collect()),
+						expression.position(),
+					);
+				}
+				else {
+					for field in fields {
+						self.compile_into(&field.value, semantic_program, emission);
+					}
+
+					self.emit(
+						emission,
+						Instruction::MakeObject(fields.iter().map(|field| field.name.clone()).collect()),
+						expression.position(),
+					);
+				}
 			}
 			Expr::Range(RangeExpr { start, step, end, .. }) => {
 				self.compile_into(start, semantic_program, emission);
@@ -592,6 +632,58 @@ impl Compiler {
 		emission.positions.push(position.min(u32::MAX as usize) as u32);
 	}
 
+	fn emit_default_value(
+		&mut self,
+		data_type: &crate::ast::DataType,
+		semantic_program: &SemanticProgram,
+		emission: &mut EmissionState,
+		position: usize,
+	) {
+		match data_type {
+			crate::ast::DataType::Array(_) => {
+				self.emit(emission, Instruction::MakeArray(0), position);
+			}
+			crate::ast::DataType::Bool => {
+				self.emit(emission, Instruction::PushBoolean(false), position);
+			}
+			crate::ast::DataType::Dec => {
+				self.emit(
+					emission,
+					Instruction::PushDecimal(crate::value::Decimal::from_literal("0.0").unwrap()),
+					position,
+				);
+			}
+			crate::ast::DataType::Int => {
+				self.emit(emission, Instruction::PushInteger(0), position);
+			}
+			crate::ast::DataType::Object(name) => {
+				let object_declaration = semantic_program.object_declaration(name)
+					.unwrap_or_else(|| panic!("Missing object declaration for `{name}`."));
+
+				for field in &object_declaration.fields {
+					if let Some(default_value) = &field.default_value {
+						self.compile_into(default_value, semantic_program, emission);
+					}
+					else {
+						self.emit_default_value(&field.data_type, semantic_program, emission, position);
+					}
+				}
+
+				self.emit(
+					emission,
+					Instruction::MakeObject(object_declaration.fields.iter().map(|field| field.name.clone()).collect()),
+					position,
+				);
+			}
+			crate::ast::DataType::Text => {
+				self.emit(emission, Instruction::PushText(String::new()), position);
+			}
+			crate::ast::DataType::EmptyArray | crate::ast::DataType::Range(_) | crate::ast::DataType::Void => {
+				panic!("Cannot emit an implicit default value for `{}`.", data_type_name(data_type));
+			}
+		}
+	}
+
 	fn enter_debug_scope(&self, emission: &mut EmissionState) {
 		emission.local_scope_stack.push(Vec::new());
 	}
@@ -686,6 +778,7 @@ fn data_type_name(data_type: &crate::ast::DataType) -> String {
 		crate::ast::DataType::Dec => String::from("dec"),
 		crate::ast::DataType::EmptyArray => String::from("empty array"),
 		crate::ast::DataType::Int => String::from("int"),
+		crate::ast::DataType::Object(name) => name.clone(),
 		crate::ast::DataType::Range(element_type) => format!("range<{}>", data_type_name(element_type)),
 		crate::ast::DataType::Text => String::from("text"),
 		crate::ast::DataType::Void => String::from("void"),
@@ -800,6 +893,7 @@ mod tests {
 	fn compiles_built_in_len_call() {
 		let program = AstProgram {
 			functions: vec![],
+			objects: vec![],
 			statements: vec![],
 			result: Some(Expr::Call(CallExpr {
 				arguments: vec![
@@ -843,6 +937,7 @@ mod tests {
 	fn compiles_compound_assignment_expression() {
 		let program = AstProgram {
 			functions: vec![],
+			objects: vec![],
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
@@ -886,6 +981,7 @@ mod tests {
 	fn compiles_compound_indexed_assignment_expression() {
 		let program = AstProgram {
 			functions: vec![],
+			objects: vec![],
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Array(Box::new(DataType::Int)),
@@ -950,6 +1046,7 @@ mod tests {
 	fn compiles_const_declaration() {
 		let program = AstProgram {
 			functions: vec![],
+			objects: vec![],
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
@@ -1019,6 +1116,7 @@ mod tests {
 	fn compiles_expression_statement_to_pop_its_result() {
 		let program = AstProgram {
 			functions: vec![],
+			objects: vec![],
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
@@ -1068,6 +1166,7 @@ mod tests {
 	fn compiles_for_statement() {
 		let program = AstProgram {
 			functions: vec![],
+			objects: vec![],
 			statements: vec![
 				Statement::For(ForStatement {
 					body: BlockStatement {
@@ -1127,6 +1226,7 @@ mod tests {
 	fn compiles_if_else_statement() {
 		let program = AstProgram {
 			functions: vec![],
+			objects: vec![],
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
@@ -1210,6 +1310,7 @@ mod tests {
 	fn compiles_if_without_else_statement() {
 		let program = AstProgram {
 			functions: vec![],
+			objects: vec![],
 			statements: vec![
 				Statement::If(IfStatement {
 					condition: Expr::Boolean(BooleanLiteral {
@@ -1337,6 +1438,7 @@ mod tests {
 	fn compiles_program_with_variable_declarations() {
 		let program = AstProgram {
 			functions: vec![],
+			objects: vec![],
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
@@ -1435,6 +1537,7 @@ mod tests {
 	fn compiles_while_statement() {
 		let program = AstProgram {
 			functions: vec![],
+			objects: vec![],
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
@@ -1509,6 +1612,7 @@ mod tests {
 	fn compiles_while_statement_with_break_and_continue() {
 		let program = AstProgram {
 			functions: vec![],
+			objects: vec![],
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
@@ -1606,6 +1710,7 @@ mod tests {
 	fn rejects_assignment_to_const() {
 		let program = AstProgram {
 			functions: vec![],
+			objects: vec![],
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
@@ -1641,6 +1746,7 @@ mod tests {
 	fn rejects_compound_assignment_when_result_type_changes() {
 		let program = AstProgram {
 			functions: vec![],
+			objects: vec![],
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
@@ -1676,6 +1782,7 @@ mod tests {
 	fn rejects_non_boolean_if_condition() {
 		let program = AstProgram {
 			functions: vec![],
+			objects: vec![],
 			statements: vec![
 				Statement::If(IfStatement {
 					condition: Expr::Integer(IntegerLiteral {
@@ -1703,6 +1810,7 @@ mod tests {
 	fn rejects_non_boolean_while_condition() {
 		let program = AstProgram {
 			functions: vec![],
+			objects: vec![],
 			statements: vec![
 				Statement::While(WhileStatement {
 					body: BlockStatement {
@@ -1729,6 +1837,7 @@ mod tests {
 	fn rejects_wrong_type_in_assignment() {
 		let program = AstProgram {
 			functions: vec![],
+			objects: vec![],
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,
@@ -1764,6 +1873,7 @@ mod tests {
 	fn rejects_wrong_type_in_variable_initializer() {
 		let program = AstProgram {
 			functions: vec![],
+			objects: vec![],
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
 					data_type: DataType::Int,

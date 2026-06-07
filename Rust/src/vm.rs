@@ -357,6 +357,11 @@ impl VirtualMachine {
 				self.stack.push(compare_values(lhs, rhs, instruction_index, ComparisonKind::LessThanOrEqual)?);
 				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::LoadField(field_name) => {
+				let object = self.pop_value(instruction_index)?;
+				self.stack.push(load_field_value(object, field_name, instruction_index)?);
+				Ok(ExecutionOutcome::Continue(None))
+			}
 			Instruction::LoadIndex => {
 				let index = self.pop_value(instruction_index)?;
 				let array = self.pop_value(instruction_index)?;
@@ -399,6 +404,18 @@ impl VirtualMachine {
 
 				values.reverse();
 				self.stack.push(Value::Array(values));
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::MakeObject(field_names) => {
+				let mut values = Vec::with_capacity(field_names.len());
+
+				for _ in 0..field_names.len() {
+					values.push(self.pop_value(instruction_index)?);
+				}
+
+				values.reverse();
+				let fields = field_names.iter().cloned().zip(values).collect();
+				self.stack.push(Value::Object(fields));
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::MakeRange => {
@@ -583,7 +600,7 @@ impl VirtualMachine {
 	fn pop_numeric(&mut self, instruction_index: usize) -> Result<Value, VmError> {
 		let value = self.pop_value(instruction_index)?;
 
-		if matches!(value, Value::Array(_) | Value::Boolean(_) | Value::DecimalRange(_) | Value::IntegerRange(_) | Value::Iterator(_) | Value::Reference(_) | Value::Text(_)) {
+		if matches!(value, Value::Array(_) | Value::Boolean(_) | Value::DecimalRange(_) | Value::IntegerRange(_) | Value::Iterator(_) | Value::Object(_) | Value::Reference(_) | Value::Text(_)) {
 			return Err(VmError {
 				instruction_index,
 				message: format!("Expected a numeric operand, found a {} value.", type_name(&value)),
@@ -842,6 +859,7 @@ fn equals_value(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Valu
 	let value = match (lhs, rhs) {
 		(Value::Array(lhs), Value::Array(rhs)) => lhs == rhs,
 		(Value::Boolean(lhs), Value::Boolean(rhs)) => lhs == rhs,
+		(Value::Object(lhs), Value::Object(rhs)) => lhs == rhs,
 		(Value::Text(lhs), Value::Text(rhs)) => lhs == rhs,
 		(lhs @ Value::Iterator(_), rhs) | (lhs, rhs @ Value::Iterator(_)) => {
 			return Err(vm_error(
@@ -850,6 +868,12 @@ fn equals_value(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Valu
 			));
 		}
 		(lhs @ Value::Array(_), rhs) | (lhs, rhs @ Value::Array(_)) => {
+			return Err(vm_error(
+				instruction_index,
+				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
+			));
+		}
+		(lhs @ Value::Object(_), rhs) | (lhs, rhs @ Value::Object(_)) => {
 			return Err(vm_error(
 				instruction_index,
 				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
@@ -948,6 +972,19 @@ fn iterator_next_value(iterator: Value, instruction_index: usize) -> Result<(Val
 			iterator.next_value = if in_bounds { next_value } else { None };
 			Ok((Value::Integer(value), Value::Iterator(IteratorState::IntegerRange(iterator))))
 		}
+	}
+}
+
+fn load_field_value(object: Value, field_name: &str, instruction_index: usize) -> Result<Value, VmError> {
+	match object {
+		Value::Object(fields) => fields.get(field_name).cloned().ok_or(vm_error(
+			instruction_index,
+			format!("Object does not contain a field named `{field_name}`."),
+		)),
+		other => Err(vm_error(
+			instruction_index,
+			format!("Field access requires an object operand, found `{}`.", type_name(&other)),
+		)),
 	}
 }
 
@@ -1150,6 +1187,7 @@ fn negate_value(value: Value) -> Value {
 		Value::Integer(integer) => Value::Integer(integer.saturating_neg()),
 		Value::IntegerRange(_) => unreachable!("Range values are rejected before numeric negation."),
 		Value::Iterator(_) => unreachable!("Iterator values are rejected before numeric negation."),
+		Value::Object(_) => unreachable!("Object values are rejected before numeric negation."),
 		Value::Reference(_) => unreachable!("Reference values are resolved before numeric negation."),
 		Value::Text(_) => unreachable!("Text values are rejected before numeric negation."),
 	}
@@ -1241,6 +1279,22 @@ fn stringify_value(value: &Value) -> String {
 		Value::Integer(value) => value.to_string(),
 		Value::IntegerRange(value) => value.to_string(),
 		Value::Iterator(_) => String::from("<iterator>"),
+		Value::Object(fields) => {
+			let mut result = String::from("{");
+
+			for (index, (name, value)) in fields.iter().enumerate() {
+				if index > 0 {
+					result.push_str(", ");
+				}
+
+				result.push_str(name);
+				result.push_str(": ");
+				result.push_str(&stringify_value(value));
+			}
+
+			result.push('}');
+			result
+		}
 		Value::Reference(_) => String::from("<reference>"),
 		Value::Text(value) => value.clone(),
 	}
@@ -1261,12 +1315,13 @@ fn type_name(value: &Value) -> &'static str {
 		Value::Array(_) => "array",
 		Value::Boolean(_) => "bool",
 		Value::Decimal(_) => "dec",
-	Value::DecimalRange(_) => "range",
-	Value::Integer(_) => "int",
-	Value::IntegerRange(_) => "range",
-	Value::Iterator(_) => "iterator",
-	Value::Reference(_) => "reference",
-	Value::Text(_) => "text",
+		Value::DecimalRange(_) => "range",
+		Value::Integer(_) => "int",
+		Value::IntegerRange(_) => "range",
+		Value::Iterator(_) => "iterator",
+		Value::Object(_) => "object",
+		Value::Reference(_) => "reference",
+		Value::Text(_) => "text",
 	}
 }
 

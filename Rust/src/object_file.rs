@@ -59,6 +59,8 @@ const OPCODE_CALL_BUILT_IN: u8 = 36;
 const OPCODE_DUP2: u8 = 37;
 const OPCODE_MAKE_RANGE: u8 = 38;
 const OPCODE_MAKE_STEPPED_RANGE: u8 = 39;
+const OPCODE_MAKE_OBJECT: u8 = 40;
+const OPCODE_LOAD_FIELD: u8 = 41;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectFileError {
@@ -159,6 +161,11 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 		}
 		Instruction::LessThan => bytes.push(OPCODE_LESS_THAN),
 		Instruction::LessThanOrEqual => bytes.push(OPCODE_LESS_THAN_OR_EQUAL),
+		Instruction::LoadField(field_name) => {
+			bytes.push(OPCODE_LOAD_FIELD);
+			bytes.extend_from_slice(&(field_name.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(field_name.as_bytes());
+		}
 		Instruction::LoadIndex => bytes.push(OPCODE_LOAD_INDEX),
 		Instruction::LoadLocal(slot) => {
 			bytes.push(OPCODE_LOAD_LOCAL);
@@ -171,6 +178,15 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 		Instruction::MakeArray(element_count) => {
 			bytes.push(OPCODE_MAKE_ARRAY);
 			bytes.extend_from_slice(&element_count.to_le_bytes());
+		}
+		Instruction::MakeObject(field_names) => {
+			bytes.push(OPCODE_MAKE_OBJECT);
+			bytes.extend_from_slice(&(field_names.len() as u32).to_le_bytes());
+
+			for field_name in field_names {
+				bytes.extend_from_slice(&(field_name.len() as u32).to_le_bytes());
+				bytes.extend_from_slice(field_name.as_bytes());
+			}
 		}
 		Instruction::MakeRange => bytes.push(OPCODE_MAKE_RANGE),
 		Instruction::MakeSteppedRange => bytes.push(OPCODE_MAKE_STEPPED_RANGE),
@@ -419,10 +435,21 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_JUMP_IF_FALSE => Ok(Instruction::JumpIfFalse(self.read_u32()?)),
 			OPCODE_LESS_THAN => Ok(Instruction::LessThan),
 			OPCODE_LESS_THAN_OR_EQUAL => Ok(Instruction::LessThanOrEqual),
+			OPCODE_LOAD_FIELD => Ok(Instruction::LoadField(self.read_string()?)),
 			OPCODE_LOAD_INDEX => Ok(Instruction::LoadIndex),
 			OPCODE_LOAD_LOCAL => Ok(Instruction::LoadLocal(self.read_u32()?)),
 			OPCODE_LOAD_REFERENCE => Ok(Instruction::LoadReference(self.read_u32()?)),
 			OPCODE_MAKE_ARRAY => Ok(Instruction::MakeArray(self.read_u32()?)),
+			OPCODE_MAKE_OBJECT => {
+				let field_count = self.read_u32()? as usize;
+				let mut field_names = Vec::with_capacity(field_count);
+
+				for _ in 0..field_count {
+					field_names.push(self.read_string()?);
+				}
+
+				Ok(Instruction::MakeObject(field_names))
+			}
 			OPCODE_MAKE_RANGE => Ok(Instruction::MakeRange),
 			OPCODE_MAKE_STEPPED_RANGE => Ok(Instruction::MakeSteppedRange),
 			OPCODE_MODULO => Ok(Instruction::Modulo),

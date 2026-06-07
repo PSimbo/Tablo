@@ -41,6 +41,7 @@ pub enum DataType {
 	Dec,
 	EmptyArray,
 	Int,
+	Object(String),
 	Range(Box<DataType>),
 	Text,
 	Void,
@@ -54,9 +55,11 @@ pub enum Expr {
 	Boolean(BooleanLiteral),
 	Call(CallExpr),
 	Decimal(DecimalLiteral),
+	FieldAccess(FieldAccessExpr),
 	Identifier(IdentifierExpr),
 	Index(IndexExpr),
 	Integer(IntegerLiteral),
+	ObjectConstruction(ObjectConstructionExpr),
 	Range(RangeExpr),
 	Text(TextLiteral),
 	Unary(UnaryExpr),
@@ -154,6 +157,13 @@ pub struct DecimalLiteral {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FieldAccessExpr {
+	pub field: IdentifierExpr,
+	pub object: Box<Expr>,
+	pub position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ForStatement {
 	pub body: BlockStatement,
 	pub iterable: Expr,
@@ -206,8 +216,38 @@ pub struct IntegerLiteral {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObjectConstructionExpr {
+	pub fields: Vec<ObjectConstructionField>,
+	pub object_type_name: String,
+	pub position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObjectConstructionField {
+	pub name: String,
+	pub position: usize,
+	pub value: Expr,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObjectDeclaration {
+	pub fields: Vec<ObjectFieldDeclaration>,
+	pub name: String,
+	pub position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObjectFieldDeclaration {
+	pub data_type: DataType,
+	pub default_value: Option<Expr>,
+	pub name: String,
+	pub position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Program {
 	pub functions: Vec<FunctionDeclaration>,
+	pub objects: Vec<ObjectDeclaration>,
 	pub result: Option<Expr>,
 	pub statements: Vec<Statement>,
 }
@@ -264,9 +304,11 @@ impl Expr {
 			Expr::Boolean(expression) => expression.position,
 			Expr::Call(expression) => expression.position,
 			Expr::Decimal(expression) => expression.position,
+			Expr::FieldAccess(expression) => expression.position,
 			Expr::Identifier(expression) => expression.position,
 			Expr::Index(expression) => expression.position,
 			Expr::Integer(expression) => expression.position,
+			Expr::ObjectConstruction(expression) => expression.position,
 			Expr::Range(expression) => expression.position,
 			Expr::Text(expression) => expression.position,
 			Expr::Unary(expression) => expression.position,

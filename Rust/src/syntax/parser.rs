@@ -14,6 +14,7 @@ use crate::ast::ContinueStatement;
 use crate::ast::DataType;
 use crate::ast::DecimalLiteral;
 use crate::ast::Expr;
+use crate::ast::FieldAccessExpr;
 use crate::ast::ForStatement;
 use crate::ast::FunctionDeclaration;
 use crate::ast::FunctionParameter;
@@ -21,6 +22,10 @@ use crate::ast::IdentifierExpr;
 use crate::ast::IfStatement;
 use crate::ast::IndexExpr;
 use crate::ast::IntegerLiteral;
+use crate::ast::ObjectConstructionExpr;
+use crate::ast::ObjectConstructionField;
+use crate::ast::ObjectDeclaration;
+use crate::ast::ObjectFieldDeclaration;
 use crate::ast::Program;
 use crate::ast::RangeExpr;
 use crate::ast::ReturnStatement;
@@ -78,6 +83,7 @@ impl Parser {
 
 	pub fn parse_program(&mut self) -> Result<Program, ParseError> {
 		let mut functions = Vec::new();
+		let mut objects = Vec::new();
 		let mut statements = Vec::new();
 		let mut result = None;
 
@@ -86,6 +92,9 @@ impl Parser {
 				Some(token) if token.kind == TokenKind::EndOfFile => break,
 				Some(token) if token.kind == TokenKind::FnKeyword => {
 					functions.push(self.parse_function_declaration()?);
+				}
+				Some(token) if token.kind == TokenKind::ObjKeyword => {
+					objects.push(self.parse_object_declaration()?);
 				}
 				Some(token) if matches!(token.kind, TokenKind::BreakKeyword | TokenKind::ConstKeyword | TokenKind::ContinueKeyword | TokenKind::ForKeyword | TokenKind::IfKeyword | TokenKind::LeftBrace | TokenKind::ReturnKeyword | TokenKind::VarKeyword | TokenKind::WhileKeyword) => {
 					statements.push(self.parse_statement()?);
@@ -110,6 +119,7 @@ impl Parser {
 
 		Ok(Program {
 			functions,
+			objects,
 			result,
 			statements,
 		})
@@ -369,6 +379,7 @@ impl Parser {
 		match token.kind {
 			TokenKind::BoolKeyword => Ok(DataType::Bool),
 			TokenKind::DecKeyword => Ok(DataType::Dec),
+			TokenKind::Identifier => Ok(DataType::Object(token.lexeme)),
 			TokenKind::IntKeyword => Ok(DataType::Int),
 			TokenKind::LeftBracket => {
 				let element_type = self.parse_data_type()?;
@@ -405,10 +416,12 @@ impl Parser {
 				TokenKind::Asterisk => BindingPower::Multiplicative,
 				TokenKind::BangEqual => BindingPower::Equality,
 				TokenKind::Dash => BindingPower::Additive,
+				TokenKind::Dot => BindingPower::Call,
 				TokenKind::EqualEqual => BindingPower::Equality,
 				TokenKind::ForwardSlash => BindingPower::Multiplicative,
 				TokenKind::GreaterThan => BindingPower::Comparison,
 				TokenKind::GreaterThanOrEqual => BindingPower::Comparison,
+				TokenKind::LeftBrace if matches!(left, Expr::Identifier(_)) => BindingPower::Call,
 				TokenKind::LeftBracket => BindingPower::Call,
 				TokenKind::LeftParenthesis => BindingPower::Call,
 				TokenKind::LessThan => BindingPower::Comparison,
@@ -429,6 +442,19 @@ impl Parser {
 		}
 
 		Ok(left)
+	}
+
+	fn parse_field_access_expression(&mut self, object: Expr, start: usize) -> Result<Expr, ParseError> {
+		let field = self.expect_token(TokenKind::Identifier, "Expected field name after `.`.")?;
+
+		Ok(Expr::FieldAccess(FieldAccessExpr {
+			field: IdentifierExpr {
+				name: field.lexeme,
+				position: field.start,
+			},
+			object: Box::new(object),
+			position: start,
+		}))
 	}
 
 	fn parse_for_statement(&mut self) -> Result<Statement, ParseError> {
@@ -625,6 +651,7 @@ impl Parser {
 					right: Box::new(right),
 				}))
 			}
+			TokenKind::Dot => self.parse_field_access_expression(left, operator.start),
 			TokenKind::EqualEqual => {
 				let right = self.parse_expression_with_binding_power(binding_power)?;
 
@@ -665,6 +692,7 @@ impl Parser {
 					right: Box::new(right),
 				}))
 			}
+			TokenKind::LeftBrace => self.parse_object_construction_expression(left, operator.start),
 			TokenKind::LeftBracket => self.parse_index_expression(left, operator.start),
 			TokenKind::LeftParenthesis => self.parse_call_expression(left, operator.start),
 			TokenKind::LessThan => {
@@ -819,6 +847,106 @@ impl Parser {
 			operator: UnaryOperator::Not,
 			position,
 		}))
+	}
+
+	fn parse_object_construction_expression(&mut self, object_type: Expr, start: usize) -> Result<Expr, ParseError> {
+		let object_type_name = match object_type {
+			Expr::Identifier(identifier) => identifier.name,
+			_ => {
+				return Err(ParseError {
+					message: String::from("Object construction target must be an identifier."),
+					position: start,
+				});
+			}
+		};
+
+		let mut fields = Vec::new();
+
+		if !self.current().is_some_and(|token| token.kind == TokenKind::RightBrace) {
+			loop {
+				let name = self.expect_token(TokenKind::Identifier, "Expected object field name.")?;
+				self.expect_token(TokenKind::Colon, "Expected `:` after object field name.")?;
+				let value = self.parse_assignment_expression()?;
+				fields.push(ObjectConstructionField {
+					name: name.lexeme,
+					position: name.start,
+					value,
+				});
+
+				match self.current() {
+					Some(token) if token.kind == TokenKind::Comma => {
+						self.next();
+
+						if self.current().is_some_and(|token| token.kind == TokenKind::RightBrace) {
+							break;
+						}
+					}
+					_ => break,
+				}
+			}
+		}
+
+		self.expect_token(TokenKind::RightBrace, "Expected `}` to close object construction.")?;
+
+		Ok(Expr::ObjectConstruction(ObjectConstructionExpr {
+			fields,
+			object_type_name,
+			position: start,
+		}))
+	}
+
+	fn parse_object_declaration(&mut self) -> Result<ObjectDeclaration, ParseError> {
+		let object_keyword = self.expect_token(TokenKind::ObjKeyword, "Expected `obj` to start object declaration.")?;
+		let name = self.expect_token(TokenKind::Identifier, "Expected object type name.")?;
+		self.expect_token(TokenKind::LeftBrace, "Expected `{` to start object field list.")?;
+
+		let mut fields = Vec::new();
+
+		if !self.current().is_some_and(|token| token.kind == TokenKind::RightBrace) {
+			loop {
+				fields.push(self.parse_object_field_declaration()?);
+
+				match self.current() {
+					Some(token) if token.kind == TokenKind::Comma => {
+						self.next();
+
+						if self.current().is_some_and(|token| token.kind == TokenKind::RightBrace) {
+							break;
+						}
+					}
+					_ => break,
+				}
+			}
+		}
+
+		self.expect_token(TokenKind::RightBrace, "Expected `}` to close object declaration.")?;
+		self.expect_token(TokenKind::Semicolon, "Expected `;` after object declaration.")?;
+
+		Ok(ObjectDeclaration {
+			fields,
+			name: name.lexeme,
+			position: object_keyword.start,
+		})
+	}
+
+	fn parse_object_field_declaration(&mut self) -> Result<ObjectFieldDeclaration, ParseError> {
+		let name = self.expect_token(TokenKind::Identifier, "Expected object field name.")?;
+		self.expect_token(TokenKind::Colon, "Expected `:` after object field name.")?;
+		let data_type = self.parse_data_type()?;
+		let default_value = if self.current().is_some_and(|token| token.kind == TokenKind::Equal) {
+			self.next();
+			Some(self.parse_assignment_expression()?)
+		}
+		else {
+			None
+		};
+
+		Ok(ObjectFieldDeclaration {
+			data_type,
+			default_value,
+			name: name.lexeme,
+			position: name.start,
+		})
 	}
 
 	fn parse_prefix(&mut self) -> Result<Expr, ParseError> {
@@ -1001,6 +1129,7 @@ mod tests {
 	use crate::ast::DataType;
 	use crate::ast::DecimalLiteral;
 	use crate::ast::Expr;
+	use crate::ast::FieldAccessExpr;
 	use crate::ast::ForStatement;
 	use crate::ast::FunctionDeclaration;
 	use crate::ast::FunctionParameter;
@@ -1008,6 +1137,10 @@ mod tests {
 	use crate::ast::IfStatement;
 	use crate::ast::IndexExpr;
 	use crate::ast::IntegerLiteral;
+	use crate::ast::ObjectConstructionExpr;
+	use crate::ast::ObjectConstructionField;
+	use crate::ast::ObjectDeclaration;
+	use crate::ast::ObjectFieldDeclaration;
 	use crate::ast::Program;
 	use crate::ast::RangeExpr;
 	use crate::ast::ReturnStatement;
@@ -1094,6 +1227,11 @@ mod tests {
 				position: 0,
 				value,
 			}),
+			Expr::FieldAccess(FieldAccessExpr { field, object, .. }) => Expr::FieldAccess(FieldAccessExpr {
+				field: normalize_identifier(field),
+				object: Box::new(normalize_expr(*object)),
+				position: 0,
+			}),
 			Expr::Identifier(identifier) => Expr::Identifier(normalize_identifier(identifier)),
 			Expr::Index(IndexExpr { array, index, .. }) => Expr::Index(IndexExpr {
 				array: Box::new(normalize_expr(*array)),
@@ -1103,6 +1241,15 @@ mod tests {
 			Expr::Integer(IntegerLiteral { value, .. }) => Expr::Integer(IntegerLiteral {
 				position: 0,
 				value,
+			}),
+			Expr::ObjectConstruction(ObjectConstructionExpr {
+				fields,
+				object_type_name,
+				..
+			}) => Expr::ObjectConstruction(ObjectConstructionExpr {
+				fields: fields.into_iter().map(normalize_object_construction_field).collect(),
+				object_type_name,
+				position: 0,
 			}),
 			Expr::Range(RangeExpr {
 				start,
@@ -1166,9 +1313,35 @@ mod tests {
 		}
 	}
 
+	fn normalize_object_construction_field(field: ObjectConstructionField) -> ObjectConstructionField {
+		ObjectConstructionField {
+			name: field.name,
+			position: 0,
+			value: normalize_expr(field.value),
+		}
+	}
+
+	fn normalize_object_declaration(object: ObjectDeclaration) -> ObjectDeclaration {
+		ObjectDeclaration {
+			fields: object.fields.into_iter().map(normalize_object_field_declaration).collect(),
+			name: object.name,
+			position: 0,
+		}
+	}
+
+	fn normalize_object_field_declaration(field: ObjectFieldDeclaration) -> ObjectFieldDeclaration {
+		ObjectFieldDeclaration {
+			data_type: field.data_type,
+			default_value: field.default_value.map(normalize_expr),
+			name: field.name,
+			position: 0,
+		}
+	}
+
 	fn normalize_program(program: Program) -> Program {
 		Program {
 			functions: program.functions.into_iter().map(normalize_function_declaration).collect(),
+			objects: program.objects.into_iter().map(normalize_object_declaration).collect(),
 			result: program.result.map(normalize_expr),
 			statements: program.statements.into_iter().map(normalize_statement).collect(),
 		}
@@ -1251,6 +1424,7 @@ mod tests {
 
 		assert_eq!(normalize_program(program), Program {
 			functions: vec![],
+			objects: vec![],
 			result: Some(Expr::Index(IndexExpr {
 				array: Box::new(Expr::Identifier(IdentifierExpr {
 					name: String::from("xs"),
@@ -1272,6 +1446,7 @@ mod tests {
 
 		assert_eq!(normalize_program(program), Program {
 			functions: vec![],
+			objects: vec![],
 			result: Some(Expr::Array(ArrayLiteral {
 				elements: vec![
 					Expr::Integer(IntegerLiteral {
@@ -1295,6 +1470,7 @@ mod tests {
 
 		assert_eq!(normalize_program(program), Program {
 			functions: vec![],
+			objects: vec![],
 			result: Some(Expr::Index(IndexExpr {
 				array: Box::new(Expr::Identifier(IdentifierExpr {
 					name: String::from("xs"),
@@ -1324,6 +1500,7 @@ mod tests {
 
 		assert_eq!(normalize_program(program), Program {
 			functions: vec![],
+			objects: vec![],
 			result: None,
 			statements: vec![
 				Statement::VariableDeclaration(VariableDeclaration {
@@ -1373,6 +1550,7 @@ mod tests {
 			parse_program("{ var x: int = 1; x += 2; }"),
 			Program {
 				functions: vec![],
+				objects: vec![],
 				statements: vec![
 					Statement::Block(BlockStatement {
 						position: 0,
@@ -1479,6 +1657,7 @@ mod tests {
 						return_type: DataType::Void,
 					},
 				],
+				objects: vec![],
 				result: None,
 				statements: vec![],
 			}
@@ -1537,6 +1716,7 @@ mod tests {
 
 		assert_eq!(normalize_program(program), Program {
 			functions: vec![],
+			objects: vec![],
 			result: None,
 			statements: vec![
 				Statement::Expression(Expr::Assignment(AssignmentExpr {
@@ -1568,6 +1748,7 @@ mod tests {
 			parse_program("const name: text = 'Tablo';"),
 			Program {
 				functions: vec![],
+				objects: vec![],
 				statements: vec![
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Text,
@@ -1602,6 +1783,7 @@ mod tests {
 			parse_program("var x: int = 1;\nx += 2;\nx"),
 			Program {
 				functions: vec![],
+				objects: vec![],
 				statements: vec![
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Int,
@@ -1640,6 +1822,7 @@ mod tests {
 			parse_program("for value in [1, 2] { value; }"),
 			Program {
 				functions: vec![],
+				objects: vec![],
 				statements: vec![
 					Statement::For(ForStatement {
 						body: BlockStatement {
@@ -1754,6 +1937,7 @@ mod tests {
 						return_type: DataType::Int,
 					},
 				],
+				objects: vec![],
 				result: Some(Expr::Call(CallExpr {
 					arguments: vec![
 						CallArgument {
@@ -1817,6 +2001,7 @@ mod tests {
 			parse_program("if false { var x: int = 1; } else if true { var y: int = 2; }"),
 			Program {
 				functions: vec![],
+				objects: vec![],
 				statements: vec![
 					Statement::If(IfStatement {
 						condition: Expr::Boolean(BooleanLiteral {
@@ -1875,6 +2060,7 @@ mod tests {
 			parse_program("if true { var x: int = 1; } else { var x: int = 2; }"),
 			Program {
 				functions: vec![],
+				objects: vec![],
 				statements: vec![
 					Statement::If(IfStatement {
 						condition: Expr::Boolean(BooleanLiteral {
@@ -1925,6 +2111,7 @@ mod tests {
 			parse_program("if true { var x: int = 1; }"),
 			Program {
 				functions: vec![],
+				objects: vec![],
 				statements: vec![
 					Statement::If(IfStatement {
 						condition: Expr::Boolean(BooleanLiteral {
@@ -1961,6 +2148,7 @@ mod tests {
 
 		assert_eq!(normalize_program(program), Program {
 			functions: vec![],
+			objects: vec![],
 			result: None,
 			statements: vec![
 				Statement::Expression(Expr::Assignment(AssignmentExpr {
@@ -2212,6 +2400,7 @@ mod tests {
 						return_type: DataType::Void,
 					},
 				],
+				objects: vec![],
 				result: None,
 				statements: vec![],
 			}
@@ -2234,11 +2423,67 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_object_declaration_and_construction() {
+		assert_eq!(
+			parse_program("obj Person { name: text = '', age: int, };\nPerson { age: 1 }.age"),
+			Program {
+				functions: vec![],
+				objects: vec![
+					ObjectDeclaration {
+						fields: vec![
+							ObjectFieldDeclaration {
+								data_type: DataType::Text,
+								default_value: Some(Expr::Text(TextLiteral {
+									position: 0,
+									value: String::from(""),
+								})),
+								name: String::from("name"),
+								position: 0,
+							},
+							ObjectFieldDeclaration {
+								data_type: DataType::Int,
+								default_value: None,
+								name: String::from("age"),
+								position: 0,
+							},
+						],
+						name: String::from("Person"),
+						position: 0,
+					},
+				],
+				result: Some(Expr::FieldAccess(FieldAccessExpr {
+					field: IdentifierExpr {
+						name: String::from("age"),
+						position: 0,
+					},
+					object: Box::new(Expr::ObjectConstruction(ObjectConstructionExpr {
+						fields: vec![
+							ObjectConstructionField {
+								name: String::from("age"),
+								position: 0,
+								value: Expr::Integer(IntegerLiteral {
+									position: 0,
+									value: 1,
+								}),
+							},
+						],
+						object_type_name: String::from("Person"),
+						position: 0,
+					})),
+					position: 0,
+				})),
+				statements: vec![],
+			}
+		);
+	}
+
+	#[test]
 	fn parses_program_with_variable_declarations() {
 		assert_eq!(
 			parse_program("var x: int = 1;\nvar y: int = 2;\nx + y"),
 			Program {
 				functions: vec![],
+				objects: vec![],
 				statements: vec![
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Int,
@@ -2362,6 +2607,7 @@ mod tests {
 			parse_program("var name: text = 'Tablo';"),
 			Program {
 				functions: vec![],
+				objects: vec![],
 				statements: vec![
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Text,
@@ -2423,6 +2669,7 @@ mod tests {
 			parse_program("var x: int;"),
 			Program {
 				functions: vec![],
+				objects: vec![],
 				statements: vec![
 					Statement::VariableDeclaration(VariableDeclaration {
 						data_type: DataType::Int,
@@ -2443,6 +2690,7 @@ mod tests {
 			parse_program("while x < 3 { x += 1; }"),
 			Program {
 				functions: vec![],
+				objects: vec![],
 				statements: vec![
 					Statement::While(WhileStatement {
 						body: BlockStatement {
@@ -2488,6 +2736,7 @@ mod tests {
 			parse_program("while true { continue; break; }"),
 			Program {
 				functions: vec![],
+				objects: vec![],
 				result: None,
 				statements: vec![
 					Statement::While(WhileStatement {
