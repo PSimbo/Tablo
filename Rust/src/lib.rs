@@ -8,6 +8,7 @@ pub mod compiler;
 pub mod debugger;
 pub mod object_file;
 pub mod schema;
+pub mod schema_fixture;
 pub mod semantic;
 pub mod source;
 pub mod syntax;
@@ -190,6 +191,8 @@ mod tests {
 	use crate::bytecode::Instruction;
 	use crate::object_file::read_program_from_path;
 	use crate::object_file::write_program_to_path;
+	use crate::schema::SchemaCatalog;
+	use crate::schema_fixture::read_schema_catalog_from_str;
 	use crate::value::Value;
 
 	use super::compile_source_to_program_with_name;
@@ -219,6 +222,16 @@ mod tests {
 		write_program_to_path(output_path, &program).map_err(TabloError::ObjectFile)
 	}
 
+	fn compile_snippet_with_schema_fixture(source: &str, schema_fixture: &str) -> Result<(crate::bytecode::Program, SchemaCatalog), TabloError> {
+		let schema = read_schema_catalog_from_str(schema_fixture)
+			.map_err(|error| TabloError::Compile(crate::compiler::CompileError {
+				message: error.message,
+				position: 0,
+			}))?;
+		let program = compile_source_to_program_with_name(source, None, CompilationTarget::Snippet)?;
+		Ok((program, schema))
+	}
+
 	#[test]
 	fn compiles_source_text_to_object_file() {
 		let output_path = unique_test_output_path("compiles_source_text_to_object_file");
@@ -227,6 +240,31 @@ mod tests {
 		let _ = std::fs::remove_file(&output_path);
 
 		assert_eq!(program.entry_function_index(), Some(0));
+	}
+
+	#[test]
+	fn compiles_snippet_with_schema_fixture_for_future_schema_aware_tests() {
+		let (program, schema) = compile_snippet_with_schema_fixture(
+			"1 + 2",
+			r#"{
+				"databases": [
+					{
+						"name": "ExampleDb",
+						"tables": [
+							{
+								"name": "Customers",
+								"columns": [
+									{ "name": "Id", "data_type": "int", "is_nullable": false }
+								]
+							}
+						]
+					}
+				]
+			}"#,
+		).unwrap();
+
+		assert_eq!(run_program(&program).unwrap(), Some(Value::Integer(3)));
+		assert!(schema.database("exampledb").is_some());
 	}
 
 	#[test]
