@@ -362,6 +362,11 @@ impl VirtualMachine {
 				self.stack.push(load_field_value(object, field_name, instruction_index)?);
 				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::LoadFieldPath(field_path) => {
+				let object = self.pop_value(instruction_index)?;
+				self.stack.push(load_field_path_value(object, field_path, instruction_index)?);
+				Ok(ExecutionOutcome::Continue(None))
+			}
 			Instruction::LoadIndex => {
 				let index = self.pop_value(instruction_index)?;
 				let array = self.pop_value(instruction_index)?;
@@ -491,6 +496,14 @@ impl VirtualMachine {
 				let rhs = self.pop_numeric(instruction_index)?;
 				let lhs = self.pop_numeric(instruction_index)?;
 				self.stack.push(subtract_values(lhs, rhs, instruction_index)?);
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::StoreFieldPath(field_path) => {
+				let value = self.pop_value(instruction_index)?;
+				let object = self.pop_value(instruction_index)?;
+				let (assigned_value, updated_object) = store_field_path_value(object, field_path, value, instruction_index)?;
+				self.stack.push(assigned_value);
+				self.stack.push(updated_object);
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::StoreIndex => {
@@ -975,6 +988,16 @@ fn iterator_next_value(iterator: Value, instruction_index: usize) -> Result<(Val
 	}
 }
 
+fn load_field_path_value(object: Value, field_path: &[String], instruction_index: usize) -> Result<Value, VmError> {
+	let mut value = object;
+
+	for field_name in field_path {
+		value = load_field_value(value, field_name, instruction_index)?;
+	}
+
+	Ok(value)
+}
+
 fn load_field_value(object: Value, field_name: &str, instruction_index: usize) -> Result<Value, VmError> {
 	match object {
 		Value::Object(fields) => fields.get(field_name).cloned().ok_or(vm_error(
@@ -1209,6 +1232,57 @@ fn pow10_i128(exponent: u32) -> Result<i128, String> {
 	}
 
 	Ok(value)
+}
+
+fn store_field_path_into_object(
+	object: Value,
+	field_path: &[String],
+	value: Value,
+	instruction_index: usize,
+) -> Result<Value, VmError> {
+	let Value::Object(mut fields) = object else {
+		return Err(vm_error(
+			instruction_index,
+			String::from("Field assignment requires an object operand."),
+		));
+	};
+
+	let Some((field_name, remaining_path)) = field_path.split_first() else {
+		return Err(vm_error(
+			instruction_index,
+			String::from("Field assignment requires at least one field name."),
+		));
+	};
+
+	if remaining_path.is_empty() {
+		if !fields.contains_key(field_name) {
+			return Err(vm_error(
+				instruction_index,
+				format!("Object does not contain a field named `{field_name}`."),
+			));
+		}
+
+		fields.insert(field_name.clone(), value);
+		return Ok(Value::Object(fields));
+	}
+
+	let child = fields.remove(field_name).ok_or(vm_error(
+		instruction_index,
+		format!("Object does not contain a field named `{field_name}`."),
+	))?;
+	let updated_child = store_field_path_into_object(child, remaining_path, value, instruction_index)?;
+	fields.insert(field_name.clone(), updated_child);
+	Ok(Value::Object(fields))
+}
+
+fn store_field_path_value(
+	object: Value,
+	field_path: &[String],
+	value: Value,
+	instruction_index: usize,
+) -> Result<(Value, Value), VmError> {
+	let updated_object = store_field_path_into_object(object, field_path, value.clone(), instruction_index)?;
+	Ok((value, updated_object))
 }
 
 fn store_index_value(array: Value, index: Value, value: Value, instruction_index: usize) -> Result<(Value, Value), VmError> {

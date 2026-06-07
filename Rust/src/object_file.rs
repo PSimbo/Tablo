@@ -61,6 +61,8 @@ const OPCODE_MAKE_RANGE: u8 = 38;
 const OPCODE_MAKE_STEPPED_RANGE: u8 = 39;
 const OPCODE_MAKE_OBJECT: u8 = 40;
 const OPCODE_LOAD_FIELD: u8 = 41;
+const OPCODE_LOAD_FIELD_PATH: u8 = 42;
+const OPCODE_STORE_FIELD_PATH: u8 = 43;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectFileError {
@@ -166,6 +168,15 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.extend_from_slice(&(field_name.len() as u32).to_le_bytes());
 			bytes.extend_from_slice(field_name.as_bytes());
 		}
+		Instruction::LoadFieldPath(field_path) => {
+			bytes.push(OPCODE_LOAD_FIELD_PATH);
+			bytes.extend_from_slice(&(field_path.len() as u32).to_le_bytes());
+
+			for field_name in field_path {
+				bytes.extend_from_slice(&(field_name.len() as u32).to_le_bytes());
+				bytes.extend_from_slice(field_name.as_bytes());
+			}
+		}
 		Instruction::LoadIndex => bytes.push(OPCODE_LOAD_INDEX),
 		Instruction::LoadLocal(slot) => {
 			bytes.push(OPCODE_LOAD_LOCAL);
@@ -218,6 +229,15 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 		}
 		Instruction::Return => bytes.push(OPCODE_RETURN),
 		Instruction::ReturnVoid => bytes.push(OPCODE_RETURN_VOID),
+		Instruction::StoreFieldPath(field_path) => {
+			bytes.push(OPCODE_STORE_FIELD_PATH);
+			bytes.extend_from_slice(&(field_path.len() as u32).to_le_bytes());
+
+			for field_name in field_path {
+				bytes.extend_from_slice(&(field_name.len() as u32).to_le_bytes());
+				bytes.extend_from_slice(field_name.as_bytes());
+			}
+		}
 		Instruction::StoreIndex => bytes.push(OPCODE_STORE_INDEX),
 		Instruction::StoreLocal(slot) => {
 			bytes.push(OPCODE_STORE_LOCAL);
@@ -436,6 +456,7 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_LESS_THAN => Ok(Instruction::LessThan),
 			OPCODE_LESS_THAN_OR_EQUAL => Ok(Instruction::LessThanOrEqual),
 			OPCODE_LOAD_FIELD => Ok(Instruction::LoadField(self.read_string()?)),
+			OPCODE_LOAD_FIELD_PATH => Ok(Instruction::LoadFieldPath(self.read_string_vec()?)),
 			OPCODE_LOAD_INDEX => Ok(Instruction::LoadIndex),
 			OPCODE_LOAD_LOCAL => Ok(Instruction::LoadLocal(self.read_u32()?)),
 			OPCODE_LOAD_REFERENCE => Ok(Instruction::LoadReference(self.read_u32()?)),
@@ -465,6 +486,7 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_PUSH_TEXT => Ok(Instruction::PushText(self.read_string()?)),
 			OPCODE_RETURN => Ok(Instruction::Return),
 			OPCODE_RETURN_VOID => Ok(Instruction::ReturnVoid),
+			OPCODE_STORE_FIELD_PATH => Ok(Instruction::StoreFieldPath(self.read_string_vec()?)),
 			OPCODE_STORE_INDEX => Ok(Instruction::StoreIndex),
 			OPCODE_STORE_LOCAL => Ok(Instruction::StoreLocal(self.read_u32()?)),
 			OPCODE_SUBTRACT => Ok(Instruction::Subtract),
@@ -518,6 +540,17 @@ impl<'a> ObjectFileReader<'a> {
 			offset: self.offset - len,
 			message: String::from("Invalid UTF-8 string data in object file."),
 		})
+	}
+
+	fn read_string_vec(&mut self) -> Result<Vec<String>, ObjectFileError> {
+		let count = self.read_u32()? as usize;
+		let mut values = Vec::with_capacity(count);
+
+		for _ in 0..count {
+			values.push(self.read_string()?);
+		}
+
+		Ok(values)
 	}
 
 	fn read_u8(&mut self) -> Result<u8, ObjectFileError> {
@@ -849,6 +882,24 @@ mod tests {
 			Instruction::PushInteger(1),
 			Instruction::PushInteger(2),
 			Instruction::Dup2,
+		]);
+
+		let bytes = write_program(&program);
+		let decoded = read_program(&bytes).unwrap();
+
+		assert_eq!(decoded, program);
+	}
+
+	#[test]
+	fn round_trips_program_bytes_with_object_field_path() {
+		let program = Program::new(vec![
+			Instruction::PushInteger(1),
+			Instruction::MakeObject(vec![String::from("value")]),
+			Instruction::LoadFieldPath(vec![String::from("value")]),
+			Instruction::PushInteger(2),
+			Instruction::MakeObject(vec![String::from("value")]),
+			Instruction::PushInteger(3),
+			Instruction::StoreFieldPath(vec![String::from("value")]),
 		]);
 
 		let bytes = write_program(&program);

@@ -255,6 +255,11 @@ impl Compiler {
 			}
 			Expr::Assignment(AssignmentExpr { operator, target, value, .. }) => {
 				match target {
+					AssignmentTarget::Field(target) => {
+						let slot = semantic_program.identifier_slot(target.object.position)
+							.unwrap_or_else(|| panic!("Missing slot for identifier `{}`.", target.object.name));
+						self.compile_object_field_assignment(slot, &target.fields, *operator, value, semantic_program, emission);
+					}
 					AssignmentTarget::Identifier(target) => {
 						let slot = semantic_program.identifier_slot(target.position)
 							.unwrap_or_else(|| panic!("Missing slot for identifier `{}`.", target.name));
@@ -371,6 +376,34 @@ impl Compiler {
 				self.emit(emission, operator.instruction(), expression.position());
 			}
 		}
+	}
+
+	fn compile_object_field_assignment(
+		&mut self,
+		slot: u32,
+		fields: &[crate::ast::IdentifierExpr],
+		operator: AssignmentOperator,
+		value: &Expr,
+		semantic_program: &SemanticProgram,
+		emission: &mut EmissionState,
+	) {
+		let field_path = fields.iter().map(|field| field.name.clone()).collect::<Vec<_>>();
+		let field_position = fields.last().map_or(value.position(), |field| field.position);
+
+		self.emit(emission, Instruction::LoadLocal(slot), field_position);
+
+		if let Some(instruction) = operator.compound_instruction() {
+			self.emit(emission, Instruction::LoadLocal(slot), field_position);
+			self.emit(emission, Instruction::LoadFieldPath(field_path.clone()), field_position);
+			self.compile_into(value, semantic_program, emission);
+			self.emit(emission, instruction, value.position());
+		}
+		else {
+			self.compile_into(value, semantic_program, emission);
+		}
+
+		self.emit(emission, Instruction::StoreFieldPath(field_path), value.position());
+		self.emit(emission, Instruction::StoreLocal(slot), value.position());
 	}
 
 	fn compile_program_with_semantics(&mut self, program: &AstProgram, semantic_program: &SemanticProgram) -> Result<Program, CompileError> {

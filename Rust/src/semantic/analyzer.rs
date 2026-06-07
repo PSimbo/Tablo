@@ -572,6 +572,54 @@ impl SemanticAnalyzer {
 						let value_type = self.infer_expression_type(value)?;
 						self.assignment_result_type(*operator, element_type, &value_type, expression.position())
 					}
+					AssignmentTarget::Field(target) => {
+						let local = self.lookup_local(&target.object.name).ok_or(self.compile_error(
+							target.object.position,
+							format!("Variable `{}` is not declared in this scope.", target.object.name),
+						))?;
+						self.semantic_program.identifier_slots.insert(target.object.position, local.slot);
+
+						if local.is_const {
+							let operation = match operator {
+								AssignmentOperator::Assign => "=",
+								AssignmentOperator::AddAssign => "+=",
+								AssignmentOperator::DivideAssign => "/=",
+								AssignmentOperator::ModuloAssign => "%=",
+								AssignmentOperator::MultiplyAssign => "*=",
+								AssignmentOperator::SubtractAssign => "-=",
+							};
+
+							return Err(self.compile_error(
+								expression.position(),
+								format!("Constant `{}` cannot be assigned using `{operation}`.", target.object.name),
+							));
+						}
+
+						let mut current_type = local.data_type.clone();
+
+						for field in &target.fields {
+							match current_type {
+								DataType::Object(ref object_name) => {
+									current_type = self.lookup_object_field(object_name, &field.name)
+										.ok_or(self.compile_error(
+											field.position,
+											format!("Object `{object_name}` does not contain a field named `{}`.", field.name),
+										))?
+										.data_type
+										.clone();
+								}
+								ref other => {
+									return Err(self.compile_error(
+										field.position,
+										format!("Field access requires an object operand, found `{}`.", self.data_type_name(other)),
+									));
+								}
+							}
+						}
+
+						let value_type = self.infer_expression_type(value)?;
+						self.assignment_result_type(*operator, &current_type, &value_type, expression.position())
+					}
 				}
 			}
 			Expr::Binary(BinaryExpr { left, operator, right, .. }) => {

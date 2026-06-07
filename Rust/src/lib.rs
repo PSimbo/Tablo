@@ -966,6 +966,15 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_nested_object_field_assignment_source_text() {
+		let result = run(
+			"obj Address { line1: text = 'Unknown', };\nobj Person { name: text = '', address: Address, };\nfn Main(args: [text]) int { var person: Person = Person { name: 'Alice' }; person.address.line1 = 'Updated'; if person.address.line1 == 'Updated' { return 1; } return 0; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
 	fn runs_object_default_field_values_source_text() {
 		let result = run(
 			"obj Person { name: text = 'Anonymous', age: int, };\nfn Main(args: [text]) int { var person: Person = Person { age: 30 }; if person.name == 'Anonymous' { return 1; } return 0; }"
@@ -981,6 +990,28 @@ mod tests {
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(30)));
+	}
+
+	#[test]
+	fn runs_object_field_assignment_object_file() {
+		let output_path = unique_test_output_path("runs_object_field_assignment_object_file");
+		compile(
+			"obj Counter { value: int = 0, };\nfn Main(args: [text]) int { var counter: Counter = Counter { }; counter.value += 2; return counter.value; }",
+			&output_path,
+		).unwrap();
+		let result = run_file(&output_path).unwrap();
+		let _ = std::fs::remove_file(&output_path);
+
+		assert_eq!(result, Some(Value::Integer(2)));
+	}
+
+	#[test]
+	fn runs_object_field_compound_assignment_source_text() {
+		let result = run(
+			"obj Counter { value: int = 0, };\nfn Main(args: [text]) int { var counter: Counter = Counter { }; counter.value += 2; return counter.value; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(2)));
 	}
 
 	#[test]

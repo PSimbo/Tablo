@@ -12,6 +12,7 @@ pub enum AssignmentOperator {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AssignmentTarget {
+	Field(ObjectFieldAssignmentTarget),
 	Identifier(IdentifierExpr),
 	Index(ArrayIndexAssignmentTarget),
 }
@@ -233,6 +234,13 @@ pub struct ObjectConstructionField {
 pub struct ObjectDeclaration {
 	pub fields: Vec<ObjectFieldDeclaration>,
 	pub name: String,
+	pub position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObjectFieldAssignmentTarget {
+	pub fields: Vec<IdentifierExpr>,
+	pub object: IdentifierExpr,
 	pub position: usize,
 }
 

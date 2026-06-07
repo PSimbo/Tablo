@@ -25,6 +25,7 @@ use crate::ast::IntegerLiteral;
 use crate::ast::ObjectConstructionExpr;
 use crate::ast::ObjectConstructionField;
 use crate::ast::ObjectDeclaration;
+use crate::ast::ObjectFieldAssignmentTarget;
 use crate::ast::ObjectFieldDeclaration;
 use crate::ast::Program;
 use crate::ast::RangeExpr;
@@ -159,6 +160,38 @@ impl Parser {
 		Ok(token)
 	}
 
+	fn extract_field_assignment_target(
+		&self,
+		field_access: FieldAccessExpr,
+		position: usize,
+	) -> Result<ObjectFieldAssignmentTarget, ParseError> {
+		let mut fields = vec![field_access.field];
+		let mut object = *field_access.object;
+
+		loop {
+			match object {
+				Expr::FieldAccess(field_access) => {
+					fields.push(field_access.field);
+					object = *field_access.object;
+				}
+				Expr::Identifier(identifier) => {
+					fields.reverse();
+					return Ok(ObjectFieldAssignmentTarget {
+						fields,
+						object: identifier,
+						position,
+					});
+				}
+				_ => {
+					return Err(ParseError {
+						message: String::from("Object field assignment target must be an identifier-based field access."),
+						position,
+					});
+				}
+			}
+		}
+	}
+
 	fn next(&mut self) -> Option<Token> {
 		let token = self.current()?.clone();
 		self.position += 1;
@@ -207,6 +240,9 @@ impl Parser {
 		let operator_position = token.start;
 
 		let target = match left {
+			Expr::FieldAccess(field_access) => {
+				AssignmentTarget::Field(self.extract_field_assignment_target(field_access, operator_position)?)
+			}
 			Expr::Identifier(target) => AssignmentTarget::Identifier(target),
 			Expr::Index(IndexExpr { array, index, position }) => {
 				let array = match *array {
@@ -227,7 +263,7 @@ impl Parser {
 			}
 			_ => {
 				return Err(ParseError {
-					message: String::from("Assignment target must be an identifier or indexed array element."),
+					message: String::from("Assignment target must be an identifier, object field, or indexed array element."),
 					position: token.start,
 				});
 			}
@@ -1140,6 +1176,7 @@ mod tests {
 	use crate::ast::ObjectConstructionExpr;
 	use crate::ast::ObjectConstructionField;
 	use crate::ast::ObjectDeclaration;
+	use crate::ast::ObjectFieldAssignmentTarget;
 	use crate::ast::ObjectFieldDeclaration;
 	use crate::ast::Program;
 	use crate::ast::RangeExpr;
@@ -1158,6 +1195,11 @@ mod tests {
 
 	fn normalize_assignment_target(target: AssignmentTarget) -> AssignmentTarget {
 		match target {
+			AssignmentTarget::Field(target) => AssignmentTarget::Field(ObjectFieldAssignmentTarget {
+				fields: target.fields.into_iter().map(normalize_identifier).collect(),
+				object: normalize_identifier(target.object),
+				position: 0,
+			}),
 			AssignmentTarget::Identifier(identifier) => AssignmentTarget::Identifier(normalize_identifier(identifier)),
 			AssignmentTarget::Index(target) => AssignmentTarget::Index(ArrayIndexAssignmentTarget {
 				array: normalize_identifier(target.array),
@@ -2475,6 +2517,44 @@ mod tests {
 				statements: vec![],
 			}
 		);
+	}
+
+	#[test]
+	fn parses_object_field_assignment_expression() {
+		let program = parse_program("person.address.line1 = 'Updated';");
+
+		assert_eq!(normalize_program(program), Program {
+			functions: vec![],
+			objects: vec![],
+			result: None,
+			statements: vec![
+				Statement::Expression(Expr::Assignment(AssignmentExpr {
+					operator: AssignmentOperator::Assign,
+					position: 0,
+					target: AssignmentTarget::Field(ObjectFieldAssignmentTarget {
+						fields: vec![
+							IdentifierExpr {
+								name: String::from("address"),
+								position: 0,
+							},
+							IdentifierExpr {
+								name: String::from("line1"),
+								position: 0,
+							},
+						],
+						object: IdentifierExpr {
+							name: String::from("person"),
+							position: 0,
+						},
+						position: 0,
+					}),
+					value: Box::new(Expr::Text(TextLiteral {
+						position: 0,
+						value: String::from("Updated"),
+					})),
+				})),
+			],
+		});
 	}
 
 	#[test]
