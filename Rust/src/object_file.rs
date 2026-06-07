@@ -215,6 +215,11 @@ impl<'a> ObjectFileReader<'a> {
 			7 => Ok(DataType::Range(Box::new(self.read_data_type()?))),
 			8 => Ok(DataType::Text),
 			9 => Ok(DataType::Void),
+			10 => Ok(DataType::RecordPointer(crate::ast::RecordPointerType {
+				database_name: self.read_string()?,
+				schema_name: self.read_string()?,
+				table_name: self.read_string()?,
+			})),
 			tag => Err(ObjectFileError {
 				offset: tag_offset,
 				message: format!("Unknown data type tag {tag}."),
@@ -551,6 +556,13 @@ fn write_data_type(bytes: &mut Vec<u8>, data_type: &DataType) {
 		}
 		DataType::Text => bytes.push(8),
 		DataType::Void => bytes.push(9),
+		DataType::RecordPointer(record_pointer) => {
+			bytes.push(10);
+			for value in [&record_pointer.database_name, &record_pointer.schema_name, &record_pointer.table_name] {
+				bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+				bytes.extend_from_slice(value.as_bytes());
+			}
+		}
 	}
 }
 

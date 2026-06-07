@@ -440,6 +440,13 @@ impl Compiler {
 	}
 
 	fn compile_program_with_semantics(&mut self, program: &AstProgram, semantic_program: &SemanticProgram) -> Result<Program, CompileError> {
+		if let Some(position) = first_find_expression_position(program) {
+			return Err(self.compile_error(
+				position,
+				String::from("`find` queries are not executable yet."),
+			));
+		}
+
 		let all_functions = collect_all_function_declarations(program);
 		let mut functions = Vec::with_capacity(all_functions.len());
 		let mut code_body_debug = Vec::with_capacity(all_functions.len() + 1);
@@ -746,7 +753,10 @@ impl Compiler {
 			crate::ast::DataType::Text => {
 				self.emit(emission, Instruction::PushText(String::new()), position);
 			}
-			crate::ast::DataType::EmptyArray | crate::ast::DataType::Range(_) | crate::ast::DataType::Void => {
+			crate::ast::DataType::EmptyArray
+			| crate::ast::DataType::Range(_)
+			| crate::ast::DataType::RecordPointer(_)
+			| crate::ast::DataType::Void => {
 				panic!("Cannot emit an implicit default value for `{}`.", data_type_name(data_type));
 			}
 		}
@@ -848,8 +858,34 @@ fn data_type_name(data_type: &crate::ast::DataType) -> String {
 		crate::ast::DataType::Int => String::from("int"),
 		crate::ast::DataType::Object(name) => name.clone(),
 		crate::ast::DataType::Range(element_type) => format!("range<{}>", data_type_name(element_type)),
+		crate::ast::DataType::RecordPointer(_) => String::from("record pointer"),
 		crate::ast::DataType::Text => String::from("text"),
 		crate::ast::DataType::Void => String::from("void"),
+	}
+}
+
+fn expression_contains_find(expression: &Expr) -> Option<usize> {
+	match expression {
+		Expr::Array(array) => array.elements.iter().find_map(expression_contains_find),
+		Expr::Assignment(assignment) => {
+			if let AssignmentTarget::Index(target) = &assignment.target {
+				if let Some(position) = expression_contains_find(&target.index) {
+					return Some(position);
+				}
+			}
+			expression_contains_find(&assignment.value)
+		}
+		Expr::Binary(binary) => expression_contains_find(&binary.left).or_else(|| expression_contains_find(&binary.right)),
+		Expr::Boolean(_) | Expr::Count(_) | Expr::Decimal(_) | Expr::Identifier(_) | Expr::Integer(_) | Expr::Text(_) => None,
+		Expr::Call(call) => call.arguments.iter().find_map(|argument| expression_contains_find(&argument.value)),
+		Expr::FieldAccess(field_access) => expression_contains_find(&field_access.object),
+		Expr::Find(find) => Some(find.position),
+		Expr::Index(index) => expression_contains_find(&index.array).or_else(|| expression_contains_find(&index.index)),
+		Expr::ObjectConstruction(object) => object.fields.iter().find_map(|field| expression_contains_find(&field.value)),
+		Expr::Range(range) => expression_contains_find(&range.start)
+			.or_else(|| range.step.as_ref().and_then(|step| expression_contains_find(step)))
+			.or_else(|| expression_contains_find(&range.end)),
+		Expr::Unary(unary) => expression_contains_find(&unary.operand),
 	}
 }
 
@@ -858,6 +894,31 @@ fn expression_produces_runtime_value(expression: &Expr, semantic_program: &Seman
 		Expr::Call(call) => semantic_program.call_return_type(call.position) != Some(crate::ast::DataType::Void),
 		_ => true,
 	}
+}
+
+fn first_find_expression_position(program: &AstProgram) -> Option<usize> {
+	fn in_statement(statement: &Statement) -> Option<usize> {
+		match statement {
+			Statement::Block(block) => block.statements.iter().find_map(in_statement),
+			Statement::Break(_) | Statement::Continue(_) => None,
+			Statement::Expression(expression) => expression_contains_find(expression),
+			Statement::For(statement) => expression_contains_find(&statement.iterable)
+				.or_else(|| statement.body.statements.iter().find_map(in_statement)),
+			Statement::FunctionDeclaration(function) => function.body.statements.iter().find_map(in_statement),
+			Statement::If(statement) => expression_contains_find(&statement.condition)
+				.or_else(|| statement.then_branch.statements.iter().find_map(in_statement))
+				.or_else(|| statement.else_branch.as_ref().and_then(|else_branch| in_statement(else_branch))),
+			Statement::Return(statement) => statement.value.as_ref().and_then(expression_contains_find),
+			Statement::VariableDeclaration(statement) => statement.initial_value.as_ref().and_then(expression_contains_find),
+			Statement::While(statement) => expression_contains_find(&statement.condition)
+				.or_else(|| statement.body.statements.iter().find_map(in_statement)),
+		}
+	}
+
+	program.functions.iter()
+		.find_map(|function| function.body.statements.iter().find_map(in_statement))
+		.or_else(|| program.statements.iter().find_map(in_statement))
+		.or_else(|| program.result.as_ref().and_then(expression_contains_find))
 }
 
 fn statement_position(statement: &Statement) -> usize {

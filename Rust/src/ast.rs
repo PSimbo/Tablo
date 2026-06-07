@@ -44,6 +44,7 @@ pub enum DataType {
 	Int,
 	Object(String),
 	Range(Box<DataType>),
+	RecordPointer(RecordPointerType),
 	Text,
 	Void,
 }
@@ -291,6 +292,13 @@ pub struct RangeExpr {
 	pub position: usize,
 	pub start: Box<Expr>,
 	pub step: Option<Box<Expr>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordPointerType {
+	pub database_name: String,
+	pub schema_name: String,
+	pub table_name: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

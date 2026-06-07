@@ -602,7 +602,7 @@ mod tests {
 		).unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
-			message: String::from("`find` queries are not implemented yet."),
+			message: String::from("`find` queries are not executable yet."),
 			position: 16,
 		}));
 	}

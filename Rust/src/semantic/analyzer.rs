@@ -25,6 +25,7 @@ use crate::ast::ObjectConstructionExpr;
 use crate::ast::ObjectDeclaration;
 use crate::ast::Program;
 use crate::ast::RangeExpr;
+use crate::ast::RecordPointerType;
 use crate::ast::ReturnStatement;
 use crate::ast::Statement;
 use crate::ast::TableReference;
@@ -468,7 +469,7 @@ impl SemanticAnalyzer {
 	fn data_type_has_implicit_default(&self, data_type: &DataType) -> bool {
 		match data_type {
 			DataType::Array(_) | DataType::Bool | DataType::Dec | DataType::Int | DataType::Object(_) | DataType::Text => true,
-			DataType::EmptyArray | DataType::Range(_) | DataType::Void => false,
+			DataType::EmptyArray | DataType::Range(_) | DataType::RecordPointer(_) | DataType::Void => false,
 		}
 	}
 
@@ -481,6 +482,7 @@ impl SemanticAnalyzer {
 			DataType::Int => String::from("int"),
 			DataType::Object(name) => name.clone(),
 			DataType::Range(element_type) => format!("range<{}>", self.data_type_name(element_type)),
+			DataType::RecordPointer(_) => String::from("record pointer"),
 			DataType::Text => String::from("text"),
 			DataType::Void => String::from("void"),
 		}
@@ -874,6 +876,11 @@ impl SemanticAnalyzer {
 							.clone();
 						Ok(field_type)
 					}
+					DataType::RecordPointer(record_pointer) => self.infer_record_pointer_field_access_type(
+						&record_pointer,
+						field.position,
+						&field.name,
+					),
 					other => Err(self.compile_error(
 						object.position(),
 						format!("Field access requires an object operand, found `{}`.", self.data_type_name(&other)),
@@ -1038,12 +1045,27 @@ impl SemanticAnalyzer {
 	}
 
 	fn infer_find_expression_type(&mut self, find: &FindExpr) -> Result<DataType, CompileError> {
-		let _ = find;
+		let record_pointer = {
+			let resolved_table = self.resolve_table_reference(&find.table)?;
+			RecordPointerType {
+				database_name: resolved_table.database().name().to_string(),
+				schema_name: resolved_table.schema().name().to_string(),
+				table_name: resolved_table.table().name().to_string(),
+			}
+		};
 
-		Err(self.compile_error(
-			find.position,
-			String::from("`find` queries are not implemented yet."),
-		))
+		if let Some(where_clause) = &find.where_clause {
+			let where_type = self.infer_query_expression_type(where_clause, &find.table)?;
+
+			if where_type != DataType::Bool {
+				return Err(self.compile_error(
+					where_clause.position(),
+					format!("`where` clause must evaluate to `bool`, found `{}`.", self.data_type_name(&where_type)),
+				));
+			}
+		}
+
+		Ok(DataType::RecordPointer(record_pointer))
 	}
 
 	fn infer_query_expression_type(
@@ -1237,6 +1259,48 @@ impl SemanticAnalyzer {
 			field_access.position,
 			String::from("Only simple `table.field` or local object field access is supported in `where` clauses."),
 		))
+	}
+
+	fn infer_record_pointer_field_access_type(
+		&mut self,
+		record_pointer: &RecordPointerType,
+		field_position: usize,
+		field_name: &str,
+	) -> Result<DataType, CompileError> {
+		let schema_catalog = self.current_schema_catalog.as_ref().ok_or(self.compile_error(
+			field_position,
+			String::from("Record pointer field access requires schema metadata, but none was supplied."),
+		))?;
+		let database = schema_catalog.database(&record_pointer.database_name).ok_or(self.compile_error(
+			field_position,
+			format!("Unknown database `{}` for record pointer field access.", record_pointer.database_name),
+		))?;
+		let schema = database.schema(&record_pointer.schema_name).ok_or(self.compile_error(
+			field_position,
+			format!(
+				"Unknown schema `{}` on database `{}` for record pointer field access.",
+				record_pointer.schema_name,
+				record_pointer.database_name,
+			),
+		))?;
+		let table = schema.table(&record_pointer.table_name).ok_or(self.compile_error(
+			field_position,
+			format!(
+				"Unknown table `{}` on database `{}.{}` for record pointer field access.",
+				record_pointer.table_name,
+				record_pointer.database_name,
+				record_pointer.schema_name,
+			),
+		))?;
+		let column = table.column(field_name).ok_or(self.compile_error(
+			field_position,
+			format!(
+				"Field `{field_name}` does not exist on table `{}`.",
+				record_pointer.table_name,
+			),
+		))?;
+
+		self.data_type_from_schema_type(column.data_type())
 	}
 
 	fn is_numeric_type(&self, data_type: &DataType) -> bool {
@@ -1811,6 +1875,7 @@ impl SemanticAnalyzer {
 					))
 				}
 			}
+			DataType::RecordPointer(_) => Err(self.compile_error(position, message)),
 			_ => Ok(()),
 		}
 	}
@@ -2126,6 +2191,7 @@ fn statement_position(statement: &Statement) -> usize {
 #[cfg(test)]
 mod tests {
 	use crate::ast::Expr;
+	use crate::ast::RecordPointerType;
 	use crate::query::QueryBinaryExpr;
 	use crate::query::QueryBinaryOperator;
 	use crate::query::QueryColumnReference;
@@ -2144,15 +2210,115 @@ mod tests {
 	use super::SemanticAnalyzer;
 
 	fn parse_count_expression(source: &str) -> crate::ast::CountExpr {
+		match parse_expression(source) {
+			Expr::Count(count) => count,
+			other => panic!("Expected count expression, found {other:?}."),
+		}
+	}
+
+	fn parse_expression(source: &str) -> Expr {
 		let mut lexer = Lexer::new(SourceText::new(source));
 		let tokens = lexer.tokenize().unwrap();
 		let mut parser = Parser::new(tokens);
 		let program = parser.parse_program().unwrap();
+		program.result.unwrap()
+	}
 
-		match program.result.unwrap() {
-			Expr::Count(count) => count,
-			other => panic!("Expected count expression, found {other:?}."),
+	fn parse_find_expression(source: &str) -> crate::ast::FindExpr {
+		match parse_expression(source) {
+			Expr::Find(find) => find,
+			other => panic!("Expected find expression, found {other:?}."),
 		}
+	}
+
+	#[test]
+	fn infers_field_access_type_for_record_pointer_local() {
+		let schema = read_schema_catalog_from_str(
+			r#"{
+				"databases": [
+					{
+						"backend": "sqlite",
+						"name": "ExampleDb",
+						"schemas": [
+							{
+								"name": "Main",
+								"is_implicit": true,
+								"tables": [
+									{
+										"name": "Customers",
+										"columns": [
+											{ "name": "Id", "data_type": "int", "is_nullable": false },
+											{ "name": "Name", "data_type": "text", "is_nullable": false }
+										]
+									}
+								]
+							}
+						]
+					}
+				]
+			}"#,
+		).unwrap();
+		let expression = parse_expression("cust.name");
+		let mut analyzer = SemanticAnalyzer::new();
+		analyzer.current_schema_catalog = Some(schema);
+		analyzer.enter_scope();
+		analyzer.declare_local(
+			String::from("cust"),
+			LocalBinding {
+				data_type: DataType::RecordPointer(RecordPointerType {
+					database_name: String::from("ExampleDb"),
+					schema_name: String::from("Main"),
+					table_name: String::from("Customers"),
+				}),
+				is_const: false,
+				slot: 2,
+			},
+		);
+
+		let data_type = analyzer.infer_expression_type(&expression).unwrap();
+
+		assert_eq!(data_type, DataType::Text);
+	}
+
+	#[test]
+	fn infers_record_pointer_type_for_find_expression() {
+		let schema = read_schema_catalog_from_str(
+			r#"{
+				"databases": [
+					{
+						"backend": "sqlite",
+						"name": "ExampleDb",
+						"schemas": [
+							{
+								"name": "Main",
+								"is_implicit": true,
+								"tables": [
+									{
+										"name": "Customers",
+										"columns": [
+											{ "name": "Id", "data_type": "int", "is_nullable": false },
+											{ "name": "Name", "data_type": "text", "is_nullable": false }
+										]
+									}
+								]
+							}
+						]
+					}
+				]
+			}"#,
+		).unwrap();
+		let find = parse_find_expression("find first customers where id = 1");
+		let mut analyzer = SemanticAnalyzer::new();
+		analyzer.current_schema_catalog = Some(schema);
+		analyzer.semantic_program.active_databases = vec![String::from("exampledb")];
+
+		let data_type = analyzer.infer_find_expression_type(&find).unwrap();
+
+		assert_eq!(data_type, DataType::RecordPointer(RecordPointerType {
+			database_name: String::from("ExampleDb"),
+			schema_name: String::from("Main"),
+			table_name: String::from("Customers"),
+		}));
 	}
 
 	#[test]
