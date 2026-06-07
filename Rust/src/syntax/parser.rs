@@ -30,6 +30,8 @@ use crate::ast::ObjectConstructionField;
 use crate::ast::ObjectDeclaration;
 use crate::ast::ObjectFieldAssignmentTarget;
 use crate::ast::ObjectFieldDeclaration;
+use crate::ast::OrderByDirection;
+use crate::ast::OrderByItem;
 use crate::ast::Program;
 use crate::ast::RangeExpr;
 use crate::ast::ReturnStatement;
@@ -545,9 +547,11 @@ impl Parser {
 		else {
 			None
 		};
+		let order_by = self.parse_optional_order_by_clause()?;
 
 		Ok(Expr::Find(FindExpr {
 			kind,
+			order_by,
 			position: start,
 			table,
 			where_clause,
@@ -1062,6 +1066,45 @@ impl Parser {
 		})
 	}
 
+	fn parse_optional_order_by_clause(&mut self) -> Result<Vec<OrderByItem>, ParseError> {
+		if !self.current().is_some_and(|token| token.kind == TokenKind::OrderKeyword) {
+			return Ok(vec![]);
+		}
+
+		self.next();
+		self.expect_token(TokenKind::ByKeyword, "Expected `by` after `order`.")?;
+		let mut items = Vec::new();
+
+		loop {
+			let expression = self.parse_expression_with_binding_power(BindingPower::Default, true)?;
+			let direction = match self.current().map(|token| token.kind) {
+				Some(TokenKind::AscKeyword) => {
+					self.next();
+					OrderByDirection::Ascending
+				}
+				Some(TokenKind::DescKeyword) => {
+					self.next();
+					OrderByDirection::Descending
+				}
+				_ => OrderByDirection::Ascending,
+			};
+
+			items.push(OrderByItem {
+				direction,
+				position: expression.position(),
+				expression,
+			});
+
+			if !self.current().is_some_and(|token| token.kind == TokenKind::Comma) {
+				break;
+			}
+
+			self.next();
+		}
+
+		Ok(items)
+	}
+
 	fn parse_prefix(&mut self) -> Result<Expr, ParseError> {
 		let token = self.next().ok_or(ParseError {
 			message: String::from("Expected an expression."),
@@ -1316,6 +1359,8 @@ mod tests {
 	use crate::ast::ObjectDeclaration;
 	use crate::ast::ObjectFieldAssignmentTarget;
 	use crate::ast::ObjectFieldDeclaration;
+	use crate::ast::OrderByDirection;
+	use crate::ast::OrderByItem;
 	use crate::ast::Program;
 	use crate::ast::RangeExpr;
 	use crate::ast::ReturnStatement;
@@ -1419,8 +1464,9 @@ mod tests {
 				object: Box::new(normalize_expr(*object)),
 				position: 0,
 			}),
-			Expr::Find(FindExpr { kind, table, where_clause, .. }) => Expr::Find(FindExpr {
+			Expr::Find(FindExpr { kind, order_by, table, where_clause, .. }) => Expr::Find(FindExpr {
 				kind,
+				order_by: order_by.into_iter().map(normalize_order_by_item).collect(),
 				position: 0,
 				table: normalize_table_reference(table),
 				where_clause: where_clause.map(|expression| Box::new(normalize_expr(*expression))),
@@ -1536,6 +1582,14 @@ mod tests {
 			data_type: field.data_type,
 			default_value: field.default_value.map(normalize_expr),
 			name: field.name,
+			position: 0,
+		}
+	}
+
+	fn normalize_order_by_item(item: OrderByItem) -> OrderByItem {
+		OrderByItem {
+			direction: item.direction,
+			expression: normalize_expr(item.expression),
 			position: 0,
 		}
 	}
@@ -2074,6 +2128,50 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_find_expression_with_order_by_clause() {
+		let program = parse_program("find customers order by name desc, id");
+
+		assert_eq!(normalize_program(program), Program {
+			functions: vec![],
+			objects: vec![],
+			result: Some(Expr::Find(FindExpr {
+				kind: FindKind::Any,
+				order_by: vec![
+					OrderByItem {
+						direction: OrderByDirection::Descending,
+						expression: Expr::Identifier(IdentifierExpr {
+							name: String::from("name"),
+							position: 0,
+						}),
+						position: 0,
+					},
+					OrderByItem {
+						direction: OrderByDirection::Ascending,
+						expression: Expr::Identifier(IdentifierExpr {
+							name: String::from("id"),
+							position: 0,
+						}),
+						position: 0,
+					},
+				],
+				position: 0,
+				table: TableReference {
+					components: vec![
+						IdentifierExpr {
+							name: String::from("customers"),
+							position: 0,
+						},
+					],
+					position: 0,
+				},
+				where_clause: None,
+			})),
+			statements: vec![],
+			with_declarations: vec![],
+		});
+	}
+
+	#[test]
 	fn parses_find_first_expression_with_where_clause() {
 		let program = parse_program("find first sales.customers where active = true");
 
@@ -2082,6 +2180,7 @@ mod tests {
 			objects: vec![],
 			result: Some(Expr::Find(FindExpr {
 				kind: FindKind::First,
+				order_by: vec![],
 				position: 0,
 				table: TableReference {
 					components: vec![
@@ -2123,6 +2222,7 @@ mod tests {
 			objects: vec![],
 			result: Some(Expr::Find(FindExpr {
 				kind: FindKind::Last,
+				order_by: vec![],
 				position: 0,
 				table: TableReference {
 					components: vec![

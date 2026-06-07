@@ -793,6 +793,43 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_void_order_by_expression_in_find_query() {
+		let error = compile_snippet_with_schema_fixture(
+			"with exampledb;\nfind customers order by disp('x')",
+			r#"{
+				"databases": [
+					{
+						"backend": "sqlite",
+						"name": "ExampleDb",
+						"schemas": [
+							{
+								"name": "Main",
+								"is_implicit": true,
+								"tables": [
+									{
+										"name": "Customers",
+										"columns": [
+											{ "name": "Id", "data_type": "int", "is_nullable": false },
+											{ "name": "Name", "data_type": "text", "is_nullable": false }
+										]
+									}
+								]
+							}
+						]
+					}
+				]
+			}"#,
+		).unwrap_err();
+
+		match error {
+			TabloError::Compile(compile_error) => {
+				assert_eq!(compile_error.message, "`order by` expressions must produce a runtime value.");
+			}
+			other => panic!("expected compile error, found {other:?}"),
+		}
+	}
+
+	#[test]
 	fn rejects_with_declaration_without_schema_catalog() {
 		let error = evaluate_snippet("with exampledb;\n1 + 2").unwrap_err();
 

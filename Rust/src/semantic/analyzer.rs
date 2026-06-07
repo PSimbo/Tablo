@@ -1065,6 +1065,17 @@ impl SemanticAnalyzer {
 			}
 		}
 
+		for order_by in &find.order_by {
+			let order_type = self.infer_query_expression_type(&order_by.expression, &find.table)?;
+
+			if order_type == DataType::Void {
+				return Err(self.compile_error(
+					order_by.position,
+					String::from("`order by` expressions must produce a runtime value."),
+				));
+			}
+		}
+
 		Ok(DataType::RecordPointer(record_pointer))
 	}
 
@@ -2371,6 +2382,47 @@ mod tests {
 			}"#,
 		).unwrap();
 		let find = parse_find_expression("find first customers where id = 1");
+		let mut analyzer = SemanticAnalyzer::new();
+		analyzer.current_schema_catalog = Some(schema);
+		analyzer.semantic_program.active_databases = vec![String::from("exampledb")];
+
+		let data_type = analyzer.infer_find_expression_type(&find).unwrap();
+
+		assert_eq!(data_type, DataType::RecordPointer(RecordPointerType {
+			database_name: String::from("ExampleDb"),
+			schema_name: String::from("Main"),
+			table_name: String::from("Customers"),
+		}));
+	}
+
+	#[test]
+	fn infers_record_pointer_type_for_find_expression_with_order_by() {
+		let schema = read_schema_catalog_from_str(
+			r#"{
+				"databases": [
+					{
+						"backend": "sqlite",
+						"name": "ExampleDb",
+						"schemas": [
+							{
+								"name": "Main",
+								"is_implicit": true,
+								"tables": [
+									{
+										"name": "Customers",
+										"columns": [
+											{ "name": "Id", "data_type": "int", "is_nullable": false },
+											{ "name": "Name", "data_type": "text", "is_nullable": false }
+										]
+									}
+								]
+							}
+						]
+					}
+				]
+			}"#,
+		).unwrap();
+		let find = parse_find_expression("find first customers order by name desc, id");
 		let mut analyzer = SemanticAnalyzer::new();
 		analyzer.current_schema_catalog = Some(schema);
 		analyzer.semantic_program.active_databases = vec![String::from("exampledb")];

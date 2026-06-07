@@ -309,12 +309,15 @@ impl Lexer {
 		let lexeme = self.source.as_str()[start..self.position].to_string();
 		let kind = match lexeme.as_str() {
 			"and" => TokenKind::AndKeyword,
+			"asc" => TokenKind::AscKeyword,
 			"bool" => TokenKind::BoolKeyword,
 			"break" => TokenKind::BreakKeyword,
+			"by" => TokenKind::ByKeyword,
 			"const" => TokenKind::ConstKeyword,
 			"continue" => TokenKind::ContinueKeyword,
 			"count" => TokenKind::CountKeyword,
 			"dec" => TokenKind::DecKeyword,
+			"desc" => TokenKind::DescKeyword,
 			"else" => TokenKind::ElseKeyword,
 			"false" => TokenKind::FalseKeyword,
 			"find" => TokenKind::FindKeyword,
@@ -328,6 +331,7 @@ impl Lexer {
 			"not" => TokenKind::NotKeyword,
 			"obj" => TokenKind::ObjKeyword,
 			"or" => TokenKind::OrKeyword,
+			"order" => TokenKind::OrderKeyword,
 			"return" => TokenKind::ReturnKeyword,
 			"text" => TokenKind::TextKeyword,
 			"true" => TokenKind::TrueKeyword,
@@ -887,41 +891,42 @@ mod tests {
 
 	#[test]
 	fn tokenizes_keyword_literals() {
-		let mut lexer = Lexer::new(SourceText::new("true false and break continue count else find first fn for if in last or not return void where while with xor bool const dec int text var"));
+		let mut lexer = Lexer::new(SourceText::new("asc and bool break by const continue count dec desc else find first fn for if in last not order or return text true var void where while with xor"));
 		let tokens = lexer.tokenize().unwrap();
 
-		assert_eq!(tokens.len(), 29);
-		assert_eq!(tokens[0].kind, TokenKind::TrueKeyword);
-		assert_eq!(tokens[0].lexeme, "true");
-		assert_eq!(tokens[1].kind, TokenKind::FalseKeyword);
-		assert_eq!(tokens[1].lexeme, "false");
-		assert_eq!(tokens[2].kind, TokenKind::AndKeyword);
+		assert_eq!(tokens.len(), 31);
+		assert_eq!(tokens[0].kind, TokenKind::AscKeyword);
+		assert_eq!(tokens[0].lexeme, "asc");
+		assert_eq!(tokens[1].kind, TokenKind::AndKeyword);
+		assert_eq!(tokens[2].kind, TokenKind::BoolKeyword);
 		assert_eq!(tokens[3].kind, TokenKind::BreakKeyword);
-		assert_eq!(tokens[4].kind, TokenKind::ContinueKeyword);
-		assert_eq!(tokens[5].kind, TokenKind::CountKeyword);
-		assert_eq!(tokens[6].kind, TokenKind::ElseKeyword);
-		assert_eq!(tokens[7].kind, TokenKind::FindKeyword);
-		assert_eq!(tokens[8].kind, TokenKind::FirstKeyword);
-		assert_eq!(tokens[9].kind, TokenKind::FnKeyword);
-		assert_eq!(tokens[10].kind, TokenKind::ForKeyword);
-		assert_eq!(tokens[11].kind, TokenKind::IfKeyword);
-		assert_eq!(tokens[12].kind, TokenKind::InKeyword);
-		assert_eq!(tokens[13].kind, TokenKind::LastKeyword);
-		assert_eq!(tokens[14].kind, TokenKind::OrKeyword);
-		assert_eq!(tokens[15].kind, TokenKind::NotKeyword);
-		assert_eq!(tokens[16].kind, TokenKind::ReturnKeyword);
-		assert_eq!(tokens[17].kind, TokenKind::VoidKeyword);
-		assert_eq!(tokens[18].kind, TokenKind::WhereKeyword);
-		assert_eq!(tokens[19].kind, TokenKind::WhileKeyword);
-		assert_eq!(tokens[20].kind, TokenKind::WithKeyword);
-		assert_eq!(tokens[21].kind, TokenKind::XorKeyword);
-		assert_eq!(tokens[22].kind, TokenKind::BoolKeyword);
-		assert_eq!(tokens[23].kind, TokenKind::ConstKeyword);
-		assert_eq!(tokens[24].kind, TokenKind::DecKeyword);
-		assert_eq!(tokens[25].kind, TokenKind::IntKeyword);
-		assert_eq!(tokens[26].kind, TokenKind::TextKeyword);
-		assert_eq!(tokens[27].kind, TokenKind::VarKeyword);
-		assert_eq!(tokens[28].kind, TokenKind::EndOfFile);
+		assert_eq!(tokens[4].kind, TokenKind::ByKeyword);
+		assert_eq!(tokens[5].kind, TokenKind::ConstKeyword);
+		assert_eq!(tokens[6].kind, TokenKind::ContinueKeyword);
+		assert_eq!(tokens[7].kind, TokenKind::CountKeyword);
+		assert_eq!(tokens[8].kind, TokenKind::DecKeyword);
+		assert_eq!(tokens[9].kind, TokenKind::DescKeyword);
+		assert_eq!(tokens[10].kind, TokenKind::ElseKeyword);
+		assert_eq!(tokens[11].kind, TokenKind::FindKeyword);
+		assert_eq!(tokens[12].kind, TokenKind::FirstKeyword);
+		assert_eq!(tokens[13].kind, TokenKind::FnKeyword);
+		assert_eq!(tokens[14].kind, TokenKind::ForKeyword);
+		assert_eq!(tokens[15].kind, TokenKind::IfKeyword);
+		assert_eq!(tokens[16].kind, TokenKind::InKeyword);
+		assert_eq!(tokens[17].kind, TokenKind::LastKeyword);
+		assert_eq!(tokens[18].kind, TokenKind::NotKeyword);
+		assert_eq!(tokens[19].kind, TokenKind::OrderKeyword);
+		assert_eq!(tokens[20].kind, TokenKind::OrKeyword);
+		assert_eq!(tokens[21].kind, TokenKind::ReturnKeyword);
+		assert_eq!(tokens[22].kind, TokenKind::TextKeyword);
+		assert_eq!(tokens[23].kind, TokenKind::TrueKeyword);
+		assert_eq!(tokens[24].kind, TokenKind::VarKeyword);
+		assert_eq!(tokens[25].kind, TokenKind::VoidKeyword);
+		assert_eq!(tokens[26].kind, TokenKind::WhereKeyword);
+		assert_eq!(tokens[27].kind, TokenKind::WhileKeyword);
+		assert_eq!(tokens[28].kind, TokenKind::WithKeyword);
+		assert_eq!(tokens[29].kind, TokenKind::XorKeyword);
+		assert_eq!(tokens[30].kind, TokenKind::EndOfFile);
 	}
 
 	#[test]

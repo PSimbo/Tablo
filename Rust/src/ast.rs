@@ -76,6 +76,12 @@ pub enum FindKind {
 	Last,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OrderByDirection {
+	Ascending,
+	Descending,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Statement {
 	Block(BlockStatement),
@@ -184,6 +190,7 @@ pub struct FieldAccessExpr {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FindExpr {
 	pub kind: FindKind,
+	pub order_by: Vec<OrderByItem>,
 	pub position: usize,
 	pub table: TableReference,
 	pub where_clause: Option<Box<Expr>>,
@@ -274,6 +281,13 @@ pub struct ObjectFieldDeclaration {
 	pub data_type: DataType,
 	pub default_value: Option<Expr>,
 	pub name: String,
+	pub position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OrderByItem {
+	pub direction: OrderByDirection,
+	pub expression: Expr,
 	pub position: usize,
 }
 
