@@ -756,6 +756,34 @@ Database modifications are executed by the following statements:
 * `update` statement
 * `delete` statement
 
+### Active Databases and Table Resolution
+
+Database table names are resolved only against the databases explicitly activated by `with` declarations.
+
+~~~
+with salesdb;
+with archivedb;
+~~~
+
+If no `with` declaration activates a particular database then tables from that database are not visible to the source file.
+
+Table references may be written in any of the following forms:
+
+* `<table>`
+* `<schema>.<table>`
+* `<database>.<table>`
+* `<database>.<schema>.<table>`
+
+The meaning of each form is as follows:
+
+1. If `<table>` is unique among all active databases then it may be referenced as-is.
+2. If `<table>` is not unique, but `<schema>.<table>` is sufficient to identify a unique table among the active databases, then the table must be referenced as `<schema>.<table>`.
+3. If `<schema>.<table>` is still ambiguous, then the table must be referenced as `<database>.<schema>.<table>`.
+
+Some database backends do not expose multiple meaningful schemas for a given database. In such cases, if `<database>` identifies a database with only one visible schema, `<database>.<table>` may be used as shorthand for `<database>.<schema>.<table>`.
+
+If any table reference remains ambiguous after applying the above rules then compilation fails.
+
 ### Query Syntax
 
 #### Where Clause
