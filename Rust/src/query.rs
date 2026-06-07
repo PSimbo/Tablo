@@ -1,4 +1,6 @@
 use crate::ast::DataType;
+use crate::ast::FindKind;
+use crate::ast::OrderByDirection;
 use crate::schema::DatabaseBackend;
 use crate::value::Decimal;
 
@@ -65,6 +67,12 @@ pub enum SqlDialect {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SqlQueryResultShape {
+	IntegerScalar,
+	RecordPointer(Vec<QueryResultColumn>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryBinaryExpr {
 	pub left: Box<QueryExpr>,
 	pub operator: QueryBinaryOperator,
@@ -100,16 +108,7 @@ impl QueryCountPlan {
 
 	fn lower_to_sqlite(&self) -> SqlQuery {
 		let mut parameters = Vec::new();
-		let table_source = if self.schema_is_implicit {
-			quote_identifier(&self.table_name)
-		}
-		else {
-			format!(
-				"{}.{}",
-				quote_identifier(&self.schema_name),
-				quote_identifier(&self.table_name),
-			)
-		};
+		let table_source = sqlite_table_source(&self.schema_name, &self.table_name, self.schema_is_implicit);
 
 		let mut statement = format!("SELECT COUNT(*) FROM {table_source}");
 
@@ -122,15 +121,99 @@ impl QueryCountPlan {
 			database_name: self.database_name.clone(),
 			dialect: SqlDialect::Sqlite,
 			parameters,
+			result_shape: SqlQueryResultShape::IntegerScalar,
 			statement,
 		}
 	}
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryFindPlan {
+	pub backend: DatabaseBackend,
+	pub database_name: String,
+	pub filter: Option<QueryExpr>,
+	pub kind: FindKind,
+	pub order_by: Vec<QueryOrderByItem>,
+	pub record_columns: Vec<QueryResultColumn>,
+	pub schema_is_implicit: bool,
+	pub schema_name: String,
+	pub table_name: String,
+}
+
+impl QueryFindPlan {
+	pub fn lower_to_backend(&self) -> Result<LoweredBackendQuery, QueryLoweringError> {
+		match self.backend {
+			DatabaseBackend::Sqlite => Ok(LoweredBackendQuery::Sql(self.lower_to_sqlite())),
+			other => Err(QueryLoweringError::UnsupportedBackend {
+				backend: other,
+			}),
+		}
+	}
+
+	fn lower_to_sqlite(&self) -> SqlQuery {
+		let mut parameters = Vec::new();
+		let table_source = sqlite_table_source(&self.schema_name, &self.table_name, self.schema_is_implicit);
+		let select_columns = self.record_columns.iter()
+			.map(|column| {
+				format!(
+					"{}.{}",
+					quote_identifier(&self.table_name),
+					quote_identifier(&column.column_name),
+				)
+			})
+			.collect::<Vec<_>>()
+			.join(", ");
+		let mut statement = format!("SELECT {select_columns} FROM {table_source}");
+
+		if let Some(filter) = &self.filter {
+			statement.push_str(" WHERE ");
+			statement.push_str(&lower_query_expr_sqlite(filter, &mut parameters));
+		}
+
+		if !self.order_by.is_empty() {
+			statement.push_str(" ORDER BY ");
+			let order_by = self.order_by.iter()
+				.map(|item| {
+					let expression = lower_query_expr_sqlite(&item.expression, &mut parameters);
+					let direction = match effective_find_order_direction(self.kind, item.direction) {
+						OrderByDirection::Ascending => "ASC",
+						OrderByDirection::Descending => "DESC",
+					};
+					format!("{expression} {direction}")
+				})
+				.collect::<Vec<_>>()
+				.join(", ");
+			statement.push_str(&order_by);
+		}
+
+		statement.push_str(" LIMIT 1");
+
+		SqlQuery {
+			database_name: self.database_name.clone(),
+			dialect: SqlDialect::Sqlite,
+			parameters,
+			result_shape: SqlQueryResultShape::RecordPointer(self.record_columns.clone()),
+			statement,
+		}
+	}
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryOrderByItem {
+	pub direction: OrderByDirection,
+	pub expression: QueryExpr,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryParameter {
 	pub data_type: DataType,
 	pub slot: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryResultColumn {
+	pub column_name: String,
+	pub data_type: DataType,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -151,7 +234,18 @@ pub struct SqlQuery {
 	pub database_name: String,
 	pub dialect: SqlDialect,
 	pub parameters: Vec<SqlParameter>,
+	pub result_shape: SqlQueryResultShape,
 	pub statement: String,
+}
+
+fn effective_find_order_direction(kind: FindKind, direction: OrderByDirection) -> OrderByDirection {
+	match kind {
+		FindKind::Any | FindKind::First => direction,
+		FindKind::Last => match direction {
+			OrderByDirection::Ascending => OrderByDirection::Descending,
+			OrderByDirection::Descending => OrderByDirection::Ascending,
+		},
+	}
 }
 
 fn lower_query_expr_sqlite(expression: &QueryExpr, parameters: &mut Vec<SqlParameter>) -> String {
@@ -224,9 +318,24 @@ fn quote_text_literal(value: &str) -> String {
 	format!("'{}'", value.replace('\'', "''"))
 }
 
+fn sqlite_table_source(schema_name: &str, table_name: &str, schema_is_implicit: bool) -> String {
+	if schema_is_implicit {
+		quote_identifier(table_name)
+	}
+	else {
+		format!(
+			"{}.{}",
+			quote_identifier(schema_name),
+			quote_identifier(table_name),
+		)
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use crate::ast::DataType;
+	use crate::ast::FindKind;
+	use crate::ast::OrderByDirection;
 	use crate::schema::DatabaseBackend;
 	use crate::value::Decimal;
 
@@ -236,13 +345,17 @@ mod tests {
 	use super::QueryColumnReference;
 	use super::QueryCountPlan;
 	use super::QueryExpr;
+	use super::QueryFindPlan;
 	use super::QueryLiteral;
+	use super::QueryOrderByItem;
 	use super::QueryParameter;
+	use super::QueryResultColumn;
 	use super::QueryUnaryExpr;
 	use super::QueryUnaryOperator;
 	use super::SqlDialect;
 	use super::SqlParameter;
 	use super::SqlQuery;
+	use super::SqlQueryResultShape;
 
 	#[test]
 	fn lowers_sqlite_count_plan_to_sql_query() {
@@ -291,6 +404,7 @@ mod tests {
 					slot: 3,
 				},
 			],
+			result_shape: SqlQueryResultShape::IntegerScalar,
 			statement: String::from(
 				"SELECT COUNT(*) FROM \"Customers\" WHERE ((\"Customers\".\"Id\" = ?1) AND (NOT (\"Customers\".\"Active\" = 0)))"
 			),
@@ -318,8 +432,69 @@ mod tests {
 			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::Sqlite,
 			parameters: vec![],
+			result_shape: SqlQueryResultShape::IntegerScalar,
 			statement: String::from(
 				"SELECT COUNT(*) FROM \"Reporting\".\"Metrics\" WHERE (12.50 = 'hi ''there''')"
+			),
+		}));
+	}
+
+	#[test]
+	fn lowers_sqlite_find_plan_to_sql_query() {
+		let query = QueryFindPlan {
+			backend: DatabaseBackend::Sqlite,
+			database_name: String::from("ExampleDb"),
+			filter: Some(QueryExpr::Binary(QueryBinaryExpr {
+				left: Box::new(QueryExpr::Column(QueryColumnReference {
+					column_name: String::from("Active"),
+					data_type: DataType::Bool,
+					table_name: String::from("Customers"),
+				})),
+				operator: QueryBinaryOperator::Equal,
+				right: Box::new(QueryExpr::Literal(QueryLiteral::Boolean(true))),
+			})),
+			kind: FindKind::Last,
+			order_by: vec![
+				QueryOrderByItem {
+					direction: OrderByDirection::Ascending,
+					expression: QueryExpr::Column(QueryColumnReference {
+						column_name: String::from("Name"),
+						data_type: DataType::Text,
+						table_name: String::from("Customers"),
+					}),
+				},
+			],
+			record_columns: vec![
+				QueryResultColumn {
+					column_name: String::from("Id"),
+					data_type: DataType::Int,
+				},
+				QueryResultColumn {
+					column_name: String::from("Name"),
+					data_type: DataType::Text,
+				},
+			],
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
+			table_name: String::from("Customers"),
+		}.lower_to_backend().unwrap();
+
+		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
+			database_name: String::from("ExampleDb"),
+			dialect: SqlDialect::Sqlite,
+			parameters: vec![],
+			result_shape: SqlQueryResultShape::RecordPointer(vec![
+				QueryResultColumn {
+					column_name: String::from("Id"),
+					data_type: DataType::Int,
+				},
+				QueryResultColumn {
+					column_name: String::from("Name"),
+					data_type: DataType::Text,
+				},
+			]),
+			statement: String::from(
+				"SELECT \"Customers\".\"Id\", \"Customers\".\"Name\" FROM \"Customers\" WHERE (\"Customers\".\"Active\" = 1) ORDER BY \"Customers\".\"Name\" DESC LIMIT 1"
 			),
 		}));
 	}

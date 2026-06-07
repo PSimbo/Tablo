@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 use rusqlite::params_from_iter;
 use rusqlite::types::Value as SqlValue;
+use rusqlite::types::ValueRef as SqlValueRef;
 
 use crate::builtins::BuiltInFunction;
 use crate::bytecode::CodeBody;
@@ -11,8 +12,10 @@ use crate::bytecode::Instruction;
 use crate::bytecode::Program;
 use crate::bytecode::SourceLocation;
 use crate::query::LoweredBackendQuery;
+use crate::query::QueryResultColumn;
 use crate::query::SqlDialect;
 use crate::query::SqlQuery;
+use crate::query::SqlQueryResultShape;
 use crate::value::Decimal;
 use crate::value::DecimalRange;
 use crate::value::DecimalRangeIterator;
@@ -20,6 +23,7 @@ use crate::value::IntegerRange;
 use crate::value::IntegerRangeIterator;
 use crate::value::IteratorState;
 use crate::value::LocalReference;
+use crate::value::RecordPointerValue;
 use crate::value::Value;
 
 #[derive(Clone, Copy)]
@@ -385,7 +389,7 @@ impl VirtualMachine {
 					format!("Compiled query index {} does not exist.", query_index),
 				))?;
 				let result = self.execute_query(query, locals, instruction_index)?;
-				self.stack.push(Value::Integer(result));
+				self.stack.push(result);
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::GreaterThan => {
@@ -421,7 +425,7 @@ impl VirtualMachine {
 				Ok(ExecutionOutcome::Continue(Some(*target as usize)))
 			}
 			Instruction::JumpIfFalse(target) => {
-				let value = self.pop_boolean(instruction_index)?;
+				let value = self.pop_condition_value(instruction_index)?;
 
 				if value {
 					Ok(ExecutionOutcome::Continue(None))
@@ -630,7 +634,7 @@ impl VirtualMachine {
 		query: &LoweredBackendQuery,
 		locals: &[Value],
 		instruction_index: usize,
-	) -> Result<i64, VmError> {
+	) -> Result<Value, VmError> {
 		match query {
 			LoweredBackendQuery::Sql(query) => self.execute_sql_query(query, locals, instruction_index),
 		}
@@ -641,7 +645,7 @@ impl VirtualMachine {
 		query: &SqlQuery,
 		locals: &[Value],
 		instruction_index: usize,
-	) -> Result<i64, VmError> {
+	) -> Result<Value, VmError> {
 		match query.dialect {
 			SqlDialect::Sqlite => self.execute_sqlite_query(query, locals, instruction_index),
 		}
@@ -652,7 +656,7 @@ impl VirtualMachine {
 		query: &SqlQuery,
 		locals: &[Value],
 		instruction_index: usize,
-	) -> Result<i64, VmError> {
+	) -> Result<Value, VmError> {
 		let database_path = self.database_config.sqlite_database_path(&query.database_name).ok_or(vm_error(
 			instruction_index,
 			format!("SQLite database `{}` is not configured at runtime.", query.database_name),
@@ -669,10 +673,38 @@ impl VirtualMachine {
 			.map(|parameter| self.sqlite_parameter_value(parameter.slot, locals, instruction_index))
 			.collect::<Result<Vec<_>, _>>()?;
 
-		statement.query_row(params_from_iter(parameter_values), |row| row.get::<_, i64>(0)).map_err(|error| vm_error(
-			instruction_index,
-			format!("Failed to execute SQLite query: {error}"),
-		))
+		match &query.result_shape {
+			SqlQueryResultShape::IntegerScalar => {
+				let result = statement.query_row(params_from_iter(parameter_values), |row| row.get::<_, i64>(0))
+					.map_err(|error| vm_error(
+						instruction_index,
+						format!("Failed to execute SQLite query: {error}"),
+					))?;
+				Ok(Value::Integer(result))
+			}
+			SqlQueryResultShape::RecordPointer(columns) => {
+				let mut rows = statement.query(params_from_iter(parameter_values)).map_err(|error| vm_error(
+					instruction_index,
+					format!("Failed to execute SQLite query: {error}"),
+				))?;
+				let Some(row) = rows.next().map_err(|error| vm_error(
+					instruction_index,
+					format!("Failed to read SQLite query result: {error}"),
+				))? else {
+					return Ok(Value::RecordPointer(RecordPointerValue {
+						exists: false,
+						fields: BTreeMap::new(),
+						locked: false,
+					}));
+				};
+				let fields = load_sqlite_record_fields(row, columns, instruction_index)?;
+				Ok(Value::RecordPointer(RecordPointerValue {
+					exists: true,
+					fields,
+					locked: false,
+				}))
+			}
+		}
 	}
 
 	fn finish_current_frame(&mut self, result: Option<Value>) -> VmExecutionState {
@@ -745,6 +777,19 @@ impl VirtualMachine {
 		Ok(arguments)
 	}
 
+	fn pop_condition_value(&mut self, instruction_index: usize) -> Result<bool, VmError> {
+		let value = self.pop_value(instruction_index)?;
+
+		match value {
+			Value::Boolean(value) => Ok(value),
+			Value::RecordPointer(record) => Ok(record.exists && !record.locked),
+			other => Err(vm_error(
+				instruction_index,
+				format!("Expected a `bool` or `record pointer` condition, found `{}`.", type_name(&other)),
+			)),
+		}
+	}
+
 	fn pop_numeric(&mut self, instruction_index: usize) -> Result<Value, VmError> {
 		let value = self.pop_value(instruction_index)?;
 
@@ -755,6 +800,15 @@ impl VirtualMachine {
 				source_location: None,
 				stack_trace: Vec::new(),
 			});
+		}
+
+		if matches!(value, Value::RecordPointer(_)) {
+				return Err(VmError {
+					instruction_index,
+					message: format!("Expected a numeric operand, found a {} value.", type_name(&value)),
+					source_location: None,
+					stack_trace: Vec::new(),
+				});
 		}
 
 		Ok(value)
@@ -849,14 +903,28 @@ impl VirtualMachine {
 					format!("Built-in function `displn` expects 1 argument(s), found {}.", arguments.len()),
 				)),
 			},
-			BuiltInFunction::Exists => Err(vm_error(
-				instruction_index,
-				String::from("Built-in function `exists` is not executable yet."),
-			)),
-			BuiltInFunction::Locked => Err(vm_error(
-				instruction_index,
-				String::from("Built-in function `locked` is not executable yet."),
-			)),
+			BuiltInFunction::Exists => match arguments.as_slice() {
+				[Value::RecordPointer(record)] => Ok(Some(Value::Boolean(record.exists))),
+				[value] => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `exists` does not accept a `{}` value.", type_name(value)),
+				)),
+				_ => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `exists` expects 1 argument(s), found {}.", arguments.len()),
+				)),
+			},
+			BuiltInFunction::Locked => match arguments.as_slice() {
+				[Value::RecordPointer(record)] => Ok(Some(Value::Boolean(record.locked))),
+				[value] => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `locked` does not accept a `{}` value.", type_name(value)),
+				)),
+				_ => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `locked` expects 1 argument(s), found {}.", arguments.len()),
+				)),
+			},
 		}
 	}
 
@@ -1019,6 +1087,21 @@ fn compare_values(lhs: Value, rhs: Value, instruction_index: usize, kind: Compar
 	Ok(Value::Boolean(value))
 }
 
+fn data_type_name_for_runtime(data_type: &crate::ast::DataType) -> String {
+	match data_type {
+		crate::ast::DataType::Array(element) => format!("[{}]", data_type_name_for_runtime(element)),
+		crate::ast::DataType::Bool => String::from("bool"),
+		crate::ast::DataType::Dec => String::from("dec"),
+		crate::ast::DataType::EmptyArray => String::from("empty array"),
+		crate::ast::DataType::Int => String::from("int"),
+		crate::ast::DataType::Object(name) => name.clone(),
+		crate::ast::DataType::Range(element) => format!("range<{}>", data_type_name_for_runtime(element)),
+		crate::ast::DataType::RecordPointer(_) => String::from("record pointer"),
+		crate::ast::DataType::Text => String::from("text"),
+		crate::ast::DataType::Void => String::from("void"),
+	}
+}
+
 fn divide_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
 	match (lhs, rhs) {
 		(Value::Integer(lhs), Value::Integer(rhs)) => {
@@ -1040,6 +1123,7 @@ fn equals_value(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Valu
 		(Value::Array(lhs), Value::Array(rhs)) => lhs == rhs,
 		(Value::Boolean(lhs), Value::Boolean(rhs)) => lhs == rhs,
 		(Value::Object(lhs), Value::Object(rhs)) => lhs == rhs,
+		(Value::RecordPointer(lhs), Value::RecordPointer(rhs)) => lhs == rhs,
 		(Value::Text(lhs), Value::Text(rhs)) => lhs == rhs,
 		(lhs @ Value::Iterator(_), rhs) | (lhs, rhs @ Value::Iterator(_)) => {
 			return Err(vm_error(
@@ -1054,6 +1138,12 @@ fn equals_value(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Valu
 			));
 		}
 		(lhs @ Value::Object(_), rhs) | (lhs, rhs @ Value::Object(_)) => {
+			return Err(vm_error(
+				instruction_index,
+				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
+			));
+		}
+		(lhs @ Value::RecordPointer(_), rhs) | (lhs, rhs @ Value::RecordPointer(_)) => {
 			return Err(vm_error(
 				instruction_index,
 				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
@@ -1171,6 +1261,25 @@ fn load_field_value(object: Value, field_name: &str, instruction_index: usize) -
 			instruction_index,
 			format!("Object does not contain a field named `{field_name}`."),
 		)),
+		Value::RecordPointer(record) => {
+			if !record.exists {
+				return Err(vm_error(
+					instruction_index,
+					String::from("Cannot access fields on a record pointer that does not reference a record."),
+				));
+			}
+			if record.locked {
+				return Err(vm_error(
+					instruction_index,
+					String::from("Cannot access fields on a locked record pointer."),
+				));
+			}
+
+			record.fields.get(&normalize_record_field_name(field_name)).cloned().ok_or(vm_error(
+				instruction_index,
+				format!("Record pointer does not contain a field named `{field_name}`."),
+			))
+		}
 		other => Err(vm_error(
 			instruction_index,
 			format!("Field access requires an object operand, found `{}`.", type_name(&other)),
@@ -1246,6 +1355,27 @@ fn load_range_slice_value(values: Vec<Value>, range: IntegerRange, instruction_i
 	}
 
 	Ok(Value::Array(result))
+}
+
+fn load_sqlite_record_fields(
+	row: &rusqlite::Row<'_>,
+	columns: &[QueryResultColumn],
+	instruction_index: usize,
+) -> Result<BTreeMap<String, Value>, VmError> {
+	let mut fields = BTreeMap::new();
+
+	for (index, column) in columns.iter().enumerate() {
+		let value = row.get_ref(index).map_err(|error| vm_error(
+			instruction_index,
+			format!("Failed to read SQLite column `{}`: {error}", column.column_name),
+		))?;
+		fields.insert(
+			normalize_record_field_name(&column.column_name),
+			sqlite_runtime_value(value, &column.data_type, instruction_index)?,
+		);
+	}
+
+	Ok(fields)
 }
 
 fn make_iterator_value(iterable: Value, instruction_index: usize) -> Result<Value, VmError> {
@@ -1378,12 +1508,17 @@ fn negate_value(value: Value) -> Value {
 		Value::IntegerRange(_) => unreachable!("Range values are rejected before numeric negation."),
 		Value::Iterator(_) => unreachable!("Iterator values are rejected before numeric negation."),
 		Value::Object(_) => unreachable!("Object values are rejected before numeric negation."),
+		Value::RecordPointer(_) => unreachable!("Record pointer values are rejected before numeric negation."),
 		Value::Reference(_) => unreachable!("Reference values are resolved before numeric negation."),
 		Value::Text(_) => unreachable!("Text values are rejected before numeric negation."),
 	}
 }
 
 fn normalize_database_name(name: &str) -> String {
+	name.to_ascii_lowercase()
+}
+
+fn normalize_record_field_name(name: &str) -> String {
 	name.to_ascii_lowercase()
 }
 
@@ -1426,6 +1561,73 @@ fn sqlite_path_from_connection_string(database_name: &str, value: &str) -> Resul
 	};
 
 	Ok(PathBuf::from(normalized))
+}
+
+fn sqlite_runtime_value(
+	value: SqlValueRef<'_>,
+	data_type: &crate::ast::DataType,
+	instruction_index: usize,
+) -> Result<Value, VmError> {
+	match data_type {
+		crate::ast::DataType::Bool => match value {
+			SqlValueRef::Integer(value) => Ok(Value::Boolean(value != 0)),
+			other => Err(vm_error(
+				instruction_index,
+				format!("Cannot convert SQLite value `{}` to `bool`.", sqlite_value_name(other)),
+			)),
+		},
+		crate::ast::DataType::Dec => match value {
+			SqlValueRef::Integer(value) => Ok(Value::Decimal(Decimal::from_integer(value))),
+			SqlValueRef::Real(value) => Ok(Value::Decimal(
+				Decimal::from_literal(&value.to_string()).map_err(|message| vm_error(instruction_index, message))?,
+			)),
+			SqlValueRef::Text(value) => {
+				let text = std::str::from_utf8(value).map_err(|_| vm_error(
+					instruction_index,
+					String::from("SQLite returned invalid UTF-8 for a decimal column."),
+				))?;
+				Ok(Value::Decimal(
+					Decimal::from_literal(text).map_err(|message| vm_error(instruction_index, message))?,
+				))
+			}
+			other => Err(vm_error(
+				instruction_index,
+				format!("Cannot convert SQLite value `{}` to `dec`.", sqlite_value_name(other)),
+			)),
+		},
+		crate::ast::DataType::Int => match value {
+			SqlValueRef::Integer(value) => Ok(Value::Integer(value)),
+			other => Err(vm_error(
+				instruction_index,
+				format!("Cannot convert SQLite value `{}` to `int`.", sqlite_value_name(other)),
+			)),
+		},
+		crate::ast::DataType::Text => match value {
+			SqlValueRef::Text(value) => Ok(Value::Text(
+				std::str::from_utf8(value)
+					.map_err(|_| vm_error(instruction_index, String::from("SQLite returned invalid UTF-8 for a text column.")))?
+					.to_string(),
+			)),
+			other => Err(vm_error(
+				instruction_index,
+				format!("Cannot convert SQLite value `{}` to `text`.", sqlite_value_name(other)),
+			)),
+		},
+		other => Err(vm_error(
+			instruction_index,
+			format!("Database records cannot yet materialize fields of type `{}`.", data_type_name_for_runtime(other)),
+		)),
+	}
+}
+
+fn sqlite_value_name(value: SqlValueRef<'_>) -> &'static str {
+	match value {
+		SqlValueRef::Blob(_) => "blob",
+		SqlValueRef::Integer(_) => "integer",
+		SqlValueRef::Null => "null",
+		SqlValueRef::Real(_) => "real",
+		SqlValueRef::Text(_) => "text",
+	}
 }
 
 fn store_field_path_into_object(
@@ -1563,6 +1765,17 @@ fn stringify_value(value: &Value) -> String {
 			result.push('}');
 			result
 		}
+		Value::RecordPointer(record) => {
+			if !record.exists {
+				String::from("<record pointer: missing>")
+			}
+			else if record.locked {
+				String::from("<record pointer: locked>")
+			}
+			else {
+				String::from("<record pointer>")
+			}
+		}
 		Value::Reference(_) => String::from("<reference>"),
 		Value::Text(value) => value.clone(),
 	}
@@ -1588,6 +1801,7 @@ fn type_name(value: &Value) -> &'static str {
 		Value::IntegerRange(_) => "range",
 		Value::Iterator(_) => "iterator",
 		Value::Object(_) => "object",
+		Value::RecordPointer(_) => "record pointer",
 		Value::Reference(_) => "reference",
 		Value::Text(_) => "text",
 	}

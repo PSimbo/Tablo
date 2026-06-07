@@ -42,9 +42,12 @@ use crate::query::QueryBinaryOperator;
 use crate::query::QueryColumnReference;
 use crate::query::QueryCountPlan;
 use crate::query::QueryExpr;
+use crate::query::QueryFindPlan;
 use crate::query::QueryLiteral;
 use crate::query::QueryLoweringError;
+use crate::query::QueryOrderByItem;
 use crate::query::QueryParameter;
+use crate::query::QueryResultColumn;
 use crate::query::QueryUnaryExpr;
 use crate::query::QueryUnaryOperator;
 use crate::schema::SchemaCatalog;
@@ -105,6 +108,7 @@ pub struct SemanticProgram {
 	call_return_types: BTreeMap<usize, DataType>,
 	call_targets: BTreeMap<usize, u32>,
 	compiled_count_queries: BTreeMap<usize, LoweredBackendQuery>,
+	compiled_find_queries: BTreeMap<usize, LoweredBackendQuery>,
 	declaration_slots: BTreeMap<usize, u32>,
 	declaration_types: BTreeMap<usize, DataType>,
 	entry_point_function_index: Option<u32>,
@@ -113,6 +117,7 @@ pub struct SemanticProgram {
 	identifier_slots: BTreeMap<usize, u32>,
 	iterator_slots: BTreeMap<usize, u32>,
 	lowered_count_queries: BTreeMap<usize, QueryCountPlan>,
+	lowered_find_queries: BTreeMap<usize, QueryFindPlan>,
 	object_declarations: BTreeMap<String, ObjectDeclaration>,
 	resolved_tables: BTreeMap<usize, ResolvedTableReference>,
 }
@@ -140,6 +145,10 @@ impl SemanticProgram {
 
 	pub fn compiled_count_query(&self, position: usize) -> Option<&LoweredBackendQuery> {
 		self.compiled_count_queries.get(&position)
+	}
+
+	pub fn compiled_find_query(&self, position: usize) -> Option<&LoweredBackendQuery> {
+		self.compiled_find_queries.get(&position)
 	}
 
 	pub fn declaration_slot(&self, position: usize) -> Option<u32> {
@@ -172,6 +181,10 @@ impl SemanticProgram {
 
 	pub fn lowered_count_query(&self, position: usize) -> Option<&QueryCountPlan> {
 		self.lowered_count_queries.get(&position)
+	}
+
+	pub fn lowered_find_query(&self, position: usize) -> Option<&QueryFindPlan> {
+		self.lowered_find_queries.get(&position)
 	}
 
 	pub fn object_declaration(&self, name: &str) -> Option<&ObjectDeclaration> {
@@ -1045,6 +1058,7 @@ impl SemanticAnalyzer {
 	}
 
 	fn infer_find_expression_type(&mut self, find: &FindExpr) -> Result<DataType, CompileError> {
+		let lowered_query = self.lower_find_query(find)?;
 		let record_pointer = {
 			let resolved_table = self.resolve_table_reference(&find.table)?;
 			RecordPointerType {
@@ -1075,6 +1089,13 @@ impl SemanticAnalyzer {
 				));
 			}
 		}
+
+		let compiled_query = lowered_query.lower_to_backend().map_err(|error| self.compile_error(
+			find.position,
+			query_lowering_error_message(error),
+		))?;
+		self.semantic_program.compiled_find_queries.insert(find.position, compiled_query);
+		self.semantic_program.lowered_find_queries.insert(find.position, lowered_query);
 
 		Ok(DataType::RecordPointer(record_pointer))
 	}
@@ -1356,6 +1377,50 @@ impl SemanticAnalyzer {
 			backend,
 			database_name,
 			filter,
+			schema_is_implicit,
+			schema_name,
+			table_name,
+		})
+	}
+
+	fn lower_find_query(&mut self, find: &FindExpr) -> Result<QueryFindPlan, CompileError> {
+		let (backend, database_name, schema_name, schema_is_implicit, table_name, record_column_schemas) = {
+			let resolved_table = self.resolve_table_reference(&find.table)?;
+			let record_column_schemas = resolved_table.table().columns()
+				.map(|column| (column.name().to_string(), column.data_type().clone()))
+				.collect::<Vec<_>>();
+			(
+				resolved_table.database().backend(),
+				resolved_table.database().name().to_string(),
+				resolved_table.schema().name().to_string(),
+				resolved_table.schema().is_implicit(),
+				resolved_table.table().name().to_string(),
+				record_column_schemas,
+			)
+		};
+		let record_columns = record_column_schemas.into_iter()
+			.map(|(column_name, schema_type)| Ok(QueryResultColumn {
+				column_name,
+				data_type: self.data_type_from_schema_type(&schema_type)?,
+			}))
+			.collect::<Result<Vec<_>, CompileError>>()?;
+		let filter = find.where_clause.as_ref()
+			.map(|where_clause| self.lower_query_expression(where_clause, &find.table, backend))
+			.transpose()?;
+		let order_by = find.order_by.iter()
+			.map(|item| Ok(QueryOrderByItem {
+				direction: item.direction,
+				expression: self.lower_query_expression(&item.expression, &find.table, backend)?,
+			}))
+			.collect::<Result<Vec<_>, CompileError>>()?;
+
+		Ok(QueryFindPlan {
+			backend,
+			database_name,
+			filter,
+			kind: find.kind,
+			order_by,
+			record_columns,
 			schema_is_implicit,
 			schema_name,
 			table_name,

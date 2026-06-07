@@ -18,9 +18,11 @@ use crate::bytecode::LocalVariableDebugInfo;
 use crate::bytecode::Program;
 use crate::bytecode::SourceFileDebugInfo;
 use crate::query::LoweredBackendQuery;
+use crate::query::QueryResultColumn;
 use crate::query::SqlDialect;
 use crate::query::SqlParameter;
 use crate::query::SqlQuery;
+use crate::query::SqlQueryResultShape;
 use crate::value::Decimal;
 
 const MAGIC_BYTES: [u8; 4] = *b"TBO0";
@@ -71,6 +73,8 @@ const OPCODE_STORE_FIELD_PATH: u8 = 43;
 const OPCODE_EXECUTE_QUERY: u8 = 44;
 const QUERY_KIND_SQL: u8 = 1;
 const SQL_DIALECT_SQLITE: u8 = 1;
+const SQL_RESULT_INTEGER_SCALAR: u8 = 1;
+const SQL_RESULT_RECORD_POINTER: u8 = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectFileError {
@@ -471,6 +475,28 @@ impl<'a> ObjectFileReader<'a> {
 		};
 		let database_name = self.read_string()?;
 		let statement = self.read_string()?;
+		let result_shape = match self.read_u8()? {
+			SQL_RESULT_INTEGER_SCALAR => SqlQueryResultShape::IntegerScalar,
+			SQL_RESULT_RECORD_POINTER => {
+				let column_count = self.read_u32()? as usize;
+				let mut columns = Vec::with_capacity(column_count);
+
+				for _ in 0..column_count {
+					columns.push(QueryResultColumn {
+						column_name: self.read_string()?,
+						data_type: self.read_data_type()?,
+					});
+				}
+
+				SqlQueryResultShape::RecordPointer(columns)
+			}
+			kind => {
+				return Err(ObjectFileError {
+					offset: self.offset - 1,
+					message: format!("Unknown SQL query result kind {kind}."),
+				});
+			}
+		};
 		let parameter_count = self.read_u32()? as usize;
 		let mut parameters = Vec::with_capacity(parameter_count);
 
@@ -486,6 +512,7 @@ impl<'a> ObjectFileReader<'a> {
 			database_name,
 			dialect,
 			parameters,
+			result_shape,
 			statement,
 		})
 	}
@@ -704,6 +731,19 @@ fn write_sql_query(bytes: &mut Vec<u8>, query: &SqlQuery) {
 	bytes.extend_from_slice(query.database_name.as_bytes());
 	bytes.extend_from_slice(&(query.statement.len() as u32).to_le_bytes());
 	bytes.extend_from_slice(query.statement.as_bytes());
+	match &query.result_shape {
+		SqlQueryResultShape::IntegerScalar => bytes.push(SQL_RESULT_INTEGER_SCALAR),
+		SqlQueryResultShape::RecordPointer(columns) => {
+			bytes.push(SQL_RESULT_RECORD_POINTER);
+			bytes.extend_from_slice(&(columns.len() as u32).to_le_bytes());
+
+			for column in columns {
+				bytes.extend_from_slice(&(column.column_name.len() as u32).to_le_bytes());
+				bytes.extend_from_slice(column.column_name.as_bytes());
+				write_data_type(bytes, &column.data_type);
+			}
+		}
+	}
 	bytes.extend_from_slice(&(query.parameters.len() as u32).to_le_bytes());
 
 	for parameter in &query.parameters {

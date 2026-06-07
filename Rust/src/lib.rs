@@ -574,40 +574,6 @@ mod tests {
 	}
 
 	#[test]
-	fn rejects_find_expression_until_record_queries_exist() {
-		let error = compile_snippet_with_schema_fixture(
-			"with exampledb;\nfind first customers where true",
-			r#"{
-				"databases": [
-					{
-						"backend": "sqlite",
-						"name": "ExampleDb",
-						"schemas": [
-							{
-								"name": "Main",
-								"is_implicit": true,
-								"tables": [
-									{
-										"name": "Customers",
-										"columns": [
-											{ "name": "Id", "data_type": "int", "is_nullable": false }
-										]
-									}
-								]
-							}
-						]
-					}
-				]
-			}"#,
-		).unwrap_err();
-
-		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
-			message: String::from("`find` queries are not executable yet."),
-			position: 16,
-		}));
-	}
-
-	#[test]
 	fn rejects_implicit_outer_variable_capture_in_nested_function_source_text() {
 		let error = run(
 			"fn Main(args: [text]) int { var x: int = 1; fn inner() int { return x; } return inner(); }"
@@ -823,7 +789,7 @@ mod tests {
 
 		match error {
 			TabloError::Compile(compile_error) => {
-				assert_eq!(compile_error.message, "`order by` expressions must produce a runtime value.");
+				assert_eq!(compile_error.message, "Function `disp` is not yet supported in lowered database query expressions.");
 			}
 			other => panic!("expected compile error, found {other:?}"),
 		}
@@ -1091,6 +1057,52 @@ mod tests {
 		let result = evaluate_snippet("2 == 2.0").unwrap();
 
 		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
+	fn runs_exists_for_missing_sqlite_find_query() {
+		let database_path = create_sqlite_test_database(
+			"runs_exists_for_missing_sqlite_find_query",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Active INTEGER NOT NULL
+				);
+				INSERT INTO Customers (Id, Active) VALUES (1, 1), (2, 0), (3, 1);
+			"#,
+		);
+		let (program, _) = compile_snippet_with_schema_fixture(
+			"with exampledb;\nexists(find first customers where id = 999)",
+			r#"{
+				"databases": [
+					{
+						"backend": "sqlite",
+						"name": "ExampleDb",
+						"schemas": [
+							{
+								"name": "Main",
+								"is_implicit": true,
+								"tables": [
+									{
+										"name": "Customers",
+										"columns": [
+											{ "name": "Id", "data_type": "int", "is_nullable": false },
+											{ "name": "Active", "data_type": "bool", "is_nullable": false }
+										]
+									}
+								]
+							}
+						]
+					}
+				]
+			}"#,
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Boolean(false)));
 	}
 
 	#[test]
@@ -1494,6 +1506,113 @@ mod tests {
 		let _ = std::fs::remove_file(&output_path);
 
 		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn runs_sqlite_find_first_query_from_snippet() {
+		let database_path = create_sqlite_test_database(
+			"runs_sqlite_find_first_query_from_snippet",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Active INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO Customers (Id, Active, Name) VALUES
+					(2, 1, 'Bea'),
+					(1, 1, 'Ada'),
+					(3, 0, 'Cam');
+			"#,
+		);
+		let (program, _) = compile_snippet_with_schema_fixture(
+			"with exampledb;\n(find first customers where active = true order by id).name",
+			r#"{
+				"databases": [
+					{
+						"backend": "sqlite",
+						"name": "ExampleDb",
+						"schemas": [
+							{
+								"name": "Main",
+								"is_implicit": true,
+								"tables": [
+									{
+										"name": "Customers",
+										"columns": [
+											{ "name": "Id", "data_type": "int", "is_nullable": false },
+											{ "name": "Active", "data_type": "bool", "is_nullable": false },
+											{ "name": "Name", "data_type": "text", "is_nullable": false }
+										]
+									}
+								]
+							}
+						]
+					}
+				]
+			}"#,
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Text(String::from("Ada"))));
+	}
+
+	#[test]
+	fn runs_sqlite_find_last_query_after_object_round_trip() {
+		let database_path = create_sqlite_test_database(
+			"runs_sqlite_find_last_query_after_object_round_trip",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Active INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO Customers (Id, Active, Name) VALUES
+					(2, 1, 'Bea'),
+					(1, 1, 'Ada'),
+					(4, 1, 'Dee'),
+					(3, 0, 'Cam');
+			"#,
+		);
+		let output_path = unique_test_output_path("sqlite_find_query_program");
+		let (program, _) = compile_standalone_with_schema_fixture(
+			"with exampledb;\nfn Main(args: [text]) int { return (find last customers where active = true order by id).id; }",
+			r#"{
+				"databases": [
+					{
+						"backend": "sqlite",
+						"name": "ExampleDb",
+						"schemas": [
+							{
+								"name": "Main",
+								"is_implicit": true,
+								"tables": [
+									{
+										"name": "Customers",
+										"columns": [
+											{ "name": "Id", "data_type": "int", "is_nullable": false },
+											{ "name": "Active", "data_type": "bool", "is_nullable": false },
+											{ "name": "Name", "data_type": "text", "is_nullable": false }
+										]
+									}
+								]
+							}
+						]
+					}
+				]
+			}"#,
+		).unwrap();
+		write_program_to_path(&output_path, &program).unwrap();
+		let decoded = read_program_from_path(&output_path).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&decoded, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+		let _ = std::fs::remove_file(&output_path);
+
+		assert_eq!(result, Some(Value::Integer(4)));
 	}
 
 	#[test]

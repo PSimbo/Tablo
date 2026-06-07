@@ -18,6 +18,7 @@ pub enum Value {
 	IntegerRange(IntegerRange),
 	Iterator(IteratorState),
 	Object(BTreeMap<String, Value>),
+	RecordPointer(RecordPointerValue),
 	Reference(LocalReference),
 	Text(String),
 }
@@ -56,6 +57,17 @@ impl Display for Value {
 				}
 
 				write!(f, "}}")
+			}
+			Value::RecordPointer(record) => {
+				if !record.exists {
+					write!(f, "<record pointer: missing>")
+				}
+				else if record.locked {
+					write!(f, "<record pointer: locked>")
+				}
+				else {
+					write!(f, "<record pointer>")
+				}
 			}
 			Value::Reference(_) => write!(f, "<reference>"),
 			Value::Text(value) => write!(f, "{value}"),
@@ -318,6 +330,13 @@ pub struct IntegerRangeIterator {
 pub struct LocalReference {
 	pub frame_index: usize,
 	pub slot: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordPointerValue {
+	pub exists: bool,
+	pub fields: BTreeMap<String, Value>,
+	pub locked: bool,
 }
 
 fn align_decimal_operands(lhs: &Decimal, rhs: &Decimal) -> Result<(i128, i128, u8), String> {
