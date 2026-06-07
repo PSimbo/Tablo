@@ -1235,11 +1235,16 @@ impl SemanticAnalyzer {
 	}
 
 	fn lower_count_query(&mut self, count: &CountExpr) -> Result<QueryCountPlan, CompileError> {
-		let resolved_table = self.resolve_table_reference(&count.table)?;
-		let backend = resolved_table.database().backend();
-		let database_name = resolved_table.database().name().to_string();
-		let schema_name = resolved_table.schema().name().to_string();
-		let table_name = resolved_table.table().name().to_string();
+		let (backend, database_name, schema_name, schema_is_implicit, table_name) = {
+			let resolved_table = self.resolve_table_reference(&count.table)?;
+			(
+				resolved_table.database().backend(),
+				resolved_table.database().name().to_string(),
+				resolved_table.schema().name().to_string(),
+				resolved_table.schema().is_implicit(),
+				resolved_table.table().name().to_string(),
+			)
+		};
 		let filter = count.where_clause.as_ref()
 			.map(|where_clause| self.lower_query_expression(where_clause, &count.table, backend))
 			.transpose()?;
@@ -1248,6 +1253,7 @@ impl SemanticAnalyzer {
 			backend,
 			database_name,
 			filter,
+			schema_is_implicit,
 			schema_name,
 			table_name,
 		})
@@ -2150,6 +2156,7 @@ mod tests {
 					right: Box::new(QueryExpr::Literal(QueryLiteral::Boolean(true))),
 				})),
 			})),
+			schema_is_implicit: true,
 			schema_name: String::from("Main"),
 			table_name: String::from("Customers"),
 		});
