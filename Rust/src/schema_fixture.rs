@@ -3,6 +3,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::schema::ColumnSchema;
+use crate::schema::DatabaseNamespace;
 use crate::schema::DatabaseSchema;
 use crate::schema::SchemaCatalog;
 use crate::schema::SchemaDataType;
@@ -34,15 +35,15 @@ impl ColumnFixture {
 #[derive(Deserialize)]
 struct DatabaseFixture {
 	name: String,
-	tables: Vec<TableFixture>,
+	schemas: Vec<SchemaFixture>,
 }
 
 impl DatabaseFixture {
 	fn into_database_schema(self) -> Result<DatabaseSchema, SchemaFixtureError> {
 		let mut database = DatabaseSchema::new(self.name);
 
-		for table in self.tables {
-			database.add_table(table.into_table_schema()?)
+		for schema in self.schemas {
+			database.add_schema(schema.into_database_namespace(&database.name().to_string())?)
 				.map_err(schema_error_to_fixture_error)?;
 		}
 
@@ -65,6 +66,31 @@ impl SchemaCatalogFixture {
 		}
 
 		Ok(catalog)
+	}
+}
+
+#[derive(Deserialize)]
+struct SchemaFixture {
+	is_implicit: Option<bool>,
+	name: String,
+	tables: Vec<TableFixture>,
+}
+
+impl SchemaFixture {
+	fn into_database_namespace(self, database_name: &str) -> Result<DatabaseNamespace, SchemaFixtureError> {
+		let mut schema = if self.is_implicit.unwrap_or(false) {
+			DatabaseNamespace::with_implicit(self.name)
+		}
+		else {
+			DatabaseNamespace::new(self.name)
+		};
+
+		for table in self.tables {
+			schema.add_table(table.into_table_schema()?, database_name)
+				.map_err(schema_error_to_fixture_error)?;
+		}
+
+		Ok(schema)
 	}
 }
 
@@ -133,6 +159,19 @@ fn parse_schema_data_type(input: &str) -> Result<SchemaDataType, SchemaFixtureEr
 fn schema_error_to_fixture_error(error: SchemaError) -> SchemaFixtureError {
 	SchemaFixtureError {
 		message: match error {
+			SchemaError::AmbiguousDatabaseQualifiedTableName { database_name, table_name } => {
+				format!("Table `{table_name}` is ambiguous within database `{database_name}`.")
+			}
+			SchemaError::AmbiguousSchemaQualifiedTableName {
+				active_databases,
+				schema_name,
+				table_name,
+			} => {
+				format!(
+					"Table `{schema_name}.{table_name}` is ambiguous across active databases: {}.",
+					active_databases.join(", ")
+				)
+			}
 			SchemaError::AmbiguousTableName { active_databases, table_name } => {
 				format!(
 					"Table `{table_name}` is ambiguous across active databases: {}.",
@@ -145,11 +184,28 @@ fn schema_error_to_fixture_error(error: SchemaError) -> SchemaFixtureError {
 			SchemaError::DuplicateDatabase { database_name } => {
 				format!("Database `{database_name}` is declared more than once.")
 			}
-			SchemaError::DuplicateTable { database_name, table_name } => {
-				format!("Table `{table_name}` is declared more than once in database `{database_name}`.")
+			SchemaError::DuplicateSchema { database_name, schema_name } => {
+				format!("Schema `{schema_name}` is declared more than once in database `{database_name}`.")
+			}
+			SchemaError::DuplicateTable {
+				database_name,
+				schema_name,
+				table_name,
+			} => {
+				format!(
+					"Table `{table_name}` is declared more than once in schema `{schema_name}` of database `{database_name}`."
+				)
 			}
 			SchemaError::UnknownDatabase { database_name } => {
 				format!("Unknown database `{database_name}`.")
+			}
+			SchemaError::UnknownSchema { database_name, schema_name } => {
+				match database_name {
+					Some(database_name) => {
+						format!("Unknown schema `{schema_name}` in database `{database_name}`.")
+					}
+					None => format!("Unknown schema `{schema_name}`."),
+				}
 			}
 			SchemaError::UnknownTable { table_name } => {
 				format!("Unknown table `{table_name}`.")
@@ -166,18 +222,18 @@ mod tests {
 	use super::SchemaFixtureError;
 
 	#[test]
-	fn loads_schema_fixture_catalog() {
+	fn loads_single_schema_database_with_implicit_schema_marker() {
 		let catalog = read_schema_catalog_from_str(
 			r#"{
 				"databases": [
 					{
 						"name": "ExampleDb",
-						"tables": [
+						"schemas": [
 							{
-								"name": "Customers",
-								"columns": [
-									{ "name": "Id", "data_type": "int", "is_nullable": false },
-									{ "name": "Tags", "data_type": "[text]", "is_nullable": true }
+								"name": "Main",
+								"is_implicit": true,
+								"tables": [
+									{ "name": "Customers", "columns": [] }
 								]
 							}
 						]
@@ -187,7 +243,40 @@ mod tests {
 		).unwrap();
 
 		let database = catalog.database("exampledb").unwrap();
-		let table = database.table("customers").unwrap();
+		let schema = database.schema("main").unwrap();
+
+		assert!(schema.is_implicit());
+	}
+
+	#[test]
+	fn loads_schema_fixture_catalog() {
+		let catalog = read_schema_catalog_from_str(
+			r#"{
+				"databases": [
+					{
+						"name": "ExampleDb",
+						"schemas": [
+							{
+								"name": "Public",
+								"tables": [
+									{
+										"name": "Customers",
+										"columns": [
+											{ "name": "Id", "data_type": "int", "is_nullable": false },
+											{ "name": "Tags", "data_type": "[text]", "is_nullable": true }
+										]
+									}
+								]
+							}
+						]
+					}
+				]
+			}"#,
+		).unwrap();
+
+		let database = catalog.database("exampledb").unwrap();
+		let schema = database.schema("public").unwrap();
+		let table = schema.table("customers").unwrap();
 		let column = table.column("tags").unwrap();
 
 		assert_eq!(column.data_type(), &SchemaDataType::Array(Box::new(SchemaDataType::Text)));
@@ -201,9 +290,14 @@ mod tests {
 				"databases": [
 					{
 						"name": "ExampleDb",
-						"tables": [
-							{ "name": "Customers", "columns": [] },
-							{ "name": "customers", "columns": [] }
+						"schemas": [
+							{
+								"name": "Public",
+								"tables": [
+									{ "name": "Customers", "columns": [] },
+									{ "name": "customers", "columns": [] }
+								]
+							}
 						]
 					}
 				]
@@ -211,7 +305,9 @@ mod tests {
 		).unwrap_err();
 
 		assert_eq!(error, SchemaFixtureError {
-			message: String::from("Table `customers` is declared more than once in database `ExampleDb`."),
+			message: String::from(
+				"Table `customers` is declared more than once in schema `Public` of database `ExampleDb`."
+			),
 		});
 	}
 
@@ -222,11 +318,16 @@ mod tests {
 				"databases": [
 					{
 						"name": "ExampleDb",
-						"tables": [
+						"schemas": [
 							{
-								"name": "Customers",
-								"columns": [
-									{ "name": "Profile", "data_type": "customer", "is_nullable": false }
+								"name": "Public",
+								"tables": [
+									{
+										"name": "Customers",
+										"columns": [
+											{ "name": "Profile", "data_type": "customer", "is_nullable": false }
+										]
+									}
 								]
 							}
 						]

@@ -20,6 +20,15 @@ pub enum SchemaDataType {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SchemaError {
+	AmbiguousDatabaseQualifiedTableName {
+		database_name: String,
+		table_name: String,
+	},
+	AmbiguousSchemaQualifiedTableName {
+		active_databases: Vec<String>,
+		schema_name: String,
+		table_name: String,
+	},
 	AmbiguousTableName {
 		active_databases: Vec<String>,
 		table_name: String,
@@ -31,12 +40,21 @@ pub enum SchemaError {
 	DuplicateDatabase {
 		database_name: String,
 	},
+	DuplicateSchema {
+		database_name: String,
+		schema_name: String,
+	},
 	DuplicateTable {
 		database_name: String,
+		schema_name: String,
 		table_name: String,
 	},
 	UnknownDatabase {
 		database_name: String,
+	},
+	UnknownSchema {
+		database_name: Option<String>,
+		schema_name: String,
 	},
 	UnknownTable {
 		table_name: String,
@@ -73,31 +91,38 @@ impl ColumnSchema {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DatabaseSchema {
+pub struct DatabaseNamespace {
+	is_implicit: bool,
 	name: String,
 	tables: BTreeMap<String, TableSchema>,
 }
 
-impl DatabaseSchema {
+impl DatabaseNamespace {
 	pub fn new(name: impl Into<String>) -> Self {
 		Self {
+			is_implicit: false,
 			name: name.into(),
 			tables: BTreeMap::new(),
 		}
 	}
 
-	pub fn add_table(&mut self, table: TableSchema) -> Result<(), SchemaError> {
+	pub fn add_table(&mut self, table: TableSchema, database_name: &str) -> Result<(), SchemaError> {
 		let normalized_name = normalize_name(table.name());
 
 		if self.tables.contains_key(&normalized_name) {
 			return Err(SchemaError::DuplicateTable {
-				database_name: self.name.clone(),
+				database_name: database_name.to_string(),
+				schema_name: self.name.clone(),
 				table_name: table.name().to_string(),
 			});
 		}
 
 		self.tables.insert(normalized_name, table);
 		Ok(())
+	}
+
+	pub fn is_implicit(&self) -> bool {
+		self.is_implicit
 	}
 
 	pub fn name(&self) -> &str {
@@ -111,17 +136,75 @@ impl DatabaseSchema {
 	pub fn tables(&self) -> impl Iterator<Item = &TableSchema> {
 		self.tables.values()
 	}
+
+	pub fn with_implicit(name: impl Into<String>) -> Self {
+		Self {
+			is_implicit: true,
+			name: name.into(),
+			tables: BTreeMap::new(),
+		}
+	}
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DatabaseSchema {
+	name: String,
+	schemas: BTreeMap<String, DatabaseNamespace>,
+}
+
+impl DatabaseSchema {
+	pub fn new(name: impl Into<String>) -> Self {
+		Self {
+			name: name.into(),
+			schemas: BTreeMap::new(),
+		}
+	}
+
+	pub fn add_schema(&mut self, schema: DatabaseNamespace) -> Result<(), SchemaError> {
+		let normalized_name = normalize_name(schema.name());
+
+		if self.schemas.contains_key(&normalized_name) {
+			return Err(SchemaError::DuplicateSchema {
+				database_name: self.name.clone(),
+				schema_name: schema.name().to_string(),
+			});
+		}
+
+		self.schemas.insert(normalized_name, schema);
+		Ok(())
+	}
+
+	pub fn name(&self) -> &str {
+		&self.name
+	}
+
+	pub fn schema(&self, name: &str) -> Option<&DatabaseNamespace> {
+		self.schemas.get(&normalize_name(name))
+	}
+
+	pub fn schemas(&self) -> impl Iterator<Item = &DatabaseNamespace> {
+		self.schemas.values()
+	}
+
+	fn allows_database_table_shorthand(&self) -> bool {
+		self.schemas.len() == 1
+	}
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedTable<'a> {
 	database: &'a DatabaseSchema,
+	schema: &'a DatabaseNamespace,
 	table: &'a TableSchema,
 }
 
 impl<'a> ResolvedTable<'a> {
 	pub fn database(&self) -> &'a DatabaseSchema {
 		self.database
+	}
+
+	pub fn schema(&self) -> &'a DatabaseNamespace {
+		self.schema
 	}
 
 	pub fn table(&self) -> &'a TableSchema {
@@ -162,6 +245,79 @@ impl SchemaCatalog {
 		self.databases.values()
 	}
 
+	pub fn resolve_database_schema_table<'a>(
+		&'a self,
+		active_databases: &[&str],
+		database_name: &str,
+		schema_name: &str,
+		table_name: &str,
+	) -> Result<ResolvedTable<'a>, SchemaError> {
+		let database = self.active_database(active_databases, database_name)?;
+		let schema = database.schema(schema_name).ok_or(SchemaError::UnknownSchema {
+			database_name: Some(database.name().to_string()),
+			schema_name: schema_name.to_string(),
+		})?;
+		let table = schema.table(table_name).ok_or(SchemaError::UnknownTable {
+			table_name: format!("{}.{}.{}", database.name(), schema_name, table_name),
+		})?;
+
+		Ok(ResolvedTable { database, schema, table })
+	}
+
+	pub fn resolve_database_table<'a>(
+		&'a self,
+		active_databases: &[&str],
+		database_name: &str,
+		table_name: &str,
+	) -> Result<ResolvedTable<'a>, SchemaError> {
+		let database = self.active_database(active_databases, database_name)?;
+
+		if !database.allows_database_table_shorthand() {
+			return Err(SchemaError::AmbiguousDatabaseQualifiedTableName {
+				database_name: database.name().to_string(),
+				table_name: table_name.to_string(),
+			});
+		}
+
+		let schema = database.schemas().next().unwrap();
+		let table = schema.table(table_name).ok_or(SchemaError::UnknownTable {
+			table_name: format!("{}.{}", database.name(), table_name),
+		})?;
+
+		Ok(ResolvedTable { database, schema, table })
+	}
+
+	pub fn resolve_schema_table<'a>(
+		&'a self,
+		active_databases: &[&str],
+		schema_name: &str,
+		table_name: &str,
+	) -> Result<ResolvedTable<'a>, SchemaError> {
+		let mut matches = Vec::new();
+
+		for database_name in active_databases {
+			let database = self.active_database(active_databases, database_name)?;
+
+			if let Some(schema) = database.schema(schema_name) {
+				if let Some(table) = schema.table(table_name) {
+					matches.push(ResolvedTable { database, schema, table });
+				}
+			}
+		}
+
+		match matches.len() {
+			0 => Err(SchemaError::UnknownTable {
+				table_name: format!("{schema_name}.{table_name}"),
+			}),
+			1 => Ok(matches.pop().unwrap()),
+			_ => Err(SchemaError::AmbiguousSchemaQualifiedTableName {
+				active_databases: active_databases.iter().map(|name| (*name).to_string()).collect(),
+				schema_name: schema_name.to_string(),
+				table_name: table_name.to_string(),
+			}),
+		}
+	}
+
 	pub fn resolve_table<'a>(
 		&'a self,
 		active_databases: &[&str],
@@ -170,12 +326,12 @@ impl SchemaCatalog {
 		let mut matches = Vec::new();
 
 		for database_name in active_databases {
-			let database = self.database(database_name).ok_or(SchemaError::UnknownDatabase {
-				database_name: (*database_name).to_string(),
-			})?;
+			let database = self.active_database(active_databases, database_name)?;
 
-			if let Some(table) = database.table(table_name) {
-				matches.push(ResolvedTable { database, table });
+			for schema in database.schemas() {
+				if let Some(table) = schema.table(table_name) {
+					matches.push(ResolvedTable { database, schema, table });
+				}
 			}
 		}
 
@@ -189,6 +345,22 @@ impl SchemaCatalog {
 				table_name: table_name.to_string(),
 			}),
 		}
+	}
+
+	fn active_database<'a>(
+		&'a self,
+		active_databases: &[&str],
+		database_name: &str,
+	) -> Result<&'a DatabaseSchema, SchemaError> {
+		if !active_databases.iter().any(|active| active.eq_ignore_ascii_case(database_name)) {
+			return Err(SchemaError::UnknownDatabase {
+				database_name: database_name.to_string(),
+			});
+		}
+
+		self.database(database_name).ok_or(SchemaError::UnknownDatabase {
+			database_name: database_name.to_string(),
+		})
 	}
 }
 
@@ -246,11 +418,50 @@ fn normalize_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
 	use super::ColumnSchema;
+	use super::DatabaseNamespace;
 	use super::DatabaseSchema;
+	use super::ResolvedTable;
 	use super::SchemaCatalog;
 	use super::SchemaDataType;
 	use super::SchemaError;
 	use super::TableSchema;
+
+	fn resolved_names(resolved: ResolvedTable<'_>) -> (String, String, String) {
+		(
+			resolved.database().name().to_string(),
+			resolved.schema().name().to_string(),
+			resolved.table().name().to_string(),
+		)
+	}
+
+	fn schema_with_table(name: &str, table: &str) -> DatabaseNamespace {
+		let mut schema = DatabaseNamespace::new(name);
+		schema.add_table(table_with_id(table), "ExampleDb").unwrap();
+		schema
+	}
+
+	fn table_with_id(name: &str) -> TableSchema {
+		let mut table = TableSchema::new(name);
+		table.add_column(ColumnSchema::new("Id", SchemaDataType::Int, false)).unwrap();
+		table
+	}
+
+	#[test]
+	fn rejects_database_table_shorthand_for_multi_schema_database() {
+		let mut database = DatabaseSchema::new("ExampleDb");
+		database.add_schema(schema_with_table("Public", "Customers")).unwrap();
+		database.add_schema(schema_with_table("Archive", "Customers")).unwrap();
+
+		let mut catalog = SchemaCatalog::new();
+		catalog.add_database(database).unwrap();
+
+		let error = catalog.resolve_database_table(&["exampledb"], "ExampleDb", "Customers").unwrap_err();
+
+		assert_eq!(error, SchemaError::AmbiguousDatabaseQualifiedTableName {
+			database_name: String::from("ExampleDb"),
+			table_name: String::from("Customers"),
+		});
+	}
 
 	#[test]
 	fn rejects_duplicate_column_names_case_insensitively() {
@@ -278,25 +489,60 @@ mod tests {
 	}
 
 	#[test]
-	fn rejects_duplicate_table_names_case_insensitively() {
+	fn rejects_duplicate_schema_names_case_insensitively() {
 		let mut database = DatabaseSchema::new("ExampleDb");
-		database.add_table(TableSchema::new("Customers")).unwrap();
+		database.add_schema(DatabaseNamespace::new("Public")).unwrap();
 
-		let error = database.add_table(TableSchema::new("customers")).unwrap_err();
+		let error = database.add_schema(DatabaseNamespace::new("public")).unwrap_err();
+
+		assert_eq!(error, SchemaError::DuplicateSchema {
+			database_name: String::from("ExampleDb"),
+			schema_name: String::from("public"),
+		});
+	}
+
+	#[test]
+	fn rejects_duplicate_table_names_case_insensitively_within_schema() {
+		let mut schema = DatabaseNamespace::new("Public");
+		schema.add_table(TableSchema::new("Customers"), "ExampleDb").unwrap();
+
+		let error = schema.add_table(TableSchema::new("customers"), "ExampleDb").unwrap_err();
 
 		assert_eq!(error, SchemaError::DuplicateTable {
 			database_name: String::from("ExampleDb"),
+			schema_name: String::from("Public"),
 			table_name: String::from("customers"),
 		});
 	}
 
 	#[test]
-	fn reports_ambiguous_table_name_across_active_databases() {
+	fn reports_ambiguous_schema_qualified_table_across_active_databases() {
 		let mut sales = DatabaseSchema::new("Sales");
-		sales.add_table(TableSchema::new("Customers")).unwrap();
+		sales.add_schema(schema_with_table("Public", "Customers")).unwrap();
 
 		let mut archive = DatabaseSchema::new("Archive");
-		archive.add_table(TableSchema::new("Customers")).unwrap();
+		archive.add_schema(schema_with_table("Public", "Customers")).unwrap();
+
+		let mut catalog = SchemaCatalog::new();
+		catalog.add_database(sales).unwrap();
+		catalog.add_database(archive).unwrap();
+
+		let error = catalog.resolve_schema_table(&["sales", "archive"], "public", "customers").unwrap_err();
+
+		assert_eq!(error, SchemaError::AmbiguousSchemaQualifiedTableName {
+			active_databases: vec![String::from("sales"), String::from("archive")],
+			schema_name: String::from("public"),
+			table_name: String::from("customers"),
+		});
+	}
+
+	#[test]
+	fn reports_ambiguous_unqualified_table_name_across_active_databases() {
+		let mut sales = DatabaseSchema::new("Sales");
+		sales.add_schema(schema_with_table("Public", "Customers")).unwrap();
+
+		let mut archive = DatabaseSchema::new("Archive");
+		archive.add_schema(schema_with_table("Public", "Customers")).unwrap();
 
 		let mut catalog = SchemaCatalog::new();
 		catalog.add_database(sales).unwrap();
@@ -322,21 +568,26 @@ mod tests {
 	}
 
 	#[test]
-	fn resolves_database_table_and_column_names_case_insensitively() {
+	fn resolves_database_schema_table_and_column_names_case_insensitively() {
 		let mut table = TableSchema::new("Customers");
 		table.add_column(ColumnSchema::new("Name", SchemaDataType::Text, true)).unwrap();
 
+		let mut schema = DatabaseNamespace::new("Public");
+		schema.add_table(table, "ExampleDb").unwrap();
+
 		let mut database = DatabaseSchema::new("ExampleDb");
-		database.add_table(table).unwrap();
+		database.add_schema(schema).unwrap();
 
 		let mut catalog = SchemaCatalog::new();
 		catalog.add_database(database).unwrap();
 
 		let database = catalog.database("exampledb").unwrap();
-		let table = database.table("customers").unwrap();
+		let schema = database.schema("public").unwrap();
+		let table = schema.table("customers").unwrap();
 		let column = table.column("name").unwrap();
 
 		assert_eq!(database.name(), "ExampleDb");
+		assert_eq!(schema.name(), "Public");
 		assert_eq!(table.name(), "Customers");
 		assert_eq!(column.name(), "Name");
 		assert_eq!(column.data_type(), &SchemaDataType::Text);
@@ -344,19 +595,57 @@ mod tests {
 	}
 
 	#[test]
-	fn resolves_unqualified_table_name_from_active_databases() {
-		let mut table = TableSchema::new("Customers");
-		table.add_column(ColumnSchema::new("Id", SchemaDataType::Int, false)).unwrap();
+	fn resolves_database_table_shorthand_for_single_schema_database() {
+		let mut schema = DatabaseNamespace::with_implicit("Main");
+		schema.add_table(table_with_id("Customers"), "ExampleDb").unwrap();
 
+		let mut database = DatabaseSchema::new("ExampleDb");
+		database.add_schema(schema).unwrap();
+
+		let mut catalog = SchemaCatalog::new();
+		catalog.add_database(database).unwrap();
+
+		let resolved = catalog.resolve_database_table(&["exampledb"], "ExampleDb", "Customers").unwrap();
+
+		assert_eq!(
+			resolved_names(resolved),
+			(String::from("ExampleDb"), String::from("Main"), String::from("Customers"))
+		);
+	}
+
+	#[test]
+	fn resolves_schema_qualified_table_across_active_databases() {
+		let mut sales = DatabaseSchema::new("Sales");
+		sales.add_schema(schema_with_table("Crm", "Customers")).unwrap();
+
+		let mut archive = DatabaseSchema::new("Archive");
+		archive.add_schema(schema_with_table("Legacy", "Customers")).unwrap();
+
+		let mut catalog = SchemaCatalog::new();
+		catalog.add_database(sales).unwrap();
+		catalog.add_database(archive).unwrap();
+
+		let resolved = catalog.resolve_schema_table(&["sales", "archive"], "crm", "customers").unwrap();
+
+		assert_eq!(
+			resolved_names(resolved),
+			(String::from("Sales"), String::from("Crm"), String::from("Customers"))
+		);
+	}
+
+	#[test]
+	fn resolves_unqualified_table_name_from_active_databases_when_unique() {
 		let mut database = DatabaseSchema::new("Sales");
-		database.add_table(table).unwrap();
+		database.add_schema(schema_with_table("Public", "Customers")).unwrap();
 
 		let mut catalog = SchemaCatalog::new();
 		catalog.add_database(database).unwrap();
 
 		let resolved = catalog.resolve_table(&["sales"], "customers").unwrap();
 
-		assert_eq!(resolved.database().name(), "Sales");
-		assert_eq!(resolved.table().name(), "Customers");
+		assert_eq!(
+			resolved_names(resolved),
+			(String::from("Sales"), String::from("Public"), String::from("Customers"))
+		);
 	}
 }

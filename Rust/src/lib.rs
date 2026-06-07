@@ -256,11 +256,16 @@ mod tests {
 				"databases": [
 					{
 						"name": "ExampleDb",
-						"tables": [
+						"schemas": [
 							{
-								"name": "Customers",
-								"columns": [
-									{ "name": "Id", "data_type": "int", "is_nullable": false }
+								"name": "Public",
+								"tables": [
+									{
+										"name": "Customers",
+										"columns": [
+											{ "name": "Id", "data_type": "int", "is_nullable": false }
+										]
+									}
 								]
 							}
 						]
@@ -581,7 +586,7 @@ mod tests {
 			"with missingdb;\n1 + 2",
 			r#"{
 				"databases": [
-					{ "name": "ExampleDb", "tables": [] }
+					{ "name": "ExampleDb", "schemas": [{ "name": "Public", "tables": [] }] }
 				]
 			}"#,
 		).unwrap_err();
