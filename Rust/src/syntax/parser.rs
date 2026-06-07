@@ -16,6 +16,8 @@ use crate::ast::DataType;
 use crate::ast::DecimalLiteral;
 use crate::ast::Expr;
 use crate::ast::FieldAccessExpr;
+use crate::ast::FindExpr;
+use crate::ast::FindKind;
 use crate::ast::ForStatement;
 use crate::ast::FunctionDeclaration;
 use crate::ast::FunctionParameter;
@@ -520,6 +522,35 @@ impl Parser {
 			},
 			object: Box::new(object),
 			position: start,
+		}))
+	}
+
+	fn parse_find_expression(&mut self, start: usize) -> Result<Expr, ParseError> {
+		let kind = match self.current().map(|token| token.kind) {
+			Some(TokenKind::FirstKeyword) => {
+				self.next();
+				FindKind::First
+			}
+			Some(TokenKind::LastKeyword) => {
+				self.next();
+				FindKind::Last
+			}
+			_ => FindKind::Any,
+		};
+		let table = self.parse_table_reference()?;
+		let where_clause = if self.current().is_some_and(|token| token.kind == TokenKind::WhereKeyword) {
+			self.next();
+			Some(Box::new(self.parse_expression_with_binding_power(BindingPower::Default, true)?))
+		}
+		else {
+			None
+		};
+
+		Ok(Expr::Find(FindExpr {
+			kind,
+			position: start,
+			table,
+			where_clause,
 		}))
 	}
 
@@ -1046,6 +1077,7 @@ impl Parser {
 				position: token.start,
 			}),
 			TokenKind::FalseKeyword | TokenKind::TrueKeyword => self.parse_boolean_literal(token),
+			TokenKind::FindKeyword => self.parse_find_expression(token.start),
 			TokenKind::Identifier => Ok(self.parse_identifier_expression(token)),
 			TokenKind::IntegerLiteral => self.parse_integer_literal(token),
 			TokenKind::InterpolatedStringStart => self.parse_interpolated_string(token),
@@ -1270,6 +1302,8 @@ mod tests {
 	use crate::ast::DecimalLiteral;
 	use crate::ast::Expr;
 	use crate::ast::FieldAccessExpr;
+	use crate::ast::FindExpr;
+	use crate::ast::FindKind;
 	use crate::ast::ForStatement;
 	use crate::ast::FunctionDeclaration;
 	use crate::ast::FunctionParameter;
@@ -1384,6 +1418,12 @@ mod tests {
 				field: normalize_identifier(field),
 				object: Box::new(normalize_expr(*object)),
 				position: 0,
+			}),
+			Expr::Find(FindExpr { kind, table, where_clause, .. }) => Expr::Find(FindExpr {
+				kind,
+				position: 0,
+				table: normalize_table_reference(table),
+				where_clause: where_clause.map(|expression| Box::new(normalize_expr(*expression))),
 			}),
 			Expr::Identifier(identifier) => Expr::Identifier(normalize_identifier(identifier)),
 			Expr::Index(IndexExpr { array, index, .. }) => Expr::Index(IndexExpr {
@@ -2031,6 +2071,73 @@ mod tests {
 				with_declarations: vec![],
 			}
 		);
+	}
+
+	#[test]
+	fn parses_find_first_expression_with_where_clause() {
+		let program = parse_program("find first sales.customers where active = true");
+
+		assert_eq!(normalize_program(program), Program {
+			functions: vec![],
+			objects: vec![],
+			result: Some(Expr::Find(FindExpr {
+				kind: FindKind::First,
+				position: 0,
+				table: TableReference {
+					components: vec![
+						IdentifierExpr {
+							name: String::from("sales"),
+							position: 0,
+						},
+						IdentifierExpr {
+							name: String::from("customers"),
+							position: 0,
+						},
+					],
+					position: 0,
+				},
+				where_clause: Some(Box::new(Expr::Binary(BinaryExpr {
+					left: Box::new(Expr::Identifier(IdentifierExpr {
+						name: String::from("active"),
+						position: 0,
+					})),
+					operator: BinaryOperator::Equal,
+					position: 0,
+					right: Box::new(Expr::Boolean(BooleanLiteral {
+						position: 0,
+						value: true,
+					})),
+				}))),
+			})),
+			statements: vec![],
+			with_declarations: vec![],
+		});
+	}
+
+	#[test]
+	fn parses_find_last_expression() {
+		let program = parse_program("find last customers");
+
+		assert_eq!(normalize_program(program), Program {
+			functions: vec![],
+			objects: vec![],
+			result: Some(Expr::Find(FindExpr {
+				kind: FindKind::Last,
+				position: 0,
+				table: TableReference {
+					components: vec![
+						IdentifierExpr {
+							name: String::from("customers"),
+							position: 0,
+						},
+					],
+					position: 0,
+				},
+				where_clause: None,
+			})),
+			statements: vec![],
+			with_declarations: vec![],
+		});
 	}
 
 	#[test]

@@ -58,6 +58,7 @@ pub enum Expr {
 	Count(CountExpr),
 	Decimal(DecimalLiteral),
 	FieldAccess(FieldAccessExpr),
+	Find(FindExpr),
 	Identifier(IdentifierExpr),
 	Index(IndexExpr),
 	Integer(IntegerLiteral),
@@ -65,6 +66,13 @@ pub enum Expr {
 	Range(RangeExpr),
 	Text(TextLiteral),
 	Unary(UnaryExpr),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FindKind {
+	Any,
+	First,
+	Last,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -170,6 +178,14 @@ pub struct FieldAccessExpr {
 	pub field: IdentifierExpr,
 	pub object: Box<Expr>,
 	pub position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FindExpr {
+	pub kind: FindKind,
+	pub position: usize,
+	pub table: TableReference,
+	pub where_clause: Option<Box<Expr>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -335,6 +351,7 @@ impl Expr {
 			Expr::Count(expression) => expression.position,
 			Expr::Decimal(expression) => expression.position,
 			Expr::FieldAccess(expression) => expression.position,
+			Expr::Find(expression) => expression.position,
 			Expr::Identifier(expression) => expression.position,
 			Expr::Index(expression) => expression.position,
 			Expr::Integer(expression) => expression.position,

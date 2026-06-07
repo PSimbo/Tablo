@@ -14,6 +14,7 @@ use crate::ast::CountExpr;
 use crate::ast::DataType;
 use crate::ast::Expr;
 use crate::ast::FieldAccessExpr;
+use crate::ast::FindExpr;
 use crate::ast::ForStatement;
 use crate::ast::FunctionDeclaration;
 use crate::ast::FunctionParameter;
@@ -879,6 +880,7 @@ impl SemanticAnalyzer {
 					)),
 				}
 			}
+			Expr::Find(find) => self.infer_find_expression_type(find),
 			Expr::Identifier(IdentifierExpr { name, .. }) => {
 				let local = self.lookup_local(name).ok_or(self.compile_error(
 					expression.position(),
@@ -1035,6 +1037,15 @@ impl SemanticAnalyzer {
 		}
 	}
 
+	fn infer_find_expression_type(&mut self, find: &FindExpr) -> Result<DataType, CompileError> {
+		let _ = find;
+
+		Err(self.compile_error(
+			find.position,
+			String::from("`find` queries are not implemented yet."),
+		))
+	}
+
 	fn infer_query_expression_type(
 		&mut self,
 		expression: &Expr,
@@ -1105,6 +1116,10 @@ impl SemanticAnalyzer {
 			)),
 			Expr::Decimal(_) => Ok(DataType::Dec),
 			Expr::FieldAccess(field_access) => self.infer_query_field_access_type(field_access, table),
+			Expr::Find(_) => Err(self.compile_error(
+				expression.position(),
+				String::from("Nested `find` queries are not yet supported in `where` clauses."),
+			)),
 			Expr::Identifier(identifier) => {
 				if let Some(local) = self.lookup_local(&identifier.name) {
 					self.semantic_program.identifier_slots.insert(identifier.position, local.slot);

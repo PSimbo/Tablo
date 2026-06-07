@@ -574,6 +574,40 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_find_expression_until_record_queries_exist() {
+		let error = compile_snippet_with_schema_fixture(
+			"with exampledb;\nfind first customers where true",
+			r#"{
+				"databases": [
+					{
+						"backend": "sqlite",
+						"name": "ExampleDb",
+						"schemas": [
+							{
+								"name": "Main",
+								"is_implicit": true,
+								"tables": [
+									{
+										"name": "Customers",
+										"columns": [
+											{ "name": "Id", "data_type": "int", "is_nullable": false }
+										]
+									}
+								]
+							}
+						]
+					}
+				]
+			}"#,
+		).unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("`find` queries are not implemented yet."),
+			position: 16,
+		}));
+	}
+
+	#[test]
 	fn rejects_implicit_outer_variable_capture_in_nested_function_source_text() {
 		let error = run(
 			"fn Main(args: [text]) int { var x: int = 1; fn inner() int { return x; } return inner(); }"

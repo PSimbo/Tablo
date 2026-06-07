@@ -338,6 +338,9 @@ impl Compiler {
 				self.compile_into(object, semantic_program, emission);
 				self.emit(emission, Instruction::LoadField(field.name.clone()), expression.position());
 			}
+			Expr::Find(_) => {
+				panic!("`find` queries should not reach bytecode generation before runtime support exists.");
+			}
 			Expr::Identifier(IdentifierExpr { name, .. }) => {
 				let slot = semantic_program.identifier_slot(expression.position())
 					.unwrap_or_else(|| panic!("Missing slot for identifier `{name}`."));
