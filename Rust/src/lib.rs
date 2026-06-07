@@ -7,6 +7,7 @@ pub mod bytecode;
 pub mod compiler;
 pub mod debugger;
 pub mod object_file;
+pub mod query;
 pub mod schema;
 pub mod schema_fixture;
 pub mod semantic;
@@ -255,6 +256,7 @@ mod tests {
 			r#"{
 				"databases": [
 					{
+						"backend": "postgresql",
 						"name": "ExampleDb",
 						"schemas": [
 							{
@@ -412,12 +414,14 @@ mod tests {
 			r#"{
 				"databases": [
 					{
+						"backend": "postgresql",
 						"name": "Sales",
 						"schemas": [
 							{ "name": "Public", "tables": [{ "name": "Customers", "columns": [] }] }
 						]
 					},
 					{
+						"backend": "sqlite",
 						"name": "Archive",
 						"schemas": [
 							{ "name": "Public", "tables": [{ "name": "Customers", "columns": [] }] }
@@ -460,6 +464,7 @@ mod tests {
 			r#"{
 				"databases": [
 					{
+						"backend": "mysql",
 						"name": "ExampleDb",
 						"schemas": [
 							{
@@ -646,7 +651,7 @@ mod tests {
 			"with missingdb;\n1 + 2",
 			r#"{
 				"databases": [
-					{ "name": "ExampleDb", "schemas": [{ "name": "Public", "tables": [] }] }
+					{ "backend": "postgresql", "name": "ExampleDb", "schemas": [{ "name": "Public", "tables": [] }] }
 				]
 			}"#,
 		).unwrap_err();
@@ -664,6 +669,7 @@ mod tests {
 			r#"{
 				"databases": [
 					{
+						"backend": "postgresql",
 						"name": "ExampleDb",
 						"schemas": [
 							{

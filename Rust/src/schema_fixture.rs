@@ -3,6 +3,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::schema::ColumnSchema;
+use crate::schema::DatabaseBackend;
 use crate::schema::DatabaseNamespace;
 use crate::schema::DatabaseSchema;
 use crate::schema::SchemaCatalog;
@@ -34,13 +35,14 @@ impl ColumnFixture {
 
 #[derive(Deserialize)]
 struct DatabaseFixture {
+	backend: String,
 	name: String,
 	schemas: Vec<SchemaFixture>,
 }
 
 impl DatabaseFixture {
 	fn into_database_schema(self) -> Result<DatabaseSchema, SchemaFixtureError> {
-		let mut database = DatabaseSchema::new(self.name);
+		let mut database = DatabaseSchema::with_backend(self.name, parse_database_backend(&self.backend)?);
 
 		for schema in self.schemas {
 			database.add_schema(schema.into_database_namespace(&database.name().to_string())?)
@@ -127,6 +129,17 @@ pub fn read_schema_catalog_from_str(fixture: &str) -> Result<SchemaCatalog, Sche
 	})?;
 
 	fixture.into_schema_catalog()
+}
+
+fn parse_database_backend(input: &str) -> Result<DatabaseBackend, SchemaFixtureError> {
+	match input.trim().to_ascii_lowercase().as_str() {
+		"mysql" => Ok(DatabaseBackend::MySql),
+		"postgres" | "postgresql" => Ok(DatabaseBackend::PostgreSql),
+		"sqlite" => Ok(DatabaseBackend::Sqlite),
+		_ => Err(SchemaFixtureError {
+			message: format!("Unsupported schema fixture database backend `{input}`."),
+		}),
+	}
 }
 
 fn parse_schema_data_type(input: &str) -> Result<SchemaDataType, SchemaFixtureError> {
@@ -227,6 +240,7 @@ mod tests {
 			r#"{
 				"databases": [
 					{
+						"backend": "sqlite",
 						"name": "ExampleDb",
 						"schemas": [
 							{
@@ -254,6 +268,7 @@ mod tests {
 			r#"{
 				"databases": [
 					{
+						"backend": "postgresql",
 						"name": "ExampleDb",
 						"schemas": [
 							{
@@ -289,6 +304,7 @@ mod tests {
 			r#"{
 				"databases": [
 					{
+						"backend": "mysql",
 						"name": "ExampleDb",
 						"schemas": [
 							{
@@ -317,6 +333,7 @@ mod tests {
 			r#"{
 				"databases": [
 					{
+						"backend": "sqlite",
 						"name": "ExampleDb",
 						"schemas": [
 							{

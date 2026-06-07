@@ -34,7 +34,17 @@ use crate::ast::WhileStatement;
 use crate::ast::WithDeclaration;
 use crate::builtins::BuiltInFunction;
 use crate::compiler::CompileError;
+use crate::query::QueryBinaryExpr;
+use crate::query::QueryBinaryOperator;
+use crate::query::QueryColumnReference;
+use crate::query::QueryCountPlan;
+use crate::query::QueryExpr;
+use crate::query::QueryLiteral;
+use crate::query::QueryParameter;
+use crate::query::QueryUnaryExpr;
+use crate::query::QueryUnaryOperator;
 use crate::schema::SchemaCatalog;
+use crate::schema::DatabaseBackend;
 use crate::schema::SchemaDataType;
 use crate::schema::SchemaError;
 
@@ -97,6 +107,7 @@ pub struct SemanticProgram {
 	function_declaration_targets: BTreeMap<usize, u32>,
 	identifier_slots: BTreeMap<usize, u32>,
 	iterator_slots: BTreeMap<usize, u32>,
+	lowered_count_queries: BTreeMap<usize, QueryCountPlan>,
 	object_declarations: BTreeMap<String, ObjectDeclaration>,
 	resolved_tables: BTreeMap<usize, ResolvedTableReference>,
 }
@@ -148,6 +159,10 @@ impl SemanticProgram {
 
 	pub fn iterator_slot(&self, position: usize) -> Option<u32> {
 		self.iterator_slots.get(&position).copied()
+	}
+
+	pub fn lowered_count_query(&self, position: usize) -> Option<&QueryCountPlan> {
+		self.lowered_count_queries.get(&position)
 	}
 
 	pub fn object_declaration(&self, name: &str) -> Option<&ObjectDeclaration> {
@@ -599,7 +614,7 @@ impl SemanticAnalyzer {
 	}
 
 	fn infer_count_expression_type(&mut self, count: &CountExpr) -> Result<DataType, CompileError> {
-		self.resolve_table_reference(&count.table)?;
+		let lowered_query = self.lower_count_query(count)?;
 
 		if let Some(where_clause) = &count.where_clause {
 			let where_type = self.infer_query_expression_type(where_clause, &count.table)?;
@@ -611,6 +626,8 @@ impl SemanticAnalyzer {
 				));
 			}
 		}
+
+		self.semantic_program.lowered_count_queries.insert(count.position, lowered_query);
 
 		Err(self.compile_error(
 			count.position,
@@ -1215,6 +1232,170 @@ impl SemanticAnalyzer {
 			.fields
 			.iter()
 			.find(|field| field.name == field_name)
+	}
+
+	fn lower_count_query(&mut self, count: &CountExpr) -> Result<QueryCountPlan, CompileError> {
+		let resolved_table = self.resolve_table_reference(&count.table)?;
+		let backend = resolved_table.database().backend();
+		let database_name = resolved_table.database().name().to_string();
+		let schema_name = resolved_table.schema().name().to_string();
+		let table_name = resolved_table.table().name().to_string();
+		let filter = count.where_clause.as_ref()
+			.map(|where_clause| self.lower_query_expression(where_clause, &count.table, backend))
+			.transpose()?;
+
+		Ok(QueryCountPlan {
+			backend,
+			database_name,
+			filter,
+			schema_name,
+			table_name,
+		})
+	}
+
+	fn lower_query_binary_operator(&self, operator: BinaryOperator) -> QueryBinaryOperator {
+		match operator {
+			BinaryOperator::Add => QueryBinaryOperator::Add,
+			BinaryOperator::And => QueryBinaryOperator::And,
+			BinaryOperator::Divide => QueryBinaryOperator::Divide,
+			BinaryOperator::Equal => QueryBinaryOperator::Equal,
+			BinaryOperator::GreaterThan => QueryBinaryOperator::GreaterThan,
+			BinaryOperator::GreaterThanOrEqual => QueryBinaryOperator::GreaterThanOrEqual,
+			BinaryOperator::LessThan => QueryBinaryOperator::LessThan,
+			BinaryOperator::LessThanOrEqual => QueryBinaryOperator::LessThanOrEqual,
+			BinaryOperator::Modulo => QueryBinaryOperator::Modulo,
+			BinaryOperator::Multiply => QueryBinaryOperator::Multiply,
+			BinaryOperator::NotEqual => QueryBinaryOperator::NotEqual,
+			BinaryOperator::Or => QueryBinaryOperator::Or,
+			BinaryOperator::Subtract => QueryBinaryOperator::Subtract,
+			BinaryOperator::Xor => QueryBinaryOperator::Xor,
+		}
+	}
+
+	fn lower_query_expression(
+		&mut self,
+		expression: &Expr,
+		table: &TableReference,
+		backend: DatabaseBackend,
+	) -> Result<QueryExpr, CompileError> {
+		let _ = backend;
+
+		match expression {
+			Expr::Binary(BinaryExpr { left, operator, right, .. }) => Ok(QueryExpr::Binary(QueryBinaryExpr {
+				left: Box::new(self.lower_query_expression(left, table, backend)?),
+				operator: self.lower_query_binary_operator(*operator),
+				right: Box::new(self.lower_query_expression(right, table, backend)?),
+			})),
+			Expr::Boolean(boolean) => Ok(QueryExpr::Literal(QueryLiteral::Boolean(boolean.value))),
+			Expr::Call(CallExpr { callee, .. }) => Err(self.compile_error(
+				expression.position(),
+				format!("Function `{}` is not yet supported in lowered database query expressions.", callee.name),
+			)),
+			Expr::Decimal(decimal) => Ok(QueryExpr::Literal(QueryLiteral::Decimal(decimal.value.clone()))),
+			Expr::FieldAccess(field_access) => self.lower_query_field_access(field_access, table, backend),
+			Expr::Identifier(identifier) => {
+				if let Some(local) = self.lookup_local(&identifier.name) {
+					self.semantic_program.identifier_slots.insert(identifier.position, local.slot);
+					return Ok(QueryExpr::Parameter(QueryParameter {
+						data_type: local.data_type,
+						slot: local.slot,
+					}));
+				}
+
+				let (table_name, column_name, column_type) = {
+					let resolved_table = self.resolve_table_reference(table)?;
+					let table_name = resolved_table.table().name().to_string();
+					let Some(column) = resolved_table.table().column(&identifier.name) else {
+						return Err(self.compile_error(
+							identifier.position,
+							format!("Field `{}` does not exist on table `{table_name}`.", identifier.name),
+						));
+					};
+					(
+						table_name,
+						column.name().to_string(),
+						column.data_type().clone(),
+					)
+				};
+
+				Ok(QueryExpr::Column(QueryColumnReference {
+					column_name,
+					data_type: self.data_type_from_schema_type(&column_type)?,
+					table_name,
+				}))
+			}
+			Expr::Integer(integer) => Ok(QueryExpr::Literal(QueryLiteral::Integer(integer.value))),
+			Expr::Text(text) => Ok(QueryExpr::Literal(QueryLiteral::Text(text.value.clone()))),
+			Expr::Unary(UnaryExpr { operand, operator, .. }) => Ok(QueryExpr::Unary(QueryUnaryExpr {
+				operand: Box::new(self.lower_query_expression(operand, table, backend)?),
+				operator: match operator {
+					UnaryOperator::Negate => QueryUnaryOperator::Negate,
+					UnaryOperator::Not => QueryUnaryOperator::Not,
+				},
+			})),
+			_ => Err(self.compile_error(
+				expression.position(),
+				String::from("This expression form cannot yet be lowered into a database query."),
+			)),
+		}
+	}
+
+	fn lower_query_field_access(
+		&mut self,
+		field_access: &FieldAccessExpr,
+		table: &TableReference,
+		backend: DatabaseBackend,
+	) -> Result<QueryExpr, CompileError> {
+		let _ = backend;
+
+		if let Expr::Identifier(identifier) = field_access.object.as_ref() {
+			if let Some(local) = self.lookup_local(&identifier.name) {
+				self.semantic_program.identifier_slots.insert(identifier.position, local.slot);
+
+				return Err(self.compile_error(
+					field_access.position,
+					format!(
+						"Object field access such as `{}.{}` is not yet supported in lowered database query expressions.",
+						identifier.name,
+						field_access.field.name,
+					),
+				));
+			}
+
+			let resolved_table = self.resolve_table_reference(table)?;
+			let resolved_table_name = resolved_table.table().name().to_string();
+
+			if !identifier.name.eq_ignore_ascii_case(&resolved_table_name) {
+				return Err(self.compile_error(
+					identifier.position,
+					format!("Qualified field reference must use the target table name `{resolved_table_name}`."),
+				));
+			}
+
+			let (column_name, column_type) = {
+				let Some(column) = resolved_table.table().column(&field_access.field.name) else {
+					return Err(self.compile_error(
+						field_access.field.position,
+						format!(
+							"Field `{}` does not exist on table `{resolved_table_name}`.",
+							field_access.field.name,
+						),
+					));
+				};
+				(column.name().to_string(), column.data_type().clone())
+			};
+
+			return Ok(QueryExpr::Column(QueryColumnReference {
+				column_name,
+				data_type: self.data_type_from_schema_type(&column_type)?,
+				table_name: resolved_table_name,
+			}));
+		}
+
+		Err(self.compile_error(
+			field_access.position,
+			String::from("Only simple `table.field` access may be lowered into a database query."),
+		))
 	}
 
 	fn merge_array_element_types(&self, lhs: &DataType, rhs: &DataType, position: usize) -> Result<DataType, CompileError> {
@@ -1864,5 +2045,113 @@ fn statement_position(statement: &Statement) -> usize {
 		Statement::Return(statement) => statement.position,
 		Statement::VariableDeclaration(statement) => statement.position,
 		Statement::While(statement) => statement.position,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use crate::ast::Expr;
+	use crate::query::QueryBinaryExpr;
+	use crate::query::QueryBinaryOperator;
+	use crate::query::QueryColumnReference;
+	use crate::query::QueryCountPlan;
+	use crate::query::QueryExpr;
+	use crate::query::QueryLiteral;
+	use crate::query::QueryParameter;
+	use crate::schema::DatabaseBackend;
+	use crate::schema_fixture::read_schema_catalog_from_str;
+	use crate::source::SourceText;
+	use crate::syntax::lexer::Lexer;
+	use crate::syntax::parser::Parser;
+
+	use super::DataType;
+	use super::LocalBinding;
+	use super::SemanticAnalyzer;
+
+	fn parse_count_expression(source: &str) -> crate::ast::CountExpr {
+		let mut lexer = Lexer::new(SourceText::new(source));
+		let tokens = lexer.tokenize().unwrap();
+		let mut parser = Parser::new(tokens);
+		let program = parser.parse_program().unwrap();
+
+		match program.result.unwrap() {
+			Expr::Count(count) => count,
+			other => panic!("Expected count expression, found {other:?}."),
+		}
+	}
+
+	#[test]
+	fn lowers_count_query_to_backend_aware_ir() {
+		let schema = read_schema_catalog_from_str(
+			r#"{
+				"databases": [
+					{
+						"backend": "sqlite",
+						"name": "ExampleDb",
+						"schemas": [
+							{
+								"name": "Main",
+								"is_implicit": true,
+								"tables": [
+									{
+										"name": "Customers",
+										"columns": [
+											{ "name": "Id", "data_type": "int", "is_nullable": false },
+											{ "name": "Active", "data_type": "bool", "is_nullable": false }
+										]
+									}
+								]
+							}
+						]
+					}
+				]
+			}"#,
+		).unwrap();
+		let count = parse_count_expression("count customers where id = targetId and active = true");
+		let mut analyzer = SemanticAnalyzer::new();
+		analyzer.current_schema_catalog = Some(schema);
+		analyzer.semantic_program.active_databases = vec![String::from("exampledb")];
+		analyzer.enter_scope();
+		analyzer.declare_local(
+			String::from("targetId"),
+			LocalBinding {
+				data_type: DataType::Int,
+				is_const: false,
+				slot: 7,
+			},
+		);
+
+		let query = analyzer.lower_count_query(&count).unwrap();
+
+		assert_eq!(query, QueryCountPlan {
+			backend: DatabaseBackend::Sqlite,
+			database_name: String::from("ExampleDb"),
+			filter: Some(QueryExpr::Binary(QueryBinaryExpr {
+				left: Box::new(QueryExpr::Binary(QueryBinaryExpr {
+					left: Box::new(QueryExpr::Column(QueryColumnReference {
+						column_name: String::from("Id"),
+						data_type: DataType::Int,
+						table_name: String::from("Customers"),
+					})),
+					operator: QueryBinaryOperator::Equal,
+					right: Box::new(QueryExpr::Parameter(QueryParameter {
+						data_type: DataType::Int,
+						slot: 7,
+					})),
+				})),
+				operator: QueryBinaryOperator::And,
+				right: Box::new(QueryExpr::Binary(QueryBinaryExpr {
+					left: Box::new(QueryExpr::Column(QueryColumnReference {
+						column_name: String::from("Active"),
+						data_type: DataType::Bool,
+						table_name: String::from("Customers"),
+					})),
+					operator: QueryBinaryOperator::Equal,
+					right: Box::new(QueryExpr::Literal(QueryLiteral::Boolean(true))),
+				})),
+			})),
+			schema_name: String::from("Main"),
+			table_name: String::from("Customers"),
+		});
 	}
 }

@@ -1,5 +1,12 @@
 use std::collections::BTreeMap;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DatabaseBackend {
+	MySql,
+	PostgreSql,
+	Sqlite,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SchemaDataType {
 	Array(Box<SchemaDataType>),
@@ -148,13 +155,19 @@ impl DatabaseNamespace {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DatabaseSchema {
+	backend: DatabaseBackend,
 	name: String,
 	schemas: BTreeMap<String, DatabaseNamespace>,
 }
 
 impl DatabaseSchema {
 	pub fn new(name: impl Into<String>) -> Self {
+		Self::with_backend(name, DatabaseBackend::PostgreSql)
+	}
+
+	pub fn with_backend(name: impl Into<String>, backend: DatabaseBackend) -> Self {
 		Self {
+			backend,
 			name: name.into(),
 			schemas: BTreeMap::new(),
 		}
@@ -172,6 +185,10 @@ impl DatabaseSchema {
 
 		self.schemas.insert(normalized_name, schema);
 		Ok(())
+	}
+
+	pub fn backend(&self) -> DatabaseBackend {
+		self.backend
 	}
 
 	pub fn name(&self) -> &str {
