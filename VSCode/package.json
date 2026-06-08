@@ -32,6 +32,13 @@
         "configuration": "./language-configuration.json"
       }
     ],
+    "grammars": [
+      {
+        "language": "tablo",
+        "scopeName": "source.tablo",
+        "path": "./syntaxes/tablo.tmLanguage.json"
+      }
+    ],
     "debuggers": [
       {
         "type": "tablo",
