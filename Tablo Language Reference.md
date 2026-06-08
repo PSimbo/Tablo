@@ -132,6 +132,7 @@ Tablo supports the following primitive data types:
 
 | Type          | Description              |
 |---------------|--------------------------|
+| `any`         | Dynamically typed value  |
 | `bin`         | Binary data              |
 | `bool`        | Boolean                  |
 | `date`        | Date                     |
@@ -162,6 +163,16 @@ Where a decimal arithmetic operation cannot be represented exactly within the su
 
 If a `dec` value is assigned to a database field whose supported range is too small to store the value, the assigned value is clamped to the supported range.
 
+The `any` type allows for dynamically typed values. It is intended for situations where a value's shape is not known statically, such as when receiving loosely-typed JSON-like input that must later be validated and converted into a stronger type.
+
+Values of type `any` may be stored in variables, passed to functions, returned from functions, used as object field types, and used as array element types (e.g. `[any]`).
+
+The `any` type is never implicitly converted to a more specific type. A value of type `any` must first be cast to a more specific type in situations where a specific type is required.
+
+No arithmetic, ordering, logical, or indexing operations are defined directly on `any` values. Such operations require conversion to a more specific type first. Functions may define arguments of type `any`.
+
+The `any` type is distinct from `json`. The `json` type represents JSON-domain data, whereas `any` represents an arbitrary Tablo runtime value whose concrete type is not known statically.
+
 Note that the `json` data type does not require that the database backend have explicit support for storing JSON data. Tablo provides functions for converting JSON data to and from strings.
 
 Beyond the primitive data types listed in this section, custom data types may be defined as objects (see the "Objects" section).
@@ -189,6 +200,7 @@ The following identifiers are reserved as keywords:
 | Keyword       | Description                                         |
 |---------------|-----------------------------------------------------|
 | `and`         | Logical AND                                         |
+| `any`         | Dynamically typed data type                         |
 | `as`          | Defines an alias for a query sub-expression         |
 | `asc`         | Marks the sort order for a field as ascending       |
 | `bin`         | Binary data data type                               |
@@ -338,6 +350,8 @@ Decimal values may be compared with other decimal values. Decimal values may als
 
 Arrays may be compared for equality using `==` and `!=`. Two arrays are equal if and only if they have the same length and each element is equal to the corresponding element in the other array.
 
+Equality operators are not defined directly for `any` values. If equality over dynamically typed values is required, those values must first be converted or validated into more specific types.
+
 ### Comparison Operators
 
 The `>`, `>=`, `<`, and `<=` operators are used to compare the ordering of two values. Operands must be numeric, date/time, or `text`.
@@ -364,6 +378,8 @@ The unary prefix `not` operator evaluates to the result of a logical NOT of its 
 
 The `xor` operator evaluates to the result of a logical XOR of the two operands. Operands must be of type `bool`.
 
+Logical operators are not defined for operands of type `any`.
+
 ### Mathematical Operators
 
 The `+` operator evaluates to the sum of its operands. In the case of strings, it is used for concatenation. It may also be used to concatenate two arrays of compatible element type. Operands must therefore be numeric, date/time, `text`, or arrays. The operands may be dissimilar if both types are numeric or if both are arrays whose element types are compatible under the normal array element typing rules.
@@ -375,6 +391,8 @@ The `*` operator evaluates to the product of its operands. Operands must be nume
 The `/` operator evaluates to the quotient of its operands. Operands must be numeric and may be dissimilar. When the result is a decimal value and the quotient cannot be represented exactly within the implementation's supported decimal capacity, the result is rounded as described in the "Primitive Types" section.
 
 The `%` operator evaluates to the modulus of its operands. Operands must be numeric and may be dissimilar.
+
+Mathematical operators are not defined for operands of type `any`.
 
 ### Assignment Operators
 
@@ -441,6 +459,8 @@ Tablo supports a fairly limited set of automatic type conversions. In general, a
 
 Numeric values may be implicitly converted between `int` and `dec` where necessary.
 
+No implicit conversions are defined to or from `any`, except that values of any type may be assigned to a variable, field, or array element whose declared type is `any`.
+
 Note that `float` and `dec` are not implicitly converted to one another. Any operation involving both `float` and `dec` requires an explicit conversion.
 
 Tablo does not automatically convert `text` values to numeric or date/time values. Built-in functions exist for parsing strings as these types.
@@ -469,6 +489,8 @@ A variable may be declared as non-nullable by adding a `!` after the type name. 
 var decimal: dec!; // Initial value is 0.0.
 var string: text!; // Initial value is '';
 ~~~
+
+The `any` type may not currently be marked as non-nullable. Its default value is always `null`.
 
 The non-null default values for each data type are:
 
