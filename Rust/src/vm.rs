@@ -27,6 +27,7 @@ use crate::value::LocalReference;
 use crate::value::RecordFieldValue;
 use crate::value::RecordPointerValue;
 use crate::value::Value;
+use crate::value::sqlite_record_field_runtime_value;
 
 #[derive(Clone, Copy)]
 enum ComparisonKind {
@@ -785,6 +786,10 @@ impl VirtualMachine {
 		match value {
 			Value::Boolean(value) => Ok(value),
 			Value::RecordPointer(record) => Ok(record.exists && !record.locked),
+			Value::Null => Err(vm_error(
+				instruction_index,
+				String::from("Expected a `bool` or `record pointer` condition, found `null`."),
+			)),
 			other => Err(vm_error(
 				instruction_index,
 				format!("Expected a `bool` or `record pointer` condition, found `{}`.", type_name(&other)),
@@ -795,7 +800,7 @@ impl VirtualMachine {
 	fn pop_numeric(&mut self, instruction_index: usize) -> Result<Value, VmError> {
 		let value = self.pop_value(instruction_index)?;
 
-		if matches!(value, Value::Array(_) | Value::Boolean(_) | Value::DecimalRange(_) | Value::IntegerRange(_) | Value::Iterator(_) | Value::Object(_) | Value::Reference(_) | Value::Text(_)) {
+		if matches!(value, Value::Array(_) | Value::Boolean(_) | Value::DecimalRange(_) | Value::IntegerRange(_) | Value::Iterator(_) | Value::Null | Value::Object(_) | Value::Reference(_) | Value::Text(_)) {
 			return Err(VmError {
 				instruction_index,
 				message: format!("Expected a numeric operand, found a {} value.", type_name(&value)),
@@ -946,6 +951,7 @@ impl VirtualMachine {
 			Value::Boolean(value) => Ok(SqlValue::Integer(if value { 1 } else { 0 })),
 			Value::Decimal(value) => Ok(SqlValue::Text(value.to_string())),
 			Value::Integer(value) => Ok(SqlValue::Integer(value)),
+			Value::Null => Ok(SqlValue::Null),
 			Value::Text(value) => Ok(SqlValue::Text(value)),
 			other => Err(vm_error(
 				instruction_index,
@@ -1089,21 +1095,6 @@ fn compare_values(lhs: Value, rhs: Value, instruction_index: usize, kind: Compar
 	Ok(Value::Boolean(value))
 }
 
-fn data_type_name_for_runtime(data_type: &crate::ast::DataType) -> String {
-	match data_type {
-		crate::ast::DataType::Array(element) => format!("[{}]", data_type_name_for_runtime(element)),
-		crate::ast::DataType::Bool => String::from("bool"),
-		crate::ast::DataType::Dec => String::from("dec"),
-		crate::ast::DataType::EmptyArray => String::from("empty array"),
-		crate::ast::DataType::Int => String::from("int"),
-		crate::ast::DataType::Object(name) => name.clone(),
-		crate::ast::DataType::Range(element) => format!("range<{}>", data_type_name_for_runtime(element)),
-		crate::ast::DataType::RecordPointer(_) => String::from("record pointer"),
-		crate::ast::DataType::Text => String::from("text"),
-		crate::ast::DataType::Void => String::from("void"),
-	}
-}
-
 fn deferred_sqlite_value(value: SqlValueRef<'_>) -> Result<DeferredSqliteValue, String> {
 	match value {
 		SqlValueRef::Blob(value) => Ok(DeferredSqliteValue::Blob(value.to_vec())),
@@ -1115,16 +1106,6 @@ fn deferred_sqlite_value(value: SqlValueRef<'_>) -> Result<DeferredSqliteValue, 
 				.map_err(|_| String::from("SQLite returned invalid UTF-8 text data."))?
 				.to_string(),
 		)),
-	}
-}
-
-fn deferred_sqlite_value_name(value: &DeferredSqliteValue) -> &'static str {
-	match value {
-		DeferredSqliteValue::Blob(_) => "blob",
-		DeferredSqliteValue::Integer(_) => "integer",
-		DeferredSqliteValue::Null => "null",
-		DeferredSqliteValue::Real(_) => "real",
-		DeferredSqliteValue::Text(_) => "text",
 	}
 }
 
@@ -1148,6 +1129,7 @@ fn equals_value(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Valu
 	let value = match (lhs, rhs) {
 		(Value::Array(lhs), Value::Array(rhs)) => lhs == rhs,
 		(Value::Boolean(lhs), Value::Boolean(rhs)) => lhs == rhs,
+		(Value::Null, Value::Null) => true,
 		(Value::Object(lhs), Value::Object(rhs)) => lhs == rhs,
 		(Value::RecordPointer(lhs), Value::RecordPointer(rhs)) => lhs == rhs,
 		(Value::Text(lhs), Value::Text(rhs)) => lhs == rhs,
@@ -1182,6 +1164,12 @@ fn equals_value(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Valu
 			));
 		}
 		(lhs @ Value::Boolean(_), rhs) | (lhs, rhs @ Value::Boolean(_)) => {
+			return Err(vm_error(
+				instruction_index,
+				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
+			));
+		}
+		(lhs @ Value::Null, rhs) | (lhs, rhs @ Value::Null) => {
 			return Err(vm_error(
 				instruction_index,
 				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
@@ -1401,6 +1389,7 @@ fn load_sqlite_record_fields(
 			normalize_record_field_name(&column.column_name),
 			RecordFieldValue::DeferredSqlite {
 				data_type: column.data_type.clone(),
+				is_nullable: column.is_nullable,
 				value: deferred_sqlite_value(value).map_err(|message| vm_error(instruction_index, message))?,
 			},
 		);
@@ -1538,6 +1527,7 @@ fn negate_value(value: Value) -> Value {
 		Value::Integer(integer) => Value::Integer(integer.saturating_neg()),
 		Value::IntegerRange(_) => unreachable!("Range values are rejected before numeric negation."),
 		Value::Iterator(_) => unreachable!("Iterator values are rejected before numeric negation."),
+		Value::Null => unreachable!("Null values are rejected before numeric negation."),
 		Value::Object(_) => unreachable!("Object values are rejected before numeric negation."),
 		Value::RecordPointer(_) => unreachable!("Record pointer values are rejected before numeric negation."),
 		Value::Reference(_) => unreachable!("Reference values are resolved before numeric negation."),
@@ -1574,8 +1564,9 @@ fn pow10_i128(exponent: u32) -> Result<i128, String> {
 fn resolve_record_field_value(field: &RecordFieldValue, instruction_index: usize) -> Result<Value, VmError> {
 	match field {
 		RecordFieldValue::Materialized(value) => Ok(value.clone()),
-		RecordFieldValue::DeferredSqlite { data_type, value } => {
-			sqlite_runtime_value_from_deferred(value, data_type, instruction_index)
+		RecordFieldValue::DeferredSqlite { data_type, is_nullable, value } => {
+			sqlite_record_field_runtime_value(value, data_type, *is_nullable)
+				.map_err(|message| vm_error(instruction_index, message))
 		}
 	}
 }
@@ -1601,56 +1592,6 @@ fn sqlite_path_from_connection_string(database_name: &str, value: &str) -> Resul
 	};
 
 	Ok(PathBuf::from(normalized))
-}
-
-fn sqlite_runtime_value_from_deferred(
-	value: &DeferredSqliteValue,
-	data_type: &crate::ast::DataType,
-	instruction_index: usize,
-) -> Result<Value, VmError> {
-	match data_type {
-		crate::ast::DataType::Bool => match value {
-			DeferredSqliteValue::Integer(value) => Ok(Value::Boolean(*value != 0)),
-			other => Err(vm_error(
-				instruction_index,
-				format!("Cannot convert SQLite value `{}` to `bool`.", deferred_sqlite_value_name(other)),
-			)),
-		},
-		crate::ast::DataType::Dec => match value {
-			DeferredSqliteValue::Integer(value) => Ok(Value::Decimal(Decimal::from_integer(*value))),
-			DeferredSqliteValue::Real(value) => Ok(Value::Decimal(
-				Decimal::from_literal(value).map_err(|message| vm_error(instruction_index, message))?,
-			)),
-			DeferredSqliteValue::Text(value) => Ok(Value::Decimal(
-				Decimal::from_literal(value).map_err(|message| vm_error(instruction_index, message))?,
-			)),
-			other => Err(vm_error(
-				instruction_index,
-				format!("Cannot convert SQLite value `{}` to `dec`.", deferred_sqlite_value_name(other)),
-			)),
-		},
-		crate::ast::DataType::Int => match value {
-			DeferredSqliteValue::Integer(value) => Ok(Value::Integer(*value)),
-			other => Err(vm_error(
-				instruction_index,
-				format!("Cannot convert SQLite value `{}` to `int`.", deferred_sqlite_value_name(other)),
-			)),
-		},
-		crate::ast::DataType::Text => match value {
-			DeferredSqliteValue::Text(value) => Ok(Value::Text(value.clone())),
-			other => Err(vm_error(
-				instruction_index,
-				format!("Cannot convert SQLite value `{}` to `text`.", deferred_sqlite_value_name(other)),
-			)),
-		},
-		other => Err(vm_error(
-			instruction_index,
-			format!(
-				"SQLite record pointer fields do not yet support runtime conversion to `{}`.",
-				data_type_name_for_runtime(other),
-			),
-		)),
-	}
 }
 
 fn store_field_path_into_object(
@@ -1772,6 +1713,7 @@ fn stringify_value(value: &Value) -> String {
 		Value::Integer(value) => value.to_string(),
 		Value::IntegerRange(value) => value.to_string(),
 		Value::Iterator(_) => String::from("<iterator>"),
+		Value::Null => String::from("null"),
 		Value::Object(fields) => {
 			let mut result = String::from("{");
 
@@ -1823,6 +1765,7 @@ fn type_name(value: &Value) -> &'static str {
 		Value::Integer(_) => "int",
 		Value::IntegerRange(_) => "range",
 		Value::Iterator(_) => "iterator",
+		Value::Null => "null",
 		Value::Object(_) => "object",
 		Value::RecordPointer(_) => "record pointer",
 		Value::Reference(_) => "reference",

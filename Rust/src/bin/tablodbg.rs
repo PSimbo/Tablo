@@ -18,6 +18,9 @@ use tablo::debugger::InstructionBreakpoint;
 use tablo::debugger::PauseReason;
 use tablo::object_file::read_program_from_path;
 use tablo::runtime_config::read_runtime_database_config_from_path;
+use tablo::value::RecordFieldValue;
+use tablo::value::Value;
+use tablo::value::sqlite_record_field_runtime_value;
 use tablo::vm::VmError;
 use tablo::vm::VmStackFrame;
 
@@ -48,6 +51,12 @@ enum DebugCommand {
 	StepOver,
 }
 
+#[derive(Clone)]
+enum VariableContainer {
+	Locals(usize),
+	Value(Value),
+}
+
 #[derive(Deserialize)]
 struct DapRequest {
 	arguments: Option<JsonValue>,
@@ -59,20 +68,24 @@ struct DapRequest {
 
 struct DapServer {
 	breakpoints_by_source: BTreeMap<String, Vec<InstructionBreakpoint>>,
+	next_variables_reference: i64,
 	program: Option<&'static Program>,
 	runtime_error: Option<VmError>,
 	session: Option<DebuggerSession<'static>>,
 	stop: Option<DebuggerStop>,
+	variable_containers: BTreeMap<i64, VariableContainer>,
 }
 
 impl DapServer {
 	fn new() -> Self {
 		Self {
 			breakpoints_by_source: BTreeMap::new(),
+			next_variables_reference: 1,
 			program: None,
 			runtime_error: None,
 			session: None,
 			stop: None,
+			variable_containers: BTreeMap::new(),
 		}
 	}
 
@@ -104,6 +117,7 @@ impl DapServer {
 
 		self.stop = Some(stop.clone());
 		self.runtime_error = None;
+		self.reset_variable_containers();
 
 		let mut messages = vec![dap_response(request_seq, "configurationDone", json!({}))];
 		messages.extend(self.messages_for_stop(&stop, Some("entry")));
@@ -127,6 +141,7 @@ impl DapServer {
 			Err(error) => {
 				self.stop = None;
 				self.runtime_error = Some(error.clone());
+				self.reset_variable_containers();
 				let mut messages = vec![dap_response(
 					request_seq,
 					"continue",
@@ -137,6 +152,7 @@ impl DapServer {
 			}
 		};
 		self.stop = Some(stop.clone());
+		self.reset_variable_containers();
 
 		let mut messages = vec![dap_response(
 			request_seq,
@@ -202,17 +218,20 @@ impl DapServer {
 		self.runtime_error = None;
 		self.session = Some(session);
 		self.stop = None;
+		self.reset_variable_containers();
 
 		Ok(vec![dap_response(request_seq, "launch", json!({}))])
 	}
 
-	fn handle_scopes(&self, request_seq: i64, arguments: Option<JsonValue>) -> Result<Vec<JsonValue>, String> {
+	fn handle_scopes(&mut self, request_seq: i64, arguments: Option<JsonValue>) -> Result<Vec<JsonValue>, String> {
 		let frame_id = frame_id_from_arguments(arguments)?;
 		let stack_frames = self.current_stack_frames().ok_or(String::from("Program is not currently paused."))?;
 
 		if frame_id == 0 || frame_id > stack_frames.len() as i64 {
 			return Err(format!("Unknown frame id {frame_id}."));
 		}
+
+		let locals_reference = self.register_container(VariableContainer::Locals((frame_id - 1) as usize));
 
 		Ok(vec![dap_response(
 			request_seq,
@@ -222,7 +241,7 @@ impl DapServer {
 					{
 						"name": "Locals",
 						"presentationHint": "locals",
-						"variablesReference": frame_id,
+						"variablesReference": locals_reference,
 						"expensive": false,
 					}
 				]
@@ -348,12 +367,14 @@ impl DapServer {
 			Err(error) => {
 				self.stop = None;
 				self.runtime_error = Some(error.clone());
+				self.reset_variable_containers();
 				let mut messages = vec![dap_response(request_seq, "stepIn", json!({}))];
 				messages.extend(self.messages_for_runtime_error(&error));
 				return Ok(messages);
 			}
 		};
 		self.stop = Some(stop.clone());
+		self.reset_variable_containers();
 
 		let mut messages = vec![dap_response(request_seq, "stepIn", json!({}))];
 		messages.extend(self.messages_for_stop(&stop, None));
@@ -374,12 +395,14 @@ impl DapServer {
 			Err(error) => {
 				self.stop = None;
 				self.runtime_error = Some(error.clone());
+				self.reset_variable_containers();
 				let mut messages = vec![dap_response(request_seq, "stepOut", json!({}))];
 				messages.extend(self.messages_for_runtime_error(&error));
 				return Ok(messages);
 			}
 		};
 		self.stop = Some(stop.clone());
+		self.reset_variable_containers();
 
 		let mut messages = vec![dap_response(request_seq, "stepOut", json!({}))];
 		messages.extend(self.messages_for_stop(&stop, None));
@@ -400,12 +423,14 @@ impl DapServer {
 			Err(error) => {
 				self.stop = None;
 				self.runtime_error = Some(error.clone());
+				self.reset_variable_containers();
 				let mut messages = vec![dap_response(request_seq, "next", json!({}))];
 				messages.extend(self.messages_for_runtime_error(&error));
 				return Ok(messages);
 			}
 		};
 		self.stop = Some(stop.clone());
+		self.reset_variable_containers();
 
 		let mut messages = vec![dap_response(request_seq, "next", json!({}))];
 		messages.extend(self.messages_for_stop(&stop, None));
@@ -424,7 +449,7 @@ impl DapServer {
 		)]
 	}
 
-	fn handle_variables(&self, request_seq: i64, arguments: Option<JsonValue>) -> Result<Vec<JsonValue>, String> {
+	fn handle_variables(&mut self, request_seq: i64, arguments: Option<JsonValue>) -> Result<Vec<JsonValue>, String> {
 		let stack_frames = self.current_stack_frames().ok_or(String::from("Program is not currently paused."))?;
 		let variables_reference = arguments
 			.unwrap_or(JsonValue::Null)
@@ -432,19 +457,36 @@ impl DapServer {
 			.and_then(JsonValue::as_i64)
 			.ok_or(String::from("Variables request must include `variablesReference`."))?;
 
-		if variables_reference <= 0 || variables_reference > stack_frames.len() as i64 {
+		let Some(container) = self.variable_containers.get(&variables_reference).cloned() else {
 			return Err(format!("Unknown variables reference {variables_reference}."));
-		}
+		};
 
-		let frame = &stack_frames[(variables_reference - 1) as usize];
-		let variables = frame.locals().iter().map(|local| {
-			json!({
-				"name": local.name(),
-				"value": local.value().to_string(),
-				"type": local.declared_type(),
-				"variablesReference": 0,
-			})
-		}).collect::<Vec<_>>();
+		let variables = match container {
+			VariableContainer::Locals(frame_index) => {
+				let frame = stack_frames.get(frame_index).ok_or_else(|| format!("Unknown frame id {}.", frame_index + 1))?;
+				let locals = frame.locals().iter().map(|local| {
+					(
+						local.name().to_string(),
+						local.declared_type().to_string(),
+						local.value().clone(),
+					)
+				}).collect::<Vec<_>>();
+				let mut variables = Vec::new();
+
+				for (name, declared_type, value) in locals {
+					let child_reference = self.variables_reference_for_value(value.clone());
+					variables.push(json!({
+						"name": name,
+						"value": value.to_string(),
+						"type": declared_type,
+						"variablesReference": child_reference,
+					}));
+				}
+
+				variables
+			}
+			VariableContainer::Value(value) => self.child_variables_for_value(&value)?,
+		};
 
 		Ok(vec![dap_response(
 			request_seq,
@@ -498,6 +540,100 @@ impl DapServer {
 			.values()
 			.flat_map(|breakpoints| breakpoints.iter().copied())
 			.collect()
+	}
+
+	fn child_variables_for_value(&mut self, value: &Value) -> Result<Vec<JsonValue>, String> {
+		match value {
+			Value::Array(values) => Ok(values.iter().enumerate().map(|(index, value)| {
+				let child_reference = self.variables_reference_for_value(value.clone());
+				json!({
+					"name": format!("[{}]", index + 1),
+					"value": value.to_string(),
+					"type": variable_type_name(value),
+					"variablesReference": child_reference,
+				})
+			}).collect()),
+			Value::Null => Ok(Vec::new()),
+			Value::Object(fields) => Ok(fields.iter().map(|(name, value)| {
+				let child_reference = self.variables_reference_for_value(value.clone());
+				json!({
+					"name": name,
+					"value": value.to_string(),
+					"type": variable_type_name(value),
+					"variablesReference": child_reference,
+				})
+			}).collect()),
+			Value::RecordPointer(record) => {
+				if !record.exists || record.locked {
+					return Ok(Vec::new());
+				}
+
+				let mut variables = Vec::new();
+
+				for (name, field) in &record.fields {
+					let value = debugger_value_for_record_field(field)?;
+					let child_reference = self.variables_reference_for_value(value.clone());
+					variables.push(json!({
+						"name": name,
+						"value": value.to_string(),
+						"type": variable_type_name(&value),
+						"variablesReference": child_reference,
+					}));
+				}
+
+				Ok(variables)
+			}
+			_ => Ok(Vec::new()),
+		}
+	}
+
+	fn register_container(&mut self, container: VariableContainer) -> i64 {
+		let variables_reference = self.next_variables_reference;
+		self.next_variables_reference += 1;
+		self.variable_containers.insert(variables_reference, container);
+		variables_reference
+	}
+
+	fn reset_variable_containers(&mut self) {
+		self.next_variables_reference = 1;
+		self.variable_containers.clear();
+	}
+
+	fn variables_reference_for_value(&mut self, value: Value) -> i64 {
+		match value {
+			Value::Array(_) | Value::Object(_) | Value::RecordPointer(_) => {
+				self.register_container(VariableContainer::Value(value))
+			}
+			_ => 0,
+		}
+	}
+}
+
+fn debugger_value_for_record_field(field: &RecordFieldValue) -> Result<Value, String> {
+	match field {
+		RecordFieldValue::Materialized(value) => Ok(value.clone()),
+		RecordFieldValue::DeferredSqlite {
+			data_type,
+			is_nullable,
+			value,
+		} => sqlite_record_field_runtime_value(value, data_type, *is_nullable),
+	}
+}
+
+fn variable_type_name(value: &Value) -> &'static str {
+	match value {
+		Value::Array(_) => "array",
+		Value::Boolean(_) => "bool",
+		Value::Decimal(_) => "dec",
+		Value::DecimalRange(_) => "range",
+		Value::Integer(_) => "int",
+		Value::IntegerRange(_) => "range",
+		Value::Iterator(_) => "iterator",
+		Value::Null => "null",
+		Value::Object(_) => "object",
+		Value::RecordPointer(_) => "record pointer",
+		Value::Reference(_) => "reference",
+		Value::Text(_) => "text",
 	}
 }
 
@@ -964,5 +1100,52 @@ fn run_debug_loop(program: &Program, session: &mut DebuggerSession<'_>, mut stop
 				}
 			},
 		};
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::collections::BTreeMap;
+
+	use serde_json::Value as JsonValue;
+	use tablo::ast::DataType;
+	use tablo::value::DeferredSqliteValue;
+	use tablo::value::RecordFieldValue;
+	use tablo::value::RecordPointerValue;
+	use tablo::value::Value;
+
+	use super::DapServer;
+
+	#[test]
+	fn expands_record_pointer_fields_in_variables_view() {
+		let mut fields = BTreeMap::new();
+		fields.insert(
+			String::from("address1"),
+			RecordFieldValue::DeferredSqlite {
+				data_type: DataType::Text,
+				is_nullable: true,
+				value: DeferredSqliteValue::Null,
+			},
+		);
+		fields.insert(
+			String::from("id"),
+			RecordFieldValue::Materialized(Value::Integer(2)),
+		);
+
+		let value = Value::RecordPointer(RecordPointerValue {
+			exists: true,
+			fields,
+			locked: false,
+		});
+		let mut server = DapServer::new();
+		let variables = server.child_variables_for_value(&value).unwrap();
+
+		assert_eq!(variables.len(), 2);
+		assert_eq!(variables[0].get("name"), Some(&JsonValue::String(String::from("address1"))));
+		assert_eq!(variables[0].get("value"), Some(&JsonValue::String(String::from("null"))));
+		assert_eq!(variables[0].get("type"), Some(&JsonValue::String(String::from("null"))));
+		assert_eq!(variables[1].get("name"), Some(&JsonValue::String(String::from("id"))));
+		assert_eq!(variables[1].get("value"), Some(&JsonValue::String(String::from("2"))));
+		assert_eq!(variables[1].get("type"), Some(&JsonValue::String(String::from("int"))));
 	}
 }

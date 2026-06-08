@@ -1677,6 +1677,57 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_sqlite_find_query_when_accessed_nullable_field_is_null() {
+		let database_path = create_sqlite_test_database(
+			"runs_sqlite_find_query_when_accessed_nullable_field_is_null",
+			r#"
+				CREATE TABLE Customer (
+					Id INTEGER NOT NULL,
+					Name TEXT NOT NULL,
+					Address1 TEXT NULL,
+					Country TEXT NOT NULL
+				);
+				INSERT INTO Customer (Id, Name, Address1, Country) VALUES
+					(2, 'Acme Ltd.', NULL, 'US');
+			"#,
+		);
+		let (program, _) = compile_snippet_with_schema_fixture(
+			"with test;\n(find first Customer).Address1",
+			r#"{
+				"databases": [
+					{
+						"backend": "sqlite",
+						"name": "Test",
+						"schemas": [
+							{
+								"name": "Main",
+								"is_implicit": true,
+								"tables": [
+									{
+										"name": "Customer",
+										"columns": [
+											{ "name": "Id", "data_type": "int", "is_nullable": false },
+											{ "name": "Name", "data_type": "text", "is_nullable": false },
+											{ "name": "Address1", "data_type": "text", "is_nullable": true },
+											{ "name": "Country", "data_type": "text", "is_nullable": false }
+										]
+									}
+								]
+							}
+						]
+					}
+				]
+			}"#,
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("Test", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Null));
+	}
+
+	#[test]
 	fn runs_sqlite_find_query_when_unused_nullable_field_is_null() {
 		let database_path = create_sqlite_test_database(
 			"runs_sqlite_find_query_when_unused_nullable_field_is_null",

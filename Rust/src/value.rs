@@ -23,6 +23,7 @@ pub enum IteratorState {
 pub enum RecordFieldValue {
 	DeferredSqlite {
 		data_type: DataType,
+		is_nullable: bool,
 		value: DeferredSqliteValue,
 	},
 	Materialized(Value),
@@ -37,6 +38,7 @@ pub enum Value {
 	Integer(i64),
 	IntegerRange(IntegerRange),
 	Iterator(IteratorState),
+	Null,
 	Object(BTreeMap<String, Value>),
 	RecordPointer(RecordPointerValue),
 	Reference(LocalReference),
@@ -65,6 +67,7 @@ impl Display for Value {
 			Value::Integer(value) => write!(f, "{value}"),
 			Value::IntegerRange(range) => write!(f, "{range}"),
 			Value::Iterator(_) => write!(f, "<iterator>"),
+			Value::Null => write!(f, "null"),
 			Value::Object(fields) => {
 				write!(f, "{{")?;
 
@@ -359,6 +362,53 @@ pub struct RecordPointerValue {
 	pub locked: bool,
 }
 
+pub fn sqlite_record_field_runtime_value(
+	value: &DeferredSqliteValue,
+	data_type: &DataType,
+	is_nullable: bool,
+) -> Result<Value, String> {
+	if is_nullable && matches!(value, DeferredSqliteValue::Null) {
+		return Ok(Value::Null);
+	}
+
+	match data_type {
+		DataType::Bool => match value {
+			DeferredSqliteValue::Integer(value) => Ok(Value::Boolean(*value != 0)),
+			other => Err(format!(
+				"Cannot convert SQLite value `{}` to `bool`.",
+				deferred_sqlite_value_name(other),
+			)),
+		},
+		DataType::Dec => match value {
+			DeferredSqliteValue::Integer(value) => Ok(Value::Decimal(Decimal::from_integer(*value))),
+			DeferredSqliteValue::Real(value) => Ok(Value::Decimal(Decimal::from_literal(value)?)),
+			DeferredSqliteValue::Text(value) => Ok(Value::Decimal(Decimal::from_literal(value)?)),
+			other => Err(format!(
+				"Cannot convert SQLite value `{}` to `dec`.",
+				deferred_sqlite_value_name(other),
+			)),
+		},
+		DataType::Int => match value {
+			DeferredSqliteValue::Integer(value) => Ok(Value::Integer(*value)),
+			other => Err(format!(
+				"Cannot convert SQLite value `{}` to `int`.",
+				deferred_sqlite_value_name(other),
+			)),
+		},
+		DataType::Text => match value {
+			DeferredSqliteValue::Text(value) => Ok(Value::Text(value.clone())),
+			other => Err(format!(
+				"Cannot convert SQLite value `{}` to `text`.",
+				deferred_sqlite_value_name(other),
+			)),
+		},
+		other => Err(format!(
+			"SQLite record pointer fields do not yet support runtime conversion to `{}`.",
+			data_type_name_for_sqlite_runtime(other),
+		)),
+	}
+}
+
 fn align_decimal_operands(lhs: &Decimal, rhs: &Decimal) -> Result<(i128, i128, u8), String> {
 	let scale = lhs.scale.max(rhs.scale);
 	let lhs_factor = pow10((scale - lhs.scale) as u32)?;
@@ -367,6 +417,21 @@ fn align_decimal_operands(lhs: &Decimal, rhs: &Decimal) -> Result<(i128, i128, u
 	let rhs_coefficient = rhs.coefficient.checked_mul(rhs_factor).ok_or(String::from("Decimal alignment overflowed the supported precision."))?;
 
 	Ok((lhs_coefficient, rhs_coefficient, scale))
+}
+
+fn data_type_name_for_sqlite_runtime(data_type: &DataType) -> &'static str {
+	match data_type {
+		DataType::Array(_) => "array",
+		DataType::Bool => "bool",
+		DataType::Dec => "dec",
+		DataType::EmptyArray => "empty array",
+		DataType::Int => "int",
+		DataType::Object(_) => "object",
+		DataType::Range(_) => "range",
+		DataType::RecordPointer(_) => "record pointer",
+		DataType::Text => "text",
+		DataType::Void => "void",
+	}
 }
 
 fn decimal_precision(coefficient: i128, scale: u8) -> Result<u8, String> {
@@ -378,6 +443,16 @@ fn decimal_precision(coefficient: i128, scale: u8) -> Result<u8, String> {
 	}
 
 	Ok(precision as u8)
+}
+
+fn deferred_sqlite_value_name(value: &DeferredSqliteValue) -> &'static str {
+	match value {
+		DeferredSqliteValue::Blob(_) => "blob",
+		DeferredSqliteValue::Integer(_) => "integer",
+		DeferredSqliteValue::Null => "null",
+		DeferredSqliteValue::Real(_) => "real",
+		DeferredSqliteValue::Text(_) => "text",
+	}
 }
 
 fn normalize_decimal_parts(mut coefficient: i128, mut scale: u8) -> (i128, u8) {

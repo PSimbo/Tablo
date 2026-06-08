@@ -214,6 +214,7 @@ pub struct QueryParameter {
 pub struct QueryResultColumn {
 	pub column_name: String,
 	pub data_type: DataType,
+	pub is_nullable: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -468,10 +469,12 @@ mod tests {
 				QueryResultColumn {
 					column_name: String::from("Id"),
 					data_type: DataType::Int,
+					is_nullable: false,
 				},
 				QueryResultColumn {
 					column_name: String::from("Name"),
 					data_type: DataType::Text,
+					is_nullable: false,
 				},
 			],
 			schema_is_implicit: true,
@@ -487,10 +490,12 @@ mod tests {
 				QueryResultColumn {
 					column_name: String::from("Id"),
 					data_type: DataType::Int,
+					is_nullable: false,
 				},
 				QueryResultColumn {
 					column_name: String::from("Name"),
 					data_type: DataType::Text,
+					is_nullable: false,
 				},
 			]),
 			statement: String::from(

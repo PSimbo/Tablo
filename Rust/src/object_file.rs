@@ -485,6 +485,7 @@ impl<'a> ObjectFileReader<'a> {
 					columns.push(QueryResultColumn {
 						column_name: self.read_string()?,
 						data_type: self.read_data_type()?,
+						is_nullable: self.read_bool()?,
 					});
 				}
 
@@ -741,6 +742,7 @@ fn write_sql_query(bytes: &mut Vec<u8>, query: &SqlQuery) {
 				bytes.extend_from_slice(&(column.column_name.len() as u32).to_le_bytes());
 				bytes.extend_from_slice(column.column_name.as_bytes());
 				write_data_type(bytes, &column.data_type);
+				bytes.push(if column.is_nullable { 1 } else { 0 });
 			}
 		}
 	}

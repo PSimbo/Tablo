@@ -1388,7 +1388,7 @@ impl SemanticAnalyzer {
 		let (backend, database_name, schema_name, schema_is_implicit, table_name, record_column_schemas) = {
 			let resolved_table = self.resolve_table_reference(&find.table)?;
 			let record_column_schemas = resolved_table.table().columns()
-				.map(|column| (column.name().to_string(), column.data_type().clone()))
+				.map(|column| (column.name().to_string(), column.data_type().clone(), column.is_nullable()))
 				.collect::<Vec<_>>();
 			(
 				resolved_table.database().backend(),
@@ -1400,9 +1400,10 @@ impl SemanticAnalyzer {
 			)
 		};
 		let record_columns = record_column_schemas.into_iter()
-			.map(|(column_name, schema_type)| Ok(QueryResultColumn {
+			.map(|(column_name, schema_type, is_nullable)| Ok(QueryResultColumn {
 				column_name,
 				data_type: self.data_type_from_schema_type(&schema_type)?,
+				is_nullable,
 			}))
 			.collect::<Result<Vec<_>, CompileError>>()?;
 		let filter = find.where_clause.as_ref()
