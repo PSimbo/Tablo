@@ -1778,6 +1778,58 @@ mod tests {
 		assert_eq!(result, Some(Value::Integer(2)));
 	}
 
+
+	#[test]
+	fn runs_sqlite_for_record_query_loop() {
+		let database_path = create_sqlite_test_database(
+			"runs_sqlite_for_record_query_loop",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Active INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO Customers (Id, Active, Name) VALUES
+					(2, 1, 'Bea'),
+					(1, 1, 'Ada'),
+					(3, 0, 'Cam');
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture(
+			"with exampledb;\nfn Main(args: [text]) int { var total: int = 0; for rec cust in customers where active = true order by id { total += cust.id; } return total; }",
+			r#"{
+				"databases": [
+					{
+						"backend": "sqlite",
+						"name": "ExampleDb",
+						"schemas": [
+							{
+								"name": "Main",
+								"is_implicit": true,
+								"tables": [
+									{
+										"name": "Customers",
+										"columns": [
+											{ "name": "Id", "data_type": "int", "is_nullable": false },
+											{ "name": "Active", "data_type": "bool", "is_nullable": false },
+											{ "name": "Name", "data_type": "text", "is_nullable": false }
+										]
+									}
+								]
+							}
+						]
+					}
+				]
+			}"#,
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
 	#[test]
 	fn runs_text_concatenation_source_text() {
 		let result = evaluate_snippet("'hello ' + 42").unwrap();

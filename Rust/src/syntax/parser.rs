@@ -18,6 +18,7 @@ use crate::ast::Expr;
 use crate::ast::FieldAccessExpr;
 use crate::ast::FindExpr;
 use crate::ast::FindKind;
+use crate::ast::ForRecordStatement;
 use crate::ast::ForStatement;
 use crate::ast::FunctionDeclaration;
 use crate::ast::FunctionParameter;
@@ -423,7 +424,7 @@ impl Parser {
 		let table = self.parse_table_reference()?;
 		let where_clause = if self.current().is_some_and(|token| token.kind == TokenKind::WhereKeyword) {
 			self.next();
-			Some(Box::new(self.parse_expression_with_binding_power(BindingPower::Default, true)?))
+			Some(Box::new(self.parse_query_expression_with_binding_power(BindingPower::Default, true)?))
 		}
 		else {
 			None
@@ -543,7 +544,7 @@ impl Parser {
 		let table = self.parse_table_reference()?;
 		let where_clause = if self.current().is_some_and(|token| token.kind == TokenKind::WhereKeyword) {
 			self.next();
-			Some(Box::new(self.parse_expression_with_binding_power(BindingPower::Default, true)?))
+			Some(Box::new(self.parse_query_expression_with_binding_power(BindingPower::Default, true)?))
 		}
 		else {
 			None
@@ -559,8 +560,52 @@ impl Parser {
 		}))
 	}
 
+	fn parse_for_record_statement(&mut self, position: usize) -> Result<Statement, ParseError> {
+		self.expect_token(TokenKind::RecKeyword, "Expected `rec` after `for`.")?;
+		let is_mut = if self.current().is_some_and(|token| token.kind == TokenKind::MutKeyword) {
+			self.next();
+			true
+		}
+		else {
+			false
+		};
+		let variable = self.expect_token(TokenKind::Identifier, "Expected record loop variable name.")?;
+		self.expect_token(TokenKind::InKeyword, "Expected `in` after record loop variable name.")?;
+		let table = self.parse_table_reference()?;
+		let where_clause = if self.current().is_some_and(|token| token.kind == TokenKind::WhereKeyword) {
+			self.next();
+			Some(Box::new(self.parse_query_expression_with_binding_power(BindingPower::Default, true)?))
+		}
+		else {
+			None
+		};
+		let order_by = self.parse_optional_order_by_clause()?;
+		let body = match self.parse_block_statement()? {
+			Statement::Block(block) => block,
+			_ => unreachable!("Block parser must return a block statement."),
+		};
+
+		Ok(Statement::ForRecord(ForRecordStatement {
+			body,
+			is_mut,
+			order_by,
+			position,
+			table,
+			variable: IdentifierExpr {
+				name: variable.lexeme,
+				position: variable.start,
+			},
+			where_clause,
+		}))
+	}
+
 	fn parse_for_statement(&mut self) -> Result<Statement, ParseError> {
 		let for_keyword = self.expect_token(TokenKind::ForKeyword, "Expected `for` to start for statement.")?;
+
+		if self.current().is_some_and(|token| token.kind == TokenKind::RecKeyword) {
+			return self.parse_for_record_statement(for_keyword.start);
+		}
+
 		let variable = self.expect_token(TokenKind::Identifier, "Expected loop variable name.")?;
 		self.expect_token(TokenKind::InKeyword, "Expected `in` after loop variable name.")?;
 		let iterable = self.parse_assignment_expression()?;
@@ -1077,7 +1122,7 @@ impl Parser {
 		let mut items = Vec::new();
 
 		loop {
-			let expression = self.parse_expression_with_binding_power(BindingPower::Default, true)?;
+			let expression = self.parse_query_expression_with_binding_power(BindingPower::Default, true)?;
 			let direction = match self.current().map(|token| token.kind) {
 				Some(TokenKind::AscKeyword) => {
 					self.next();
@@ -1134,6 +1179,47 @@ impl Parser {
 				position: token.start,
 			}),
 		}
+	}
+
+	fn parse_query_expression_with_binding_power(
+		&mut self,
+		binding_power: BindingPower,
+		treat_equal_as_equality: bool,
+	) -> Result<Expr, ParseError> {
+		let mut left = self.parse_prefix()?;
+
+		while let Some(token) = self.current() {
+			let next_binding_power = match token.kind {
+				TokenKind::AndKeyword => BindingPower::LogicalAnd,
+				TokenKind::Asterisk => BindingPower::Multiplicative,
+				TokenKind::BangEqual => BindingPower::Equality,
+				TokenKind::Dash => BindingPower::Additive,
+				TokenKind::Dot => BindingPower::Call,
+				TokenKind::Equal if treat_equal_as_equality => BindingPower::Equality,
+				TokenKind::EqualEqual => BindingPower::Equality,
+				TokenKind::ForwardSlash => BindingPower::Multiplicative,
+				TokenKind::GreaterThan => BindingPower::Comparison,
+				TokenKind::GreaterThanOrEqual => BindingPower::Comparison,
+				TokenKind::LeftBracket => BindingPower::Call,
+				TokenKind::LeftParenthesis => BindingPower::Call,
+				TokenKind::LessThan => BindingPower::Comparison,
+				TokenKind::LessThanOrEqual => BindingPower::Comparison,
+				TokenKind::OrKeyword => BindingPower::LogicalOr,
+				TokenKind::Percent => BindingPower::Multiplicative,
+				TokenKind::Plus => BindingPower::Additive,
+				TokenKind::XorKeyword => BindingPower::LogicalXor,
+				_ => break,
+			};
+
+			if next_binding_power <= binding_power {
+				break;
+			}
+
+			let operator = self.next().unwrap();
+			left = self.parse_infix(left, operator, next_binding_power, treat_equal_as_equality)?;
+		}
+
+		Ok(left)
 	}
 
 	fn parse_range_expression(&mut self) -> Result<Expr, ParseError> {
@@ -1371,6 +1457,7 @@ mod tests {
 	use crate::ast::FieldAccessExpr;
 	use crate::ast::FindExpr;
 	use crate::ast::FindKind;
+	use crate::ast::ForRecordStatement;
 	use crate::ast::ForStatement;
 	use crate::ast::FunctionDeclaration;
 	use crate::ast::FunctionParameter;
@@ -1542,6 +1629,18 @@ mod tests {
 		}
 	}
 
+	fn normalize_for_record_statement(for_statement: ForRecordStatement) -> ForRecordStatement {
+		ForRecordStatement {
+			body: normalize_block(for_statement.body),
+			is_mut: for_statement.is_mut,
+			order_by: for_statement.order_by.into_iter().map(normalize_order_by_item).collect(),
+			position: 0,
+			table: normalize_table_reference(for_statement.table),
+			variable: normalize_identifier(for_statement.variable),
+			where_clause: for_statement.where_clause.map(|expression| Box::new(normalize_expr(*expression))),
+		}
+	}
+
 	fn normalize_for_statement(for_statement: ForStatement) -> ForStatement {
 		ForStatement {
 			body: normalize_block(for_statement.body),
@@ -1656,6 +1755,7 @@ mod tests {
 			}),
 			Statement::Expression(expression) => Statement::Expression(normalize_expr(expression)),
 			Statement::For(for_statement) => Statement::For(normalize_for_statement(for_statement)),
+			Statement::ForRecord(for_statement) => Statement::ForRecord(normalize_for_record_statement(for_statement)),
 			Statement::FunctionDeclaration(function) => {
 				Statement::FunctionDeclaration(normalize_function_declaration(function))
 			}
@@ -2275,6 +2375,76 @@ mod tests {
 			statements: vec![],
 			with_declarations: vec![],
 		});
+	}
+
+	#[test]
+	fn parses_for_record_statement() {
+		assert_eq!(
+			normalize_program(parse_program("for rec mut cust in customers where active = true order by name desc { cust.name; }")),
+			Program {
+				functions: vec![],
+				objects: vec![],
+				result: None,
+				statements: vec![
+					Statement::ForRecord(ForRecordStatement {
+						body: BlockStatement {
+							position: 0,
+							statements: vec![
+								Statement::Expression(Expr::FieldAccess(FieldAccessExpr {
+									field: IdentifierExpr {
+										name: String::from("name"),
+										position: 0,
+									},
+									object: Box::new(Expr::Identifier(IdentifierExpr {
+										name: String::from("cust"),
+										position: 0,
+									})),
+									position: 0,
+								})),
+							],
+						},
+						is_mut: true,
+						order_by: vec![
+							OrderByItem {
+								direction: OrderByDirection::Descending,
+								expression: Expr::Identifier(IdentifierExpr {
+									name: String::from("name"),
+									position: 0,
+								}),
+								position: 0,
+							},
+						],
+						position: 0,
+						table: TableReference {
+							components: vec![
+								IdentifierExpr {
+									name: String::from("customers"),
+									position: 0,
+								},
+							],
+							position: 0,
+						},
+						variable: IdentifierExpr {
+							name: String::from("cust"),
+							position: 0,
+						},
+						where_clause: Some(Box::new(Expr::Binary(BinaryExpr {
+							left: Box::new(Expr::Identifier(IdentifierExpr {
+								name: String::from("active"),
+								position: 0,
+							})),
+							operator: BinaryOperator::Equal,
+							position: 0,
+							right: Box::new(Expr::Boolean(BooleanLiteral {
+								position: 0,
+								value: true,
+							})),
+						}))),
+					}),
+				],
+				with_declarations: vec![],
+			}
+		);
 	}
 
 	#[test]

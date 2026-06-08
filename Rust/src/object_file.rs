@@ -75,6 +75,7 @@ const QUERY_KIND_SQL: u8 = 1;
 const SQL_DIALECT_SQLITE: u8 = 1;
 const SQL_RESULT_INTEGER_SCALAR: u8 = 1;
 const SQL_RESULT_RECORD_POINTER: u8 = 2;
+const SQL_RESULT_RECORD_POINTER_ARRAY: u8 = 3;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectFileError {
@@ -491,6 +492,20 @@ impl<'a> ObjectFileReader<'a> {
 
 				SqlQueryResultShape::RecordPointer(columns)
 			}
+			SQL_RESULT_RECORD_POINTER_ARRAY => {
+				let column_count = self.read_u32()? as usize;
+				let mut columns = Vec::with_capacity(column_count);
+
+				for _ in 0..column_count {
+					columns.push(QueryResultColumn {
+						column_name: self.read_string()?,
+						data_type: self.read_data_type()?,
+						is_nullable: self.read_bool()?,
+					});
+				}
+
+				SqlQueryResultShape::RecordPointerArray(columns)
+			}
 			kind => {
 				return Err(ObjectFileError {
 					offset: self.offset - 1,
@@ -736,6 +751,17 @@ fn write_sql_query(bytes: &mut Vec<u8>, query: &SqlQuery) {
 		SqlQueryResultShape::IntegerScalar => bytes.push(SQL_RESULT_INTEGER_SCALAR),
 		SqlQueryResultShape::RecordPointer(columns) => {
 			bytes.push(SQL_RESULT_RECORD_POINTER);
+			bytes.extend_from_slice(&(columns.len() as u32).to_le_bytes());
+
+			for column in columns {
+				bytes.extend_from_slice(&(column.column_name.len() as u32).to_le_bytes());
+				bytes.extend_from_slice(column.column_name.as_bytes());
+				write_data_type(bytes, &column.data_type);
+				bytes.push(if column.is_nullable { 1 } else { 0 });
+			}
+		}
+		SqlQueryResultShape::RecordPointerArray(columns) => {
+			bytes.push(SQL_RESULT_RECORD_POINTER_ARRAY);
 			bytes.extend_from_slice(&(columns.len() as u32).to_le_bytes());
 
 			for column in columns {

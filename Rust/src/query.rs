@@ -70,6 +70,7 @@ pub enum SqlDialect {
 pub enum SqlQueryResultShape {
 	IntegerScalar,
 	RecordPointer(Vec<QueryResultColumn>),
+	RecordPointerArray(Vec<QueryResultColumn>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -193,6 +194,74 @@ impl QueryFindPlan {
 			dialect: SqlDialect::Sqlite,
 			parameters,
 			result_shape: SqlQueryResultShape::RecordPointer(self.record_columns.clone()),
+			statement,
+		}
+	}
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryForPlan {
+	pub backend: DatabaseBackend,
+	pub database_name: String,
+	pub filter: Option<QueryExpr>,
+	pub order_by: Vec<QueryOrderByItem>,
+	pub record_columns: Vec<QueryResultColumn>,
+	pub schema_is_implicit: bool,
+	pub schema_name: String,
+	pub table_name: String,
+}
+
+impl QueryForPlan {
+	pub fn lower_to_backend(&self) -> Result<LoweredBackendQuery, QueryLoweringError> {
+		match self.backend {
+			DatabaseBackend::Sqlite => Ok(LoweredBackendQuery::Sql(self.lower_to_sqlite())),
+			other => Err(QueryLoweringError::UnsupportedBackend {
+				backend: other,
+			}),
+		}
+	}
+
+	fn lower_to_sqlite(&self) -> SqlQuery {
+		let mut parameters = Vec::new();
+		let table_source = sqlite_table_source(&self.schema_name, &self.table_name, self.schema_is_implicit);
+		let select_columns = self.record_columns.iter()
+			.map(|column| {
+				format!(
+					"{}.{}",
+					quote_identifier(&self.table_name),
+					quote_identifier(&column.column_name),
+				)
+			})
+			.collect::<Vec<_>>()
+			.join(", ");
+		let mut statement = format!("SELECT {select_columns} FROM {table_source}");
+
+		if let Some(filter) = &self.filter {
+			statement.push_str(" WHERE ");
+			statement.push_str(&lower_query_expr_sqlite(filter, &mut parameters));
+		}
+
+		if !self.order_by.is_empty() {
+			statement.push_str(" ORDER BY ");
+			let order_by = self.order_by.iter()
+				.map(|item| {
+					let expression = lower_query_expr_sqlite(&item.expression, &mut parameters);
+					let direction = match item.direction {
+						OrderByDirection::Ascending => "ASC",
+						OrderByDirection::Descending => "DESC",
+					};
+					format!("{expression} {direction}")
+				})
+				.collect::<Vec<_>>()
+				.join(", ");
+			statement.push_str(&order_by);
+		}
+
+		SqlQuery {
+			database_name: self.database_name.clone(),
+			dialect: SqlDialect::Sqlite,
+			parameters,
+			result_shape: SqlQueryResultShape::RecordPointerArray(self.record_columns.clone()),
 			statement,
 		}
 	}
@@ -347,6 +416,7 @@ mod tests {
 	use super::QueryCountPlan;
 	use super::QueryExpr;
 	use super::QueryFindPlan;
+	use super::QueryForPlan;
 	use super::QueryLiteral;
 	use super::QueryOrderByItem;
 	use super::QueryParameter;
@@ -500,6 +570,69 @@ mod tests {
 			]),
 			statement: String::from(
 				"SELECT \"Customers\".\"Id\", \"Customers\".\"Name\" FROM \"Customers\" WHERE (\"Customers\".\"Active\" = 1) ORDER BY \"Customers\".\"Name\" DESC LIMIT 1"
+			),
+		}));
+	}
+
+	#[test]
+	fn lowers_sqlite_for_record_plan_to_sql_query() {
+		let query = QueryForPlan {
+			backend: DatabaseBackend::Sqlite,
+			database_name: String::from("ExampleDb"),
+			filter: Some(QueryExpr::Binary(QueryBinaryExpr {
+				left: Box::new(QueryExpr::Column(QueryColumnReference {
+					column_name: String::from("Active"),
+					data_type: DataType::Bool,
+					table_name: String::from("Customers"),
+				})),
+				operator: QueryBinaryOperator::Equal,
+				right: Box::new(QueryExpr::Literal(QueryLiteral::Boolean(true))),
+			})),
+			order_by: vec![
+				QueryOrderByItem {
+					direction: OrderByDirection::Descending,
+					expression: QueryExpr::Column(QueryColumnReference {
+						column_name: String::from("Name"),
+						data_type: DataType::Text,
+						table_name: String::from("Customers"),
+					}),
+				},
+			],
+			record_columns: vec![
+				QueryResultColumn {
+					column_name: String::from("Id"),
+					data_type: DataType::Int,
+					is_nullable: false,
+				},
+				QueryResultColumn {
+					column_name: String::from("Name"),
+					data_type: DataType::Text,
+					is_nullable: false,
+				},
+			],
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
+			table_name: String::from("Customers"),
+		}.lower_to_backend().unwrap();
+
+		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
+			database_name: String::from("ExampleDb"),
+			dialect: SqlDialect::Sqlite,
+			parameters: vec![],
+			result_shape: SqlQueryResultShape::RecordPointerArray(vec![
+				QueryResultColumn {
+					column_name: String::from("Id"),
+					data_type: DataType::Int,
+					is_nullable: false,
+				},
+				QueryResultColumn {
+					column_name: String::from("Name"),
+					data_type: DataType::Text,
+					is_nullable: false,
+				},
+			]),
+			statement: String::from(
+				"SELECT \"Customers\".\"Id\", \"Customers\".\"Name\" FROM \"Customers\" WHERE (\"Customers\".\"Active\" = 1) ORDER BY \"Customers\".\"Name\" DESC"
 			),
 		}));
 	}

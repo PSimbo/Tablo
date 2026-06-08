@@ -89,6 +89,7 @@ pub enum Statement {
 	Continue(ContinueStatement),
 	Expression(Expr),
 	For(ForStatement),
+	ForRecord(ForRecordStatement),
 	FunctionDeclaration(FunctionDeclaration),
 	If(IfStatement),
 	RecordPointerDeclaration(RecordPointerDeclaration),
@@ -194,6 +195,17 @@ pub struct FindExpr {
 	pub order_by: Vec<OrderByItem>,
 	pub position: usize,
 	pub table: TableReference,
+	pub where_clause: Option<Box<Expr>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ForRecordStatement {
+	pub body: BlockStatement,
+	pub is_mut: bool,
+	pub order_by: Vec<OrderByItem>,
+	pub position: usize,
+	pub table: TableReference,
+	pub variable: IdentifierExpr,
 	pub where_clause: Option<Box<Expr>>,
 }
 

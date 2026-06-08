@@ -15,6 +15,7 @@ use crate::ast::DataType;
 use crate::ast::Expr;
 use crate::ast::FieldAccessExpr;
 use crate::ast::FindExpr;
+use crate::ast::ForRecordStatement;
 use crate::ast::ForStatement;
 use crate::ast::FunctionDeclaration;
 use crate::ast::FunctionParameter;
@@ -44,6 +45,7 @@ use crate::query::QueryColumnReference;
 use crate::query::QueryCountPlan;
 use crate::query::QueryExpr;
 use crate::query::QueryFindPlan;
+use crate::query::QueryForPlan;
 use crate::query::QueryLiteral;
 use crate::query::QueryLoweringError;
 use crate::query::QueryOrderByItem;
@@ -110,6 +112,7 @@ pub struct SemanticProgram {
 	call_targets: BTreeMap<usize, u32>,
 	compiled_count_queries: BTreeMap<usize, LoweredBackendQuery>,
 	compiled_find_queries: BTreeMap<usize, LoweredBackendQuery>,
+	compiled_for_record_queries: BTreeMap<usize, LoweredBackendQuery>,
 	declaration_slots: BTreeMap<usize, u32>,
 	declaration_types: BTreeMap<usize, DataType>,
 	entry_point_function_index: Option<u32>,
@@ -119,6 +122,7 @@ pub struct SemanticProgram {
 	iterator_slots: BTreeMap<usize, u32>,
 	lowered_count_queries: BTreeMap<usize, QueryCountPlan>,
 	lowered_find_queries: BTreeMap<usize, QueryFindPlan>,
+	lowered_for_record_queries: BTreeMap<usize, QueryForPlan>,
 	object_declarations: BTreeMap<String, ObjectDeclaration>,
 	resolved_tables: BTreeMap<usize, ResolvedTableReference>,
 }
@@ -150,6 +154,10 @@ impl SemanticProgram {
 
 	pub fn compiled_find_query(&self, position: usize) -> Option<&LoweredBackendQuery> {
 		self.compiled_find_queries.get(&position)
+	}
+
+	pub fn compiled_for_record_query(&self, position: usize) -> Option<&LoweredBackendQuery> {
+		self.compiled_for_record_queries.get(&position)
 	}
 
 	pub fn declaration_slot(&self, position: usize) -> Option<u32> {
@@ -186,6 +194,10 @@ impl SemanticProgram {
 
 	pub fn lowered_find_query(&self, position: usize) -> Option<&QueryFindPlan> {
 		self.lowered_find_queries.get(&position)
+	}
+
+	pub fn lowered_for_record_query(&self, position: usize) -> Option<&QueryForPlan> {
+		self.lowered_for_record_queries.get(&position)
 	}
 
 	pub fn object_declaration(&self, name: &str) -> Option<&ObjectDeclaration> {
@@ -1429,6 +1441,50 @@ impl SemanticAnalyzer {
 		})
 	}
 
+	fn lower_for_record_query(&mut self, for_record: &ForRecordStatement) -> Result<QueryForPlan, CompileError> {
+		let (backend, database_name, schema_name, schema_is_implicit, table_name, record_column_schemas) = {
+			let resolved_table = self.resolve_table_reference(&for_record.table)?;
+			let record_column_schemas = resolved_table.table().columns()
+				.map(|column| (column.name().to_string(), column.data_type().clone(), column.is_nullable()))
+				.collect::<Vec<_>>();
+			(
+				resolved_table.database().backend(),
+				resolved_table.database().name().to_string(),
+				resolved_table.schema().name().to_string(),
+				resolved_table.schema().is_implicit(),
+				resolved_table.table().name().to_string(),
+				record_column_schemas,
+			)
+		};
+		let record_columns = record_column_schemas.into_iter()
+			.map(|(column_name, schema_type, is_nullable)| Ok(QueryResultColumn {
+				column_name,
+				data_type: self.data_type_from_schema_type(&schema_type)?,
+				is_nullable,
+			}))
+			.collect::<Result<Vec<_>, CompileError>>()?;
+		let filter = for_record.where_clause.as_ref()
+			.map(|where_clause| self.lower_query_expression(where_clause, &for_record.table, backend))
+			.transpose()?;
+		let order_by = for_record.order_by.iter()
+			.map(|item| Ok(QueryOrderByItem {
+				direction: item.direction,
+				expression: self.lower_query_expression(&item.expression, &for_record.table, backend)?,
+			}))
+			.collect::<Result<Vec<_>, CompileError>>()?;
+
+		Ok(QueryForPlan {
+			backend,
+			database_name,
+			filter,
+			order_by,
+			record_columns,
+			schema_is_implicit,
+			schema_name,
+			table_name,
+		})
+	}
+
 	fn lower_query_binary_operator(&self, operator: BinaryOperator) -> QueryBinaryOperator {
 		match operator {
 			BinaryOperator::Add => QueryBinaryOperator::Add,
@@ -1808,7 +1864,7 @@ impl SemanticAnalyzer {
 			}
 			Statement::RecordPointerDeclaration(_) => false,
 			Statement::Return(_) => true,
-			Statement::Expression(_) | Statement::For(_) | Statement::VariableDeclaration(_) | Statement::While(_) => false,
+			Statement::Expression(_) | Statement::For(_) | Statement::ForRecord(_) | Statement::VariableDeclaration(_) | Statement::While(_) => false,
 		}
 	}
 
@@ -2067,6 +2123,95 @@ impl SemanticAnalyzer {
 				self.exit_scope();
 				validation_result
 			}
+			Statement::ForRecord(ForRecordStatement {
+				body,
+				is_mut,
+				order_by,
+				position,
+				table,
+				variable,
+				where_clause,
+			}) => {
+				let lowered_query = self.lower_for_record_query(&ForRecordStatement {
+					body: body.clone(),
+					is_mut: *is_mut,
+					order_by: order_by.clone(),
+					position: *position,
+					table: table.clone(),
+					variable: variable.clone(),
+					where_clause: where_clause.clone(),
+				})?;
+				let record_pointer = {
+					let resolved_table = self.resolve_table_reference(table)?;
+					RecordPointerType {
+						database_name: resolved_table.database().name().to_string(),
+						schema_name: resolved_table.schema().name().to_string(),
+						table_name: resolved_table.table().name().to_string(),
+					}
+				};
+
+				if let Some(where_clause) = where_clause {
+					let where_type = self.infer_query_expression_type(where_clause, table)?;
+
+					if where_type != DataType::Bool {
+						return Err(self.compile_error(
+							where_clause.position(),
+							format!("`where` clause must evaluate to `bool`, found `{}`.", self.data_type_name(&where_type)),
+						));
+					}
+				}
+
+				for order_by in order_by {
+					let order_type = self.infer_query_expression_type(&order_by.expression, table)?;
+
+					if order_type == DataType::Void {
+						return Err(self.compile_error(
+							order_by.position,
+							String::from("`order by` expressions must produce a runtime value."),
+						));
+					}
+				}
+
+				let compiled_query = lowered_query.lower_to_backend().map_err(|error| self.compile_error(
+					*position,
+					query_lowering_error_message(error),
+				))?;
+				self.semantic_program.compiled_for_record_queries.insert(*position, compiled_query);
+				self.semantic_program.lowered_for_record_queries.insert(*position, lowered_query);
+
+				self.enter_scope();
+
+				if self.current_scope_contains(&variable.name) {
+					self.exit_scope();
+					return Err(self.compile_error(
+						variable.position,
+						format!("Record pointer `{}` is already declared in this scope.", variable.name),
+					));
+				}
+
+				let loop_variable_slot = self.next_local_slot;
+				self.next_local_slot += 1;
+				self.semantic_program.declaration_slots.insert(variable.position, loop_variable_slot);
+				self.semantic_program.declaration_types.insert(
+					variable.position,
+					DataType::RecordPointer(record_pointer.clone()),
+				);
+				self.declare_local(variable.name.clone(), LocalBinding {
+					data_type: DataType::RecordPointer(record_pointer),
+					is_const: !*is_mut,
+					slot: loop_variable_slot,
+				});
+
+				let iterator_slot = self.next_local_slot;
+				self.next_local_slot += 1;
+				self.semantic_program.iterator_slots.insert(*position, iterator_slot);
+
+				self.loop_depth += 1;
+				let validation_result = self.validate_statement(&Statement::Block(body.clone()));
+				self.loop_depth -= 1;
+				self.exit_scope();
+				validation_result
+			}
 			Statement::If(IfStatement { condition, else_branch, position, then_branch }) => {
 				let condition_type = self.infer_expression_type(condition)?;
 
@@ -2294,6 +2439,7 @@ fn statement_position(statement: &Statement) -> usize {
 		Statement::Continue(statement) => statement.position,
 		Statement::Expression(expression) => expression.position(),
 		Statement::For(statement) => statement.position,
+		Statement::ForRecord(statement) => statement.position,
 		Statement::FunctionDeclaration(statement) => statement.position,
 		Statement::If(statement) => statement.position,
 		Statement::RecordPointerDeclaration(statement) => statement.position,

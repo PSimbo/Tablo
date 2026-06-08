@@ -707,6 +707,27 @@ impl VirtualMachine {
 					locked: false,
 				}))
 			}
+			SqlQueryResultShape::RecordPointerArray(columns) => {
+				let mut rows = statement.query(params_from_iter(parameter_values)).map_err(|error| vm_error(
+					instruction_index,
+					format!("Failed to execute SQLite query: {error}"),
+				))?;
+				let mut records = Vec::new();
+
+				while let Some(row) = rows.next().map_err(|error| vm_error(
+					instruction_index,
+					format!("Failed to read SQLite query result: {error}"),
+				))? {
+					let fields = load_sqlite_record_fields(row, columns, instruction_index)?;
+					records.push(Value::RecordPointer(RecordPointerValue {
+						exists: true,
+						fields,
+						locked: false,
+					}));
+				}
+
+				Ok(Value::Array(records))
+			}
 		}
 	}
 

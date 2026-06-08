@@ -14,6 +14,7 @@ use crate::ast::ContinueStatement;
 use crate::ast::DecimalLiteral;
 use crate::ast::Expr;
 use crate::ast::FieldAccessExpr;
+use crate::ast::ForRecordStatement;
 use crate::ast::ForStatement;
 use crate::ast::FunctionDeclaration;
 use crate::ast::IdentifierExpr;
@@ -594,6 +595,81 @@ impl Compiler {
 				self.exit_debug_scope(emission);
 				Ok(())
 			}
+			Statement::ForRecord(ForRecordStatement {
+				body,
+				is_mut,
+				position,
+				variable,
+				..
+			}) => {
+				let variable_slot = semantic_program.declaration_slot(variable.position).ok_or(self.compile_error(
+					variable.position,
+					format!("Missing slot for record loop variable `{}`.", variable.name),
+				))?;
+				let iterator_slot = semantic_program.iterator_slot(*position).ok_or(self.compile_error(
+					*position,
+					String::from("Missing iterator slot for `for rec` statement."),
+				))?;
+				let query = semantic_program.compiled_for_record_query(*position)
+					.ok_or(self.compile_error(*position, String::from("Missing compiled database query for `for rec` statement.")))?
+					.clone();
+				let query_index = self.compiled_queries.len() as u32;
+				self.compiled_queries.push(query);
+
+				self.enter_debug_scope(emission);
+				self.emit(emission, Instruction::ExecuteQuery(query_index), *position);
+				self.emit(emission, Instruction::IterInit, *position);
+				self.emit(emission, Instruction::StoreLocal(iterator_slot), *position);
+
+				let loop_start = emission.instructions.len() as u32;
+				self.loop_stack.push(LoopContext {
+					break_jump_indices: Vec::new(),
+					continue_jump_indices: Vec::new(),
+					loop_start,
+				});
+
+				self.emit(emission, Instruction::LoadLocal(iterator_slot), *position);
+				self.emit(emission, Instruction::IterHasNext, *position);
+				let jump_if_false_index = emission.instructions.len();
+				self.emit(emission, Instruction::JumpIfFalse(0), *position);
+
+				self.emit(emission, Instruction::LoadLocal(iterator_slot), *position);
+				self.emit(emission, Instruction::IterNext, *position);
+				self.emit(emission, Instruction::StoreLocal(iterator_slot), *position);
+				self.emit(emission, Instruction::StoreLocal(variable_slot), variable.position);
+				let variable_type = semantic_program.declaration_type(variable.position).ok_or(self.compile_error(
+					variable.position,
+					format!("Missing declared type for record loop variable `{}`.", variable.name),
+				))?;
+				self.record_local_debug(
+					emission,
+					variable.name.clone(),
+					variable_slot,
+					data_type_name(variable_type),
+					!*is_mut,
+					emission.instructions.len() as u32,
+				);
+
+				self.compile_statement(&Statement::Block(body.clone()), semantic_program, emission)?;
+				self.emit(emission, Instruction::Jump(loop_start), *position);
+
+				let loop_end = emission.instructions.len() as u32;
+				emission.instructions[jump_if_false_index] = Instruction::JumpIfFalse(loop_end);
+
+				let loop_context = self.loop_stack.pop()
+					.expect("Loop context must exist while compiling a for rec statement.");
+
+				for break_jump_index in loop_context.break_jump_indices {
+					emission.instructions[break_jump_index] = Instruction::Jump(loop_end);
+				}
+
+				for continue_jump_index in loop_context.continue_jump_indices {
+					emission.instructions[continue_jump_index] = Instruction::Jump(loop_context.loop_start);
+				}
+
+				self.exit_debug_scope(emission);
+				Ok(())
+			}
 			Statement::FunctionDeclaration(_) => Ok(()),
 			Statement::If(IfStatement {
 				condition,
@@ -852,6 +928,7 @@ fn collect_functions_from_statement<'a>(statement: &'a Statement, functions: &mu
 	match statement {
 		Statement::Block(block) => collect_functions_from_statements(block.statements.as_slice(), functions),
 		Statement::For(statement) => collect_functions_from_statements(statement.body.statements.as_slice(), functions),
+		Statement::ForRecord(statement) => collect_functions_from_statements(statement.body.statements.as_slice(), functions),
 		Statement::FunctionDeclaration(function) => collect_function_declaration(function, functions),
 		Statement::If(statement) => {
 			collect_functions_from_statements(statement.then_branch.statements.as_slice(), functions);
@@ -899,6 +976,7 @@ fn statement_position(statement: &Statement) -> usize {
 		Statement::Continue(statement) => statement.position,
 		Statement::Expression(expression) => expression.position(),
 		Statement::For(statement) => statement.position,
+		Statement::ForRecord(statement) => statement.position,
 		Statement::FunctionDeclaration(statement) => statement.position,
 		Statement::If(statement) => statement.position,
 		Statement::RecordPointerDeclaration(statement) => statement.position,
