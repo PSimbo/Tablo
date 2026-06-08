@@ -4,6 +4,7 @@ use crate::bytecode::InstructionSite;
 use crate::bytecode::Program;
 use crate::bytecode::SourceLocation;
 use crate::value::Value;
+use crate::vm::RuntimeDatabaseConfig;
 use crate::vm::VirtualMachine;
 use crate::vm::VmError;
 use crate::vm::VmExecutionState;
@@ -187,6 +188,16 @@ impl<'a> DebuggerSession<'a> {
 			if let Some(stop) = self.stop_at_breakpoint_if_present() {
 				return Ok(stop);
 			}
+		}
+	}
+
+	pub fn with_database_config(program: &'a Program, database_config: RuntimeDatabaseConfig) -> Self {
+		Self {
+			breakpoints: BTreeSet::new(),
+			program,
+			skip_breakpoint_once: None,
+			started: false,
+			vm: VirtualMachine::with_database_config(database_config),
 		}
 	}
 

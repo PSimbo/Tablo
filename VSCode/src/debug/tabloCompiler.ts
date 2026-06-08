@@ -3,20 +3,28 @@ import * as path from "path";
 import { execFile } from "child_process";
 import * as vscode from "vscode";
 import { logError, logInfo } from "../log";
-import { defaultTablocPath, resolveDebugOutputPath } from "./paths";
+import { defaultProjectConfigPath, defaultTablocPath, resolveDebugOutputPath } from "./paths";
 
 export async function compileSourceForDebugging(
 	sourceFile: string,
 	workspaceFolder: vscode.WorkspaceFolder | undefined,
-	explicitTablocPath?: string
+	explicitTablocPath?: string,
+	explicitProjectConfigPath?: string
 ): Promise<string> {
 	const outputPath = resolveDebugOutputPath(sourceFile, workspaceFolder);
 	await fs.mkdir(path.dirname(outputPath), { recursive: true });
 
 	const tablocPath = explicitTablocPath || defaultTablocPath();
-	logInfo(`Compiling ${sourceFile} to ${outputPath} using ${tablocPath}.`);
+	const projectConfigPath = explicitProjectConfigPath || defaultProjectConfigPath();
+	const args = projectConfigPath
+		? ["--config", projectConfigPath, sourceFile, outputPath]
+		: [sourceFile, outputPath];
+	logInfo(
+		`Compiling ${sourceFile} to ${outputPath} using ${tablocPath}` +
+		`${projectConfigPath ? ` with config ${projectConfigPath}` : ""}.`
+	);
 
-	await execFileAsync(tablocPath, [sourceFile, outputPath], {
+	await execFileAsync(tablocPath, args, {
 		cwd: workspaceFolder?.uri.fsPath || path.dirname(sourceFile),
 	});
 

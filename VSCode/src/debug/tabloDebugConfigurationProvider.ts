@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { logError, logInfo, revealLogs } from "../log";
 import { compileSourceForDebugging } from "./tabloCompiler";
-import { isTabloObjectFile, isTabloSourceFile } from "./paths";
+import { defaultProjectConfigPath, isTabloObjectFile, isTabloSourceFile } from "./paths";
 
 export class TabloDebugConfigurationProvider implements vscode.DebugConfigurationProvider {
 	resolveDebugConfiguration(
@@ -30,6 +30,10 @@ export class TabloDebugConfigurationProvider implements vscode.DebugConfiguratio
 			resolved.cwd = "${workspaceFolder}";
 		}
 
+		if (!resolved.projectConfigPath) {
+			resolved.projectConfigPath = defaultProjectConfigPath();
+		}
+
 		return resolved;
 	}
 
@@ -45,7 +49,8 @@ export class TabloDebugConfigurationProvider implements vscode.DebugConfiguratio
 				resolved.program = await compileSourceForDebugging(
 					resolved.sourceFile,
 					_folder,
-					resolved.tablocPath as string | undefined
+					resolved.tablocPath as string | undefined,
+					resolved.projectConfigPath as string | undefined
 				);
 			}
 			catch (error) {

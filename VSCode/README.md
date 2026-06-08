@@ -21,6 +21,7 @@ The extension currently assumes:
 - compiled Tablo programs are debugged from `.tbo` object files
 - `.tablo` source files can be compiled automatically into `.tablo/debug/`
 - `tablodbg` is either on `PATH` or configured explicitly
+- an optional `tablo.toml` path can be supplied through `tablo.debug.projectConfigPath`
 
 Future work will likely add:
 

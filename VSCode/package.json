@@ -61,6 +61,10 @@
               "tablodbgPath": {
                 "type": "string",
                 "description": "Optional path to the tablodbg executable. Defaults to `tablodbg` on PATH."
+              },
+              "projectConfigPath": {
+                "type": "string",
+                "description": "Optional path to a `tablo.toml` file used for schema-aware compilation and runtime database configuration during debugging."
               }
             }
           }
@@ -92,6 +96,11 @@
           "type": "string",
           "default": "tablodbg",
           "description": "Path to the `tablodbg` executable used for DAP debugging."
+        },
+        "tablo.debug.projectConfigPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to a `tablo.toml` file used by both `tabloc` and `tablodbg` during debugging."
         },
         "tablo.debug.outputDirectory": {
           "type": "string",

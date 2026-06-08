@@ -5,6 +5,11 @@ export function defaultDebugOutputDirectory(): string {
 	return vscode.workspace.getConfiguration("tablo").get<string>("debug.outputDirectory") || ".tablo/debug";
 }
 
+export function defaultProjectConfigPath(): string | undefined {
+	const configuredPath = vscode.workspace.getConfiguration("tablo").get<string>("debug.projectConfigPath");
+	return configuredPath && configuredPath.trim().length > 0 ? configuredPath : undefined;
+}
+
 export function defaultTablocPath(): string {
 	return vscode.workspace.getConfiguration("tablo").get<string>("debug.tablocPath") || "tabloc";
 }

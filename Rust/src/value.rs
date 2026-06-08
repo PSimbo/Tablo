@@ -1,11 +1,31 @@
 use std::collections::BTreeMap;
 use std::fmt::Display;
 
+use crate::ast::DataType;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DeferredSqliteValue {
+	Blob(Vec<u8>),
+	Integer(i64),
+	Null,
+	Real(String),
+	Text(String),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum IteratorState {
 	Array(ArrayIterator),
 	DecimalRange(DecimalRangeIterator),
 	IntegerRange(IntegerRangeIterator),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RecordFieldValue {
+	DeferredSqlite {
+		data_type: DataType,
+		value: DeferredSqliteValue,
+	},
+	Materialized(Value),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -335,7 +355,7 @@ pub struct LocalReference {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordPointerValue {
 	pub exists: bool,
-	pub fields: BTreeMap<String, Value>,
+	pub fields: BTreeMap<String, RecordFieldValue>,
 	pub locked: bool,
 }
 

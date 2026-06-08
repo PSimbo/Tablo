@@ -4,6 +4,7 @@ import { logError, logInfo } from "../log";
 export class TabloDebugAdapterTrackerFactory implements vscode.DebugAdapterTrackerFactory {
 	createDebugAdapterTracker(session: vscode.DebugSession): vscode.ProviderResult<vscode.DebugAdapterTracker> {
 		logInfo(`Started debug session "${session.name}".`);
+		let sawNormalTerminationEvent = false;
 
 		return {
 			onDidSendMessage: (message: unknown) => {
@@ -16,6 +17,10 @@ export class TabloDebugAdapterTrackerFactory implements vscode.DebugAdapterTrack
 					type?: string;
 				};
 
+				if (candidate.type === "event" && (candidate.event === "terminated" || candidate.event === "exited")) {
+					sawNormalTerminationEvent = true;
+				}
+
 				if (candidate.type === "response" && candidate.success === false) {
 					const errorMessage = candidate.message || `Debug request failed${candidate.command ? `: ${candidate.command}` : ""}.`;
 					logError(errorMessage);
@@ -27,6 +32,11 @@ export class TabloDebugAdapterTrackerFactory implements vscode.DebugAdapterTrack
 				}
 			},
 			onError: (error: Error) => {
+				if (sawNormalTerminationEvent && error.message === "read error") {
+					logInfo("Ignoring adapter read error reported after normal session termination.");
+					return;
+				}
+
 				logError(`Debug adapter error: ${error.message}`);
 				void vscode.window.showErrorMessage(`Tablo debug adapter error: ${error.message}`);
 			},

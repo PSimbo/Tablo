@@ -17,6 +17,7 @@ use tablo::debugger::DebuggerStop;
 use tablo::debugger::InstructionBreakpoint;
 use tablo::debugger::PauseReason;
 use tablo::object_file::read_program_from_path;
+use tablo::runtime_config::read_runtime_database_config_from_path;
 use tablo::vm::VmError;
 use tablo::vm::VmStackFrame;
 
@@ -178,10 +179,20 @@ impl DapServer {
 			.and_then(JsonValue::as_str)
 			.or_else(|| arguments.get("inputPath").and_then(JsonValue::as_str))
 			.ok_or(String::from("Launch request must include a `program` path."))?;
+		let config_path = arguments.get("projectConfigPath")
+			.and_then(JsonValue::as_str)
+			.or_else(|| arguments.get("configPath").and_then(JsonValue::as_str));
 
 		let program = read_program_from_path(path).map_err(|error| TabloError::ObjectFile(error).to_string())?;
 		let program = Box::leak(Box::new(program));
-		let mut session = DebuggerSession::new(program);
+		let mut session = if let Some(config_path) = config_path {
+			let database_config = read_runtime_database_config_from_path(config_path)
+				.map_err(|error| format!("Failed to load runtime config `{config_path}`: {}", error.message))?;
+			DebuggerSession::with_database_config(program, database_config)
+		}
+		else {
+			DebuggerSession::new(program)
+		};
 
 		if !self.all_breakpoints().is_empty() {
 			session.set_breakpoints(self.all_breakpoints());

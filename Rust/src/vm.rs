@@ -19,10 +19,12 @@ use crate::query::SqlQueryResultShape;
 use crate::value::Decimal;
 use crate::value::DecimalRange;
 use crate::value::DecimalRangeIterator;
+use crate::value::DeferredSqliteValue;
 use crate::value::IntegerRange;
 use crate::value::IntegerRangeIterator;
 use crate::value::IteratorState;
 use crate::value::LocalReference;
+use crate::value::RecordFieldValue;
 use crate::value::RecordPointerValue;
 use crate::value::Value;
 
@@ -1102,6 +1104,30 @@ fn data_type_name_for_runtime(data_type: &crate::ast::DataType) -> String {
 	}
 }
 
+fn deferred_sqlite_value(value: SqlValueRef<'_>) -> Result<DeferredSqliteValue, String> {
+	match value {
+		SqlValueRef::Blob(value) => Ok(DeferredSqliteValue::Blob(value.to_vec())),
+		SqlValueRef::Integer(value) => Ok(DeferredSqliteValue::Integer(value)),
+		SqlValueRef::Null => Ok(DeferredSqliteValue::Null),
+		SqlValueRef::Real(value) => Ok(DeferredSqliteValue::Real(value.to_string())),
+		SqlValueRef::Text(value) => Ok(DeferredSqliteValue::Text(
+			std::str::from_utf8(value)
+				.map_err(|_| String::from("SQLite returned invalid UTF-8 text data."))?
+				.to_string(),
+		)),
+	}
+}
+
+fn deferred_sqlite_value_name(value: &DeferredSqliteValue) -> &'static str {
+	match value {
+		DeferredSqliteValue::Blob(_) => "blob",
+		DeferredSqliteValue::Integer(_) => "integer",
+		DeferredSqliteValue::Null => "null",
+		DeferredSqliteValue::Real(_) => "real",
+		DeferredSqliteValue::Text(_) => "text",
+	}
+}
+
 fn divide_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
 	match (lhs, rhs) {
 		(Value::Integer(lhs), Value::Integer(rhs)) => {
@@ -1275,10 +1301,12 @@ fn load_field_value(object: Value, field_name: &str, instruction_index: usize) -
 				));
 			}
 
-			record.fields.get(&normalize_record_field_name(field_name)).cloned().ok_or(vm_error(
-				instruction_index,
-				format!("Record pointer does not contain a field named `{field_name}`."),
-			))
+			record.fields.get(&normalize_record_field_name(field_name))
+				.ok_or(vm_error(
+					instruction_index,
+					format!("Record pointer does not contain a field named `{field_name}`."),
+				))
+				.and_then(|field| resolve_record_field_value(field, instruction_index))
 		}
 		other => Err(vm_error(
 			instruction_index,
@@ -1361,7 +1389,7 @@ fn load_sqlite_record_fields(
 	row: &rusqlite::Row<'_>,
 	columns: &[QueryResultColumn],
 	instruction_index: usize,
-) -> Result<BTreeMap<String, Value>, VmError> {
+) -> Result<BTreeMap<String, RecordFieldValue>, VmError> {
 	let mut fields = BTreeMap::new();
 
 	for (index, column) in columns.iter().enumerate() {
@@ -1371,7 +1399,10 @@ fn load_sqlite_record_fields(
 		))?;
 		fields.insert(
 			normalize_record_field_name(&column.column_name),
-			sqlite_runtime_value(value, &column.data_type, instruction_index)?,
+			RecordFieldValue::DeferredSqlite {
+				data_type: column.data_type.clone(),
+				value: deferred_sqlite_value(value).map_err(|message| vm_error(instruction_index, message))?,
+			},
 		);
 	}
 
@@ -1540,6 +1571,15 @@ fn pow10_i128(exponent: u32) -> Result<i128, String> {
 	Ok(value)
 }
 
+fn resolve_record_field_value(field: &RecordFieldValue, instruction_index: usize) -> Result<Value, VmError> {
+	match field {
+		RecordFieldValue::Materialized(value) => Ok(value.clone()),
+		RecordFieldValue::DeferredSqlite { data_type, value } => {
+			sqlite_runtime_value_from_deferred(value, data_type, instruction_index)
+		}
+	}
+}
+
 fn sqlite_path_from_connection_string(database_name: &str, value: &str) -> Result<PathBuf, String> {
 	if value.is_empty() {
 		return Err(format!(
@@ -1563,70 +1603,53 @@ fn sqlite_path_from_connection_string(database_name: &str, value: &str) -> Resul
 	Ok(PathBuf::from(normalized))
 }
 
-fn sqlite_runtime_value(
-	value: SqlValueRef<'_>,
+fn sqlite_runtime_value_from_deferred(
+	value: &DeferredSqliteValue,
 	data_type: &crate::ast::DataType,
 	instruction_index: usize,
 ) -> Result<Value, VmError> {
 	match data_type {
 		crate::ast::DataType::Bool => match value {
-			SqlValueRef::Integer(value) => Ok(Value::Boolean(value != 0)),
+			DeferredSqliteValue::Integer(value) => Ok(Value::Boolean(*value != 0)),
 			other => Err(vm_error(
 				instruction_index,
-				format!("Cannot convert SQLite value `{}` to `bool`.", sqlite_value_name(other)),
+				format!("Cannot convert SQLite value `{}` to `bool`.", deferred_sqlite_value_name(other)),
 			)),
 		},
 		crate::ast::DataType::Dec => match value {
-			SqlValueRef::Integer(value) => Ok(Value::Decimal(Decimal::from_integer(value))),
-			SqlValueRef::Real(value) => Ok(Value::Decimal(
-				Decimal::from_literal(&value.to_string()).map_err(|message| vm_error(instruction_index, message))?,
+			DeferredSqliteValue::Integer(value) => Ok(Value::Decimal(Decimal::from_integer(*value))),
+			DeferredSqliteValue::Real(value) => Ok(Value::Decimal(
+				Decimal::from_literal(value).map_err(|message| vm_error(instruction_index, message))?,
 			)),
-			SqlValueRef::Text(value) => {
-				let text = std::str::from_utf8(value).map_err(|_| vm_error(
-					instruction_index,
-					String::from("SQLite returned invalid UTF-8 for a decimal column."),
-				))?;
-				Ok(Value::Decimal(
-					Decimal::from_literal(text).map_err(|message| vm_error(instruction_index, message))?,
-				))
-			}
+			DeferredSqliteValue::Text(value) => Ok(Value::Decimal(
+				Decimal::from_literal(value).map_err(|message| vm_error(instruction_index, message))?,
+			)),
 			other => Err(vm_error(
 				instruction_index,
-				format!("Cannot convert SQLite value `{}` to `dec`.", sqlite_value_name(other)),
+				format!("Cannot convert SQLite value `{}` to `dec`.", deferred_sqlite_value_name(other)),
 			)),
 		},
 		crate::ast::DataType::Int => match value {
-			SqlValueRef::Integer(value) => Ok(Value::Integer(value)),
+			DeferredSqliteValue::Integer(value) => Ok(Value::Integer(*value)),
 			other => Err(vm_error(
 				instruction_index,
-				format!("Cannot convert SQLite value `{}` to `int`.", sqlite_value_name(other)),
+				format!("Cannot convert SQLite value `{}` to `int`.", deferred_sqlite_value_name(other)),
 			)),
 		},
 		crate::ast::DataType::Text => match value {
-			SqlValueRef::Text(value) => Ok(Value::Text(
-				std::str::from_utf8(value)
-					.map_err(|_| vm_error(instruction_index, String::from("SQLite returned invalid UTF-8 for a text column.")))?
-					.to_string(),
-			)),
+			DeferredSqliteValue::Text(value) => Ok(Value::Text(value.clone())),
 			other => Err(vm_error(
 				instruction_index,
-				format!("Cannot convert SQLite value `{}` to `text`.", sqlite_value_name(other)),
+				format!("Cannot convert SQLite value `{}` to `text`.", deferred_sqlite_value_name(other)),
 			)),
 		},
 		other => Err(vm_error(
 			instruction_index,
-			format!("Database records cannot yet materialize fields of type `{}`.", data_type_name_for_runtime(other)),
+			format!(
+				"SQLite record pointer fields do not yet support runtime conversion to `{}`.",
+				data_type_name_for_runtime(other),
+			),
 		)),
-	}
-}
-
-fn sqlite_value_name(value: SqlValueRef<'_>) -> &'static str {
-	match value {
-		SqlValueRef::Blob(_) => "blob",
-		SqlValueRef::Integer(_) => "integer",
-		SqlValueRef::Null => "null",
-		SqlValueRef::Real(_) => "real",
-		SqlValueRef::Text(_) => "text",
 	}
 }
 
