@@ -2496,6 +2496,12 @@ mod tests {
 		}
 	}
 
+	fn sqlite_test_schema(source: &str, database_name: &str) -> crate::schema::SchemaCatalog {
+		let mut schema = read_schema_catalog_from_str(source).unwrap();
+		schema.database_mut(database_name).unwrap().set_backend(DatabaseBackend::Sqlite);
+		schema
+	}
+
 	#[test]
 	fn accepts_record_pointer_as_if_condition() {
 		let statement = Statement::If(IfStatement {
@@ -2553,31 +2559,17 @@ mod tests {
 
 	#[test]
 	fn infers_field_access_type_for_record_pointer_local() {
-		let schema = read_schema_catalog_from_str(
-			r#"{
-				"databases": [
-					{
-						"backend": "sqlite",
-						"name": "ExampleDb",
-						"schemas": [
-							{
-								"name": "Main",
-								"is_implicit": true,
-								"tables": [
-									{
-										"name": "Customers",
-										"columns": [
-											{ "name": "Id", "data_type": "int", "is_nullable": false },
-											{ "name": "Name", "data_type": "text", "is_nullable": false }
-										]
-									}
-								]
-							}
-						]
-					}
-				]
-			}"#,
-		).unwrap();
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			"ExampleDb",
+		);
 		let expression = parse_expression("cust.name");
 		let mut analyzer = SemanticAnalyzer::new();
 		analyzer.current_schema_catalog = Some(schema);
@@ -2602,31 +2594,17 @@ mod tests {
 
 	#[test]
 	fn infers_record_pointer_type_for_find_expression() {
-		let schema = read_schema_catalog_from_str(
-			r#"{
-				"databases": [
-					{
-						"backend": "sqlite",
-						"name": "ExampleDb",
-						"schemas": [
-							{
-								"name": "Main",
-								"is_implicit": true,
-								"tables": [
-									{
-										"name": "Customers",
-										"columns": [
-											{ "name": "Id", "data_type": "int", "is_nullable": false },
-											{ "name": "Name", "data_type": "text", "is_nullable": false }
-										]
-									}
-								]
-							}
-						]
-					}
-				]
-			}"#,
-		).unwrap();
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			"ExampleDb",
+		);
 		let find = parse_find_expression("find first customers where id = 1");
 		let mut analyzer = SemanticAnalyzer::new();
 		analyzer.current_schema_catalog = Some(schema);
@@ -2643,31 +2621,17 @@ mod tests {
 
 	#[test]
 	fn infers_record_pointer_type_for_find_expression_with_order_by() {
-		let schema = read_schema_catalog_from_str(
-			r#"{
-				"databases": [
-					{
-						"backend": "sqlite",
-						"name": "ExampleDb",
-						"schemas": [
-							{
-								"name": "Main",
-								"is_implicit": true,
-								"tables": [
-									{
-										"name": "Customers",
-										"columns": [
-											{ "name": "Id", "data_type": "int", "is_nullable": false },
-											{ "name": "Name", "data_type": "text", "is_nullable": false }
-										]
-									}
-								]
-							}
-						]
-					}
-				]
-			}"#,
-		).unwrap();
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			"ExampleDb",
+		);
 		let find = parse_find_expression("find first customers order by name desc, id");
 		let mut analyzer = SemanticAnalyzer::new();
 		analyzer.current_schema_catalog = Some(schema);
@@ -2684,31 +2648,17 @@ mod tests {
 
 	#[test]
 	fn lowers_count_query_to_backend_aware_ir() {
-		let schema = read_schema_catalog_from_str(
-			r#"{
-				"databases": [
-					{
-						"backend": "sqlite",
-						"name": "ExampleDb",
-						"schemas": [
-							{
-								"name": "Main",
-								"is_implicit": true,
-								"tables": [
-									{
-										"name": "Customers",
-										"columns": [
-											{ "name": "Id", "data_type": "int", "is_nullable": false },
-											{ "name": "Active", "data_type": "bool", "is_nullable": false }
-										]
-									}
-								]
-							}
-						]
-					}
-				]
-			}"#,
-		).unwrap();
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Active bool not null
+				);
+			"#,
+			"ExampleDb",
+		);
 		let count = parse_count_expression("count customers where id = targetId and active = true");
 		let mut analyzer = SemanticAnalyzer::new();
 		analyzer.current_schema_catalog = Some(schema);

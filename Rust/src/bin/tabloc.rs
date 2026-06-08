@@ -55,7 +55,7 @@ fn main() {
 		let schema_catalog = match read_schema_catalog_from_path(schema_fixture_path) {
 			Ok(schema_catalog) => schema_catalog,
 			Err(error) => {
-				eprintln!("Failed to load schema fixture `{}`: {}", schema_fixture_path.display(), error.message);
+				eprintln!("Failed to load schema file `{}`: {}", schema_fixture_path.display(), error.message);
 				std::process::exit(1);
 			}
 		};

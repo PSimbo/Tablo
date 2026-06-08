@@ -242,6 +242,7 @@ mod tests {
 	use crate::bytecode::Instruction;
 	use crate::object_file::read_program_from_path;
 	use crate::object_file::write_program_to_path;
+	use crate::schema::DatabaseBackend;
 	use crate::schema::SchemaCatalog;
 	use crate::schema_fixture::read_schema_catalog_from_str;
 	use crate::value::Value;
@@ -276,23 +277,51 @@ mod tests {
 	}
 
 	fn compile_snippet_with_schema_fixture(source: &str, schema_fixture: &str) -> Result<(crate::bytecode::Program, SchemaCatalog), TabloError> {
-		let schema = read_schema_catalog_from_str(schema_fixture)
-			.map_err(|error| TabloError::Compile(crate::compiler::CompileError {
-				message: error.message,
-				position: 0,
-			}))?;
+		compile_snippet_with_schema_fixture_and_backends(source, schema_fixture, &[])
+	}
+
+	fn compile_snippet_with_schema_fixture_and_backends(
+		source: &str,
+		schema_fixture: &str,
+		backends: &[(&str, DatabaseBackend)],
+	) -> Result<(crate::bytecode::Program, SchemaCatalog), TabloError> {
+		let schema = schema_catalog_from_fixture_with_backends(schema_fixture, backends)?;
 		let program = compile_source_to_program_with_name_and_schema(source, None, CompilationTarget::Snippet, Some(&schema))?;
 		Ok((program, schema))
 	}
 
-	fn compile_standalone_with_schema_fixture(source: &str, schema_fixture: &str) -> Result<(crate::bytecode::Program, SchemaCatalog), TabloError> {
+	fn compile_standalone_with_schema_fixture_and_backends(
+		source: &str,
+		schema_fixture: &str,
+		backends: &[(&str, DatabaseBackend)],
+	) -> Result<(crate::bytecode::Program, SchemaCatalog), TabloError> {
+		let schema = schema_catalog_from_fixture_with_backends(schema_fixture, backends)?;
+		let program = compile_source_to_program_with_name_and_schema(source, None, CompilationTarget::Standalone, Some(&schema))?;
+		Ok((program, schema))
+	}
+
+	fn schema_catalog_from_fixture_with_backends(
+		schema_fixture: &str,
+		backends: &[(&str, DatabaseBackend)],
+	) -> Result<SchemaCatalog, TabloError> {
 		let schema = read_schema_catalog_from_str(schema_fixture)
 			.map_err(|error| TabloError::Compile(crate::compiler::CompileError {
 				message: error.message,
 				position: 0,
 			}))?;
-		let program = compile_source_to_program_with_name_and_schema(source, None, CompilationTarget::Standalone, Some(&schema))?;
-		Ok((program, schema))
+
+		let mut schema = schema;
+		for (database_name, backend) in backends {
+			let database = schema.database_mut(database_name).ok_or_else(|| {
+				TabloError::Compile(crate::compiler::CompileError {
+					message: format!("Test schema does not define database `{database_name}`."),
+					position: 0,
+				})
+			})?;
+			database.set_backend(*backend);
+		}
+
+		Ok(schema)
 	}
 
 	fn create_sqlite_test_database(name: &str, setup_sql: &str) -> PathBuf {
@@ -316,27 +345,13 @@ mod tests {
 	fn compiles_snippet_with_schema_fixture_for_future_schema_aware_tests() {
 		let (program, schema) = compile_snippet_with_schema_fixture(
 			"1 + 2",
-			r#"{
-				"databases": [
-					{
-						"backend": "postgresql",
-						"name": "ExampleDb",
-						"schemas": [
-							{
-								"name": "Public",
-								"tables": [
-									{
-										"name": "Customers",
-										"columns": [
-											{ "name": "Id", "data_type": "int", "is_nullable": false }
-										]
-									}
-								]
-							}
-						]
-					}
-				]
-			}"#,
+			r#"
+				database ExampleDb;
+				schema Public;
+				create table Customers (
+					Id int not null
+				);
+			"#,
 		).unwrap();
 
 		assert_eq!(run_program(&program).unwrap(), Some(Value::Integer(3)));
@@ -474,24 +489,15 @@ mod tests {
 	fn rejects_ambiguous_unqualified_table_in_count_expression() {
 		let error = compile_snippet_with_schema_fixture(
 			"with sales, archive;\ncount customers where true",
-			r#"{
-				"databases": [
-					{
-						"backend": "postgresql",
-						"name": "Sales",
-						"schemas": [
-							{ "name": "Public", "tables": [{ "name": "Customers", "columns": [] }] }
-						]
-					},
-					{
-						"backend": "sqlite",
-						"name": "Archive",
-						"schemas": [
-							{ "name": "Public", "tables": [{ "name": "Customers", "columns": [] }] }
-						]
-					}
-				]
-			}"#,
+			r#"
+				database Sales;
+				schema Public;
+				create table Customers ();
+
+				database Archive;
+				schema Public;
+				create table Customers ();
+			"#,
 		).unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
@@ -522,29 +528,16 @@ mod tests {
 
 	#[test]
 	fn rejects_count_expression_for_unsupported_backend() {
-		let error = compile_snippet_with_schema_fixture(
+		let error = compile_snippet_with_schema_fixture_and_backends(
 			"with exampledb;\ncount customers where active = true",
-			r#"{
-				"databases": [
-					{
-						"backend": "mysql",
-						"name": "ExampleDb",
-						"schemas": [
-							{
-								"name": "Public",
-								"tables": [
-									{
-										"name": "Customers",
-										"columns": [
-											{ "name": "Active", "data_type": "bool", "is_nullable": false }
-										]
-									}
-								]
-							}
-						]
-					}
-				]
-			}"#,
+			r#"
+				database ExampleDb;
+				schema Public;
+				create table Customers (
+					Active bool not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::MySql)],
 		).unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
@@ -722,11 +715,11 @@ mod tests {
 	fn rejects_unknown_database_in_with_declaration() {
 		let error = compile_snippet_with_schema_fixture(
 			"with missingdb;\n1 + 2",
-			r#"{
-				"databases": [
-					{ "backend": "postgresql", "name": "ExampleDb", "schemas": [{ "name": "Public", "tables": [] }] }
-				]
-			}"#,
+			r#"
+				database ExampleDb;
+				schema Public;
+				create table Customers ();
+			"#,
 		).unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
@@ -739,27 +732,13 @@ mod tests {
 	fn rejects_unknown_table_in_count_expression() {
 		let error = compile_snippet_with_schema_fixture(
 			"with exampledb;\ncount missing where true",
-			r#"{
-				"databases": [
-					{
-						"backend": "postgresql",
-						"name": "ExampleDb",
-						"schemas": [
-							{
-								"name": "Public",
-								"tables": [
-									{
-										"name": "Customers",
-										"columns": [
-											{ "name": "Active", "data_type": "bool", "is_nullable": false }
-										]
-									}
-								]
-							}
-						]
-					}
-				]
-			}"#,
+			r#"
+				database ExampleDb;
+				schema Public;
+				create table Customers (
+					Active bool not null
+				);
+			"#,
 		).unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
@@ -770,31 +749,17 @@ mod tests {
 
 	#[test]
 	fn rejects_void_order_by_expression_in_find_query() {
-		let error = compile_snippet_with_schema_fixture(
+		let error = compile_snippet_with_schema_fixture_and_backends(
 			"with exampledb;\nfind customers order by disp('x')",
-			r#"{
-				"databases": [
-					{
-						"backend": "sqlite",
-						"name": "ExampleDb",
-						"schemas": [
-							{
-								"name": "Main",
-								"is_implicit": true,
-								"tables": [
-									{
-										"name": "Customers",
-										"columns": [
-											{ "name": "Id", "data_type": "int", "is_nullable": false },
-											{ "name": "Name", "data_type": "text", "is_nullable": false }
-										]
-									}
-								]
-							}
-						]
-					}
-				]
-			}"#,
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
 		).unwrap_err();
 
 		match error {
@@ -1081,31 +1046,17 @@ mod tests {
 				INSERT INTO Customers (Id, Active) VALUES (1, 1), (2, 0), (3, 1);
 			"#,
 		);
-		let (program, _) = compile_snippet_with_schema_fixture(
+		let (program, _) = compile_snippet_with_schema_fixture_and_backends(
 			"with exampledb;\nexists(find first customers where id = 999)",
-			r#"{
-				"databases": [
-					{
-						"backend": "sqlite",
-						"name": "ExampleDb",
-						"schemas": [
-							{
-								"name": "Main",
-								"is_implicit": true,
-								"tables": [
-									{
-										"name": "Customers",
-										"columns": [
-											{ "name": "Id", "data_type": "int", "is_nullable": false },
-											{ "name": "Active", "data_type": "bool", "is_nullable": false }
-										]
-									}
-								]
-							}
-						]
-					}
-				]
-			}"#,
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Active bool not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
 		).unwrap();
 		let database_config = RuntimeDatabaseConfig::new()
 			.with_sqlite_database("ExampleDb", &database_path);
@@ -1434,31 +1385,17 @@ mod tests {
 				INSERT INTO Customers (Id, Active) VALUES (1, 1), (2, 0), (3, 1);
 			"#,
 		);
-		let (program, _) = compile_snippet_with_schema_fixture(
+		let (program, _) = compile_snippet_with_schema_fixture_and_backends(
 			"with exampledb;\ncount customers where active = true",
-			r#"{
-				"databases": [
-					{
-						"backend": "sqlite",
-						"name": "ExampleDb",
-						"schemas": [
-							{
-								"name": "Main",
-								"is_implicit": true,
-								"tables": [
-									{
-										"name": "Customers",
-										"columns": [
-											{ "name": "Id", "data_type": "int", "is_nullable": false },
-											{ "name": "Active", "data_type": "bool", "is_nullable": false }
-										]
-									}
-								]
-							}
-						]
-					}
-				]
-			}"#,
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Active bool not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
 		).unwrap();
 		let database_config = RuntimeDatabaseConfig::new()
 			.with_sqlite_database("ExampleDb", &database_path);
@@ -1481,31 +1418,17 @@ mod tests {
 			"#,
 		);
 		let output_path = unique_test_output_path("sqlite_count_query_program");
-		let (program, _) = compile_standalone_with_schema_fixture(
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
 			"with exampledb;\nfn Main(args: [text]) int { var targetId: int = 2; return count customers where id = targetId; }",
-			r#"{
-				"databases": [
-					{
-						"backend": "sqlite",
-						"name": "ExampleDb",
-						"schemas": [
-							{
-								"name": "Main",
-								"is_implicit": true,
-								"tables": [
-									{
-										"name": "Customers",
-										"columns": [
-											{ "name": "Id", "data_type": "int", "is_nullable": false },
-											{ "name": "Active", "data_type": "bool", "is_nullable": false }
-										]
-									}
-								]
-							}
-						]
-					}
-				]
-			}"#,
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Active bool not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
 		).unwrap();
 		write_program_to_path(&output_path, &program).unwrap();
 		let decoded = read_program_from_path(&output_path).unwrap();
@@ -1534,32 +1457,18 @@ mod tests {
 					(3, 0, 'Cam');
 			"#,
 		);
-		let (program, _) = compile_snippet_with_schema_fixture(
+		let (program, _) = compile_snippet_with_schema_fixture_and_backends(
 			"with exampledb;\n(find first customers where active = true order by id).name",
-			r#"{
-				"databases": [
-					{
-						"backend": "sqlite",
-						"name": "ExampleDb",
-						"schemas": [
-							{
-								"name": "Main",
-								"is_implicit": true,
-								"tables": [
-									{
-										"name": "Customers",
-										"columns": [
-											{ "name": "Id", "data_type": "int", "is_nullable": false },
-											{ "name": "Active", "data_type": "bool", "is_nullable": false },
-											{ "name": "Name", "data_type": "text", "is_nullable": false }
-										]
-									}
-								]
-							}
-						]
-					}
-				]
-			}"#,
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Active bool not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
 		).unwrap();
 		let database_config = RuntimeDatabaseConfig::new()
 			.with_sqlite_database("ExampleDb", &database_path);
@@ -1587,32 +1496,18 @@ mod tests {
 			"#,
 		);
 		let output_path = unique_test_output_path("sqlite_find_query_program");
-		let (program, _) = compile_standalone_with_schema_fixture(
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
 			"with exampledb;\nfn Main(args: [text]) int { return (find last customers where active = true order by id).id; }",
-			r#"{
-				"databases": [
-					{
-						"backend": "sqlite",
-						"name": "ExampleDb",
-						"schemas": [
-							{
-								"name": "Main",
-								"is_implicit": true,
-								"tables": [
-									{
-										"name": "Customers",
-										"columns": [
-											{ "name": "Id", "data_type": "int", "is_nullable": false },
-											{ "name": "Active", "data_type": "bool", "is_nullable": false },
-											{ "name": "Name", "data_type": "text", "is_nullable": false }
-										]
-									}
-								]
-							}
-						]
-					}
-				]
-			}"#,
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Active bool not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
 		).unwrap();
 		write_program_to_path(&output_path, &program).unwrap();
 		let decoded = read_program_from_path(&output_path).unwrap();
@@ -1641,32 +1536,18 @@ mod tests {
 					(3, 0, 'Cam');
 			"#,
 		);
-		let (program, _) = compile_standalone_with_schema_fixture(
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
 			"with exampledb;\nfn Main(args: [text]) int { rec cust = find first customers where active = true order by id; if cust.name == 'Ada' { return cust.id; } return 0; }",
-			r#"{
-				"databases": [
-					{
-						"backend": "sqlite",
-						"name": "ExampleDb",
-						"schemas": [
-							{
-								"name": "Main",
-								"is_implicit": true,
-								"tables": [
-									{
-										"name": "Customers",
-										"columns": [
-											{ "name": "Id", "data_type": "int", "is_nullable": false },
-											{ "name": "Active", "data_type": "bool", "is_nullable": false },
-											{ "name": "Name", "data_type": "text", "is_nullable": false }
-										]
-									}
-								]
-							}
-						]
-					}
-				]
-			}"#,
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Active bool not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
 		).unwrap();
 		let database_config = RuntimeDatabaseConfig::new()
 			.with_sqlite_database("ExampleDb", &database_path);
@@ -1691,33 +1572,19 @@ mod tests {
 					(2, 'Acme Ltd.', NULL, 'US');
 			"#,
 		);
-		let (program, _) = compile_snippet_with_schema_fixture(
+		let (program, _) = compile_snippet_with_schema_fixture_and_backends(
 			"with test;\n(find first Customer).Address1",
-			r#"{
-				"databases": [
-					{
-						"backend": "sqlite",
-						"name": "Test",
-						"schemas": [
-							{
-								"name": "Main",
-								"is_implicit": true,
-								"tables": [
-									{
-										"name": "Customer",
-										"columns": [
-											{ "name": "Id", "data_type": "int", "is_nullable": false },
-											{ "name": "Name", "data_type": "text", "is_nullable": false },
-											{ "name": "Address1", "data_type": "text", "is_nullable": true },
-											{ "name": "Country", "data_type": "text", "is_nullable": false }
-										]
-									}
-								]
-							}
-						]
-					}
-				]
-			}"#,
+			r#"
+				database Test;
+				schema Main implicit;
+				create table Customer (
+					Id int not null,
+					Name text not null,
+					Address1 text null,
+					Country text not null
+				);
+			"#,
+			&[("Test", DatabaseBackend::Sqlite)],
 		).unwrap();
 		let database_config = RuntimeDatabaseConfig::new()
 			.with_sqlite_database("Test", &database_path);
@@ -1742,33 +1609,19 @@ mod tests {
 					(2, 'Acme Ltd.', NULL, 'US');
 			"#,
 		);
-		let (program, _) = compile_standalone_with_schema_fixture(
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
 			"with test;\nfn Main(args: [text]) int { rec temp = find first Customer; return temp.Id; }",
-			r#"{
-				"databases": [
-					{
-						"backend": "sqlite",
-						"name": "Test",
-						"schemas": [
-							{
-								"name": "Main",
-								"is_implicit": true,
-								"tables": [
-									{
-										"name": "Customer",
-										"columns": [
-											{ "name": "Id", "data_type": "int", "is_nullable": false },
-											{ "name": "Name", "data_type": "text", "is_nullable": false },
-											{ "name": "Address1", "data_type": "text", "is_nullable": true },
-											{ "name": "Country", "data_type": "text", "is_nullable": false }
-										]
-									}
-								]
-							}
-						]
-					}
-				]
-			}"#,
+			r#"
+				database Test;
+				schema Main implicit;
+				create table Customer (
+					Id int not null,
+					Name text not null,
+					Address1 text null,
+					Country text not null
+				);
+			"#,
+			&[("Test", DatabaseBackend::Sqlite)],
 		).unwrap();
 		let database_config = RuntimeDatabaseConfig::new()
 			.with_sqlite_database("Test", &database_path);
@@ -1795,32 +1648,18 @@ mod tests {
 					(3, 0, 'Cam');
 			"#,
 		);
-		let (program, _) = compile_standalone_with_schema_fixture(
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
 			"with exampledb;\nfn Main(args: [text]) int { var total: int = 0; for rec cust in customers where active = true order by id { total += cust.id; } return total; }",
-			r#"{
-				"databases": [
-					{
-						"backend": "sqlite",
-						"name": "ExampleDb",
-						"schemas": [
-							{
-								"name": "Main",
-								"is_implicit": true,
-								"tables": [
-									{
-										"name": "Customers",
-										"columns": [
-											{ "name": "Id", "data_type": "int", "is_nullable": false },
-											{ "name": "Active", "data_type": "bool", "is_nullable": false },
-											{ "name": "Name", "data_type": "text", "is_nullable": false }
-										]
-									}
-								]
-							}
-						]
-					}
-				]
-			}"#,
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Active bool not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
 		).unwrap();
 		let database_config = RuntimeDatabaseConfig::new()
 			.with_sqlite_database("ExampleDb", &database_path);

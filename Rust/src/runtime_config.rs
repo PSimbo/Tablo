@@ -31,6 +31,7 @@ impl RuntimeConfigFile {
 	}
 
 	fn into_schema_catalog(self, base_directory: &Path) -> Result<SchemaCatalog, RuntimeConfigError> {
+		let databases = self.databases.unwrap_or_default();
 		let mut merged_catalog = SchemaCatalog::new();
 
 		for (database_name, schema_path) in self.schemas.unwrap_or_default() {
@@ -43,13 +44,24 @@ impl RuntimeConfigFile {
 					error.message,
 				),
 			})?;
-			let database = schema_catalog.database(&database_name).cloned().ok_or(RuntimeConfigError {
+			let mut database = schema_catalog.database(&database_name).cloned().ok_or(RuntimeConfigError {
 				message: format!(
 					"Schema file `{}` does not define database `{}`.",
 					resolved_path.display(),
 					database_name,
 				),
 			})?;
+			let connection_string = databases.get(&database_name).ok_or(RuntimeConfigError {
+				message: format!(
+					"Schema file `{}` is mapped to database `{}`, but no matching [databases] entry exists to determine the backend.",
+					resolved_path.display(),
+					database_name,
+				),
+			})?;
+			let backend = database_backend_from_connection_string(connection_string).map_err(|message| RuntimeConfigError {
+				message: format!("Invalid connection string for database `{database_name}`: {message}"),
+			})?;
+			database.set_backend(backend);
 
 			merged_catalog.add_database(database).map_err(|error| RuntimeConfigError {
 				message: format!("Failed to merge schema file for database `{database_name}`: {}", schema_error_message(error)),
@@ -87,6 +99,19 @@ pub fn read_schema_catalog_from_runtime_config_path(path: impl AsRef<Path>) -> R
 	let base_directory = path.parent().unwrap_or_else(|| Path::new("."));
 
 	config_file.into_schema_catalog(base_directory)
+}
+
+fn database_backend_from_connection_string(connection_string: &str) -> Result<crate::schema::DatabaseBackend, String> {
+	let (scheme, _) = connection_string.split_once(':').ok_or_else(|| {
+		String::from("Connection string must use the form `<backend>:<value>`.")
+	})?;
+
+	match scheme.trim().to_ascii_lowercase().as_str() {
+		"mysql" => Ok(crate::schema::DatabaseBackend::MySql),
+		"postgres" | "postgresql" => Ok(crate::schema::DatabaseBackend::PostgreSql),
+		"sqlite" => Ok(crate::schema::DatabaseBackend::Sqlite),
+		other => Err(format!("unsupported backend `{other}`.")),
+	}
 }
 
 fn resolve_config_path(base_directory: &Path, configured_path: &str) -> PathBuf {
@@ -188,27 +213,18 @@ mod tests {
 		std::fs::create_dir_all(&temp_dir).unwrap();
 		std::fs::write(
 			&schema_path,
-			r#"{
-				"databases": [
-					{
-						"backend": "sqlite",
-						"name": "ExampleDb",
-						"schemas": [
-							{
-								"name": "Main",
-								"is_implicit": true,
-								"tables": [
-									{ "name": "Customers", "columns": [] }
-								]
-							}
-						]
-					}
-				]
-			}"#,
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers ();
+			"#,
 		).unwrap();
 		std::fs::write(
 			&config_path,
 			r#"
+				[databases]
+				ExampleDb = "sqlite:data/example.sqlite"
+
 				[schemas]
 				ExampleDb = "example.schema"
 			"#,
@@ -260,15 +276,53 @@ mod tests {
 		std::fs::create_dir_all(&temp_dir).unwrap();
 		std::fs::write(
 			&schema_path,
-			r#"{
-				"databases": [
-					{
-						"backend": "sqlite",
-						"name": "OtherDb",
-						"schemas": []
-					}
-				]
-			}"#,
+			r#"
+				database OtherDb;
+				schema Main implicit;
+				create table Customers ();
+			"#,
+		).unwrap();
+		std::fs::write(
+			&config_path,
+			r#"
+				[databases]
+				ExampleDb = "sqlite:data/example.sqlite"
+
+				[schemas]
+				ExampleDb = "example.schema"
+			"#,
+		).unwrap();
+
+		let error = read_schema_catalog_from_runtime_config_path(&config_path).unwrap_err();
+
+		assert_eq!(
+			error,
+			RuntimeConfigError {
+				message: format!(
+					"Schema file `{}` does not define database `ExampleDb`.",
+					schema_path.display(),
+				),
+			},
+		);
+
+		let _ = std::fs::remove_file(&schema_path);
+		let _ = std::fs::remove_file(&config_path);
+		let _ = std::fs::remove_dir(&temp_dir);
+	}
+
+	#[test]
+	fn rejects_schema_mapping_without_matching_database_entry() {
+		let temp_dir = unique_temp_directory("runtime_config_missing_backend");
+		let schema_path = temp_dir.join("example.schema");
+		let config_path = temp_dir.join("tablo.toml");
+		std::fs::create_dir_all(&temp_dir).unwrap();
+		std::fs::write(
+			&schema_path,
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers ();
+			"#,
 		).unwrap();
 		std::fs::write(
 			&config_path,
@@ -284,7 +338,7 @@ mod tests {
 			error,
 			RuntimeConfigError {
 				message: format!(
-					"Schema file `{}` does not define database `ExampleDb`.",
+					"Schema file `{}` is mapped to database `ExampleDb`, but no matching [databases] entry exists to determine the backend.",
 					schema_path.display(),
 				),
 			},

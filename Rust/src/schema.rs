@@ -207,6 +207,10 @@ impl DatabaseSchema {
 		self.schemas.values()
 	}
 
+	pub fn set_backend(&mut self, backend: DatabaseBackend) {
+		self.backend = backend;
+	}
+
 	fn allows_database_table_shorthand(&self) -> bool {
 		self.schemas.len() == 1
 	}
@@ -260,6 +264,10 @@ impl SchemaCatalog {
 
 	pub fn database(&self, name: &str) -> Option<&DatabaseSchema> {
 		self.databases.get(&normalize_name(name))
+	}
+
+	pub fn database_mut(&mut self, name: &str) -> Option<&mut DatabaseSchema> {
+		self.databases.get_mut(&normalize_name(name))
 	}
 
 	pub fn databases(&self) -> impl Iterator<Item = &DatabaseSchema> {
