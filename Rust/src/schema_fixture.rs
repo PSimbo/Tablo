@@ -334,7 +334,7 @@ fn parse_schema_data_type(input: &str) -> Result<SchemaDataType, SchemaFixtureEr
 		"bin" => Ok(SchemaDataType::Bin),
 		"bool" => Ok(SchemaDataType::Bool),
 		"date" => Ok(SchemaDataType::Date),
-		"dec" => Ok(SchemaDataType::Dec),
+		"dec" | "numeric" => Ok(SchemaDataType::Dec),
 		"float" => Ok(SchemaDataType::Float),
 		"int" | "integer" => Ok(SchemaDataType::Int),
 		"json" => Ok(SchemaDataType::Json),
@@ -536,6 +536,27 @@ mod tests {
 		let column = table.column("id").unwrap();
 
 		assert_eq!(column.data_type(), &SchemaDataType::Int);
+		assert!(!column.is_nullable());
+	}
+
+	#[test]
+	fn accepts_numeric_alias_in_sql_like_schema() {
+		let catalog = read_schema_catalog_from_str(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Balance numeric not null
+				);
+			"#,
+		).unwrap();
+
+		let database = catalog.database("exampledb").unwrap();
+		let schema = database.schema("main").unwrap();
+		let table = schema.table("customers").unwrap();
+		let column = table.column("balance").unwrap();
+
+		assert_eq!(column.data_type(), &SchemaDataType::Dec);
 		assert!(!column.is_nullable());
 	}
 
