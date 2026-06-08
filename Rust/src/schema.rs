@@ -199,6 +199,10 @@ impl DatabaseSchema {
 		self.schemas.get(&normalize_name(name))
 	}
 
+	pub fn schema_mut(&mut self, name: &str) -> Option<&mut DatabaseNamespace> {
+		self.schemas.get_mut(&normalize_name(name))
+	}
+
 	pub fn schemas(&self) -> impl Iterator<Item = &DatabaseNamespace> {
 		self.schemas.values()
 	}

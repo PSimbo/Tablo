@@ -37,7 +37,7 @@ impl RuntimeConfigFile {
 			let resolved_path = resolve_config_path(base_directory, &schema_path);
 			let schema_catalog = read_schema_fixture_catalog_from_path(&resolved_path).map_err(|error| RuntimeConfigError {
 				message: format!(
-					"Failed to load schema fixture `{}` for database `{}`: {}",
+					"Failed to load schema file `{}` for database `{}`: {}",
 					resolved_path.display(),
 					database_name,
 					error.message,
@@ -45,14 +45,14 @@ impl RuntimeConfigFile {
 			})?;
 			let database = schema_catalog.database(&database_name).cloned().ok_or(RuntimeConfigError {
 				message: format!(
-					"Schema fixture `{}` does not define database `{}`.",
+					"Schema file `{}` does not define database `{}`.",
 					resolved_path.display(),
 					database_name,
 				),
 			})?;
 
 			merged_catalog.add_database(database).map_err(|error| RuntimeConfigError {
-				message: format!("Failed to merge schema fixture for database `{database_name}`: {}", schema_error_message(error)),
+				message: format!("Failed to merge schema file for database `{database_name}`: {}", schema_error_message(error)),
 			})?;
 		}
 
@@ -284,7 +284,7 @@ mod tests {
 			error,
 			RuntimeConfigError {
 				message: format!(
-					"Schema fixture `{}` does not define database `ExampleDb`.",
+					"Schema file `{}` does not define database `ExampleDb`.",
 					schema_path.display(),
 				),
 			},

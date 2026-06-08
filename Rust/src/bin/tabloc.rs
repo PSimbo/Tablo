@@ -9,7 +9,7 @@ use tablo::schema_fixture::read_schema_catalog_from_path;
 #[derive(ClapParser, Debug)]
 #[command(name = "tabloc")]
 #[command(about = "Compile Tablo source files to Tablo object files.")]
-#[command(long_about = "Compile Tablo source files to Tablo object files.\n\nFor schema-aware database features, pass --schema with a backend-neutral JSON schema fixture, or use [schemas] entries in tablo.toml.\nDirect PostgreSQL/MySQL/SQLite DDL input is not supported by the CLI yet.")]
+#[command(long_about = "Compile Tablo source files to Tablo object files.\n\nFor schema-aware database features, pass --schema with a limited SQL-like schema file, or use [schemas] entries in tablo.toml.\nThe current schema parser intentionally supports only a small subset of SQL-like syntax.")]
 struct Args {
 	#[arg(
 		long = "config",
@@ -21,7 +21,7 @@ struct Args {
 	#[arg(
 		long = "schema",
 		value_name = "PATH",
-		help = "Path to a backend-neutral JSON schema fixture for schema-aware compilation. Direct DDL input is not supported yet."
+		help = "Path to a limited SQL-like schema file for schema-aware compilation."
 	)]
 	schema_fixture_path: Option<PathBuf>,
 
