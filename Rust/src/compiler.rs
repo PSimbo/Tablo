@@ -22,6 +22,7 @@ use crate::ast::IndexExpr;
 use crate::ast::ObjectConstructionExpr;
 use crate::ast::Program as AstProgram;
 use crate::ast::RangeExpr;
+use crate::ast::RecordPointerDeclaration;
 use crate::ast::ReturnStatement;
 use crate::ast::Statement;
 use crate::ast::TextLiteral;
@@ -624,6 +625,28 @@ impl Compiler {
 
 				Ok(())
 			}
+			Statement::RecordPointerDeclaration(RecordPointerDeclaration { initial_value, is_mut, name, position }) => {
+				let slot = semantic_program.declaration_slot(*position).ok_or(self.compile_error(
+					*position,
+					format!("Missing slot for record pointer declaration `{name}`."),
+				))?;
+				let data_type = semantic_program.declaration_type(*position).ok_or(self.compile_error(
+					*position,
+					format!("Missing type for record pointer declaration `{name}`."),
+				))?;
+				self.compile_into(initial_value, semantic_program, emission);
+				self.emit(emission, Instruction::StoreLocal(slot), *position);
+				self.record_local_debug(
+					emission,
+					name.clone(),
+					slot,
+					data_type_name(data_type),
+					!*is_mut,
+					emission.instructions.len() as u32,
+				);
+
+				Ok(())
+			}
 			Statement::Return(ReturnStatement { value, .. }) => {
 				if let Some(value) = value {
 					self.compile_into(value, semantic_program, emission);
@@ -837,7 +860,7 @@ fn collect_functions_from_statement<'a>(statement: &'a Statement, functions: &mu
 			}
 		}
 		Statement::While(statement) => collect_functions_from_statements(statement.body.statements.as_slice(), functions),
-		Statement::Break(_) | Statement::Continue(_) | Statement::Expression(_) | Statement::Return(_) | Statement::VariableDeclaration(_) => {}
+		Statement::Break(_) | Statement::Continue(_) | Statement::Expression(_) | Statement::RecordPointerDeclaration(_) | Statement::Return(_) | Statement::VariableDeclaration(_) => {}
 	}
 }
 
@@ -878,6 +901,7 @@ fn statement_position(statement: &Statement) -> usize {
 		Statement::For(statement) => statement.position,
 		Statement::FunctionDeclaration(statement) => statement.position,
 		Statement::If(statement) => statement.position,
+		Statement::RecordPointerDeclaration(statement) => statement.position,
 		Statement::Return(statement) => statement.position,
 		Statement::VariableDeclaration(statement) => statement.position,
 		Statement::While(statement) => statement.position,

@@ -25,6 +25,7 @@ use crate::ast::ObjectConstructionExpr;
 use crate::ast::ObjectDeclaration;
 use crate::ast::Program;
 use crate::ast::RangeExpr;
+use crate::ast::RecordPointerDeclaration;
 use crate::ast::RecordPointerType;
 use crate::ast::ReturnStatement;
 use crate::ast::Statement;
@@ -1804,6 +1805,7 @@ impl SemanticAnalyzer {
 				self.block_guarantees_return(&if_statement.then_branch)
 					&& if_statement.else_branch.as_ref().is_some_and(|else_branch| self.statement_guarantees_return(else_branch))
 			}
+			Statement::RecordPointerDeclaration(_) => false,
 			Statement::Return(_) => true,
 			Statement::Expression(_) | Statement::For(_) | Statement::VariableDeclaration(_) | Statement::While(_) => false,
 		}
@@ -2082,6 +2084,37 @@ impl SemanticAnalyzer {
 
 				Ok(())
 			}
+			Statement::RecordPointerDeclaration(RecordPointerDeclaration { initial_value, is_mut, name, position }) => {
+				if self.current_scope_contains(name) {
+					return Err(self.compile_error(
+						*position,
+						format!("Record pointer `{name}` is already declared in this scope."),
+					));
+				}
+
+				let initial_type = self.infer_expression_type(initial_value)?;
+				let DataType::RecordPointer(_) = initial_type else {
+					return Err(self.compile_error(
+						initial_value.position(),
+						format!(
+							"Record pointer `{name}` must be initialized from a record pointer value, found `{}`.",
+							self.data_type_name(&initial_type),
+						),
+					));
+				};
+
+				let slot = self.next_local_slot;
+				self.next_local_slot += 1;
+				self.semantic_program.declaration_slots.insert(*position, slot);
+				self.semantic_program.declaration_types.insert(*position, initial_type.clone());
+				self.declare_local(name.clone(), LocalBinding {
+					data_type: initial_type,
+					is_const: !*is_mut,
+					slot,
+				});
+
+				Ok(())
+			}
 			Statement::Return(ReturnStatement { position, value }) => {
 				let return_type = self.current_return_type.clone().ok_or(self.compile_error(
 					*position,
@@ -2262,6 +2295,7 @@ fn statement_position(statement: &Statement) -> usize {
 		Statement::For(statement) => statement.position,
 		Statement::FunctionDeclaration(statement) => statement.position,
 		Statement::If(statement) => statement.position,
+		Statement::RecordPointerDeclaration(statement) => statement.position,
 		Statement::Return(statement) => statement.position,
 		Statement::VariableDeclaration(statement) => statement.position,
 		Statement::While(statement) => statement.position,

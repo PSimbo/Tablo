@@ -91,6 +91,7 @@ pub enum Statement {
 	For(ForStatement),
 	FunctionDeclaration(FunctionDeclaration),
 	If(IfStatement),
+	RecordPointerDeclaration(RecordPointerDeclaration),
 	Return(ReturnStatement),
 	VariableDeclaration(VariableDeclaration),
 	While(WhileStatement),
@@ -306,6 +307,14 @@ pub struct RangeExpr {
 	pub position: usize,
 	pub start: Box<Expr>,
 	pub step: Option<Box<Expr>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordPointerDeclaration {
+	pub initial_value: Expr,
+	pub is_mut: bool,
+	pub name: String,
+	pub position: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

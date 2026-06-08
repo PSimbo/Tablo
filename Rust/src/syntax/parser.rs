@@ -34,6 +34,7 @@ use crate::ast::OrderByDirection;
 use crate::ast::OrderByItem;
 use crate::ast::Program;
 use crate::ast::RangeExpr;
+use crate::ast::RecordPointerDeclaration;
 use crate::ast::ReturnStatement;
 use crate::ast::Statement;
 use crate::ast::TableReference;
@@ -108,7 +109,7 @@ impl Parser {
 				Some(token) if token.kind == TokenKind::WithKeyword => {
 					with_declarations.push(self.parse_with_declaration()?);
 				}
-				Some(token) if matches!(token.kind, TokenKind::BreakKeyword | TokenKind::ConstKeyword | TokenKind::ContinueKeyword | TokenKind::ForKeyword | TokenKind::IfKeyword | TokenKind::LeftBrace | TokenKind::ReturnKeyword | TokenKind::VarKeyword | TokenKind::WhileKeyword) => {
+				Some(token) if matches!(token.kind, TokenKind::BreakKeyword | TokenKind::ConstKeyword | TokenKind::ContinueKeyword | TokenKind::ForKeyword | TokenKind::IfKeyword | TokenKind::LeftBrace | TokenKind::RecKeyword | TokenKind::ReturnKeyword | TokenKind::VarKeyword | TokenKind::WhileKeyword) => {
 					statements.push(self.parse_statement()?);
 				}
 				Some(_) => {
@@ -1165,6 +1166,28 @@ impl Parser {
 		}))
 	}
 
+	fn parse_record_pointer_declaration_statement(&mut self) -> Result<Statement, ParseError> {
+		let rec_keyword = self.expect_token(TokenKind::RecKeyword, "Expected `rec` to start record pointer declaration.")?;
+		let is_mut = if self.current().is_some_and(|token| token.kind == TokenKind::MutKeyword) {
+			self.next();
+			true
+		}
+		else {
+			false
+		};
+		let name = self.expect_token(TokenKind::Identifier, "Expected record pointer name.")?;
+		self.expect_token(TokenKind::Equal, "Expected `=` after record pointer name.")?;
+		let initial_value = self.parse_assignment_expression()?;
+		self.expect_token(TokenKind::Semicolon, "Expected `;` after record pointer declaration.")?;
+
+		Ok(Statement::RecordPointerDeclaration(RecordPointerDeclaration {
+			initial_value,
+			is_mut,
+			name: name.lexeme,
+			position: rec_keyword.start,
+		}))
+	}
+
 	fn parse_return_statement(&mut self) -> Result<Statement, ParseError> {
 		let return_keyword = self.expect_token(TokenKind::ReturnKeyword, "Expected `return` to start return statement.")?;
 		let value = if self.current().is_some_and(|token| token.kind == TokenKind::Semicolon) {
@@ -1192,6 +1215,7 @@ impl Parser {
 			}
 			Some(token) if token.kind == TokenKind::IfKeyword => self.parse_if_statement(),
 			Some(token) if token.kind == TokenKind::LeftBrace => self.parse_block_statement(),
+			Some(token) if token.kind == TokenKind::RecKeyword => self.parse_record_pointer_declaration_statement(),
 			Some(token) if token.kind == TokenKind::ReturnKeyword => self.parse_return_statement(),
 			Some(token) if token.kind == TokenKind::WhileKeyword => self.parse_while_statement(),
 			Some(token) if matches!(token.kind, TokenKind::ConstKeyword | TokenKind::VarKeyword) => {
@@ -1363,6 +1387,7 @@ mod tests {
 	use crate::ast::OrderByItem;
 	use crate::ast::Program;
 	use crate::ast::RangeExpr;
+	use crate::ast::RecordPointerDeclaration;
 	use crate::ast::ReturnStatement;
 	use crate::ast::Statement;
 	use crate::ast::TableReference;
@@ -1604,6 +1629,22 @@ mod tests {
 		}
 	}
 
+	fn normalize_record_pointer_declaration(declaration: RecordPointerDeclaration) -> RecordPointerDeclaration {
+		RecordPointerDeclaration {
+			initial_value: normalize_expr(declaration.initial_value),
+			is_mut: declaration.is_mut,
+			name: declaration.name,
+			position: 0,
+		}
+	}
+
+	fn normalize_return_statement(return_statement: ReturnStatement) -> ReturnStatement {
+		ReturnStatement {
+			position: 0,
+			value: return_statement.value.map(normalize_expr),
+		}
+	}
+
 	fn normalize_statement(statement: Statement) -> Statement {
 		match statement {
 			Statement::Block(block) => Statement::Block(normalize_block(block)),
@@ -1619,18 +1660,14 @@ mod tests {
 				Statement::FunctionDeclaration(normalize_function_declaration(function))
 			}
 			Statement::If(if_statement) => Statement::If(normalize_if_statement(if_statement)),
+			Statement::RecordPointerDeclaration(declaration) => {
+				Statement::RecordPointerDeclaration(normalize_record_pointer_declaration(declaration))
+			}
 			Statement::Return(return_statement) => Statement::Return(normalize_return_statement(return_statement)),
 			Statement::VariableDeclaration(declaration) => {
 				Statement::VariableDeclaration(normalize_variable_declaration(declaration))
 			}
 			Statement::While(while_statement) => Statement::While(normalize_while_statement(while_statement)),
-		}
-	}
-
-	fn normalize_return_statement(return_statement: ReturnStatement) -> ReturnStatement {
-		ReturnStatement {
-			position: 0,
-			value: return_statement.value.map(normalize_expr),
 		}
 	}
 
@@ -2992,6 +3029,49 @@ mod tests {
 				with_declarations: vec![],
 			}
 		);
+	}
+
+	#[test]
+	fn parses_record_pointer_declaration() {
+		let program = parse_program("rec mut cust = find first customers where active = true;");
+
+		assert_eq!(normalize_program(program), Program {
+			functions: vec![],
+			objects: vec![],
+			result: None,
+			statements: vec![
+				Statement::RecordPointerDeclaration(RecordPointerDeclaration {
+					initial_value: Expr::Find(FindExpr {
+						kind: FindKind::First,
+						order_by: vec![],
+						position: 0,
+						table: TableReference {
+							components: vec![IdentifierExpr {
+								name: String::from("customers"),
+								position: 0,
+							}],
+							position: 0,
+						},
+						where_clause: Some(Box::new(Expr::Binary(BinaryExpr {
+							left: Box::new(Expr::Identifier(IdentifierExpr {
+								name: String::from("active"),
+								position: 0,
+							})),
+							operator: BinaryOperator::Equal,
+							position: 0,
+							right: Box::new(Expr::Boolean(BooleanLiteral {
+								position: 0,
+								value: true,
+							})),
+						}))),
+					}),
+					is_mut: true,
+					name: String::from("cust"),
+					position: 0,
+				}),
+			],
+			with_declarations: vec![],
+		});
 	}
 
 	#[test]

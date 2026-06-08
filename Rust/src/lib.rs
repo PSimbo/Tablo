@@ -650,6 +650,16 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_non_record_pointer_initializer_for_rec_declaration_source_text() {
+		let error = run(standalone_body("rec cust = 1;\nreturn 0;")).unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Record pointer `cust` must be initialized from a record pointer value, found `int`."),
+			position: 39,
+		}));
+	}
+
+	#[test]
 	fn rejects_out_of_bounds_array_index_source_text() {
 		let error = evaluate_snippet("var xs: [int] = [10, 20];\nxs[3]").unwrap_err();
 
@@ -1613,6 +1623,57 @@ mod tests {
 		let _ = std::fs::remove_file(&output_path);
 
 		assert_eq!(result, Some(Value::Integer(4)));
+	}
+
+	#[test]
+	fn runs_sqlite_find_query_bound_to_rec_declaration() {
+		let database_path = create_sqlite_test_database(
+			"runs_sqlite_find_query_bound_to_rec_declaration",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Active INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO Customers (Id, Active, Name) VALUES
+					(2, 1, 'Bea'),
+					(1, 1, 'Ada'),
+					(3, 0, 'Cam');
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture(
+			"with exampledb;\nfn Main(args: [text]) int { rec cust = find first customers where active = true order by id; if cust.name == 'Ada' { return cust.id; } return 0; }",
+			r#"{
+				"databases": [
+					{
+						"backend": "sqlite",
+						"name": "ExampleDb",
+						"schemas": [
+							{
+								"name": "Main",
+								"is_implicit": true,
+								"tables": [
+									{
+										"name": "Customers",
+										"columns": [
+											{ "name": "Id", "data_type": "int", "is_nullable": false },
+											{ "name": "Active", "data_type": "bool", "is_nullable": false },
+											{ "name": "Name", "data_type": "text", "is_nullable": false }
+										]
+									}
+								]
+							}
+						]
+					}
+				]
+			}"#,
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(1)));
 	}
 
 	#[test]
