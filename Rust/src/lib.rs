@@ -860,6 +860,15 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_anonymous_inline_object_declaration_source_text() {
+		let result = run(
+			"obj Outer { inner: { value: int, }, };\nfn Main(args: [text]) int { var inner: Outer.inner = Outer.inner { value: 7 }; var outer: Outer = Outer { inner: inner }; return outer.inner.value; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(7)));
+	}
+
+	#[test]
 	fn runs_array_concatenation_source_text() {
 		let result = evaluate_snippet("[1, 2] + [3, 4]").unwrap();
 

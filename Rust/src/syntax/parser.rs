@@ -1077,6 +1077,13 @@ impl Parser {
 				self.parse_object_shape_declaration(qualified_name, object_keyword.start)?,
 			)
 		}
+		else if self.current().is_some_and(|token| token.kind == TokenKind::LeftBrace) {
+			let qualified_name = format!("{containing_object_name}.{}", name.lexeme);
+			(
+				DataType::Object(qualified_name.clone()),
+				self.parse_object_shape_declaration(qualified_name, name.start)?,
+			)
+		}
 		else {
 			(self.parse_data_type()?, vec![])
 		};
@@ -1897,6 +1904,52 @@ mod tests {
 		let tokens = lexer.tokenize().unwrap();
 		let mut parser = Parser::new(tokens);
 		normalize_program(parser.parse_program().unwrap())
+	}
+
+	#[test]
+	fn parses_anonymous_inline_object_declaration_as_field_qualified_object() {
+		let program = parse_program(
+			"obj Outer { inner: { value: int, }, label: text, };"
+		);
+
+		assert_eq!(normalize_program(program), Program {
+			functions: vec![],
+			objects: vec![
+				ObjectDeclaration {
+					fields: vec![
+						ObjectFieldDeclaration {
+							data_type: DataType::Object(String::from("Outer.inner")),
+							default_value: None,
+							name: String::from("inner"),
+							position: 0,
+						},
+						ObjectFieldDeclaration {
+							data_type: DataType::Text,
+							default_value: None,
+							name: String::from("label"),
+							position: 0,
+						},
+					],
+					name: String::from("Outer"),
+					position: 0,
+				},
+				ObjectDeclaration {
+					fields: vec![
+						ObjectFieldDeclaration {
+							data_type: DataType::Int,
+							default_value: None,
+							name: String::from("value"),
+							position: 0,
+						},
+					],
+					name: String::from("Outer.inner"),
+					position: 0,
+				},
+			],
+			result: None,
+			statements: vec![],
+			with_declarations: vec![],
+		});
 	}
 
 	#[test]
