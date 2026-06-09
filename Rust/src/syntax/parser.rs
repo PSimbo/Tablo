@@ -105,7 +105,7 @@ impl Parser {
 					functions.push(self.parse_function_declaration()?);
 				}
 				Some(token) if token.kind == TokenKind::ObjKeyword => {
-					objects.push(self.parse_object_declaration()?);
+					objects.extend(self.parse_object_declaration()?);
 				}
 				Some(token) if token.kind == TokenKind::WithKeyword => {
 					with_declarations.push(self.parse_with_declaration()?);
@@ -1053,16 +1053,68 @@ impl Parser {
 		}))
 	}
 
-	fn parse_object_declaration(&mut self) -> Result<ObjectDeclaration, ParseError> {
+	fn parse_object_declaration(&mut self) -> Result<Vec<ObjectDeclaration>, ParseError> {
 		let object_keyword = self.expect_token(TokenKind::ObjKeyword, "Expected `obj` to start object declaration.")?;
 		let name = self.expect_token(TokenKind::Identifier, "Expected object type name.")?;
+		let objects = self.parse_object_shape_declaration(name.lexeme, object_keyword.start)?;
+		self.expect_token(TokenKind::Semicolon, "Expected `;` after object declaration.")?;
+		Ok(objects)
+	}
+
+	fn parse_object_field_declaration(
+		&mut self,
+		containing_object_name: &str,
+	) -> Result<(ObjectFieldDeclaration, Vec<ObjectDeclaration>), ParseError> {
+		let name = self.expect_token(TokenKind::Identifier, "Expected object field name.")?;
+		self.expect_token(TokenKind::Colon, "Expected `:` after object field name.")?;
+
+		let (data_type, mut nested_objects) = if self.current().is_some_and(|token| token.kind == TokenKind::ObjKeyword) {
+			let object_keyword = self.expect_token(TokenKind::ObjKeyword, "Expected `obj` to start inline object declaration.")?;
+			let object_name = self.expect_token(TokenKind::Identifier, "Expected inline object type name.")?;
+			let qualified_name = format!("{containing_object_name}.{}", object_name.lexeme);
+			(
+				DataType::Object(qualified_name.clone()),
+				self.parse_object_shape_declaration(qualified_name, object_keyword.start)?,
+			)
+		}
+		else {
+			(self.parse_data_type()?, vec![])
+		};
+
+		let default_value = if self.current().is_some_and(|token| token.kind == TokenKind::Equal) {
+			self.next();
+			Some(self.parse_assignment_expression()?)
+		}
+		else {
+			None
+		};
+
+		Ok((
+			ObjectFieldDeclaration {
+				data_type,
+				default_value,
+				name: name.lexeme,
+				position: name.start,
+			},
+			std::mem::take(&mut nested_objects),
+		))
+	}
+
+	fn parse_object_shape_declaration(
+		&mut self,
+		name: String,
+		position: usize,
+	) -> Result<Vec<ObjectDeclaration>, ParseError> {
 		self.expect_token(TokenKind::LeftBrace, "Expected `{` to start object field list.")?;
 
 		let mut fields = Vec::new();
+		let mut nested_objects = Vec::new();
 
 		if !self.current().is_some_and(|token| token.kind == TokenKind::RightBrace) {
 			loop {
-				fields.push(self.parse_object_field_declaration()?);
+				let (field, field_nested_objects) = self.parse_object_field_declaration(&name)?;
+				fields.push(field);
+				nested_objects.extend(field_nested_objects);
 
 				match self.current() {
 					Some(token) if token.kind == TokenKind::Comma => {
@@ -1078,33 +1130,13 @@ impl Parser {
 		}
 
 		self.expect_token(TokenKind::RightBrace, "Expected `}` to close object declaration.")?;
-		self.expect_token(TokenKind::Semicolon, "Expected `;` after object declaration.")?;
-
-		Ok(ObjectDeclaration {
+		let mut objects = vec![ObjectDeclaration {
 			fields,
-			name: name.lexeme,
-			position: object_keyword.start,
-		})
-	}
-
-	fn parse_object_field_declaration(&mut self) -> Result<ObjectFieldDeclaration, ParseError> {
-		let name = self.expect_token(TokenKind::Identifier, "Expected object field name.")?;
-		self.expect_token(TokenKind::Colon, "Expected `:` after object field name.")?;
-		let data_type = self.parse_data_type()?;
-		let default_value = if self.current().is_some_and(|token| token.kind == TokenKind::Equal) {
-			self.next();
-			Some(self.parse_assignment_expression()?)
-		}
-		else {
-			None
-		};
-
-		Ok(ObjectFieldDeclaration {
-			data_type,
-			default_value,
-			name: name.lexeme,
-			position: name.start,
-		})
+			name,
+			position,
+		}];
+		objects.extend(nested_objects);
+		Ok(objects)
 	}
 
 	fn parse_optional_order_by_clause(&mut self) -> Result<Vec<OrderByItem>, ParseError> {
@@ -3097,6 +3129,52 @@ mod tests {
 				})),
 			})
 		);
+	}
+
+	#[test]
+	fn parses_named_inline_object_declaration_as_qualified_object() {
+		let program = parse_program(
+			"obj Outer { inner: obj Inner { value: int, }, label: text, };"
+		);
+
+		assert_eq!(normalize_program(program), Program {
+			functions: vec![],
+			objects: vec![
+				ObjectDeclaration {
+					fields: vec![
+						ObjectFieldDeclaration {
+							data_type: DataType::Object(String::from("Outer.Inner")),
+							default_value: None,
+							name: String::from("inner"),
+							position: 0,
+						},
+						ObjectFieldDeclaration {
+							data_type: DataType::Text,
+							default_value: None,
+							name: String::from("label"),
+							position: 0,
+						},
+					],
+					name: String::from("Outer"),
+					position: 0,
+				},
+				ObjectDeclaration {
+					fields: vec![
+						ObjectFieldDeclaration {
+							data_type: DataType::Int,
+							default_value: None,
+							name: String::from("value"),
+							position: 0,
+						},
+					],
+					name: String::from("Outer.Inner"),
+					position: 0,
+				},
+			],
+			result: None,
+			statements: vec![],
+			with_declarations: vec![],
+		});
 	}
 
 	#[test]

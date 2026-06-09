@@ -1252,6 +1252,15 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_named_inline_object_declaration_source_text() {
+		let result = run(
+			"obj Outer { inner: obj Inner { value: int, }, };\nfn Main(args: [text]) int { var inner: Outer.Inner = Outer.Inner { value: 7 }; var outer: Outer = Outer { inner: inner }; return outer.inner.value; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(7)));
+	}
+
+	#[test]
 	fn runs_nested_by_reference_function_call_source_text() {
 		let result = run(
 			"fn Main(args: [text]) int { var x: int = 1; fn bump(value: &int) void { value += 1; } bump(&x); return x; }"
