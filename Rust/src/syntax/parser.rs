@@ -206,6 +206,14 @@ impl Parser {
 		}
 	}
 
+	fn is_qualified_identifier_expr(&self, expression: &Expr) -> bool {
+		match expression {
+			Expr::Identifier(_) => true,
+			Expr::FieldAccess(field_access) => self.is_qualified_identifier_expr(&field_access.object),
+			_ => false,
+		}
+	}
+
 	fn next(&mut self) -> Option<Token> {
 		let token = self.current()?.clone();
 		self.position += 1;
@@ -488,7 +496,7 @@ impl Parser {
 				TokenKind::ForwardSlash => BindingPower::Multiplicative,
 				TokenKind::GreaterThan => BindingPower::Comparison,
 				TokenKind::GreaterThanOrEqual => BindingPower::Comparison,
-				TokenKind::LeftBrace if matches!(left, Expr::Identifier(_)) => BindingPower::Call,
+				TokenKind::LeftBrace if self.is_qualified_identifier_expr(&left) => BindingPower::Call,
 				TokenKind::LeftBracket => BindingPower::Call,
 				TokenKind::LeftParenthesis => BindingPower::Call,
 				TokenKind::LessThan => BindingPower::Comparison,
@@ -1008,15 +1016,7 @@ impl Parser {
 	}
 
 	fn parse_object_construction_expression(&mut self, object_type: Expr, start: usize) -> Result<Expr, ParseError> {
-		let object_type_name = match object_type {
-			Expr::Identifier(identifier) => identifier.name,
-			_ => {
-				return Err(ParseError {
-					message: String::from("Object construction target must be an identifier."),
-					position: start,
-				});
-			}
-		};
+		let object_type_name = self.qualified_identifier_name_from_expr(object_type, start)?;
 
 		let mut fields = Vec::new();
 
@@ -1186,7 +1186,7 @@ impl Parser {
 			TokenKind::AnyKeyword => Ok(DataType::Any),
 			TokenKind::BoolKeyword => Ok(DataType::Bool),
 			TokenKind::DecKeyword => Ok(DataType::Dec),
-			TokenKind::Identifier => Ok(DataType::Object(token.lexeme)),
+			TokenKind::Identifier => Ok(DataType::Object(self.parse_qualified_identifier_name(token)?)),
 			TokenKind::IntKeyword => Ok(DataType::Int),
 			TokenKind::LeftBracket => {
 				let element_type = self.parse_data_type()?;
@@ -1200,6 +1200,19 @@ impl Parser {
 				position: token.start,
 			}),
 		}
+	}
+
+	fn parse_qualified_identifier_name(&mut self, first: Token) -> Result<String, ParseError> {
+		let mut name = first.lexeme;
+
+		while self.current().is_some_and(|token| token.kind == TokenKind::Dot) {
+			self.next();
+			let component = self.expect_token(TokenKind::Identifier, "Expected identifier after `.`.")?;
+			name.push('.');
+			name.push_str(&component.lexeme);
+		}
+
+		Ok(name)
 	}
 
 	fn parse_query_expression_with_binding_power(
@@ -1453,6 +1466,22 @@ impl Parser {
 			databases,
 			position: with_keyword.start,
 		})
+	}
+
+	fn qualified_identifier_name_from_expr(&self, expression: Expr, position: usize) -> Result<String, ParseError> {
+		match expression {
+			Expr::Identifier(identifier) => Ok(identifier.name),
+			Expr::FieldAccess(field_access) => {
+				let mut name = self.qualified_identifier_name_from_expr(*field_access.object, position)?;
+				name.push('.');
+				name.push_str(&field_access.field.name);
+				Ok(name)
+			}
+			_ => Err(ParseError {
+				message: String::from("Object construction target must be an identifier or qualified type name."),
+				position,
+			}),
+		}
 	}
 }
 
@@ -3280,6 +3309,88 @@ mod tests {
 				with_declarations: vec![],
 			}
 		);
+	}
+
+	#[test]
+	fn parses_qualified_object_construction_target() {
+		let program = parse_program("Outer.Inner { value: 1 };");
+
+		assert_eq!(normalize_program(program), Program {
+			functions: vec![],
+			objects: vec![],
+			result: None,
+			statements: vec![
+				Statement::Expression(Expr::ObjectConstruction(ObjectConstructionExpr {
+					fields: vec![
+						ObjectConstructionField {
+							name: String::from("value"),
+							position: 0,
+							value: Expr::Integer(IntegerLiteral {
+								position: 0,
+								value: 1,
+							}),
+						},
+					],
+					object_type_name: String::from("Outer.Inner"),
+					position: 0,
+				})),
+			],
+			with_declarations: vec![],
+		});
+	}
+
+	#[test]
+	fn parses_qualified_object_type_names_in_type_positions() {
+		let program = parse_program(
+			"fn Main(args: [text]) Outer.Inner { var value: [Outer.Inner | text] = []; return value; }"
+		);
+
+		assert_eq!(normalize_program(program), Program {
+			functions: vec![
+				FunctionDeclaration {
+					body: BlockStatement {
+						position: 0,
+						statements: vec![
+							Statement::VariableDeclaration(VariableDeclaration {
+								data_type: DataType::Array(Box::new(DataType::Union(vec![
+									DataType::Object(String::from("Outer.Inner")),
+									DataType::Text,
+								]))),
+								initial_value: Some(Expr::Array(ArrayLiteral {
+									elements: vec![],
+									position: 0,
+								})),
+								is_const: false,
+								name: String::from("value"),
+								position: 0,
+							}),
+							Statement::Return(ReturnStatement {
+								position: 0,
+								value: Some(Expr::Identifier(IdentifierExpr {
+									name: String::from("value"),
+									position: 0,
+								})),
+							}),
+						],
+					},
+					name: String::from("Main"),
+					parameters: vec![
+						FunctionParameter {
+							data_type: DataType::Array(Box::new(DataType::Text)),
+							is_by_ref: false,
+							name: String::from("args"),
+							position: 0,
+						},
+					],
+					position: 0,
+					return_type: DataType::Object(String::from("Outer.Inner")),
+				},
+			],
+			objects: vec![],
+			result: None,
+			statements: vec![],
+			with_declarations: vec![],
+		});
 	}
 
 	#[test]
