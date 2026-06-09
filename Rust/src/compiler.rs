@@ -856,6 +856,7 @@ impl Compiler {
 			crate::ast::DataType::EmptyArray
 			| crate::ast::DataType::Range(_)
 			| crate::ast::DataType::RecordPointer(_)
+			| crate::ast::DataType::Union(_)
 			| crate::ast::DataType::Void => {
 				panic!("Cannot emit an implicit default value for `{}`.", data_type_name(data_type));
 			}
@@ -962,6 +963,10 @@ fn data_type_name(data_type: &crate::ast::DataType) -> String {
 		crate::ast::DataType::Range(element_type) => format!("range<{}>", data_type_name(element_type)),
 		crate::ast::DataType::RecordPointer(_) => String::from("record pointer"),
 		crate::ast::DataType::Text => String::from("text"),
+		crate::ast::DataType::Union(members) => members.iter()
+			.map(data_type_name)
+			.collect::<Vec<_>>()
+			.join(" | "),
 		crate::ast::DataType::Void => String::from("void"),
 	}
 }

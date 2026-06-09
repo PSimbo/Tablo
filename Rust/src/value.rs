@@ -431,6 +431,7 @@ fn data_type_name_for_sqlite_runtime(data_type: &DataType) -> &'static str {
 		DataType::Range(_) => "range",
 		DataType::RecordPointer(_) => "record pointer",
 		DataType::Text => "text",
+		DataType::Union(_) => "union",
 		DataType::Void => "void",
 	}
 }

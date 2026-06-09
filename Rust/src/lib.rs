@@ -507,12 +507,32 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_arithmetic_on_union_typed_values() {
+		let error = run("fn Main(args: [text]) int { var value: int | text = 1; return value + 1; }").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Expected numeric operands, found `int | text` and `int`."),
+			position: 68,
+		}));
+	}
+
+	#[test]
 	fn rejects_assignment_from_any_to_specific_type() {
 		let error = run("fn Main(args: [text]) int { var value: any = 1; var total: int = value; return total; }").unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Cannot assign a value of type `any` to a variable of type `int`."),
 			position: 65,
+		}));
+	}
+
+	#[test]
+	fn rejects_assignment_of_non_member_type_to_union() {
+		let error = run("fn Main(args: [text]) int { var value: int | text = true; return 0; }").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Cannot assign a value of type `bool` to a variable of type `int | text`."),
+			position: 52,
 		}));
 	}
 
@@ -1720,20 +1740,6 @@ mod tests {
 	}
 
 	#[test]
-	fn runs_void_function_as_expression_statement() {
-		let result = run("fn Main(args: [text]) int { var x: int = 1; bump(x); return x; }\nfn bump(value: int) void { return; }").unwrap();
-
-		assert_eq!(result, Some(Value::Integer(1)));
-	}
-
-	#[test]
-	fn runs_while_source_text() {
-		let result = run(standalone_body("var x: int = 0;\nwhile x < 3 { x += 1; }\nreturn x;")).unwrap();
-
-		assert_eq!(result, Some(Value::Integer(3)));
-	}
-
-	#[test]
 	fn runs_unary_negated_decimal_source_text() {
 		let result = evaluate_snippet("-1.25").unwrap();
 
@@ -1745,6 +1751,42 @@ mod tests {
 		let result = run(standalone_expression("-42")).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(-42)));
+	}
+
+	#[test]
+	fn runs_union_typed_program_after_object_round_trip() {
+		let output_path = unique_test_output_path("runs_union_typed_program_after_object_round_trip");
+		compile(
+			"obj Envelope { payload: int | text = 1, };\nfn Main(args: [text]) int { var value: int | text = 'hello'; var env: Envelope = Envelope { payload: value }; return 0; }",
+			&output_path,
+		).unwrap();
+		let result = run_file(&output_path).unwrap();
+		let _ = std::fs::remove_file(&output_path);
+
+		assert_eq!(result, Some(Value::Integer(0)));
+	}
+
+	#[test]
+	fn runs_union_typed_variable_and_object_field_source_text() {
+		let result = run(
+			"obj Envelope { payload: int | text = 1, };\nfn Main(args: [text]) int { var value: int | text = 1; var env: Envelope = Envelope { }; return 0; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(0)));
+	}
+
+	#[test]
+	fn runs_void_function_as_expression_statement() {
+		let result = run("fn Main(args: [text]) int { var x: int = 1; bump(x); return x; }\nfn bump(value: int) void { return; }").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn runs_while_source_text() {
+		let result = run(standalone_body("var x: int = 0;\nwhile x < 3 { x += 1; }\nreturn x;")).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(3)));
 	}
 
 	fn unique_test_output_path(test_name: &str) -> PathBuf {

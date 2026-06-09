@@ -495,7 +495,7 @@ impl SemanticAnalyzer {
 	fn data_type_has_implicit_default(&self, data_type: &DataType) -> bool {
 		match data_type {
 			DataType::Any | DataType::Array(_) | DataType::Bool | DataType::Dec | DataType::Int | DataType::Object(_) | DataType::Text => true,
-			DataType::EmptyArray | DataType::Range(_) | DataType::RecordPointer(_) | DataType::Void => false,
+			DataType::EmptyArray | DataType::Range(_) | DataType::RecordPointer(_) | DataType::Union(_) | DataType::Void => false,
 		}
 	}
 
@@ -511,6 +511,10 @@ impl SemanticAnalyzer {
 			DataType::Range(element_type) => format!("range<{}>", self.data_type_name(element_type)),
 			DataType::RecordPointer(_) => String::from("record pointer"),
 			DataType::Text => String::from("text"),
+			DataType::Union(members) => members.iter()
+				.map(|member| self.data_type_name(member))
+				.collect::<Vec<_>>()
+				.join(" | "),
 			DataType::Void => String::from("void"),
 		}
 	}
@@ -520,28 +524,18 @@ impl SemanticAnalyzer {
 	}
 
 	fn ensure_assignable(&self, target: &DataType, value: &DataType, position: usize) -> Result<(), CompileError> {
-		if target == &DataType::Any {
+		if self.is_assignable(target, value) {
 			return Ok(());
 		}
 
-		if target == value || (target == &DataType::Dec && value == &DataType::Int) {
-			return Ok(());
-		}
-
-		match (target, value) {
-			(DataType::Array(target_element), DataType::Array(value_element)) => {
-				self.ensure_assignable(target_element, value_element, position)
-			}
-			(DataType::Array(_), DataType::EmptyArray) => Ok(()),
-			_ => Err(self.compile_error(
-				position,
-				format!(
-					"Cannot assign a value of type `{}` to a variable of type `{}`.",
-					self.data_type_name(value),
-					self.data_type_name(target),
-				),
-			)),
-		}
+		Err(self.compile_error(
+			position,
+			format!(
+				"Cannot assign a value of type `{}` to a variable of type `{}`.",
+				self.data_type_name(value),
+				self.data_type_name(target),
+			),
+		))
 	}
 
 	fn enter_scope(&mut self) {
@@ -1353,6 +1347,30 @@ impl SemanticAnalyzer {
 		self.data_type_from_schema_type(column.data_type())
 	}
 
+	fn is_assignable(&self, target: &DataType, value: &DataType) -> bool {
+		if target == &DataType::Any {
+			return true;
+		}
+
+		if target == value || (target == &DataType::Dec && value == &DataType::Int) {
+			return true;
+		}
+
+		match (target, value) {
+			(DataType::Array(target_element), DataType::Array(value_element)) => self.is_assignable(target_element, value_element),
+			(DataType::Array(_), DataType::EmptyArray) => true,
+			(DataType::Union(target_members), DataType::Union(value_members)) => {
+				value_members.iter().all(|value_member| {
+					target_members.iter().any(|target_member| self.is_assignable(target_member, value_member))
+				})
+			}
+			(DataType::Union(target_members), _) => {
+				target_members.iter().any(|target_member| self.is_assignable(target_member, value))
+			}
+			_ => false,
+		}
+	}
+
 	fn is_numeric_type(&self, data_type: &DataType) -> bool {
 		matches!(data_type, DataType::Dec | DataType::Int)
 	}
@@ -1730,6 +1748,17 @@ impl SemanticAnalyzer {
 			));
 		}
 
+		if matches!(lhs, DataType::Union(_)) || matches!(rhs, DataType::Union(_)) {
+			return Err(self.compile_error(
+				position,
+				format!(
+					"Equality comparison is not supported between `{}` and `{}`.",
+					self.data_type_name(lhs),
+					self.data_type_name(rhs),
+				),
+			));
+		}
+
 		if lhs == rhs || (self.is_numeric_type(lhs) && self.is_numeric_type(rhs)) {
 			return Ok(());
 		}
@@ -1761,6 +1790,17 @@ impl SemanticAnalyzer {
 	fn require_ordering_operands(&self, lhs: &DataType, rhs: &DataType, position: usize) -> Result<(), CompileError> {
 		if (lhs == &DataType::Text && rhs == &DataType::Text) || (self.is_numeric_type(lhs) && self.is_numeric_type(rhs)) {
 			return Ok(());
+		}
+
+		if matches!(lhs, DataType::Union(_)) || matches!(rhs, DataType::Union(_)) {
+			return Err(self.compile_error(
+				position,
+				format!(
+					"Ordering comparison is not supported between `{}` and `{}`.",
+					self.data_type_name(lhs),
+					self.data_type_name(rhs),
+				),
+			));
 		}
 
 		Err(self.compile_error(
@@ -2019,6 +2059,13 @@ impl SemanticAnalyzer {
 		match data_type {
 			DataType::Void | DataType::EmptyArray => Err(self.compile_error(position, message)),
 			DataType::Array(element_type) => self.validate_non_void_data_type(element_type, position, message),
+			DataType::Union(members) => {
+				for member in members {
+					self.validate_non_void_data_type(member, position, message.clone())?;
+				}
+
+				Ok(())
+			}
 			DataType::Object(name) => {
 				if self.semantic_program.object_declarations.contains_key(name) {
 					Ok(())

@@ -47,6 +47,7 @@ pub enum DataType {
 	Range(Box<DataType>),
 	RecordPointer(RecordPointerType),
 	Text,
+	Union(Vec<DataType>),
 	Void,
 }
 

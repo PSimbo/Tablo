@@ -54,6 +54,7 @@ pub enum TokenKind {
 	OrderKeyword,
 	Percent,
 	PercentEqual,
+	Pipe,
 	Plus,
 	PlusEqual,
 	RecKeyword,

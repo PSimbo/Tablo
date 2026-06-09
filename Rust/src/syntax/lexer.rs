@@ -172,6 +172,7 @@ impl Lexer {
 				}));
 			}
 			'%' => TokenKind::Percent,
+			'|' => TokenKind::Pipe,
 			':' => TokenKind::Colon,
 			',' => TokenKind::Comma,
 			'.' => TokenKind::Dot,

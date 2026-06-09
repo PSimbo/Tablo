@@ -227,6 +227,16 @@ impl<'a> ObjectFileReader<'a> {
 				schema_name: self.read_string()?,
 				table_name: self.read_string()?,
 			})),
+			12 => {
+				let member_count = self.read_u32()? as usize;
+				let mut members = Vec::with_capacity(member_count);
+
+				for _ in 0..member_count {
+					members.push(self.read_data_type()?);
+				}
+
+				Ok(DataType::Union(members))
+			}
 			tag => Err(ObjectFileError {
 				offset: tag_offset,
 				message: format!("Unknown data type tag {tag}."),
@@ -608,6 +618,14 @@ fn write_data_type(bytes: &mut Vec<u8>, data_type: &DataType) {
 			for value in [&record_pointer.database_name, &record_pointer.schema_name, &record_pointer.table_name] {
 				bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
 				bytes.extend_from_slice(value.as_bytes());
+			}
+		}
+		DataType::Union(members) => {
+			bytes.push(12);
+			bytes.extend_from_slice(&(members.len() as u32).to_le_bytes());
+
+			for member in members {
+				write_data_type(bytes, member);
 			}
 		}
 	}

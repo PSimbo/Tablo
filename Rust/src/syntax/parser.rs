@@ -438,28 +438,22 @@ impl Parser {
 	}
 
 	fn parse_data_type(&mut self) -> Result<DataType, ParseError> {
-		let token = self.next().ok_or(ParseError {
-			message: String::from("Expected a data type."),
-			position: 0,
-		})?;
+		let mut data_types = vec![self.parse_primary_data_type()?];
 
-		match token.kind {
-			TokenKind::AnyKeyword => Ok(DataType::Any),
-			TokenKind::BoolKeyword => Ok(DataType::Bool),
-			TokenKind::DecKeyword => Ok(DataType::Dec),
-			TokenKind::Identifier => Ok(DataType::Object(token.lexeme)),
-			TokenKind::IntKeyword => Ok(DataType::Int),
-			TokenKind::LeftBracket => {
-				let element_type = self.parse_data_type()?;
-				self.expect_token(TokenKind::RightBracket, "Expected `]` after array element type.")?;
-				Ok(DataType::Array(Box::new(element_type)))
+		while self.current().is_some_and(|token| token.kind == TokenKind::Pipe) {
+			self.next();
+			let next_type = self.parse_primary_data_type()?;
+
+			if !data_types.contains(&next_type) {
+				data_types.push(next_type);
 			}
-			TokenKind::TextKeyword => Ok(DataType::Text),
-			TokenKind::VoidKeyword => Ok(DataType::Void),
-			_ => Err(ParseError {
-				message: format!("Expected a supported data type, found `{}`.", token.lexeme),
-				position: token.start,
-			}),
+		}
+
+		if data_types.len() == 1 {
+			Ok(data_types.pop().unwrap())
+		}
+		else {
+			Ok(DataType::Union(data_types))
 		}
 	}
 
@@ -1177,6 +1171,32 @@ impl Parser {
 			TokenKind::StringLiteral => Ok(self.parse_text_literal(token)),
 			_ => Err(ParseError {
 				message: format!("Unexpected token `{}` at start of expression.", token.lexeme),
+				position: token.start,
+			}),
+		}
+	}
+
+	fn parse_primary_data_type(&mut self) -> Result<DataType, ParseError> {
+		let token = self.next().ok_or(ParseError {
+			message: String::from("Expected a data type."),
+			position: 0,
+		})?;
+
+		match token.kind {
+			TokenKind::AnyKeyword => Ok(DataType::Any),
+			TokenKind::BoolKeyword => Ok(DataType::Bool),
+			TokenKind::DecKeyword => Ok(DataType::Dec),
+			TokenKind::Identifier => Ok(DataType::Object(token.lexeme)),
+			TokenKind::IntKeyword => Ok(DataType::Int),
+			TokenKind::LeftBracket => {
+				let element_type = self.parse_data_type()?;
+				self.expect_token(TokenKind::RightBracket, "Expected `]` after array element type.")?;
+				Ok(DataType::Array(Box::new(element_type)))
+			}
+			TokenKind::TextKeyword => Ok(DataType::Text),
+			TokenKind::VoidKeyword => Ok(DataType::Void),
+			_ => Err(ParseError {
+				message: format!("Expected a supported data type, found `{}`.", token.lexeme),
 				position: token.start,
 			}),
 		}
@@ -3444,6 +3464,66 @@ mod tests {
 					value: 3,
 				})),
 			})
+		);
+	}
+
+	#[test]
+	fn parses_union_data_type_in_variable_and_array_positions() {
+		assert_eq!(
+			parse_program("fn Main(args: [text]) int { var value: int | text = 1; var values: [int | text] = []; return 0; }"),
+			Program {
+				functions: vec![
+					FunctionDeclaration {
+						body: BlockStatement {
+							position: 0,
+							statements: vec![
+								Statement::VariableDeclaration(VariableDeclaration {
+									data_type: DataType::Union(vec![DataType::Int, DataType::Text]),
+									initial_value: Some(Expr::Integer(IntegerLiteral {
+										position: 0,
+										value: 1,
+									})),
+									is_const: false,
+									name: String::from("value"),
+									position: 0,
+								}),
+								Statement::VariableDeclaration(VariableDeclaration {
+									data_type: DataType::Array(Box::new(DataType::Union(vec![DataType::Int, DataType::Text]))),
+									initial_value: Some(Expr::Array(ArrayLiteral {
+										elements: vec![],
+										position: 0,
+									})),
+									is_const: false,
+									name: String::from("values"),
+									position: 0,
+								}),
+								Statement::Return(ReturnStatement {
+									position: 0,
+									value: Some(Expr::Integer(IntegerLiteral {
+										position: 0,
+										value: 0,
+									})),
+								}),
+							],
+						},
+						name: String::from("Main"),
+						parameters: vec![
+							FunctionParameter {
+								data_type: DataType::Array(Box::new(DataType::Text)),
+								is_by_ref: false,
+								name: String::from("args"),
+								position: 0,
+							},
+						],
+						position: 0,
+						return_type: DataType::Int,
+					},
+				],
+				objects: vec![],
+				result: None,
+				statements: vec![],
+				with_declarations: vec![],
+			}
 		);
 	}
 
