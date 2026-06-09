@@ -517,7 +517,7 @@ Tablo supports a somewhat struct-like, somewhat JSON-like construct called "obje
 
 An object type is declared using the `obj` keyword followed by the object name and its field structure.
 
-Each field has a name and a type. A field may also specify an optional default value using `= <literal>`. Default values are limited to literals rather than arbitrary expressions. String literals, numeric literals, boolean literals, `null`, array literals, and object literals composed only of literals are all valid field defaults.
+Each field has a name and a type. A field's type may be a primitive, a known custom data type, an anonymous inline object, or a named inline object. A field may also specify an optional default value using `= <literal>`. Default values are limited to literals rather than arbitrary expressions. String literals, numeric literals, boolean literals, `null`, array literals, and object literals composed only of literals are all valid field defaults.
 
 If a field does not specify an explicit default value then it receives the ordinary default value for its type. For example, a nullable field defaults to `null`, a non-null `text!` field defaults to `''`, and a non-null array defaults to `[]`.
 
@@ -542,6 +542,20 @@ obj CustomerCollection [
 ];
 ~~~
 
+Inline objects may optionally be named. When named, the object type is referenced relative to its containing object using dot notation rather than being introduced as an unqualified top-level type name. The typical use case for a naming an inline object is to allow a value of type `any` or a union type to be cast to a specific type.
+
+~~~
+obj Envelope {
+  payload: obj Payload {
+    code: int,
+    message: text,
+  },
+  previousPayload: Envelope.Payload,
+};
+~~~
+
+In the example above, `Payload` is named locally within `Envelope`, but its full type name is `Envelope.Payload`.
+
 New instances of a named object type are created by writing the object type name followed by a brace-delimited list of field values:
 
 ~~~
@@ -562,6 +576,8 @@ In the example above, the `isActive` field receives its default value because no
 Each specified field name must exist on the target object type and must not be repeated. Any omitted fields are populated from their explicit field default if one exists, otherwise from the normal default value for the field's data type.
 
 Where the expected type is already known, such as when assigning to an inline object-typed field, the type name may be omitted and only the brace-delimited field list is written.
+
+Qualified object type names may be used anywhere a data type is expected. This includes local variable declarations, function parameters, return types, array element types, and unions.
 
 Tablo does not currently define constructor syntax for objects. Object creation is performed entirely by supplying zero or more field values and allowing the remaining fields to be populated from defaults.
 
@@ -1641,10 +1657,12 @@ Production = <Components>
 program = { objectDeclaration | functionDeclaration }
 
 objectDeclaration = `obj` identifier objectShape `;`
-objectShape = objectFields | `[` objectFields `]`
+objectShape = objectFields | `[` objectElementType `]`
 objectFields = `{` [ objectField { `,` objectField } [ `,` ] ] `}`
 objectField = identifier `:` objectFieldType [ `=` objectDefaultLiteral ]
-objectFieldType = dataType | objectShape
+objectFieldType = dataType | inlineObjectShape
+inlineObjectShape = [ `obj` identifier ] objectShape
+objectElementType = dataType | inlineObjectShape
 
 statement = block | blockStatement | simpleStatement
 
@@ -1660,8 +1678,9 @@ returnStatement = `return` [ expression ]
 ifStatement = `if` expression block [ `else` ( block | ifStatement ) ]
 whileStatement = `while` expression block
 returnType = dataType | `void`
-dataType = unquotedIdentifier | arrayType
+dataType = typeReference | arrayType
 arrayType = `[` dataType `]`
+typeReference = identifier { `.` identifier }
 
 expression = assignment
 assignment = range [ assignmentOperator assignment ]
@@ -1679,7 +1698,7 @@ postfix = primary { callSuffix | indexSuffix }
 primary = literal | objectConstruction | groupExpression | identifier
 literal = `null` | arrayLiteral | booleanLiteral | decimalLiteral | hexLiteral | integerLiteral | octalLiteral | stringLiteral
 arrayLiteral = `[` [ expression { `,` expression } ] `]`
-objectConstruction = [ identifier ] objectLiteral
+objectConstruction = [ typeReference ] objectLiteral
 objectLiteral = `{` [ objectLiteralField { `,` objectLiteralField } [ `,` ] ] `}`
 objectLiteralField = identifier `:` expression
 objectDefaultLiteral = `null` | arrayLiteral | booleanLiteral | decimalLiteral | hexLiteral | integerLiteral | octalLiteral | objectLiteral | stringLiteral
