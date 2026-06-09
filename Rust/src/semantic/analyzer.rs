@@ -494,13 +494,14 @@ impl SemanticAnalyzer {
 
 	fn data_type_has_implicit_default(&self, data_type: &DataType) -> bool {
 		match data_type {
-			DataType::Array(_) | DataType::Bool | DataType::Dec | DataType::Int | DataType::Object(_) | DataType::Text => true,
+			DataType::Any | DataType::Array(_) | DataType::Bool | DataType::Dec | DataType::Int | DataType::Object(_) | DataType::Text => true,
 			DataType::EmptyArray | DataType::Range(_) | DataType::RecordPointer(_) | DataType::Void => false,
 		}
 	}
 
 	fn data_type_name(&self, data_type: &DataType) -> String {
 		match data_type {
+			DataType::Any => String::from("any"),
 			DataType::Array(element_type) => format!("[{}]", self.data_type_name(element_type)),
 			DataType::Bool => String::from("bool"),
 			DataType::Dec => String::from("dec"),
@@ -519,6 +520,10 @@ impl SemanticAnalyzer {
 	}
 
 	fn ensure_assignable(&self, target: &DataType, value: &DataType, position: usize) -> Result<(), CompileError> {
+		if target == &DataType::Any {
+			return Ok(());
+		}
+
 		if target == value || (target == &DataType::Dec && value == &DataType::Int) {
 			return Ok(());
 		}
@@ -1714,6 +1719,17 @@ impl SemanticAnalyzer {
 	}
 
 	fn require_equality_operands(&self, lhs: &DataType, rhs: &DataType, position: usize) -> Result<(), CompileError> {
+		if lhs == &DataType::Any || rhs == &DataType::Any {
+			return Err(self.compile_error(
+				position,
+				format!(
+					"Equality comparison is not supported between `{}` and `{}`.",
+					self.data_type_name(lhs),
+					self.data_type_name(rhs),
+				),
+			));
+		}
+
 		if lhs == rhs || (self.is_numeric_type(lhs) && self.is_numeric_type(rhs)) {
 			return Ok(());
 		}

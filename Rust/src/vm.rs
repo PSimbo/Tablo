@@ -578,6 +578,10 @@ impl VirtualMachine {
 				self.stack.push(Value::Integer(*value));
 				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::PushNull => {
+				self.stack.push(Value::Null);
+				Ok(ExecutionOutcome::Continue(None))
+			}
 			Instruction::PushText(value) => {
 				self.stack.push(Value::Text(value.clone()));
 				Ok(ExecutionOutcome::Continue(None))

@@ -2,6 +2,7 @@
 pub enum TokenKind {
 	Ampersand,
 	AndKeyword,
+	AnyKeyword,
 	AscKeyword,
 	Asterisk,
 	BangEqual,

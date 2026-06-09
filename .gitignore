@@ -3,4 +3,10 @@
 /VSCode/node_modules
 
 Cargo.lock
+tablo.toml
 .tablo/
+.vscode/
+
+*.db
+*.sql
+*.tablo

@@ -421,6 +421,7 @@ fn align_decimal_operands(lhs: &Decimal, rhs: &Decimal) -> Result<(i128, i128, u
 
 fn data_type_name_for_sqlite_runtime(data_type: &DataType) -> &'static str {
 	match data_type {
+		DataType::Any => "any",
 		DataType::Array(_) => "array",
 		DataType::Bool => "bool",
 		DataType::Dec => "dec",

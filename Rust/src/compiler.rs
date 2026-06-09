@@ -812,6 +812,9 @@ impl Compiler {
 		position: usize,
 	) {
 		match data_type {
+			crate::ast::DataType::Any => {
+				self.emit(emission, Instruction::PushNull, position);
+			}
 			crate::ast::DataType::Array(_) => {
 				self.emit(emission, Instruction::MakeArray(0), position);
 			}
@@ -949,6 +952,7 @@ fn collect_functions_from_statements<'a>(statements: &'a [Statement], functions:
 
 fn data_type_name(data_type: &crate::ast::DataType) -> String {
 	match data_type {
+		crate::ast::DataType::Any => String::from("any"),
 		crate::ast::DataType::Array(element_type) => format!("[{}]", data_type_name(element_type)),
 		crate::ast::DataType::Bool => String::from("bool"),
 		crate::ast::DataType::Dec => String::from("dec"),

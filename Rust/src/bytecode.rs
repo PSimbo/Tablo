@@ -54,6 +54,7 @@ pub enum Instruction {
 	PushBoolean(bool),
 	PushDecimal(Decimal),
 	PushInteger(i64),
+	PushNull,
 	PushText(String),
 	Return,
 	ReturnVoid,

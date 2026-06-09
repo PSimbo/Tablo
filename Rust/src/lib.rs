@@ -507,6 +507,16 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_assignment_from_any_to_specific_type() {
+		let error = run("fn Main(args: [text]) int { var value: any = 1; var total: int = value; return total; }").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Cannot assign a value of type `any` to a variable of type `int`."),
+			position: 65,
+		}));
+	}
+
+	#[test]
 	fn rejects_assignment_to_const_source_text() {
 		let error = evaluate_snippet("const x: int = 5;\nx = 3").unwrap_err();
 
@@ -563,6 +573,16 @@ mod tests {
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Built-in function `disp` does not accept an argument of type `int`."),
 			position: 5,
+		}));
+	}
+
+	#[test]
+	fn rejects_equality_comparison_on_any_values() {
+		let error = run("fn Main(args: [text]) int { var left: any = 1; var right: any = 2; var same: bool = left == right; return 0; }").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Equality comparison is not supported between `any` and `any`."),
+			position: 89,
 		}));
 	}
 
@@ -1317,6 +1337,15 @@ mod tests {
 		let _ = std::fs::remove_file(&output_path);
 
 		assert_eq!(result, Some(Value::Integer(30)));
+	}
+
+	#[test]
+	fn runs_object_with_implicit_any_field_defaulting_to_null() {
+		let result = run(
+			"obj Envelope { payload: any, };\nfn Main(args: [text]) int { var env: Envelope = Envelope { }; var payload: any = env.payload; return 1; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
 	}
 
 	#[test]

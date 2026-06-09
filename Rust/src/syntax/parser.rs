@@ -444,6 +444,7 @@ impl Parser {
 		})?;
 
 		match token.kind {
+			TokenKind::AnyKeyword => Ok(DataType::Any),
 			TokenKind::BoolKeyword => Ok(DataType::Bool),
 			TokenKind::DecKeyword => Ok(DataType::Dec),
 			TokenKind::Identifier => Ok(DataType::Object(token.lexeme)),
@@ -1815,6 +1816,66 @@ mod tests {
 		let tokens = lexer.tokenize().unwrap();
 		let mut parser = Parser::new(tokens);
 		normalize_program(parser.parse_program().unwrap())
+	}
+
+	#[test]
+	fn parses_any_data_type_in_variable_and_array_positions() {
+		assert_eq!(
+			parse_program("fn Main(args: [text]) int { var value: any = 1; var values: [any] = []; return 0; }"),
+			Program {
+				functions: vec![
+					FunctionDeclaration {
+						body: BlockStatement {
+							position: 0,
+							statements: vec![
+								Statement::VariableDeclaration(VariableDeclaration {
+									data_type: DataType::Any,
+									initial_value: Some(Expr::Integer(IntegerLiteral {
+										position: 0,
+										value: 1,
+									})),
+									is_const: false,
+									name: String::from("value"),
+									position: 0,
+								}),
+								Statement::VariableDeclaration(VariableDeclaration {
+									data_type: DataType::Array(Box::new(DataType::Any)),
+									initial_value: Some(Expr::Array(ArrayLiteral {
+										elements: vec![],
+										position: 0,
+									})),
+									is_const: false,
+									name: String::from("values"),
+									position: 0,
+								}),
+								Statement::Return(ReturnStatement {
+									position: 0,
+									value: Some(Expr::Integer(IntegerLiteral {
+										position: 0,
+										value: 0,
+									})),
+								}),
+							],
+						},
+						name: String::from("Main"),
+						parameters: vec![
+							FunctionParameter {
+								data_type: DataType::Array(Box::new(DataType::Text)),
+								is_by_ref: false,
+								name: String::from("args"),
+								position: 0,
+							},
+						],
+						position: 0,
+						return_type: DataType::Int,
+					},
+				],
+				objects: vec![],
+				result: None,
+				statements: vec![],
+				with_declarations: vec![],
+			}
+		);
 	}
 
 	#[test]

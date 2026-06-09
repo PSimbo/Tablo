@@ -37,6 +37,7 @@ pub enum BinaryOperator {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataType {
+	Any,
 	Array(Box<DataType>),
 	Bool,
 	Dec,

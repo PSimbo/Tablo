@@ -71,6 +71,7 @@ const OPCODE_LOAD_FIELD: u8 = 41;
 const OPCODE_LOAD_FIELD_PATH: u8 = 42;
 const OPCODE_STORE_FIELD_PATH: u8 = 43;
 const OPCODE_EXECUTE_QUERY: u8 = 44;
+const OPCODE_PUSH_NULL: u8 = 45;
 const QUERY_KIND_SQL: u8 = 1;
 const SQL_DIALECT_SQLITE: u8 = 1;
 const SQL_RESULT_INTEGER_SCALAR: u8 = 1;
@@ -211,16 +212,17 @@ impl<'a> ObjectFileReader<'a> {
 	fn read_data_type(&mut self) -> Result<DataType, ObjectFileError> {
 		let tag_offset = self.offset;
 		match self.read_u8()? {
-			1 => Ok(DataType::Array(Box::new(self.read_data_type()?))),
-			2 => Ok(DataType::Bool),
-			3 => Ok(DataType::Dec),
-			4 => Ok(DataType::EmptyArray),
-			5 => Ok(DataType::Int),
-			6 => Ok(DataType::Object(self.read_string()?)),
-			7 => Ok(DataType::Range(Box::new(self.read_data_type()?))),
-			8 => Ok(DataType::Text),
-			9 => Ok(DataType::Void),
-			10 => Ok(DataType::RecordPointer(crate::ast::RecordPointerType {
+			1 => Ok(DataType::Any),
+			2 => Ok(DataType::Array(Box::new(self.read_data_type()?))),
+			3 => Ok(DataType::Bool),
+			4 => Ok(DataType::Dec),
+			5 => Ok(DataType::EmptyArray),
+			6 => Ok(DataType::Int),
+			7 => Ok(DataType::Object(self.read_string()?)),
+			8 => Ok(DataType::Range(Box::new(self.read_data_type()?))),
+			9 => Ok(DataType::Text),
+			10 => Ok(DataType::Void),
+			11 => Ok(DataType::RecordPointer(crate::ast::RecordPointerType {
 				database_name: self.read_string()?,
 				schema_name: self.read_string()?,
 				table_name: self.read_string()?,
@@ -394,6 +396,7 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_PUSH_BOOLEAN => Ok(Instruction::PushBoolean(self.read_bool()?)),
 			OPCODE_PUSH_DECIMAL => Ok(Instruction::PushDecimal(self.read_decimal()?)),
 			OPCODE_PUSH_INTEGER => Ok(Instruction::PushInteger(self.read_i64()?)),
+			OPCODE_PUSH_NULL => Ok(Instruction::PushNull),
 			OPCODE_PUSH_TEXT => Ok(Instruction::PushText(self.read_string()?)),
 			OPCODE_RETURN => Ok(Instruction::Return),
 			OPCODE_RETURN_VOID => Ok(Instruction::ReturnVoid),
@@ -580,27 +583,28 @@ fn write_code_body(bytes: &mut Vec<u8>, code_body: &CodeBody) {
 
 fn write_data_type(bytes: &mut Vec<u8>, data_type: &DataType) {
 	match data_type {
+		DataType::Any => bytes.push(1),
 		DataType::Array(element_type) => {
-			bytes.push(1);
+			bytes.push(2);
 			write_data_type(bytes, element_type);
 		}
-		DataType::Bool => bytes.push(2),
-		DataType::Dec => bytes.push(3),
-		DataType::EmptyArray => bytes.push(4),
-		DataType::Int => bytes.push(5),
+		DataType::Bool => bytes.push(3),
+		DataType::Dec => bytes.push(4),
+		DataType::EmptyArray => bytes.push(5),
+		DataType::Int => bytes.push(6),
 		DataType::Object(name) => {
-			bytes.push(6);
+			bytes.push(7);
 			bytes.extend_from_slice(&(name.len() as u32).to_le_bytes());
 			bytes.extend_from_slice(name.as_bytes());
 		}
 		DataType::Range(element_type) => {
-			bytes.push(7);
+			bytes.push(8);
 			write_data_type(bytes, element_type);
 		}
-		DataType::Text => bytes.push(8),
-		DataType::Void => bytes.push(9),
+		DataType::Text => bytes.push(9),
+		DataType::Void => bytes.push(10),
 		DataType::RecordPointer(record_pointer) => {
-			bytes.push(10);
+			bytes.push(11);
 			for value in [&record_pointer.database_name, &record_pointer.schema_name, &record_pointer.table_name] {
 				bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
 				bytes.extend_from_slice(value.as_bytes());
@@ -704,6 +708,7 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.push(OPCODE_PUSH_INTEGER);
 			bytes.extend_from_slice(&value.to_le_bytes());
 		}
+		Instruction::PushNull => bytes.push(OPCODE_PUSH_NULL),
 		Instruction::PushText(value) => {
 			bytes.push(OPCODE_PUSH_TEXT);
 			bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
@@ -1027,6 +1032,23 @@ mod tests {
 			Instruction::PushInteger(2),
 			Instruction::Add,
 		]);
+
+		let bytes = write_program(&program);
+		let decoded = read_program(&bytes).unwrap();
+
+		assert_eq!(decoded, program);
+	}
+
+	#[test]
+	fn round_trips_program_bytes_with_any_type_and_null_instruction() {
+		let program = Program::from_parts_with_functions(
+			ConstantPool::default(),
+			CodeBody::new(vec![
+				Instruction::PushNull,
+				Instruction::Return,
+			]),
+			vec![],
+		);
 
 		let bytes = write_program(&program);
 		let decoded = read_program(&bytes).unwrap();
