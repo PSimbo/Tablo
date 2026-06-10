@@ -333,6 +333,9 @@ impl Compiler {
 				self.compiled_queries.push(query);
 				self.emit(emission, Instruction::ExecuteQuery(query_index), expression.position());
 			}
+			Expr::Date(date) => {
+				self.emit(emission, Instruction::PushDate(date.value), expression.position());
+			}
 			Expr::Decimal(DecimalLiteral { value, .. }) => {
 				self.emit(emission, Instruction::PushDecimal(value.clone()), expression.position());
 			}
@@ -824,6 +827,9 @@ impl Compiler {
 			crate::ast::DataType::Bool => {
 				self.emit(emission, Instruction::PushBoolean(false), position);
 			}
+			crate::ast::DataType::Date => {
+				panic!("Cannot emit an implicit default value for `{}`.", data_type_name(data_type));
+			}
 			crate::ast::DataType::Dec => {
 				self.emit(
 					emission,
@@ -967,6 +973,7 @@ fn data_type_name(data_type: &crate::ast::DataType) -> String {
 		crate::ast::DataType::Any => String::from("any"),
 		crate::ast::DataType::Array(element_type) => format!("[{}]", data_type_name(element_type)),
 		crate::ast::DataType::Bool => String::from("bool"),
+		crate::ast::DataType::Date => String::from("date"),
 		crate::ast::DataType::Dec => String::from("dec"),
 		crate::ast::DataType::EmptyArray => String::from("empty array"),
 		crate::ast::DataType::Int => String::from("int"),

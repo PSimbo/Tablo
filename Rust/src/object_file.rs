@@ -45,6 +45,7 @@ const OPCODE_LOAD_REFERENCE: u8 = 15;
 const OPCODE_MODULO: u8 = 16;
 const OPCODE_MULTIPLY: u8 = 17;
 const OPCODE_PUSH_BOOLEAN: u8 = 18;
+const OPCODE_PUSH_DATE: u8 = 46;
 const OPCODE_PUSH_DECIMAL: u8 = 19;
 const OPCODE_PUSH_INTEGER: u8 = 20;
 const OPCODE_STORE_LOCAL: u8 = 21;
@@ -237,6 +238,7 @@ impl<'a> ObjectFileReader<'a> {
 
 				Ok(DataType::Union(members))
 			}
+			13 => Ok(DataType::Date),
 			tag => Err(ObjectFileError {
 				offset: tag_offset,
 				message: format!("Unknown data type tag {tag}."),
@@ -338,6 +340,12 @@ impl<'a> ObjectFileReader<'a> {
 		Ok(slice)
 	}
 
+	fn read_i32(&mut self) -> Result<i32, ObjectFileError> {
+		let mut bytes = [0; 4];
+		bytes.copy_from_slice(self.read_exact(4)?);
+		Ok(i32::from_le_bytes(bytes))
+	}
+
 	fn read_i64(&mut self) -> Result<i64, ObjectFileError> {
 		let mut bytes = [0; 8];
 		bytes.copy_from_slice(self.read_exact(8)?);
@@ -404,6 +412,14 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_OR => Ok(Instruction::Or),
 			OPCODE_POP => Ok(Instruction::Pop),
 			OPCODE_PUSH_BOOLEAN => Ok(Instruction::PushBoolean(self.read_bool()?)),
+			OPCODE_PUSH_DATE => Ok(Instruction::PushDate(crate::value::Date::from_parts(
+				self.read_i32()?,
+				self.read_u8()?,
+				self.read_u8()?,
+			).map_err(|message| ObjectFileError {
+				offset: self.offset.saturating_sub(6),
+				message,
+			})?)),
 			OPCODE_PUSH_DECIMAL => Ok(Instruction::PushDecimal(self.read_decimal()?)),
 			OPCODE_PUSH_INTEGER => Ok(Instruction::PushInteger(self.read_i64()?)),
 			OPCODE_PUSH_NULL => Ok(Instruction::PushNull),
@@ -599,6 +615,7 @@ fn write_data_type(bytes: &mut Vec<u8>, data_type: &DataType) {
 			write_data_type(bytes, element_type);
 		}
 		DataType::Bool => bytes.push(3),
+		DataType::Date => bytes.push(13),
 		DataType::Dec => bytes.push(4),
 		DataType::EmptyArray => bytes.push(5),
 		DataType::Int => bytes.push(6),
@@ -715,6 +732,12 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 		Instruction::PushBoolean(value) => {
 			bytes.push(OPCODE_PUSH_BOOLEAN);
 			bytes.push(u8::from(*value));
+		}
+		Instruction::PushDate(value) => {
+			bytes.push(OPCODE_PUSH_DATE);
+			bytes.extend_from_slice(&value.year.to_le_bytes());
+			bytes.push(value.month);
+			bytes.push(value.day);
 		}
 		Instruction::PushDecimal(value) => {
 			bytes.push(OPCODE_PUSH_DECIMAL);
@@ -1021,6 +1044,18 @@ mod tests {
 	fn round_trips_boolean_program_bytes() {
 		let program = Program::new(vec![
 			Instruction::PushBoolean(true),
+		]);
+
+		let bytes = write_program(&program);
+		let decoded = read_program(&bytes).unwrap();
+
+		assert_eq!(decoded, program);
+	}
+
+	#[test]
+	fn round_trips_date_program_bytes() {
+		let program = Program::new(vec![
+			Instruction::PushDate(crate::value::Date::from_literal("@2025-06-10").unwrap()),
 		]);
 
 		let bytes = write_program(&program);

@@ -15,6 +15,8 @@ pub enum TokenKind {
 	ContinueKeyword,
 	CountKeyword,
 	Dash,
+	DateKeyword,
+	DateLiteral,
 	DecKeyword,
 	DecimalLiteral,
 	DescKeyword,

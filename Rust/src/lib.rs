@@ -1059,6 +1059,30 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_date_equality_object_file() {
+		let output_path = unique_test_output_path("runs_date_equality_object_file");
+		compile_snippet_to_object_file("var same: bool = @2025-06-10 == @2025-06-10;\nsame", &output_path).unwrap();
+		let result = run_file(&output_path).unwrap();
+		let _ = std::fs::remove_file(&output_path);
+
+		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
+	fn runs_date_literal_source_text() {
+		let result = evaluate_snippet("@2025-06-10").unwrap();
+
+		assert_eq!(result, Some(Value::Date(crate::value::Date::from_literal("@2025-06-10").unwrap())));
+	}
+
+	#[test]
+	fn runs_date_ordering_source_text() {
+		let result = evaluate_snippet("@2025-06-10 < @2025-06-11").unwrap();
+
+		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
 	fn runs_decimal_object_file() {
 		let output_path = unique_test_output_path("runs_decimal_object_file");
 		compile_snippet_to_object_file("1.25 + .5", &output_path).unwrap();

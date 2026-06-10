@@ -13,6 +13,7 @@ use crate::ast::CallExpr;
 use crate::ast::ContinueStatement;
 use crate::ast::CountExpr;
 use crate::ast::DataType;
+use crate::ast::DateLiteral;
 use crate::ast::DecimalLiteral;
 use crate::ast::Expr;
 use crate::ast::FieldAccessExpr;
@@ -478,6 +479,18 @@ impl Parser {
 		else {
 			Ok(DataType::Union(data_types))
 		}
+	}
+
+	fn parse_date_literal(&self, token: Token) -> Result<Expr, ParseError> {
+		let value = crate::value::Date::from_literal(&token.lexeme).map_err(|message| ParseError {
+			message,
+			position: token.start,
+		})?;
+
+		Ok(Expr::Date(DateLiteral {
+			position: token.start,
+			value,
+		}))
 	}
 
 	fn parse_decimal_literal(&self, token: Token) -> Result<Expr, ParseError> {
@@ -1275,6 +1288,7 @@ impl Parser {
 		match token.kind {
 			TokenKind::CountKeyword => self.parse_count_expression(token.start),
 			TokenKind::Dash => self.parse_negation_expression_with_position(token.start),
+			TokenKind::DateLiteral => self.parse_date_literal(token),
 			TokenKind::DecimalLiteral => self.parse_decimal_literal(token),
 			TokenKind::EndOfFile => Err(ParseError {
 				message: String::from("Expected an expression."),
@@ -1305,6 +1319,7 @@ impl Parser {
 		match token.kind {
 			TokenKind::AnyKeyword => Ok(DataType::Any),
 			TokenKind::BoolKeyword => Ok(DataType::Bool),
+			TokenKind::DateKeyword => Ok(DataType::Date),
 			TokenKind::DecKeyword => Ok(DataType::Dec),
 			TokenKind::Identifier => Ok(DataType::Object(self.parse_qualified_identifier_name(token)?)),
 			TokenKind::IntKeyword => Ok(DataType::Int),
@@ -1643,6 +1658,7 @@ mod tests {
 	use crate::ast::ContinueStatement;
 	use crate::ast::CountExpr;
 	use crate::ast::DataType;
+	use crate::ast::DateLiteral;
 	use crate::ast::DecimalLiteral;
 	use crate::ast::Expr;
 	use crate::ast::FieldAccessExpr;
@@ -1758,6 +1774,10 @@ mod tests {
 				position: 0,
 				table: normalize_table_reference(table),
 				where_clause: where_clause.map(|where_clause| Box::new(normalize_expr(*where_clause))),
+			}),
+			Expr::Date(DateLiteral { value, .. }) => Expr::Date(DateLiteral {
+				position: 0,
+				value,
 			}),
 			Expr::Decimal(DecimalLiteral { value, .. }) => Expr::Decimal(DecimalLiteral {
 				position: 0,
@@ -2640,6 +2660,17 @@ mod tests {
 			statements: vec![],
 			with_declarations: vec![],
 		});
+	}
+
+	#[test]
+	fn parses_date_literal() {
+		assert_eq!(
+			parse("@2025-06-10"),
+			Expr::Date(DateLiteral {
+				position: 0,
+				value: crate::value::Date::from_literal("@2025-06-10").unwrap(),
+			})
+		);
 	}
 
 	#[test]

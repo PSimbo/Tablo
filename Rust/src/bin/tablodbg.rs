@@ -624,6 +624,7 @@ fn variable_type_name(value: &Value) -> &'static str {
 	match value {
 		Value::Array(_) => "array",
 		Value::Boolean(_) => "bool",
+		Value::Date(_) => "date",
 		Value::Decimal(_) => "dec",
 		Value::DecimalRange(_) => "range",
 		Value::Integer(_) => "int",

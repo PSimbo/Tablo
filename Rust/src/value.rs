@@ -33,6 +33,7 @@ pub enum RecordFieldValue {
 pub enum Value {
 	Array(Vec<Value>),
 	Boolean(bool),
+	Date(Date),
 	Decimal(Decimal),
 	DecimalRange(DecimalRange),
 	Integer(i64),
@@ -62,6 +63,7 @@ impl Display for Value {
 				write!(f, "]")
 			}
 			Value::Boolean(value) => write!(f, "{value}"),
+			Value::Date(value) => write!(f, "{value}"),
 			Value::Decimal(value) => write!(f, "{value}"),
 			Value::DecimalRange(range) => write!(f, "{range}"),
 			Value::Integer(value) => write!(f, "{value}"),
@@ -102,6 +104,67 @@ impl Display for Value {
 pub struct ArrayIterator {
 	pub elements: Vec<Value>,
 	pub next_index: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct Date {
+	pub day: u8,
+	pub month: u8,
+	pub year: i32,
+}
+
+impl Date {
+	pub fn from_literal(literal: &str) -> Result<Self, String> {
+		let value = literal.strip_prefix('@').ok_or(String::from("Date literals must begin with `@`."))?;
+		let mut parts = value.split('-');
+		let year = parts.next().ok_or(String::from("Date literal must use `yyyy-mm-dd` format."))?;
+		let month = parts.next().ok_or(String::from("Date literal must use `yyyy-mm-dd` format."))?;
+		let day = parts.next().ok_or(String::from("Date literal must use `yyyy-mm-dd` format."))?;
+
+		if parts.next().is_some() || year.len() != 4 || month.len() != 2 || day.len() != 2 {
+			return Err(String::from("Date literal must use `yyyy-mm-dd` format."));
+		}
+
+		let year = year.parse::<i32>().map_err(|_| format!("Invalid date literal `{literal}`."))?;
+		let month = month.parse::<u8>().map_err(|_| format!("Invalid date literal `{literal}`."))?;
+		let day = day.parse::<u8>().map_err(|_| format!("Invalid date literal `{literal}`."))?;
+		Self::from_parts(year, month, day).map_err(|_| format!("Invalid date literal `{literal}`."))
+	}
+
+	pub fn from_parts(year: i32, month: u8, day: u8) -> Result<Self, String> {
+		if month == 0 || month > 12 {
+			return Err(String::from("Month must be in the range 1..=12."));
+		}
+
+		let max_day = days_in_month(year, month);
+		if day == 0 || day > max_day {
+			return Err(format!("Day must be in the range 1..={max_day} for {year:04}-{month:02}."));
+		}
+
+		Ok(Self { day, month, year })
+	}
+
+	fn from_sqlite_text(value: &str) -> Result<Self, String> {
+		let mut parts = value.split('-');
+		let year = parts.next().ok_or_else(|| format!("Invalid SQLite date value `{value}`."))?;
+		let month = parts.next().ok_or_else(|| format!("Invalid SQLite date value `{value}`."))?;
+		let day = parts.next().ok_or_else(|| format!("Invalid SQLite date value `{value}`."))?;
+
+		if parts.next().is_some() || year.len() != 4 || month.len() != 2 || day.len() != 2 {
+			return Err(format!("Invalid SQLite date value `{value}`."));
+		}
+
+		let year = year.parse::<i32>().map_err(|_| format!("Invalid SQLite date value `{value}`."))?;
+		let month = month.parse::<u8>().map_err(|_| format!("Invalid SQLite date value `{value}`."))?;
+		let day = day.parse::<u8>().map_err(|_| format!("Invalid SQLite date value `{value}`."))?;
+		Self::from_parts(year, month, day).map_err(|_| format!("Invalid SQLite date value `{value}`."))
+	}
+}
+
+impl Display for Date {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{:04}-{:02}-{:02}", self.year, self.month, self.day)
+	}
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -379,6 +442,13 @@ pub fn sqlite_record_field_runtime_value(
 				deferred_sqlite_value_name(other),
 			)),
 		},
+		DataType::Date => match value {
+			DeferredSqliteValue::Text(value) => Ok(Value::Date(Date::from_sqlite_text(value)?)),
+			other => Err(format!(
+				"Cannot convert SQLite value `{}` to `date`.",
+				deferred_sqlite_value_name(other),
+			)),
+		},
 		DataType::Dec => match value {
 			DeferredSqliteValue::Integer(value) => Ok(Value::Decimal(Decimal::from_integer(*value))),
 			DeferredSqliteValue::Real(value) => Ok(Value::Decimal(Decimal::from_literal(value)?)),
@@ -424,6 +494,7 @@ fn data_type_name_for_sqlite_runtime(data_type: &DataType) -> &'static str {
 		DataType::Any => "any",
 		DataType::Array(_) => "array",
 		DataType::Bool => "bool",
+		DataType::Date => "date",
 		DataType::Dec => "dec",
 		DataType::EmptyArray => "empty array",
 		DataType::Int => "int",
@@ -433,6 +504,16 @@ fn data_type_name_for_sqlite_runtime(data_type: &DataType) -> &'static str {
 		DataType::Text => "text",
 		DataType::Union(_) => "union",
 		DataType::Void => "void",
+	}
+}
+
+fn days_in_month(year: i32, month: u8) -> u8 {
+	match month {
+		1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+		4 | 6 | 9 | 11 => 30,
+		2 if is_leap_year(year) => 29,
+		2 => 28,
+		_ => 0,
 	}
 }
 
@@ -455,6 +536,10 @@ fn deferred_sqlite_value_name(value: &DeferredSqliteValue) -> &'static str {
 		DeferredSqliteValue::Real(_) => "real",
 		DeferredSqliteValue::Text(_) => "text",
 	}
+}
+
+fn is_leap_year(year: i32) -> bool {
+	(year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
 fn normalize_decimal_parts(mut coefficient: i128, mut scale: u8) -> (i128, u8) {

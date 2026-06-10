@@ -2,6 +2,7 @@ use crate::ast::DataType;
 use crate::ast::FindKind;
 use crate::ast::OrderByDirection;
 use crate::schema::DatabaseBackend;
+use crate::value::Date;
 use crate::value::Decimal;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,6 +40,7 @@ pub enum QueryExpr {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum QueryLiteral {
 	Boolean(bool),
+	Date(Date),
 	Decimal(Decimal),
 	Integer(i64),
 	Text(String),
@@ -355,6 +357,7 @@ fn lower_query_expr_sqlite(expression: &QueryExpr, parameters: &mut Vec<SqlParam
 		QueryExpr::Literal(QueryLiteral::Boolean(value)) => {
 			if *value { String::from("1") } else { String::from("0") }
 		}
+		QueryExpr::Literal(QueryLiteral::Date(value)) => quote_text_literal(&value.to_string()),
 		QueryExpr::Literal(QueryLiteral::Decimal(value)) => value.to_string(),
 		QueryExpr::Literal(QueryLiteral::Integer(value)) => value.to_string(),
 		QueryExpr::Literal(QueryLiteral::Text(value)) => quote_text_literal(value),

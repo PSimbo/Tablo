@@ -482,6 +482,7 @@ impl SemanticAnalyzer {
 		match data_type {
 			SchemaDataType::Array(element_type) => Ok(DataType::Array(Box::new(self.data_type_from_schema_type(element_type)?))),
 			SchemaDataType::Bool => Ok(DataType::Bool),
+			SchemaDataType::Date => Ok(DataType::Date),
 			SchemaDataType::Dec | SchemaDataType::Float => Ok(DataType::Dec),
 			SchemaDataType::Int => Ok(DataType::Int),
 			SchemaDataType::Text => Ok(DataType::Text),
@@ -495,7 +496,7 @@ impl SemanticAnalyzer {
 	fn data_type_has_implicit_default(&self, data_type: &DataType) -> bool {
 		match data_type {
 			DataType::Any | DataType::Array(_) | DataType::Bool | DataType::Dec | DataType::Int | DataType::Object(_) | DataType::Text => true,
-			DataType::EmptyArray | DataType::Range(_) | DataType::RecordPointer(_) | DataType::Union(_) | DataType::Void => false,
+			DataType::Date | DataType::EmptyArray | DataType::Range(_) | DataType::RecordPointer(_) | DataType::Union(_) | DataType::Void => false,
 		}
 	}
 
@@ -504,6 +505,7 @@ impl SemanticAnalyzer {
 			DataType::Any => String::from("any"),
 			DataType::Array(element_type) => format!("[{}]", self.data_type_name(element_type)),
 			DataType::Bool => String::from("bool"),
+			DataType::Date => String::from("date"),
 			DataType::Dec => String::from("dec"),
 			DataType::EmptyArray => String::from("empty array"),
 			DataType::Int => String::from("int"),
@@ -896,6 +898,7 @@ impl SemanticAnalyzer {
 				}
 			}
 			Expr::Count(count) => self.infer_count_expression_type(count),
+			Expr::Date(_) => Ok(DataType::Date),
 			Expr::Decimal(_) => Ok(DataType::Dec),
 			Expr::FieldAccess(FieldAccessExpr { field, object, .. }) => {
 				let object_type = self.infer_expression_type(object)?;
@@ -1204,6 +1207,7 @@ impl SemanticAnalyzer {
 				expression.position(),
 				String::from("Nested database queries are not yet supported in `where` clauses."),
 			)),
+			Expr::Date(_) => Ok(DataType::Date),
 			Expr::Decimal(_) => Ok(DataType::Dec),
 			Expr::FieldAccess(field_access) => self.infer_query_field_access_type(field_access, table),
 			Expr::Find(_) => Err(self.compile_error(
@@ -1578,6 +1582,7 @@ impl SemanticAnalyzer {
 				expression.position(),
 				format!("Function `{}` is not yet supported in lowered database query expressions.", callee.name),
 			)),
+			Expr::Date(date) => Ok(QueryExpr::Literal(QueryLiteral::Date(date.value))),
 			Expr::Decimal(decimal) => Ok(QueryExpr::Literal(QueryLiteral::Decimal(decimal.value.clone()))),
 			Expr::FieldAccess(field_access) => self.lower_query_field_access(field_access, table, backend),
 			Expr::Identifier(identifier) => {
@@ -1820,7 +1825,10 @@ impl SemanticAnalyzer {
 	}
 
 	fn require_ordering_operands(&self, lhs: &DataType, rhs: &DataType, position: usize) -> Result<(), CompileError> {
-		if (lhs == &DataType::Text && rhs == &DataType::Text) || (self.is_numeric_type(lhs) && self.is_numeric_type(rhs)) {
+		if (lhs == &DataType::Text && rhs == &DataType::Text)
+			|| (lhs == &DataType::Date && rhs == &DataType::Date)
+			|| (self.is_numeric_type(lhs) && self.is_numeric_type(rhs))
+		{
 			return Ok(());
 		}
 
@@ -2043,7 +2051,7 @@ impl SemanticAnalyzer {
 				}
 				Ok(())
 			}
-			Expr::Boolean(_) | Expr::Decimal(_) | Expr::Integer(_) | Expr::Text(_) => Ok(()),
+			Expr::Boolean(_) | Expr::Date(_) | Expr::Decimal(_) | Expr::Integer(_) | Expr::Text(_) => Ok(()),
 			Expr::ObjectConstruction(construction) => {
 				for field in &construction.fields {
 					self.validate_literal_expression(&field.value)?;

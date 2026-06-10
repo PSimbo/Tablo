@@ -40,6 +40,7 @@ pub enum DataType {
 	Any,
 	Array(Box<DataType>),
 	Bool,
+	Date,
 	Dec,
 	EmptyArray,
 	Int,
@@ -59,6 +60,7 @@ pub enum Expr {
 	Boolean(BooleanLiteral),
 	Call(CallExpr),
 	Count(CountExpr),
+	Date(DateLiteral),
 	Decimal(DecimalLiteral),
 	FieldAccess(FieldAccessExpr),
 	Find(FindExpr),
@@ -182,6 +184,12 @@ pub struct CountExpr {
 	pub position: usize,
 	pub table: TableReference,
 	pub where_clause: Option<Box<Expr>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DateLiteral {
+	pub position: usize,
+	pub value: crate::value::Date,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -416,6 +424,7 @@ impl Expr {
 			Expr::Boolean(expression) => expression.position,
 			Expr::Call(expression) => expression.position,
 			Expr::Count(expression) => expression.position,
+			Expr::Date(expression) => expression.position,
 			Expr::Decimal(expression) => expression.position,
 			Expr::FieldAccess(expression) => expression.position,
 			Expr::Find(expression) => expression.position,

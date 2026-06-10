@@ -570,6 +570,10 @@ impl VirtualMachine {
 				self.stack.push(Value::Boolean(*value));
 				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::PushDate(value) => {
+				self.stack.push(Value::Date(*value));
+				Ok(ExecutionOutcome::Continue(None))
+			}
 			Instruction::PushDecimal(value) => {
 				self.stack.push(Value::Decimal(value.clone()));
 				Ok(ExecutionOutcome::Continue(None))
@@ -825,7 +829,7 @@ impl VirtualMachine {
 	fn pop_numeric(&mut self, instruction_index: usize) -> Result<Value, VmError> {
 		let value = self.pop_value(instruction_index)?;
 
-		if matches!(value, Value::Array(_) | Value::Boolean(_) | Value::DecimalRange(_) | Value::IntegerRange(_) | Value::Iterator(_) | Value::Null | Value::Object(_) | Value::Reference(_) | Value::Text(_)) {
+		if matches!(value, Value::Array(_) | Value::Boolean(_) | Value::Date(_) | Value::DecimalRange(_) | Value::IntegerRange(_) | Value::Iterator(_) | Value::Null | Value::Object(_) | Value::Reference(_) | Value::Text(_)) {
 			return Err(VmError {
 				instruction_index,
 				message: format!("Expected a numeric operand, found a {} value.", type_name(&value)),
@@ -974,6 +978,7 @@ impl VirtualMachine {
 
 		match value {
 			Value::Boolean(value) => Ok(SqlValue::Integer(if value { 1 } else { 0 })),
+			Value::Date(value) => Ok(SqlValue::Text(value.to_string())),
 			Value::Decimal(value) => Ok(SqlValue::Text(value.to_string())),
 			Value::Integer(value) => Ok(SqlValue::Integer(value)),
 			Value::Null => Ok(SqlValue::Null),
@@ -1089,6 +1094,18 @@ fn compare_decimals(lhs: &Decimal, rhs: &Decimal, instruction_index: usize) -> R
 }
 
 fn compare_values(lhs: Value, rhs: Value, instruction_index: usize, kind: ComparisonKind) -> Result<Value, VmError> {
+	if let (Value::Date(lhs), Value::Date(rhs)) = (&lhs, &rhs) {
+		let ordering = lhs.cmp(rhs);
+		let value = match kind {
+			ComparisonKind::GreaterThan => ordering.is_gt(),
+			ComparisonKind::GreaterThanOrEqual => ordering.is_ge(),
+			ComparisonKind::LessThan => ordering.is_lt(),
+			ComparisonKind::LessThanOrEqual => ordering.is_le(),
+		};
+
+		return Ok(Value::Boolean(value));
+	}
+
 	if let (Value::Text(lhs), Value::Text(rhs)) = (&lhs, &rhs) {
 		let ordering = lhs.cmp(rhs);
 		let value = match kind {
@@ -1101,7 +1118,7 @@ fn compare_values(lhs: Value, rhs: Value, instruction_index: usize, kind: Compar
 		return Ok(Value::Boolean(value));
 	}
 
-	if matches!(lhs, Value::Text(_)) || matches!(rhs, Value::Text(_)) {
+	if matches!(lhs, Value::Date(_)) || matches!(rhs, Value::Date(_)) || matches!(lhs, Value::Text(_)) || matches!(rhs, Value::Text(_)) {
 		return Err(vm_error(
 			instruction_index,
 			format!("Cannot compare `{}` and `{}` for ordering.", type_name(&lhs), type_name(&rhs)),
@@ -1154,6 +1171,7 @@ fn equals_value(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Valu
 	let value = match (lhs, rhs) {
 		(Value::Array(lhs), Value::Array(rhs)) => lhs == rhs,
 		(Value::Boolean(lhs), Value::Boolean(rhs)) => lhs == rhs,
+		(Value::Date(lhs), Value::Date(rhs)) => lhs == rhs,
 		(Value::Null, Value::Null) => true,
 		(Value::Object(lhs), Value::Object(rhs)) => lhs == rhs,
 		(Value::RecordPointer(lhs), Value::RecordPointer(rhs)) => lhs == rhs,
@@ -1165,6 +1183,12 @@ fn equals_value(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Valu
 			));
 		}
 		(lhs @ Value::Array(_), rhs) | (lhs, rhs @ Value::Array(_)) => {
+			return Err(vm_error(
+				instruction_index,
+				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
+			));
+		}
+		(lhs @ Value::Date(_), rhs) | (lhs, rhs @ Value::Date(_)) => {
 			return Err(vm_error(
 				instruction_index,
 				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
@@ -1544,6 +1568,7 @@ fn negate_value(value: Value) -> Value {
 	match value {
 		Value::Array(_) => unreachable!("Array values are rejected before numeric negation."),
 		Value::Boolean(_) => unreachable!("Boolean values are rejected before numeric negation."),
+		Value::Date(_) => unreachable!("Date values are rejected before numeric negation."),
 		Value::Decimal(mut decimal) => {
 			decimal.coefficient = decimal.coefficient.saturating_neg();
 			Value::Decimal(decimal)
@@ -1571,6 +1596,7 @@ fn normalize_record_field_name(name: &str) -> String {
 fn not_equals_value(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
 	match equals_value(lhs, rhs, instruction_index)? {
 		Value::Boolean(value) => Ok(Value::Boolean(!value)),
+		Value::Date(_) => unreachable!("Date values are rejected before logical negation."),
 		_ => unreachable!("Equality comparisons always produce Boolean results."),
 	}
 }
@@ -1733,6 +1759,7 @@ fn stringify_value(value: &Value) -> String {
 			result
 		}
 		Value::Boolean(value) => value.to_string(),
+		Value::Date(value) => value.to_string(),
 		Value::Decimal(value) => value.to_string(),
 		Value::DecimalRange(value) => value.to_string(),
 		Value::Integer(value) => value.to_string(),
@@ -1785,6 +1812,7 @@ fn type_name(value: &Value) -> &'static str {
 	match value {
 		Value::Array(_) => "array",
 		Value::Boolean(_) => "bool",
+		Value::Date(_) => "date",
 		Value::Decimal(_) => "dec",
 		Value::DecimalRange(_) => "range",
 		Value::Integer(_) => "int",

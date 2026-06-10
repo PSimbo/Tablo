@@ -98,6 +98,18 @@ impl Lexer {
 			return Ok(Some(self.lex_string_token(StringTokenMode::Start)?));
 		}
 
+		if next == '@' {
+			let (kind, lexeme) = self.lex_date_literal()?;
+			let end = self.position;
+
+			return Ok(Some(Token {
+				end,
+				kind,
+				lexeme,
+				start,
+			}));
+		}
+
 		if next.is_ascii_alphabetic() {
 			let (kind, lexeme) = self.lex_keyword()?;
 			let end = self.position;
@@ -280,6 +292,28 @@ impl Lexer {
 		Some(next)
 	}
 
+	fn lex_date_literal(&mut self) -> Result<(TokenKind, String), LexError> {
+		let start = self.position;
+		self.advance_char();
+
+		let mut digit_count = 0;
+		while self.peek_char().is_some_and(|next| next.is_ascii_digit() || next == '-') {
+			if self.peek_char().unwrap().is_ascii_digit() {
+				digit_count += 1;
+			}
+			self.advance_char();
+		}
+
+		if digit_count == 0 {
+			return Err(LexError {
+				position: start,
+				message: String::from("Expected a date literal after `@`."),
+			});
+		}
+
+		Ok((TokenKind::DateLiteral, self.source.as_str()[start..self.position].to_string()))
+	}
+
 	fn lex_digit_sequence(&mut self) {
 		let mut previous_was_underscore = false;
 
@@ -318,6 +352,7 @@ impl Lexer {
 			"const" => TokenKind::ConstKeyword,
 			"continue" => TokenKind::ContinueKeyword,
 			"count" => TokenKind::CountKeyword,
+			"date" => TokenKind::DateKeyword,
 			"dec" => TokenKind::DecKeyword,
 			"desc" => TokenKind::DescKeyword,
 			"else" => TokenKind::ElseKeyword,
@@ -895,10 +930,10 @@ mod tests {
 
 	#[test]
 	fn tokenizes_keyword_literals() {
-		let mut lexer = Lexer::new(SourceText::new("any asc and bool break by const continue count dec desc else find first fn for if in last mut not order or rec return text true var void where while with xor"));
+		let mut lexer = Lexer::new(SourceText::new("any asc and bool break by const continue count date dec desc else find first fn for if in last mut not order or rec return text true var void where while with xor"));
 		let tokens = lexer.tokenize().unwrap();
 
-		assert_eq!(tokens.len(), 34);
+		assert_eq!(tokens.len(), 35);
 		assert_eq!(tokens[0].kind, TokenKind::AnyKeyword);
 		assert_eq!(tokens[0].lexeme, "any");
 		assert_eq!(tokens[1].kind, TokenKind::AscKeyword);
@@ -909,31 +944,43 @@ mod tests {
 		assert_eq!(tokens[6].kind, TokenKind::ConstKeyword);
 		assert_eq!(tokens[7].kind, TokenKind::ContinueKeyword);
 		assert_eq!(tokens[8].kind, TokenKind::CountKeyword);
-		assert_eq!(tokens[9].kind, TokenKind::DecKeyword);
-		assert_eq!(tokens[10].kind, TokenKind::DescKeyword);
-		assert_eq!(tokens[11].kind, TokenKind::ElseKeyword);
-		assert_eq!(tokens[12].kind, TokenKind::FindKeyword);
-		assert_eq!(tokens[13].kind, TokenKind::FirstKeyword);
-		assert_eq!(tokens[14].kind, TokenKind::FnKeyword);
-		assert_eq!(tokens[15].kind, TokenKind::ForKeyword);
-		assert_eq!(tokens[16].kind, TokenKind::IfKeyword);
-		assert_eq!(tokens[17].kind, TokenKind::InKeyword);
-		assert_eq!(tokens[18].kind, TokenKind::LastKeyword);
-		assert_eq!(tokens[19].kind, TokenKind::MutKeyword);
-		assert_eq!(tokens[20].kind, TokenKind::NotKeyword);
-		assert_eq!(tokens[21].kind, TokenKind::OrderKeyword);
-		assert_eq!(tokens[22].kind, TokenKind::OrKeyword);
-		assert_eq!(tokens[23].kind, TokenKind::RecKeyword);
-		assert_eq!(tokens[24].kind, TokenKind::ReturnKeyword);
-		assert_eq!(tokens[25].kind, TokenKind::TextKeyword);
-		assert_eq!(tokens[26].kind, TokenKind::TrueKeyword);
-		assert_eq!(tokens[27].kind, TokenKind::VarKeyword);
-		assert_eq!(tokens[28].kind, TokenKind::VoidKeyword);
-		assert_eq!(tokens[29].kind, TokenKind::WhereKeyword);
-		assert_eq!(tokens[30].kind, TokenKind::WhileKeyword);
-		assert_eq!(tokens[31].kind, TokenKind::WithKeyword);
-		assert_eq!(tokens[32].kind, TokenKind::XorKeyword);
-		assert_eq!(tokens[33].kind, TokenKind::EndOfFile);
+		assert_eq!(tokens[9].kind, TokenKind::DateKeyword);
+		assert_eq!(tokens[10].kind, TokenKind::DecKeyword);
+		assert_eq!(tokens[11].kind, TokenKind::DescKeyword);
+		assert_eq!(tokens[12].kind, TokenKind::ElseKeyword);
+		assert_eq!(tokens[13].kind, TokenKind::FindKeyword);
+		assert_eq!(tokens[14].kind, TokenKind::FirstKeyword);
+		assert_eq!(tokens[15].kind, TokenKind::FnKeyword);
+		assert_eq!(tokens[16].kind, TokenKind::ForKeyword);
+		assert_eq!(tokens[17].kind, TokenKind::IfKeyword);
+		assert_eq!(tokens[18].kind, TokenKind::InKeyword);
+		assert_eq!(tokens[19].kind, TokenKind::LastKeyword);
+		assert_eq!(tokens[20].kind, TokenKind::MutKeyword);
+		assert_eq!(tokens[21].kind, TokenKind::NotKeyword);
+		assert_eq!(tokens[22].kind, TokenKind::OrderKeyword);
+		assert_eq!(tokens[23].kind, TokenKind::OrKeyword);
+		assert_eq!(tokens[24].kind, TokenKind::RecKeyword);
+		assert_eq!(tokens[25].kind, TokenKind::ReturnKeyword);
+		assert_eq!(tokens[26].kind, TokenKind::TextKeyword);
+		assert_eq!(tokens[27].kind, TokenKind::TrueKeyword);
+		assert_eq!(tokens[28].kind, TokenKind::VarKeyword);
+		assert_eq!(tokens[29].kind, TokenKind::VoidKeyword);
+		assert_eq!(tokens[30].kind, TokenKind::WhereKeyword);
+		assert_eq!(tokens[31].kind, TokenKind::WhileKeyword);
+		assert_eq!(tokens[32].kind, TokenKind::WithKeyword);
+		assert_eq!(tokens[33].kind, TokenKind::XorKeyword);
+		assert_eq!(tokens[34].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
+	fn tokenizes_date_literal() {
+		let mut lexer = Lexer::new(SourceText::new("@2025-06-10"));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens.len(), 2);
+		assert_eq!(tokens[0].kind, TokenKind::DateLiteral);
+		assert_eq!(tokens[0].lexeme, "@2025-06-10");
+		assert_eq!(tokens[1].kind, TokenKind::EndOfFile);
 	}
 
 	#[test]
