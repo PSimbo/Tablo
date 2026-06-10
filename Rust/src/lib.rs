@@ -860,6 +860,15 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_anonymous_inline_object_declaration_in_array_field_source_text() {
+		let result = run(
+			"obj Outer { items: [{ value: int, }], };\nfn Main(args: [text]) int { var item: Outer.items.Element = Outer.items.Element { value: 7 }; var outer: Outer = Outer { items: [item] }; return outer.items[1].value; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(7)));
+	}
+
+	#[test]
 	fn runs_anonymous_inline_object_declaration_source_text() {
 		let result = run(
 			"obj Outer { inner: { value: int, }, };\nfn Main(args: [text]) int { var inner: Outer.inner = Outer.inner { value: 7 }; var outer: Outer = Outer { inner: inner }; return outer.inner.value; }"
@@ -1256,6 +1265,15 @@ mod tests {
 	#[test]
 	fn runs_main_entry_point_source_text() {
 		let result = run("fn Main(args: [text]) int { return 7; }").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(7)));
+	}
+
+	#[test]
+	fn runs_named_inline_object_declaration_in_array_field_source_text() {
+		let result = run(
+			"obj Outer { items: [obj Item { value: int, }], };\nfn Main(args: [text]) int { var item: Outer.Item = Outer.Item { value: 7 }; var outer: Outer = Outer { items: [item] }; return outer.items[1].value; }"
+		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(7)));
 	}

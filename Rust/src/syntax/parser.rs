@@ -220,6 +220,20 @@ impl Parser {
 		Some(token)
 	}
 
+	fn object_field_array_element_name(&self, field_name: &str, member_index: usize) -> String {
+		let base = self.object_field_member_name(field_name, member_index);
+		format!("{base}.Element")
+	}
+
+	fn object_field_member_name(&self, field_name: &str, member_index: usize) -> String {
+		if member_index == 0 {
+			String::from(field_name)
+		}
+		else {
+			format!("{field_name}$member{}", member_index + 1)
+		}
+	}
+
 	fn parse_array_literal(&mut self, start: usize) -> Result<Expr, ParseError> {
 		let mut elements = Vec::new();
 
@@ -1136,6 +1150,18 @@ impl Parser {
 		field_position: usize,
 		member_index: usize,
 	) -> Result<(DataType, Vec<ObjectDeclaration>), ParseError> {
+		if self.current().is_some_and(|token| token.kind == TokenKind::LeftBracket) {
+			self.next();
+			let element_field_name = self.object_field_array_element_name(field_name, member_index);
+			let (element_type, nested_objects) = self.parse_object_field_data_type(
+				containing_object_name,
+				&element_field_name,
+				field_position,
+			)?;
+			self.expect_token(TokenKind::RightBracket, "Expected `]` after array element type.")?;
+			return Ok((DataType::Array(Box::new(element_type)), nested_objects));
+		}
+
 		if self.current().is_some_and(|token| token.kind == TokenKind::ObjKeyword) {
 			let object_keyword = self.expect_token(TokenKind::ObjKeyword, "Expected `obj` to start inline object declaration.")?;
 			let object_name = self.expect_token(TokenKind::Identifier, "Expected inline object type name.")?;
@@ -1147,12 +1173,10 @@ impl Parser {
 		}
 
 		if self.current().is_some_and(|token| token.kind == TokenKind::LeftBrace) {
-			let qualified_name = if member_index == 0 {
-				format!("{containing_object_name}.{field_name}")
-			}
-			else {
-				format!("{containing_object_name}.{field_name}$member{}", member_index + 1)
-			};
+			let qualified_name = format!(
+				"{containing_object_name}.{}",
+				self.object_field_member_name(field_name, member_index),
+			);
 
 			return Ok((
 				DataType::Object(qualified_name.clone()),
@@ -1999,6 +2023,46 @@ mod tests {
 						},
 					],
 					name: String::from("Outer.inner"),
+					position: 0,
+				},
+			],
+			result: None,
+			statements: vec![],
+			with_declarations: vec![],
+		});
+	}
+
+	#[test]
+	fn parses_anonymous_inline_object_declaration_in_array_field() {
+		let program = parse_program(
+			"obj Outer { items: [{ value: int, }], };"
+		);
+
+		assert_eq!(normalize_program(program), Program {
+			functions: vec![],
+			objects: vec![
+				ObjectDeclaration {
+					fields: vec![
+						ObjectFieldDeclaration {
+							data_type: DataType::Array(Box::new(DataType::Object(String::from("Outer.items.Element")))),
+							default_value: None,
+							name: String::from("items"),
+							position: 0,
+						},
+					],
+					name: String::from("Outer"),
+					position: 0,
+				},
+				ObjectDeclaration {
+					fields: vec![
+						ObjectFieldDeclaration {
+							data_type: DataType::Int,
+							default_value: None,
+							name: String::from("value"),
+							position: 0,
+						},
+					],
+					name: String::from("Outer.items.Element"),
 					position: 0,
 				},
 			],
@@ -3277,6 +3341,46 @@ mod tests {
 						},
 					],
 					name: String::from("Outer.Inner"),
+					position: 0,
+				},
+			],
+			result: None,
+			statements: vec![],
+			with_declarations: vec![],
+		});
+	}
+
+	#[test]
+	fn parses_named_inline_object_declaration_in_array_field() {
+		let program = parse_program(
+			"obj Outer { items: [obj Item { value: int, }], };"
+		);
+
+		assert_eq!(normalize_program(program), Program {
+			functions: vec![],
+			objects: vec![
+				ObjectDeclaration {
+					fields: vec![
+						ObjectFieldDeclaration {
+							data_type: DataType::Array(Box::new(DataType::Object(String::from("Outer.Item")))),
+							default_value: None,
+							name: String::from("items"),
+							position: 0,
+						},
+					],
+					name: String::from("Outer"),
+					position: 0,
+				},
+				ObjectDeclaration {
+					fields: vec![
+						ObjectFieldDeclaration {
+							data_type: DataType::Int,
+							default_value: None,
+							name: String::from("value"),
+							position: 0,
+						},
+					],
+					name: String::from("Outer.Item"),
 					position: 0,
 				},
 			],
