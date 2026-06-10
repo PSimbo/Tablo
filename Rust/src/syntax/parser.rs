@@ -230,7 +230,7 @@ impl Parser {
 			String::from(field_name)
 		}
 		else {
-			format!("{field_name}$member{}", member_index + 1)
+			format!("{field_name}Member{}", member_index + 1)
 		}
 	}
 
@@ -2063,6 +2063,92 @@ mod tests {
 						},
 					],
 					name: String::from("Outer.items.Element"),
+					position: 0,
+				},
+			],
+			result: None,
+			statements: vec![],
+			with_declarations: vec![],
+		});
+	}
+
+	#[test]
+	fn parses_anonymous_inline_object_declaration_in_union_array_field() {
+		let program = parse_program(
+			"obj Envelope { payloads: text | [{ value: int, }], };"
+		);
+
+		assert_eq!(normalize_program(program), Program {
+			functions: vec![],
+			objects: vec![
+				ObjectDeclaration {
+					fields: vec![
+						ObjectFieldDeclaration {
+							data_type: DataType::Union(vec![
+								DataType::Text,
+								DataType::Array(Box::new(DataType::Object(String::from("Envelope.payloadsMember2.Element")))),
+							]),
+							default_value: None,
+							name: String::from("payloads"),
+							position: 0,
+						},
+					],
+					name: String::from("Envelope"),
+					position: 0,
+				},
+				ObjectDeclaration {
+					fields: vec![
+						ObjectFieldDeclaration {
+							data_type: DataType::Int,
+							default_value: None,
+							name: String::from("value"),
+							position: 0,
+						},
+					],
+					name: String::from("Envelope.payloadsMember2.Element"),
+					position: 0,
+				},
+			],
+			result: None,
+			statements: vec![],
+			with_declarations: vec![],
+		});
+	}
+
+	#[test]
+	fn parses_anonymous_inline_object_declaration_in_union_field() {
+		let program = parse_program(
+			"obj Envelope { payload: text | { value: int, }, };"
+		);
+
+		assert_eq!(normalize_program(program), Program {
+			functions: vec![],
+			objects: vec![
+				ObjectDeclaration {
+					fields: vec![
+						ObjectFieldDeclaration {
+							data_type: DataType::Union(vec![
+								DataType::Text,
+								DataType::Object(String::from("Envelope.payloadMember2")),
+							]),
+							default_value: None,
+							name: String::from("payload"),
+							position: 0,
+						},
+					],
+					name: String::from("Envelope"),
+					position: 0,
+				},
+				ObjectDeclaration {
+					fields: vec![
+						ObjectFieldDeclaration {
+							data_type: DataType::Int,
+							default_value: None,
+							name: String::from("value"),
+							position: 0,
+						},
+					],
+					name: String::from("Envelope.payloadMember2"),
 					position: 0,
 				},
 			],

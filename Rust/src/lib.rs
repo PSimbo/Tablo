@@ -860,12 +860,34 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_anonymous_inline_object_declaration_in_array_field_object_file() {
+		let output_path = unique_test_output_path("runs_anonymous_inline_object_declaration_in_array_field_object_file");
+		compile(
+			"obj Outer { items: [{ value: int, }], };\nfn Main(args: [text]) int { var item: Outer.items.Element = Outer.items.Element { value: 7 }; var outer: Outer = Outer { items: [item] }; return outer.items[1].value; }",
+			&output_path,
+		).unwrap();
+		let result = run_file(&output_path).unwrap();
+		let _ = std::fs::remove_file(&output_path);
+
+		assert_eq!(result, Some(Value::Integer(7)));
+	}
+
+	#[test]
 	fn runs_anonymous_inline_object_declaration_in_array_field_source_text() {
 		let result = run(
 			"obj Outer { items: [{ value: int, }], };\nfn Main(args: [text]) int { var item: Outer.items.Element = Outer.items.Element { value: 7 }; var outer: Outer = Outer { items: [item] }; return outer.items[1].value; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(7)));
+	}
+
+	#[test]
+	fn runs_anonymous_inline_object_declaration_in_union_field_source_text() {
+		let result = run(
+			"obj Envelope { payload: text | { value: int, }, };\nfn Main(args: [text]) int { var payload: Envelope.payloadMember2 = Envelope.payloadMember2 { value: 7 }; var envelope: Envelope = Envelope { payload: payload }; return 0; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(0)));
 	}
 
 	#[test]
@@ -1265,6 +1287,19 @@ mod tests {
 	#[test]
 	fn runs_main_entry_point_source_text() {
 		let result = run("fn Main(args: [text]) int { return 7; }").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(7)));
+	}
+
+	#[test]
+	fn runs_named_inline_object_declaration_in_array_field_object_file() {
+		let output_path = unique_test_output_path("runs_named_inline_object_declaration_in_array_field_object_file");
+		compile(
+			"obj Outer { items: [obj Item { value: int, }], };\nfn Main(args: [text]) int { var item: Outer.Item = Outer.Item { value: 7 }; var outer: Outer = Outer { items: [item] }; return outer.items[1].value; }",
+			&output_path,
+		).unwrap();
+		let result = run_file(&output_path).unwrap();
+		let _ = std::fs::remove_file(&output_path);
 
 		assert_eq!(result, Some(Value::Integer(7)));
 	}
