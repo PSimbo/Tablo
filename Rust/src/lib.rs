@@ -1261,6 +1261,15 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_named_inline_object_declaration_in_union_field_source_text() {
+		let result = run(
+			"obj Envelope { payload: text | obj Payload { value: int, }, };\nfn Main(args: [text]) int { var payload: Envelope.Payload = Envelope.Payload { value: 7 }; var envelope: Envelope = Envelope { payload: payload }; return 0; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(0)));
+	}
+
+	#[test]
 	fn runs_named_inline_object_declaration_source_text() {
 		let result = run(
 			"obj Outer { inner: obj Inner { value: int, }, };\nfn Main(args: [text]) int { var inner: Outer.Inner = Outer.Inner { value: 7 }; var outer: Outer = Outer { inner: inner }; return outer.inner.value; }"
