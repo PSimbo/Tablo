@@ -29,6 +29,7 @@ use crate::ast::IntegerLiteral;
 use crate::ast::ObjectConstructionExpr;
 use crate::ast::ObjectConstructionField;
 use crate::ast::ObjectDeclaration;
+use crate::ast::ObjectDeclarationShape;
 use crate::ast::ObjectFieldAssignmentTarget;
 use crate::ast::ObjectFieldDeclaration;
 use crate::ast::OrderByDirection;
@@ -1070,7 +1071,7 @@ impl Parser {
 	fn parse_object_declaration(&mut self) -> Result<Vec<ObjectDeclaration>, ParseError> {
 		let object_keyword = self.expect_token(TokenKind::ObjKeyword, "Expected `obj` to start object declaration.")?;
 		let name = self.expect_token(TokenKind::Identifier, "Expected object type name.")?;
-		let objects = self.parse_object_shape_declaration(name.lexeme, object_keyword.start)?;
+		let objects = self.parse_root_object_shape_declaration(name.lexeme, object_keyword.start)?;
 		self.expect_token(TokenKind::Semicolon, "Expected `;` after object declaration.")?;
 		Ok(objects)
 	}
@@ -1218,9 +1219,9 @@ impl Parser {
 
 		self.expect_token(TokenKind::RightBrace, "Expected `}` to close object declaration.")?;
 		let mut objects = vec![ObjectDeclaration {
-			fields,
 			name,
 			position,
+			shape: ObjectDeclarationShape::Fields(fields),
 		}];
 		objects.extend(nested_objects);
 		Ok(objects)
@@ -1444,6 +1445,27 @@ impl Parser {
 		}))
 	}
 
+	fn parse_root_object_shape_declaration(
+		&mut self,
+		name: String,
+		position: usize,
+	) -> Result<Vec<ObjectDeclaration>, ParseError> {
+		if self.current().is_some_and(|token| token.kind == TokenKind::LeftBracket) {
+			self.next();
+			let (element_type, nested_objects) = self.parse_object_field_data_type(&name, "Element", position)?;
+			self.expect_token(TokenKind::RightBracket, "Expected `]` to close object array declaration.")?;
+			let mut objects = vec![ObjectDeclaration {
+				name,
+				position,
+				shape: ObjectDeclarationShape::Array(element_type),
+			}];
+			objects.extend(nested_objects);
+			return Ok(objects);
+		}
+
+		self.parse_object_shape_declaration(name, position)
+	}
+
 	fn parse_statement(&mut self) -> Result<Statement, ParseError> {
 		match self.current() {
 			Some(token) if token.kind == TokenKind::BreakKeyword => self.parse_break_statement(),
@@ -1637,6 +1659,7 @@ mod tests {
 	use crate::ast::ObjectConstructionExpr;
 	use crate::ast::ObjectConstructionField;
 	use crate::ast::ObjectDeclaration;
+	use crate::ast::ObjectDeclarationShape;
 	use crate::ast::ObjectFieldAssignmentTarget;
 	use crate::ast::ObjectFieldDeclaration;
 	use crate::ast::OrderByDirection;
@@ -1864,9 +1887,14 @@ mod tests {
 
 	fn normalize_object_declaration(object: ObjectDeclaration) -> ObjectDeclaration {
 		ObjectDeclaration {
-			fields: object.fields.into_iter().map(normalize_object_field_declaration).collect(),
 			name: object.name,
 			position: 0,
+			shape: match object.shape {
+				ObjectDeclarationShape::Array(element_type) => ObjectDeclarationShape::Array(element_type),
+				ObjectDeclarationShape::Fields(fields) => ObjectDeclarationShape::Fields(
+					fields.into_iter().map(normalize_object_field_declaration).collect()
+				),
+			},
 		}
 	}
 
@@ -1996,7 +2024,7 @@ mod tests {
 			functions: vec![],
 			objects: vec![
 				ObjectDeclaration {
-					fields: vec![
+					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
 							data_type: DataType::Object(String::from("Outer.inner")),
 							default_value: None,
@@ -2009,19 +2037,19 @@ mod tests {
 							name: String::from("label"),
 							position: 0,
 						},
-					],
+					]),
 					name: String::from("Outer"),
 					position: 0,
 				},
 				ObjectDeclaration {
-					fields: vec![
+					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
 							data_type: DataType::Int,
 							default_value: None,
 							name: String::from("value"),
 							position: 0,
 						},
-					],
+					]),
 					name: String::from("Outer.inner"),
 					position: 0,
 				},
@@ -2042,26 +2070,26 @@ mod tests {
 			functions: vec![],
 			objects: vec![
 				ObjectDeclaration {
-					fields: vec![
+					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
 							data_type: DataType::Array(Box::new(DataType::Object(String::from("Outer.items.Element")))),
 							default_value: None,
 							name: String::from("items"),
 							position: 0,
 						},
-					],
+					]),
 					name: String::from("Outer"),
 					position: 0,
 				},
 				ObjectDeclaration {
-					fields: vec![
+					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
 							data_type: DataType::Int,
 							default_value: None,
 							name: String::from("value"),
 							position: 0,
 						},
-					],
+					]),
 					name: String::from("Outer.items.Element"),
 					position: 0,
 				},
@@ -2082,7 +2110,7 @@ mod tests {
 			functions: vec![],
 			objects: vec![
 				ObjectDeclaration {
-					fields: vec![
+					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
 							data_type: DataType::Union(vec![
 								DataType::Text,
@@ -2092,19 +2120,19 @@ mod tests {
 							name: String::from("payloads"),
 							position: 0,
 						},
-					],
+					]),
 					name: String::from("Envelope"),
 					position: 0,
 				},
 				ObjectDeclaration {
-					fields: vec![
+					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
 							data_type: DataType::Int,
 							default_value: None,
 							name: String::from("value"),
 							position: 0,
 						},
-					],
+					]),
 					name: String::from("Envelope.payloadsMember2.Element"),
 					position: 0,
 				},
@@ -2125,7 +2153,7 @@ mod tests {
 			functions: vec![],
 			objects: vec![
 				ObjectDeclaration {
-					fields: vec![
+					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
 							data_type: DataType::Union(vec![
 								DataType::Text,
@@ -2135,19 +2163,19 @@ mod tests {
 							name: String::from("payload"),
 							position: 0,
 						},
-					],
+					]),
 					name: String::from("Envelope"),
 					position: 0,
 				},
 				ObjectDeclaration {
-					fields: vec![
+					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
 							data_type: DataType::Int,
 							default_value: None,
 							name: String::from("value"),
 							position: 0,
 						},
-					],
+					]),
 					name: String::from("Envelope.payloadMember2"),
 					position: 0,
 				},
@@ -3400,7 +3428,7 @@ mod tests {
 			functions: vec![],
 			objects: vec![
 				ObjectDeclaration {
-					fields: vec![
+					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
 							data_type: DataType::Object(String::from("Outer.Inner")),
 							default_value: None,
@@ -3413,19 +3441,19 @@ mod tests {
 							name: String::from("label"),
 							position: 0,
 						},
-					],
+					]),
 					name: String::from("Outer"),
 					position: 0,
 				},
 				ObjectDeclaration {
-					fields: vec![
+					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
 							data_type: DataType::Int,
 							default_value: None,
 							name: String::from("value"),
 							position: 0,
 						},
-					],
+					]),
 					name: String::from("Outer.Inner"),
 					position: 0,
 				},
@@ -3446,26 +3474,26 @@ mod tests {
 			functions: vec![],
 			objects: vec![
 				ObjectDeclaration {
-					fields: vec![
+					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
 							data_type: DataType::Array(Box::new(DataType::Object(String::from("Outer.Item")))),
 							default_value: None,
 							name: String::from("items"),
 							position: 0,
 						},
-					],
+					]),
 					name: String::from("Outer"),
 					position: 0,
 				},
 				ObjectDeclaration {
-					fields: vec![
+					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
 							data_type: DataType::Int,
 							default_value: None,
 							name: String::from("value"),
 							position: 0,
 						},
-					],
+					]),
 					name: String::from("Outer.Item"),
 					position: 0,
 				},
@@ -3486,7 +3514,7 @@ mod tests {
 			functions: vec![],
 			objects: vec![
 				ObjectDeclaration {
-					fields: vec![
+					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
 							data_type: DataType::Union(vec![
 								DataType::Text,
@@ -3496,19 +3524,19 @@ mod tests {
 							name: String::from("payload"),
 							position: 0,
 						},
-					],
+					]),
 					name: String::from("Envelope"),
 					position: 0,
 				},
 				ObjectDeclaration {
-					fields: vec![
+					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
 							data_type: DataType::Int,
 							default_value: None,
 							name: String::from("value"),
 							position: 0,
 						},
-					],
+					]),
 					name: String::from("Envelope.Payload"),
 					position: 0,
 				},
@@ -3597,9 +3625,9 @@ mod tests {
 			Program {
 				functions: vec![],
 				objects: vec![
-					ObjectDeclaration {
-						fields: vec![
-							ObjectFieldDeclaration {
+				ObjectDeclaration {
+					shape: ObjectDeclarationShape::Fields(vec![
+						ObjectFieldDeclaration {
 								data_type: DataType::Text,
 								default_value: Some(Expr::Text(TextLiteral {
 									position: 0,
@@ -3614,10 +3642,10 @@ mod tests {
 								name: String::from("age"),
 								position: 0,
 							},
-						],
-						name: String::from("Person"),
-						position: 0,
-					},
+					]),
+					name: String::from("Person"),
+					position: 0,
+				},
 				],
 				result: Some(Expr::FieldAccess(FieldAccessExpr {
 					field: IdentifierExpr {
@@ -3880,6 +3908,70 @@ mod tests {
 					value: 4,
 				})),
 			})
+		);
+	}
+
+	#[test]
+	fn parses_root_array_shaped_object_declaration_with_anonymous_element_object() {
+		assert_eq!(
+			parse_program("obj CustomerCollection [{ name: text, }];"),
+			Program {
+				functions: vec![],
+				objects: vec![
+					ObjectDeclaration {
+						name: String::from("CustomerCollection"),
+						position: 0,
+						shape: ObjectDeclarationShape::Array(DataType::Object(String::from("CustomerCollection.Element"))),
+					},
+					ObjectDeclaration {
+						name: String::from("CustomerCollection.Element"),
+						position: 0,
+						shape: ObjectDeclarationShape::Fields(vec![
+							ObjectFieldDeclaration {
+								data_type: DataType::Text,
+								default_value: None,
+								name: String::from("name"),
+								position: 0,
+							},
+						]),
+					},
+				],
+				result: None,
+				statements: vec![],
+				with_declarations: vec![],
+			}
+		);
+	}
+
+	#[test]
+	fn parses_root_array_shaped_object_declaration_with_named_element_object() {
+		assert_eq!(
+			parse_program("obj CustomerCollection [obj Customer { name: text, }];"),
+			Program {
+				functions: vec![],
+				objects: vec![
+					ObjectDeclaration {
+						name: String::from("CustomerCollection"),
+						position: 0,
+						shape: ObjectDeclarationShape::Array(DataType::Object(String::from("CustomerCollection.Customer"))),
+					},
+					ObjectDeclaration {
+						name: String::from("CustomerCollection.Customer"),
+						position: 0,
+						shape: ObjectDeclarationShape::Fields(vec![
+							ObjectFieldDeclaration {
+								data_type: DataType::Text,
+								default_value: None,
+								name: String::from("name"),
+								position: 0,
+							},
+						]),
+					},
+				],
+				result: None,
+				statements: vec![],
+				with_declarations: vec![],
+			}
 		);
 	}
 
@@ -4194,14 +4286,14 @@ mod tests {
 				],
 				objects: vec![
 					ObjectDeclaration {
-						fields: vec![
+						shape: ObjectDeclarationShape::Fields(vec![
 							ObjectFieldDeclaration {
 								data_type: DataType::Text,
 								default_value: None,
 								name: String::from("name"),
 								position: 0,
 							},
-						],
+						]),
 						name: String::from("Person"),
 						position: 0,
 					},

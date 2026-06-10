@@ -1478,6 +1478,37 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_root_array_shaped_object_declaration_with_anonymous_element_source_text() {
+		let result = run(
+			"obj CustomerCollection [{ name: text, }];\nfn Main(args: [text]) int { var customers: CustomerCollection = [CustomerCollection.Element { name: 'Alice' }]; if customers[1].name == 'Alice' { return 1; } return 0; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn runs_root_array_shaped_object_declaration_with_named_element_object_file() {
+		let output_path = unique_test_output_path("runs_root_array_shaped_object_declaration_with_named_element_object_file");
+		compile(
+			"obj CustomerCollection [obj Customer { name: text, }];\nfn Main(args: [text]) int { var customers: CustomerCollection = [CustomerCollection.Customer { name: 'Alice' }]; if customers[1].name == 'Alice' { return 1; } return 0; }",
+			&output_path,
+		).unwrap();
+		let result = run_file(&output_path).unwrap();
+		let _ = std::fs::remove_file(&output_path);
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn runs_root_array_shaped_object_declaration_with_named_element_source_text() {
+		let result = run(
+			"obj CustomerCollection [obj Customer { name: text, }];\nfn Main(args: [text]) int { var customers: CustomerCollection = [CustomerCollection.Customer { name: 'Alice' }]; if customers[1].name == 'Alice' { return 1; } return 0; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
 	fn runs_source_text() {
 		let result = run(standalone_expression("1 + 2 + 3")).unwrap();
 

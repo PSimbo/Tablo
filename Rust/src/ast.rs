@@ -78,6 +78,12 @@ pub enum FindKind {
 	Last,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ObjectDeclarationShape {
+	Array(DataType),
+	Fields(Vec<ObjectFieldDeclaration>),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OrderByDirection {
 	Ascending,
@@ -279,9 +285,25 @@ pub struct ObjectConstructionField {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectDeclaration {
-	pub fields: Vec<ObjectFieldDeclaration>,
 	pub name: String,
 	pub position: usize,
+	pub shape: ObjectDeclarationShape,
+}
+
+impl ObjectDeclaration {
+	pub fn array_element_type(&self) -> Option<&DataType> {
+		match &self.shape {
+			ObjectDeclarationShape::Array(element_type) => Some(element_type),
+			ObjectDeclarationShape::Fields(_) => None,
+		}
+	}
+
+	pub fn fields(&self) -> Option<&[ObjectFieldDeclaration]> {
+		match &self.shape {
+			ObjectDeclarationShape::Array(_) => None,
+			ObjectDeclarationShape::Fields(fields) => Some(fields.as_slice()),
+		}
+	}
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

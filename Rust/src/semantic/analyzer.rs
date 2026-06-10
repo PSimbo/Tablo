@@ -523,6 +523,16 @@ impl SemanticAnalyzer {
 		self.locals.declare(name, local);
 	}
 
+	fn effective_object_data_type(&self, data_type: &DataType) -> Option<DataType> {
+		let DataType::Object(name) = data_type else {
+			return None;
+		};
+
+		self.semantic_program.object_declaration(name)?
+			.array_element_type()
+			.map(|element_type| DataType::Array(Box::new(element_type.clone())))
+	}
+
 	fn ensure_assignable(&self, target: &DataType, value: &DataType, position: usize) -> Result<(), CompileError> {
 		if self.is_assignable(target, value) {
 			return Ok(());
@@ -892,6 +902,13 @@ impl SemanticAnalyzer {
 
 				match object_type {
 					DataType::Object(name) => {
+						if self.semantic_program.object_declaration(&name).and_then(|object| object.array_element_type()).is_some() {
+							return Err(self.compile_error(
+								field.position,
+								format!("Field access requires an object operand, found `{}`.", self.data_type_name(&DataType::Object(name))),
+							));
+						}
+
 						let field_type = self.lookup_object_field(&name, &field.name)
 							.ok_or(self.compile_error(
 								field.position,
@@ -922,7 +939,10 @@ impl SemanticAnalyzer {
 				Ok(local.data_type)
 			}
 			Expr::Index(IndexExpr { array, index, .. }) => {
-				let array_type = self.infer_expression_type(array)?;
+				let mut array_type = self.infer_expression_type(array)?;
+				if let Some(effective_array_type) = self.effective_object_data_type(&array_type) {
+					array_type = effective_array_type;
+				}
 				let index_type = self.infer_expression_type(index)?;
 
 				match array_type {
@@ -965,10 +985,14 @@ impl SemanticAnalyzer {
 						*position,
 						format!("Object `{object_type_name}` is not declared in this module."),
 					))?;
+				let object_fields = object_declaration.fields().ok_or(self.compile_error(
+					*position,
+					format!("Object `{object_type_name}` uses array syntax and cannot be constructed with named fields."),
+				))?;
 				let mut provided_fields = BTreeMap::new();
 
 				for field in fields {
-					let Some(object_field) = object_declaration.fields.iter().find(|object_field| object_field.name == field.name) else {
+					let Some(object_field) = object_fields.iter().find(|object_field| object_field.name == field.name) else {
 						return Err(self.compile_error(
 							field.position,
 							format!("Object `{object_type_name}` does not contain a field named `{}`.", field.name),
@@ -986,7 +1010,7 @@ impl SemanticAnalyzer {
 					self.ensure_assignable(&object_field.data_type, &value_type, field.value.position())?;
 				}
 
-				for object_field in &object_declaration.fields {
+				for object_field in object_fields {
 					if !provided_fields.contains_key(&object_field.name)
 						&& object_field.default_value.is_none()
 						&& !self.data_type_has_implicit_default(&object_field.data_type)
@@ -1348,6 +1372,14 @@ impl SemanticAnalyzer {
 	}
 
 	fn is_assignable(&self, target: &DataType, value: &DataType) -> bool {
+		if let Some(target_effective) = self.effective_object_data_type(target) {
+			return self.is_assignable(&target_effective, value);
+		}
+
+		if let Some(value_effective) = self.effective_object_data_type(value) {
+			return self.is_assignable(target, &value_effective);
+		}
+
 		if target == &DataType::Any {
 			return true;
 		}
@@ -1389,7 +1421,7 @@ impl SemanticAnalyzer {
 
 	fn lookup_object_field(&self, object_name: &str, field_name: &str) -> Option<&crate::ast::ObjectFieldDeclaration> {
 		self.semantic_program.object_declaration(object_name)?
-			.fields
+			.fields()?
 			.iter()
 			.find(|field| field.name == field_name)
 	}
@@ -2083,26 +2115,37 @@ impl SemanticAnalyzer {
 	}
 
 	fn validate_object_declaration(&mut self, object: &ObjectDeclaration) -> Result<(), CompileError> {
-		let mut field_names = BTreeMap::new();
-
-		for field in &object.fields {
-			if field_names.insert(field.name.clone(), ()).is_some() {
-				return Err(self.compile_error(
-					field.position,
-					format!("Field `{}` is already declared on object `{}`.", field.name, object.name),
-				));
+		match &object.shape {
+			crate::ast::ObjectDeclarationShape::Array(element_type) => {
+				self.validate_non_void_data_type(
+					element_type,
+					object.position,
+					format!("Array-shaped object `{}` cannot have element type `{}`.", object.name, self.data_type_name(element_type)),
+				)?;
 			}
+			crate::ast::ObjectDeclarationShape::Fields(fields) => {
+				let mut field_names = BTreeMap::new();
 
-			self.validate_non_void_data_type(
-				&field.data_type,
-				field.position,
-				format!("Field `{}` cannot have type `{}`.", field.name, self.data_type_name(&field.data_type)),
-			)?;
+				for field in fields {
+					if field_names.insert(field.name.clone(), ()).is_some() {
+						return Err(self.compile_error(
+							field.position,
+							format!("Field `{}` is already declared on object `{}`.", field.name, object.name),
+						));
+					}
 
-			if let Some(default_value) = &field.default_value {
-				self.validate_literal_expression(default_value)?;
-				let default_type = self.infer_expression_type(default_value)?;
-				self.ensure_assignable(&field.data_type, &default_type, default_value.position())?;
+					self.validate_non_void_data_type(
+						&field.data_type,
+						field.position,
+						format!("Field `{}` cannot have type `{}`.", field.name, self.data_type_name(&field.data_type)),
+					)?;
+
+					if let Some(default_value) = &field.default_value {
+						self.validate_literal_expression(default_value)?;
+						let default_type = self.infer_expression_type(default_value)?;
+						self.ensure_assignable(&field.data_type, &default_type, default_value.position())?;
+					}
+				}
 			}
 		}
 

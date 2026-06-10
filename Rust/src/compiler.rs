@@ -365,7 +365,10 @@ impl Compiler {
 				let object_declaration = semantic_program.object_declaration(object_type_name);
 
 				if let Some(object_declaration) = object_declaration {
-					for field in &object_declaration.fields {
+					let object_fields = object_declaration.fields()
+						.unwrap_or_else(|| panic!("Object `{object_type_name}` does not support field-based construction."));
+
+					for field in object_fields {
 						if let Some(provided_field) = fields.iter().find(|provided_field| provided_field.name == field.name) {
 							self.compile_into(&provided_field.value, semantic_program, emission);
 						}
@@ -379,7 +382,7 @@ impl Compiler {
 
 					self.emit(
 						emission,
-						Instruction::MakeObject(object_declaration.fields.iter().map(|field| field.name.clone()).collect()),
+						Instruction::MakeObject(object_fields.iter().map(|field| field.name.clone()).collect()),
 						expression.position(),
 					);
 				}
@@ -834,21 +837,29 @@ impl Compiler {
 			crate::ast::DataType::Object(name) => {
 				let object_declaration = semantic_program.object_declaration(name)
 					.unwrap_or_else(|| panic!("Missing object declaration for `{name}`."));
-
-				for field in &object_declaration.fields {
-					if let Some(default_value) = &field.default_value {
-						self.compile_into(default_value, semantic_program, emission);
-					}
-					else {
-						self.emit_default_value(&field.data_type, semantic_program, emission, position);
-					}
+				if let Some(element_type) = object_declaration.array_element_type() {
+					let _ = element_type;
+					self.emit(emission, Instruction::MakeArray(0), position);
 				}
+				else {
+					let object_fields = object_declaration.fields()
+						.unwrap_or_else(|| panic!("Missing fields for object `{name}`."));
 
-				self.emit(
-					emission,
-					Instruction::MakeObject(object_declaration.fields.iter().map(|field| field.name.clone()).collect()),
-					position,
-				);
+					for field in object_fields {
+						if let Some(default_value) = &field.default_value {
+							self.compile_into(default_value, semantic_program, emission);
+						}
+						else {
+							self.emit_default_value(&field.data_type, semantic_program, emission, position);
+						}
+					}
+
+					self.emit(
+						emission,
+						Instruction::MakeObject(object_fields.iter().map(|field| field.name.clone()).collect()),
+						position,
+					);
+				}
 			}
 			crate::ast::DataType::Text => {
 				self.emit(emission, Instruction::PushText(String::new()), position);
