@@ -570,6 +570,10 @@ impl VirtualMachine {
 				self.stack.push(Value::Boolean(*value));
 				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::PushCurrentDate => {
+				self.stack.push(Value::Date(crate::value::Date::current_local()));
+				Ok(ExecutionOutcome::Continue(None))
+			}
 			Instruction::PushDate(value) => {
 				self.stack.push(Value::Date(*value));
 				Ok(ExecutionOutcome::Continue(None))

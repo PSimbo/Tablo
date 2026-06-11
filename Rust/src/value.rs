@@ -114,6 +114,18 @@ pub struct Date {
 }
 
 impl Date {
+	pub fn current_local() -> Self {
+		let now = time::OffsetDateTime::now_local()
+			.unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+		let date = now.date();
+
+		Self {
+			day: date.day(),
+			month: date.month() as u8,
+			year: date.year(),
+		}
+	}
+
 	pub fn from_literal(literal: &str) -> Result<Self, String> {
 		let value = literal.strip_prefix('@').ok_or(String::from("Date literals must begin with `@`."))?;
 		let mut parts = value.split('-');

@@ -46,6 +46,7 @@ const OPCODE_MODULO: u8 = 16;
 const OPCODE_MULTIPLY: u8 = 17;
 const OPCODE_PUSH_BOOLEAN: u8 = 18;
 const OPCODE_PUSH_DATE: u8 = 46;
+const OPCODE_PUSH_CURRENT_DATE: u8 = 47;
 const OPCODE_PUSH_DECIMAL: u8 = 19;
 const OPCODE_PUSH_INTEGER: u8 = 20;
 const OPCODE_STORE_LOCAL: u8 = 21;
@@ -412,6 +413,7 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_OR => Ok(Instruction::Or),
 			OPCODE_POP => Ok(Instruction::Pop),
 			OPCODE_PUSH_BOOLEAN => Ok(Instruction::PushBoolean(self.read_bool()?)),
+			OPCODE_PUSH_CURRENT_DATE => Ok(Instruction::PushCurrentDate),
 			OPCODE_PUSH_DATE => Ok(Instruction::PushDate(crate::value::Date::from_parts(
 				self.read_i32()?,
 				self.read_u8()?,
@@ -733,6 +735,7 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.push(OPCODE_PUSH_BOOLEAN);
 			bytes.push(u8::from(*value));
 		}
+		Instruction::PushCurrentDate => bytes.push(OPCODE_PUSH_CURRENT_DATE),
 		Instruction::PushDate(value) => {
 			bytes.push(OPCODE_PUSH_DATE);
 			bytes.extend_from_slice(&value.year.to_le_bytes());
@@ -1044,6 +1047,18 @@ mod tests {
 	fn round_trips_boolean_program_bytes() {
 		let program = Program::new(vec![
 			Instruction::PushBoolean(true),
+		]);
+
+		let bytes = write_program(&program);
+		let decoded = read_program(&bytes).unwrap();
+
+		assert_eq!(decoded, program);
+	}
+
+	#[test]
+	fn round_trips_current_date_program_bytes() {
+		let program = Program::new(vec![
+			Instruction::PushCurrentDate,
 		]);
 
 		let bytes = write_program(&program);

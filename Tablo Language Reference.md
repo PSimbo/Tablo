@@ -474,7 +474,7 @@ With one notable exception, no automatic conversions occur when passing argument
 Variables
 ---------
 
-The `var` keyword is used to declare a new variable. At present, the data type must be specified. Optionally, an initial value may be assigned. If no initial value is assigned, the variable contains a null value.
+The `var` keyword is used to declare a new variable. At present, the data type must be specified. Optionally, an initial value may be assigned. If no initial value is assigned, a nullable variable contains `null`.
 
 Alternatively, the `const` keyword may be used to declare a new constant. Unlike variables declared with `var`, the value of a constant may not be modified.
 
@@ -483,12 +483,14 @@ var boolean: bool; // Initial value is `null`.
 const integer: int = 5;
 ~~~
 
-A variable may be declared as non-nullable by adding a `!` after the type name. In this case, if no initial value is assigned, the variable contains a non-null default value.
+A variable may be declared as non-nullable by adding a `!` after the type name. In this case, if no initial value is assigned, the variable contains the non-null default value for its data type rather than `null`.
 
 ~~~
 var decimal: dec!; // Initial value is 0.0.
 var string: text!; // Initial value is '';
 ~~~
+
+For example, `var d: date;` defaults to `null`, whereas `var d: date!;` defaults to the current local date.
 
 The `any` type may not currently be marked as non-nullable. Its default value is always `null`.
 

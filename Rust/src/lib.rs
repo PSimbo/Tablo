@@ -359,6 +359,15 @@ mod tests {
 	}
 
 	#[test]
+	fn defaults_omitted_nullable_date_field_to_null() {
+		let result = evaluate_snippet(
+			"obj Example { when: date, };\nvar example: Example = Example { };\nexample.when"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Null));
+	}
+
+	#[test]
 	fn formats_array_index_type_error_with_line_and_column() {
 		let source = standalone_body("var xs: [int] = [1, 2];\nreturn xs['1'];");
 		let error = run(&source).unwrap_err();
@@ -1384,20 +1393,34 @@ mod tests {
 
 	#[test]
 	fn runs_nested_object_default_construction_source_text() {
+		let result = evaluate_snippet(
+			"obj Address { line1: text = 'Unknown', };\nobj Person { name: text = '', address: Address, };\nvar person: Person = Person { name: 'Alice' };\nperson.address"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Null));
+	}
+
+	#[test]
+	fn runs_nested_object_field_assignment_source_text() {
 		let result = run(
-			"obj Address { line1: text = 'Unknown', };\nobj Person { name: text = '', address: Address, };\nfn Main(args: [text]) int { var person: Person = Person { name: 'Alice' }; if person.address.line1 == 'Unknown' { return 1; } return 0; }"
+			"obj Address { line1: text = 'Unknown', };\nobj Person { name: text = '', address: Address, };\nfn Main(args: [text]) int { var person: Person = Person { name: 'Alice', address: Address { } }; person.address.line1 = 'Updated'; if person.address.line1 == 'Updated' { return 1; } return 0; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
 	}
 
 	#[test]
-	fn runs_nested_object_field_assignment_source_text() {
-		let result = run(
-			"obj Address { line1: text = 'Unknown', };\nobj Person { name: text = '', address: Address, };\nfn Main(args: [text]) int { var person: Person = Person { name: 'Alice' }; person.address.line1 = 'Updated'; if person.address.line1 == 'Updated' { return 1; } return 0; }"
-		).unwrap();
+	fn runs_nullable_array_variable_without_initializer_as_null() {
+		let result = evaluate_snippet("var values: [int];\nvalues").unwrap();
 
-		assert_eq!(result, Some(Value::Integer(1)));
+		assert_eq!(result, Some(Value::Null));
+	}
+
+	#[test]
+	fn runs_nullable_variable_without_initializer_as_null() {
+		let result = evaluate_snippet("var value: int;\nvalue").unwrap();
+
+		assert_eq!(result, Some(Value::Null));
 	}
 
 	#[test]
@@ -1465,11 +1488,11 @@ mod tests {
 
 	#[test]
 	fn runs_object_with_implicit_any_field_defaulting_to_null() {
-		let result = run(
-			"obj Envelope { payload: any, };\nfn Main(args: [text]) int { var env: Envelope = Envelope { }; var payload: any = env.payload; return 1; }"
+		let result = evaluate_snippet(
+			"obj Envelope { payload: any, };\nvar env: Envelope = Envelope { };\nenv.payload"
 		).unwrap();
 
-		assert_eq!(result, Some(Value::Integer(1)));
+		assert_eq!(result, Some(Value::Null));
 	}
 
 	#[test]

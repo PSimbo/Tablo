@@ -52,6 +52,7 @@ pub enum Instruction {
 	Or,
 	Pop,
 	PushBoolean(bool),
+	PushCurrentDate,
 	PushDate(crate::value::Date),
 	PushDecimal(Decimal),
 	PushInteger(i64),

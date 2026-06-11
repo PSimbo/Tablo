@@ -495,8 +495,19 @@ impl SemanticAnalyzer {
 
 	fn data_type_has_implicit_default(&self, data_type: &DataType) -> bool {
 		match data_type {
-			DataType::Any | DataType::Array(_) | DataType::Bool | DataType::Dec | DataType::Int | DataType::Object(_) | DataType::Text => true,
-			DataType::Date | DataType::EmptyArray | DataType::Range(_) | DataType::RecordPointer(_) | DataType::Union(_) | DataType::Void => false,
+			DataType::Any
+			| DataType::Array(_)
+			| DataType::Bool
+			| DataType::Date
+			| DataType::Dec
+			| DataType::Int
+			| DataType::Object(_)
+			| DataType::Text
+			| DataType::Union(_) => true,
+			DataType::EmptyArray
+			| DataType::Range(_)
+			| DataType::RecordPointer(_)
+			| DataType::Void => false,
 		}
 	}
 
@@ -2415,17 +2426,16 @@ impl SemanticAnalyzer {
 					));
 				}
 
-				let initial_value = initial_value.as_ref().ok_or(self.compile_error(
-					*position,
-					if *is_const {
-						format!("Constant `{name}` must currently have an initializer.")
-					}
-					else {
-						format!("Variable `{name}` must currently have an initializer.")
-					},
-				))?;
-				let initial_type = self.infer_expression_type(initial_value)?;
-				self.ensure_assignable(data_type, &initial_type, initial_value.position())?;
+				if let Some(initial_value) = initial_value.as_ref() {
+					let initial_type = self.infer_expression_type(initial_value)?;
+					self.ensure_assignable(data_type, &initial_type, initial_value.position())?;
+				}
+				else if *is_const {
+					return Err(self.compile_error(
+						*position,
+						format!("Constant `{name}` must currently have an initializer."),
+					));
+				}
 
 				let slot = self.next_local_slot;
 				self.next_local_slot += 1;
