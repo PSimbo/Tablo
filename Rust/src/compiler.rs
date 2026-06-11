@@ -33,6 +33,7 @@ use crate::ast::WhileStatement;
 use crate::bytecode::CodeBody;
 use crate::bytecode::CodeBodyDebugInfo;
 use crate::bytecode::CompiledFunction;
+use crate::bytecode::Constant;
 use crate::bytecode::DebugInfo;
 use crate::bytecode::Instruction;
 use crate::bytecode::LocalVariableDebugInfo;
@@ -344,7 +345,15 @@ impl Compiler {
 				if let Some(enum_value) = semantic_program.enum_variant_value(expression.position()) {
 					match enum_value {
 						EnumValue::Integer(value) => {
-							self.emit(emission, Instruction::PushInteger(*value), expression.position());
+							let enum_name = match object.as_ref() {
+								Expr::Identifier(identifier) => identifier.name.clone(),
+								_ => panic!("Enum variant access must be rooted at an enum identifier."),
+							};
+							self.emit(emission, Instruction::PushEnumValue {
+								backing_value: Constant::Integer(*value),
+								enum_name,
+								variant_name: field.name.clone(),
+							}, expression.position());
 						}
 					}
 				}
@@ -890,7 +899,11 @@ impl Compiler {
 						.unwrap_or_else(|| panic!("Missing resolved default value for enum `{name}`."));
 
 					match value {
-						EnumValue::Integer(value) => self.emit(emission, Instruction::PushInteger(value), position),
+						EnumValue::Integer(value) => self.emit(emission, Instruction::PushEnumValue {
+							backing_value: Constant::Integer(value),
+							enum_name: name.clone(),
+							variant_name: variant.name.clone(),
+						}, position),
 					}
 				}
 				else {

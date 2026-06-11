@@ -48,6 +48,7 @@ const OPCODE_PUSH_BOOLEAN: u8 = 18;
 const OPCODE_PUSH_DATE: u8 = 46;
 const OPCODE_PUSH_CURRENT_DATE: u8 = 47;
 const OPCODE_PUSH_DECIMAL: u8 = 19;
+const OPCODE_PUSH_ENUM_VALUE: u8 = 48;
 const OPCODE_PUSH_INTEGER: u8 = 20;
 const OPCODE_STORE_LOCAL: u8 = 21;
 const OPCODE_SUBTRACT: u8 = 22;
@@ -209,6 +210,20 @@ impl<'a> ObjectFileReader<'a> {
 		}
 
 		Ok(CodeBody::new(instructions))
+	}
+
+	fn read_constant_value(&mut self) -> Result<crate::bytecode::Constant, ObjectFileError> {
+		let tag_offset = self.offset;
+		match self.read_u8()? {
+			1 => Ok(crate::bytecode::Constant::Boolean(self.read_bool()?)),
+			2 => Ok(crate::bytecode::Constant::Decimal(self.read_decimal()?)),
+			3 => Ok(crate::bytecode::Constant::Integer(self.read_i64()?)),
+			4 => Ok(crate::bytecode::Constant::Text(self.read_string()?)),
+			tag => Err(ObjectFileError {
+				offset: tag_offset,
+				message: format!("Unknown inline constant tag {tag}."),
+			}),
+		}
 	}
 
 	fn read_data_type(&mut self) -> Result<DataType, ObjectFileError> {
@@ -424,6 +439,11 @@ impl<'a> ObjectFileReader<'a> {
 				message,
 			})?)),
 			OPCODE_PUSH_DECIMAL => Ok(Instruction::PushDecimal(self.read_decimal()?)),
+			OPCODE_PUSH_ENUM_VALUE => Ok(Instruction::PushEnumValue {
+				backing_value: self.read_constant_value()?,
+				enum_name: self.read_string()?,
+				variant_name: self.read_string()?,
+			}),
 			OPCODE_PUSH_INTEGER => Ok(Instruction::PushInteger(self.read_i64()?)),
 			OPCODE_PUSH_NULL => Ok(Instruction::PushNull),
 			OPCODE_PUSH_TEXT => Ok(Instruction::PushText(self.read_string()?)),
@@ -753,6 +773,18 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.push(value.precision);
 			bytes.push(value.scale);
 		}
+		Instruction::PushEnumValue {
+			backing_value,
+			enum_name,
+			variant_name,
+		} => {
+			bytes.push(OPCODE_PUSH_ENUM_VALUE);
+			write_inline_constant(bytes, backing_value);
+			bytes.extend_from_slice(&(enum_name.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(enum_name.as_bytes());
+			bytes.extend_from_slice(&(variant_name.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(variant_name.as_bytes());
+		}
 		Instruction::PushInteger(value) => {
 			bytes.push(OPCODE_PUSH_INTEGER);
 			bytes.extend_from_slice(&value.to_le_bytes());
@@ -781,6 +813,30 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 		}
 		Instruction::Subtract => bytes.push(OPCODE_SUBTRACT),
 		Instruction::Xor => bytes.push(OPCODE_XOR),
+	}
+}
+
+fn write_inline_constant(bytes: &mut Vec<u8>, constant: &crate::bytecode::Constant) {
+	match constant {
+		crate::bytecode::Constant::Boolean(value) => {
+			bytes.push(1);
+			bytes.push(u8::from(*value));
+		}
+		crate::bytecode::Constant::Decimal(value) => {
+			bytes.push(2);
+			bytes.extend_from_slice(&value.coefficient.to_le_bytes());
+			bytes.push(value.precision);
+			bytes.push(value.scale);
+		}
+		crate::bytecode::Constant::Integer(value) => {
+			bytes.push(3);
+			bytes.extend_from_slice(&value.to_le_bytes());
+		}
+		crate::bytecode::Constant::Text(value) => {
+			bytes.push(4);
+			bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(value.as_bytes());
+		}
 	}
 }
 

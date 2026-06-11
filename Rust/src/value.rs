@@ -36,6 +36,7 @@ pub enum Value {
 	Date(Date),
 	Decimal(Decimal),
 	DecimalRange(DecimalRange),
+	Enum(EnumValue),
 	Integer(i64),
 	IntegerRange(IntegerRange),
 	Iterator(IteratorState),
@@ -66,6 +67,7 @@ impl Display for Value {
 			Value::Date(value) => write!(f, "{value}"),
 			Value::Decimal(value) => write!(f, "{value}"),
 			Value::DecimalRange(range) => write!(f, "{range}"),
+			Value::Enum(value) => write!(f, "{}", value.variant_name),
 			Value::Integer(value) => write!(f, "{value}"),
 			Value::IntegerRange(range) => write!(f, "{range}"),
 			Value::Iterator(_) => write!(f, "<iterator>"),
@@ -396,6 +398,13 @@ pub struct DecimalRangeIterator {
 	pub end: Decimal,
 	pub next_value: Option<Decimal>,
 	pub step: Decimal,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnumValue {
+	pub backing_value: Box<Value>,
+	pub enum_name: String,
+	pub variant_name: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

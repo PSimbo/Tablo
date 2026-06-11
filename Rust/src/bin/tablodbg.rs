@@ -627,6 +627,7 @@ fn variable_type_name(value: &Value) -> &'static str {
 		Value::Date(_) => "date",
 		Value::Decimal(_) => "dec",
 		Value::DecimalRange(_) => "range",
+		Value::Enum(_) => "enum",
 		Value::Integer(_) => "int",
 		Value::IntegerRange(_) => "range",
 		Value::Iterator(_) => "iterator",

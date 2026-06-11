@@ -1990,6 +1990,15 @@ mod tests {
 		assert_eq!(result, Some(Value::Integer(3)));
 	}
 
+	#[test]
+	fn stringifies_enum_value_as_variant_name() {
+		let result = run(
+			"enum Color { Red, Green: 3, Blue }\nfn Main(args: [text]) int { var color: Color; color = Color.Blue; var message: text = 'Selected: ${ color }'; if message == 'Selected: Blue' { return 1; } return 0; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
 	fn unique_test_output_path(test_name: &str) -> PathBuf {
 		let mut path = std::env::temp_dir();
 		let process_id = std::process::id();

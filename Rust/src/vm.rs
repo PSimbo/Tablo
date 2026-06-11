@@ -20,6 +20,7 @@ use crate::value::Decimal;
 use crate::value::DecimalRange;
 use crate::value::DecimalRangeIterator;
 use crate::value::DeferredSqliteValue;
+use crate::value::EnumValue as RuntimeEnumValue;
 use crate::value::IntegerRange;
 use crate::value::IntegerRangeIterator;
 use crate::value::IteratorState;
@@ -582,6 +583,18 @@ impl VirtualMachine {
 				self.stack.push(Value::Decimal(value.clone()));
 				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::PushEnumValue {
+				backing_value,
+				enum_name,
+				variant_name,
+			} => {
+				self.stack.push(Value::Enum(RuntimeEnumValue {
+					backing_value: Box::new(runtime_value_from_constant(backing_value)),
+					enum_name: enum_name.clone(),
+					variant_name: variant_name.clone(),
+				}));
+				Ok(ExecutionOutcome::Continue(None))
+			}
 			Instruction::PushInteger(value) => {
 				self.stack.push(Value::Integer(*value));
 				Ok(ExecutionOutcome::Continue(None))
@@ -833,7 +846,7 @@ impl VirtualMachine {
 	fn pop_numeric(&mut self, instruction_index: usize) -> Result<Value, VmError> {
 		let value = self.pop_value(instruction_index)?;
 
-		if matches!(value, Value::Array(_) | Value::Boolean(_) | Value::Date(_) | Value::DecimalRange(_) | Value::IntegerRange(_) | Value::Iterator(_) | Value::Null | Value::Object(_) | Value::Reference(_) | Value::Text(_)) {
+		if matches!(value, Value::Array(_) | Value::Boolean(_) | Value::Date(_) | Value::DecimalRange(_) | Value::Enum(_) | Value::IntegerRange(_) | Value::Iterator(_) | Value::Null | Value::Object(_) | Value::Reference(_) | Value::Text(_)) {
 			return Err(VmError {
 				instruction_index,
 				message: format!("Expected a numeric operand, found a {} value.", type_name(&value)),
@@ -1098,6 +1111,13 @@ fn compare_decimals(lhs: &Decimal, rhs: &Decimal, instruction_index: usize) -> R
 }
 
 fn compare_values(lhs: Value, rhs: Value, instruction_index: usize, kind: ComparisonKind) -> Result<Value, VmError> {
+	if matches!(lhs, Value::Enum(_)) || matches!(rhs, Value::Enum(_)) {
+		return Err(vm_error(
+			instruction_index,
+			format!("Cannot compare `{}` and `{}` for ordering.", type_name(&lhs), type_name(&rhs)),
+		));
+	}
+
 	if let (Value::Date(lhs), Value::Date(rhs)) = (&lhs, &rhs) {
 		let ordering = lhs.cmp(rhs);
 		let value = match kind {
@@ -1176,10 +1196,19 @@ fn equals_value(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Valu
 		(Value::Array(lhs), Value::Array(rhs)) => lhs == rhs,
 		(Value::Boolean(lhs), Value::Boolean(rhs)) => lhs == rhs,
 		(Value::Date(lhs), Value::Date(rhs)) => lhs == rhs,
+		(Value::Enum(lhs), Value::Enum(rhs)) => {
+			lhs.enum_name == rhs.enum_name && equals_value(*lhs.backing_value, *rhs.backing_value, instruction_index)? == Value::Boolean(true)
+		}
 		(Value::Null, Value::Null) => true,
 		(Value::Object(lhs), Value::Object(rhs)) => lhs == rhs,
 		(Value::RecordPointer(lhs), Value::RecordPointer(rhs)) => lhs == rhs,
 		(Value::Text(lhs), Value::Text(rhs)) => lhs == rhs,
+		(lhs @ Value::Enum(_), rhs) | (lhs, rhs @ Value::Enum(_)) => {
+			return Err(vm_error(
+				instruction_index,
+				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
+			));
+		}
 		(lhs @ Value::Iterator(_), rhs) | (lhs, rhs @ Value::Iterator(_)) => {
 			return Err(vm_error(
 				instruction_index,
@@ -1578,6 +1607,7 @@ fn negate_value(value: Value) -> Value {
 			Value::Decimal(decimal)
 		}
 		Value::DecimalRange(_) => unreachable!("Range values are rejected before numeric negation."),
+		Value::Enum(_) => unreachable!("Enum values are rejected before numeric negation."),
 		Value::Integer(integer) => Value::Integer(integer.saturating_neg()),
 		Value::IntegerRange(_) => unreachable!("Range values are rejected before numeric negation."),
 		Value::Iterator(_) => unreachable!("Iterator values are rejected before numeric negation."),
@@ -1614,6 +1644,15 @@ fn pow10_i128(exponent: u32) -> Result<i128, String> {
 	}
 
 	Ok(value)
+}
+
+fn runtime_value_from_constant(constant: &crate::bytecode::Constant) -> Value {
+	match constant {
+		crate::bytecode::Constant::Boolean(value) => Value::Boolean(*value),
+		crate::bytecode::Constant::Decimal(value) => Value::Decimal(value.clone()),
+		crate::bytecode::Constant::Integer(value) => Value::Integer(*value),
+		crate::bytecode::Constant::Text(value) => Value::Text(value.clone()),
+	}
 }
 
 fn resolve_record_field_value(field: &RecordFieldValue, instruction_index: usize) -> Result<Value, VmError> {
@@ -1766,6 +1805,7 @@ fn stringify_value(value: &Value) -> String {
 		Value::Date(value) => value.to_string(),
 		Value::Decimal(value) => value.to_string(),
 		Value::DecimalRange(value) => value.to_string(),
+		Value::Enum(value) => value.variant_name.clone(),
 		Value::Integer(value) => value.to_string(),
 		Value::IntegerRange(value) => value.to_string(),
 		Value::Iterator(_) => String::from("<iterator>"),
@@ -1819,6 +1859,7 @@ fn type_name(value: &Value) -> &'static str {
 		Value::Date(_) => "date",
 		Value::Decimal(_) => "dec",
 		Value::DecimalRange(_) => "range",
+		Value::Enum(_) => "enum",
 		Value::Integer(_) => "int",
 		Value::IntegerRange(_) => "range",
 		Value::Iterator(_) => "iterator",

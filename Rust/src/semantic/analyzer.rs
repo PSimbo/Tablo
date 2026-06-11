@@ -2224,6 +2224,13 @@ impl SemanticAnalyzer {
 			));
 		}
 
+		if binding.backing_type.is_nullable() {
+			return Err(self.compile_error(
+				enum_declaration.position,
+				String::from("Enum backing types must be non-nullable."),
+			));
+		}
+
 		Ok(())
 	}
 

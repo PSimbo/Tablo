@@ -55,6 +55,11 @@ pub enum Instruction {
 	PushCurrentDate,
 	PushDate(crate::value::Date),
 	PushDecimal(Decimal),
+	PushEnumValue {
+		backing_value: Constant,
+		enum_name: String,
+		variant_name: String,
+	},
 	PushInteger(i64),
 	PushNull,
 	PushText(String),
