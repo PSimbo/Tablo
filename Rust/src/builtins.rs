@@ -53,17 +53,28 @@ impl BuiltInFunction {
 	}
 
 	pub fn return_type(self, argument_types: &[DataType]) -> Option<DataType> {
+		fn strip_non_null(data_type: &DataType) -> &DataType {
+			match data_type {
+				DataType::NonNull(inner) => strip_non_null(inner),
+				other => other,
+			}
+		}
+
 		match self {
 			Self::Len => match argument_types {
-				[DataType::Array(_)] | [DataType::EmptyArray] => Some(DataType::Int),
+				[arg] if matches!(strip_non_null(arg), DataType::Array(_) | DataType::EmptyArray) => {
+					Some(DataType::NonNull(Box::new(DataType::Int)))
+				}
 				_ => None,
 			},
 			Self::Disp | Self::Displn => match argument_types {
-				[DataType::Text] => Some(DataType::Void),
+				[arg] if matches!(strip_non_null(arg), DataType::Text) => Some(DataType::Void),
 				_ => None,
 			},
 			Self::Exists | Self::Locked => match argument_types {
-				[DataType::RecordPointer(_)] => Some(DataType::Bool),
+				[arg] if matches!(strip_non_null(arg), DataType::RecordPointer(_)) => {
+					Some(DataType::NonNull(Box::new(DataType::Bool)))
+				}
 				_ => None,
 			},
 		}

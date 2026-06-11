@@ -462,11 +462,11 @@ impl Parser {
 	}
 
 	fn parse_data_type(&mut self) -> Result<DataType, ParseError> {
-		let mut data_types = vec![self.parse_primary_data_type()?];
+		let mut data_types = vec![self.parse_primary_data_type_with_non_null_suffix()?];
 
 		while self.current().is_some_and(|token| token.kind == TokenKind::Pipe) {
 			self.next();
-			let next_type = self.parse_primary_data_type()?;
+			let next_type = self.parse_primary_data_type_with_non_null_suffix()?;
 
 			if !data_types.contains(&next_type) {
 				data_types.push(next_type);
@@ -1164,7 +1164,7 @@ impl Parser {
 		field_position: usize,
 		member_index: usize,
 	) -> Result<(DataType, Vec<ObjectDeclaration>), ParseError> {
-		if self.current().is_some_and(|token| token.kind == TokenKind::LeftBracket) {
+		let (mut data_type, nested_objects) = if self.current().is_some_and(|token| token.kind == TokenKind::LeftBracket) {
 			self.next();
 			let element_field_name = self.object_field_array_element_name(field_name, member_index);
 			let (element_type, nested_objects) = self.parse_object_field_data_type(
@@ -1173,32 +1173,38 @@ impl Parser {
 				field_position,
 			)?;
 			self.expect_token(TokenKind::RightBracket, "Expected `]` after array element type.")?;
-			return Ok((DataType::Array(Box::new(element_type)), nested_objects));
+			(DataType::Array(Box::new(element_type)), nested_objects)
 		}
-
-		if self.current().is_some_and(|token| token.kind == TokenKind::ObjKeyword) {
+		else if self.current().is_some_and(|token| token.kind == TokenKind::ObjKeyword) {
 			let object_keyword = self.expect_token(TokenKind::ObjKeyword, "Expected `obj` to start inline object declaration.")?;
 			let object_name = self.expect_token(TokenKind::Identifier, "Expected inline object type name.")?;
 			let qualified_name = format!("{containing_object_name}.{}", object_name.lexeme);
-			return Ok((
+			(
 				DataType::Object(qualified_name.clone()),
 				self.parse_object_shape_declaration(qualified_name, object_keyword.start)?,
-			));
+			)
 		}
-
-		if self.current().is_some_and(|token| token.kind == TokenKind::LeftBrace) {
+		else if self.current().is_some_and(|token| token.kind == TokenKind::LeftBrace) {
 			let qualified_name = format!(
 				"{containing_object_name}.{}",
 				self.object_field_member_name(field_name, member_index),
 			);
 
-			return Ok((
+			(
 				DataType::Object(qualified_name.clone()),
 				self.parse_object_shape_declaration(qualified_name, field_position)?,
-			));
+			)
+		}
+		else {
+			(self.parse_primary_data_type()?, vec![])
+		};
+
+		if self.current().is_some_and(|token| token.kind == TokenKind::Bang) {
+			self.next();
+			data_type = DataType::NonNull(Box::new(data_type));
 		}
 
-		Ok((self.parse_primary_data_type()?, vec![]))
+		Ok((data_type, nested_objects))
 	}
 
 	fn parse_object_shape_declaration(
@@ -1335,6 +1341,17 @@ impl Parser {
 				position: token.start,
 			}),
 		}
+	}
+
+	fn parse_primary_data_type_with_non_null_suffix(&mut self) -> Result<DataType, ParseError> {
+		let mut data_type = self.parse_primary_data_type()?;
+
+		if self.current().is_some_and(|token| token.kind == TokenKind::Bang) {
+			self.next();
+			data_type = DataType::NonNull(Box::new(data_type));
+		}
+
+		Ok(data_type)
 	}
 
 	fn parse_qualified_identifier_name(&mut self, first: Token) -> Result<String, ParseError> {
@@ -3624,6 +3641,63 @@ mod tests {
 						parameters: vec![],
 						position: 0,
 						return_type: DataType::Void,
+					},
+				],
+				objects: vec![],
+				result: None,
+				statements: vec![],
+				with_declarations: vec![],
+			}
+		);
+	}
+
+	#[test]
+	fn parses_non_null_data_type_in_variable_and_array_positions() {
+		assert_eq!(
+			parse_program("fn Main(args: [text]) int { var value: int!; var values: [text]! = []; return 0; }"),
+			Program {
+				functions: vec![
+					FunctionDeclaration {
+						body: BlockStatement {
+							position: 0,
+							statements: vec![
+								Statement::VariableDeclaration(VariableDeclaration {
+									data_type: DataType::NonNull(Box::new(DataType::Int)),
+									initial_value: None,
+									is_const: false,
+									name: String::from("value"),
+									position: 0,
+								}),
+								Statement::VariableDeclaration(VariableDeclaration {
+									data_type: DataType::NonNull(Box::new(DataType::Array(Box::new(DataType::Text)))),
+									initial_value: Some(Expr::Array(ArrayLiteral {
+										elements: vec![],
+										position: 0,
+									})),
+									is_const: false,
+									name: String::from("values"),
+									position: 0,
+								}),
+								Statement::Return(ReturnStatement {
+									position: 0,
+									value: Some(Expr::Integer(IntegerLiteral {
+										position: 0,
+										value: 0,
+									})),
+								}),
+							],
+						},
+						name: String::from("Main"),
+						parameters: vec![
+							FunctionParameter {
+								data_type: DataType::Array(Box::new(DataType::Text)),
+								is_by_ref: false,
+								name: String::from("args"),
+								position: 0,
+							},
+						],
+						position: 0,
+						return_type: DataType::Int,
 					},
 				],
 				objects: vec![],

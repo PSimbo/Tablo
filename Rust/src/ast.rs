@@ -44,6 +44,7 @@ pub enum DataType {
 	Dec,
 	EmptyArray,
 	Int,
+	NonNull(Box<DataType>),
 	Object(String),
 	Range(Box<DataType>),
 	RecordPointer(RecordPointerType),

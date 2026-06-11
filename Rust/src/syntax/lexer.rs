@@ -217,6 +217,7 @@ impl Lexer {
 					start,
 				}));
 			}
+			'!' => TokenKind::Bang,
 			'=' if self.peek_next_char() == Some('=') => {
 				self.advance_char();
 				self.advance_char();

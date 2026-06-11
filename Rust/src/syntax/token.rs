@@ -5,6 +5,7 @@ pub enum TokenKind {
 	AnyKeyword,
 	AscKeyword,
 	Asterisk,
+	Bang,
 	BangEqual,
 	BoolKeyword,
 	BreakKeyword,

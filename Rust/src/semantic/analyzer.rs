@@ -346,29 +346,33 @@ impl SemanticAnalyzer {
 		rhs: &DataType,
 		position: usize,
 	) -> Result<DataType, CompileError> {
-		match operator {
+		let lhs_non_null = self.is_non_null_type(lhs);
+		let rhs_non_null = self.is_non_null_type(rhs);
+		let lhs = self.strip_non_null(lhs);
+		let rhs = self.strip_non_null(rhs);
+
+		let result = match operator {
 			BinaryOperator::Add => {
 				if lhs == &DataType::Text || rhs == &DataType::Text {
-					return Ok(DataType::Text);
+					Ok(DataType::Text)
 				}
-
-				match (lhs, rhs) {
-					(DataType::Array(lhs_element), DataType::Array(rhs_element)) => {
-						return Ok(DataType::Array(Box::new(
-							self.merge_array_element_types(lhs_element, rhs_element, position)?,
-						)));
+				else {
+					match (lhs, rhs) {
+						(DataType::Array(lhs_element), DataType::Array(rhs_element)) => {
+							Ok(DataType::Array(Box::new(
+								self.merge_array_element_types(lhs_element, rhs_element, position)?,
+							)))
+						}
+						(DataType::Array(element_type), DataType::EmptyArray)
+						| (DataType::EmptyArray, DataType::Array(element_type)) => {
+							Ok(DataType::Array(element_type.clone()))
+						}
+						(DataType::EmptyArray, DataType::EmptyArray) => {
+							Ok(DataType::EmptyArray)
+						}
+						_ => self.numeric_result_type(lhs, rhs, position),
 					}
-					(DataType::Array(element_type), DataType::EmptyArray)
-					| (DataType::EmptyArray, DataType::Array(element_type)) => {
-						return Ok(DataType::Array(element_type.clone()));
-					}
-					(DataType::EmptyArray, DataType::EmptyArray) => {
-						return Ok(DataType::EmptyArray);
-					}
-					_ => {}
 				}
-
-				self.numeric_result_type(lhs, rhs, position)
 			}
 			BinaryOperator::And | BinaryOperator::Or | BinaryOperator::Xor => {
 				self.require_boolean_operands(operator, lhs, rhs, position)?;
@@ -385,7 +389,14 @@ impl SemanticAnalyzer {
 				self.require_ordering_operands(lhs, rhs, position)?;
 				Ok(DataType::Bool)
 			}
+		}?;
+
+		Ok(if lhs_non_null && rhs_non_null && !matches!(result, DataType::EmptyArray) {
+			DataType::NonNull(Box::new(result))
 		}
+		else {
+			result
+		})
 	}
 
 	fn block_guarantees_return(&self, block: &BlockStatement) -> bool {
@@ -504,6 +515,7 @@ impl SemanticAnalyzer {
 			| DataType::Object(_)
 			| DataType::Text
 			| DataType::Union(_) => true,
+			DataType::NonNull(inner) => self.non_null_type_has_implicit_default(inner),
 			DataType::EmptyArray
 			| DataType::Range(_)
 			| DataType::RecordPointer(_)
@@ -520,6 +532,7 @@ impl SemanticAnalyzer {
 			DataType::Dec => String::from("dec"),
 			DataType::EmptyArray => String::from("empty array"),
 			DataType::Int => String::from("int"),
+			DataType::NonNull(inner) => format!("{}!", self.data_type_name(inner)),
 			DataType::Object(name) => name.clone(),
 			DataType::Range(element_type) => format!("range<{}>", self.data_type_name(element_type)),
 			DataType::RecordPointer(_) => String::from("record pointer"),
@@ -537,13 +550,21 @@ impl SemanticAnalyzer {
 	}
 
 	fn effective_object_data_type(&self, data_type: &DataType) -> Option<DataType> {
-		let DataType::Object(name) = data_type else {
-			return None;
-		};
+		match data_type {
+			DataType::Object(name) => self.semantic_program.object_declaration(name)?
+				.array_element_type()
+				.map(|element_type| DataType::Array(Box::new(element_type.clone()))),
+			DataType::NonNull(inner) => {
+				let DataType::Object(name) = inner.as_ref() else {
+					return None;
+				};
 
-		self.semantic_program.object_declaration(name)?
-			.array_element_type()
-			.map(|element_type| DataType::Array(Box::new(element_type.clone())))
+				self.semantic_program.object_declaration(name)?
+					.array_element_type()
+					.map(|element_type| DataType::NonNull(Box::new(DataType::Array(Box::new(element_type.clone())))))
+			}
+			_ => None,
+		}
 	}
 
 	fn ensure_assignable(&self, target: &DataType, value: &DataType, position: usize) -> Result<(), CompileError> {
@@ -582,7 +603,7 @@ impl SemanticAnalyzer {
 		}
 
 		match element_type {
-			Some(element_type) => Ok(DataType::Array(Box::new(element_type))),
+			Some(element_type) => Ok(DataType::NonNull(Box::new(DataType::Array(Box::new(element_type))))),
 			None => Ok(DataType::EmptyArray),
 		}
 	}
@@ -677,7 +698,7 @@ impl SemanticAnalyzer {
 		if let Some(where_clause) = &count.where_clause {
 			let where_type = self.infer_query_expression_type(where_clause, &count.table)?;
 
-			if where_type != DataType::Bool {
+			if self.strip_non_null(&where_type) != &DataType::Bool {
 				return Err(self.compile_error(
 					where_clause.position(),
 					format!("`where` clause must evaluate to `bool`, found `{}`.", self.data_type_name(&where_type)),
@@ -751,14 +772,14 @@ impl SemanticAnalyzer {
 
 						let index_type = self.infer_expression_type(&target.index)?;
 
-						if index_type != DataType::Int {
+						if self.strip_non_null(&index_type) != &DataType::Int {
 							return Err(self.compile_error(
 								target.index.position(),
 								format!("Array index must be of type `int`, found `{}`.", self.data_type_name(&index_type)),
 							));
 						}
 
-						let element_type = match &local.data_type {
+						let element_type = match self.strip_non_null(&local.data_type) {
 							DataType::Array(element_type) => element_type.as_ref(),
 							other => {
 								return Err(self.compile_error(
@@ -826,7 +847,7 @@ impl SemanticAnalyzer {
 				let right_type = self.infer_expression_type(right)?;
 				self.binary_result_type(*operator, &left_type, &right_type, expression.position())
 			}
-			Expr::Boolean(_) => Ok(DataType::Bool),
+			Expr::Boolean(_) => Ok(DataType::NonNull(Box::new(DataType::Bool))),
 			Expr::Call(CallExpr { arguments, callee, .. }) => {
 				if let Some(signature) = self.lookup_function(&callee.name).cloned() {
 					if arguments.len() != signature.parameters.len() {
@@ -909,10 +930,11 @@ impl SemanticAnalyzer {
 				}
 			}
 			Expr::Count(count) => self.infer_count_expression_type(count),
-			Expr::Date(_) => Ok(DataType::Date),
-			Expr::Decimal(_) => Ok(DataType::Dec),
+			Expr::Date(_) => Ok(DataType::NonNull(Box::new(DataType::Date))),
+			Expr::Decimal(_) => Ok(DataType::NonNull(Box::new(DataType::Dec))),
 			Expr::FieldAccess(FieldAccessExpr { field, object, .. }) => {
 				let object_type = self.infer_expression_type(object)?;
+				let object_type = self.strip_non_null(&object_type).clone();
 
 				match object_type {
 					DataType::Object(name) => {
@@ -958,11 +980,13 @@ impl SemanticAnalyzer {
 					array_type = effective_array_type;
 				}
 				let index_type = self.infer_expression_type(index)?;
+				let index_type = self.strip_non_null(&index_type).clone();
+				let array_type = self.strip_non_null(&array_type).clone();
 
 				match array_type {
 					DataType::Array(element_type) => match index_type {
 						DataType::Int => Ok(*element_type),
-						DataType::Range(index_element_type) if *index_element_type == DataType::Int => {
+						DataType::Range(index_element_type) if self.strip_non_null(&index_element_type) == &DataType::Int => {
 							Ok(DataType::Array(element_type))
 						}
 						DataType::Range(index_element_type) => Err(self.compile_error(
@@ -987,7 +1011,7 @@ impl SemanticAnalyzer {
 					)),
 				}
 			}
-			Expr::Integer(_) => Ok(DataType::Int),
+			Expr::Integer(_) => Ok(DataType::NonNull(Box::new(DataType::Int))),
 			Expr::ObjectConstruction(ObjectConstructionExpr {
 				fields,
 				object_type_name,
@@ -1036,7 +1060,7 @@ impl SemanticAnalyzer {
 					}
 				}
 
-				Ok(DataType::Object(object_type_name.clone()))
+				Ok(DataType::NonNull(Box::new(DataType::Object(object_type_name.clone()))))
 			}
 			Expr::Range(RangeExpr { start, step, end, position }) => {
 				let start_type = self.infer_expression_type(start)?;
@@ -1073,16 +1097,23 @@ impl SemanticAnalyzer {
 					self.merge_array_element_types(&start_type, &end_type, *position)?
 				};
 
-				Ok(DataType::Range(Box::new(element_type)))
+				Ok(DataType::NonNull(Box::new(DataType::Range(Box::new(element_type)))))
 			}
-			Expr::Text(_) => Ok(DataType::Text),
+			Expr::Text(_) => Ok(DataType::NonNull(Box::new(DataType::Text))),
 			Expr::Unary(UnaryExpr { operand, operator, .. }) => {
 				let operand_type = self.infer_expression_type(operand)?;
+				let operand_non_null = self.is_non_null_type(&operand_type);
+				let operand_type = self.strip_non_null(&operand_type).clone();
 
 				match operator {
 					UnaryOperator::Negate => {
 						if self.is_numeric_type(&operand_type) {
-							Ok(operand_type)
+							Ok(if operand_non_null {
+								DataType::NonNull(Box::new(operand_type))
+							}
+							else {
+								operand_type
+							})
 						}
 						else {
 							Err(self.compile_error(
@@ -1093,7 +1124,12 @@ impl SemanticAnalyzer {
 					}
 					UnaryOperator::Not => {
 						if operand_type == DataType::Bool {
-							Ok(DataType::Bool)
+							Ok(if operand_non_null {
+								DataType::NonNull(Box::new(DataType::Bool))
+							}
+							else {
+								DataType::Bool
+							})
 						}
 						else {
 							Err(self.compile_error(
@@ -1121,7 +1157,7 @@ impl SemanticAnalyzer {
 		if let Some(where_clause) = &find.where_clause {
 			let where_type = self.infer_query_expression_type(where_clause, &find.table)?;
 
-			if where_type != DataType::Bool {
+			if self.strip_non_null(&where_type) != &DataType::Bool {
 				return Err(self.compile_error(
 					where_clause.position(),
 					format!("`where` clause must evaluate to `bool`, found `{}`.", self.data_type_name(&where_type)),
@@ -1132,7 +1168,7 @@ impl SemanticAnalyzer {
 		for order_by in &find.order_by {
 			let order_type = self.infer_query_expression_type(&order_by.expression, &find.table)?;
 
-			if order_type == DataType::Void {
+			if self.strip_non_null(&order_type) == &DataType::Void {
 				return Err(self.compile_error(
 					order_by.position,
 					String::from("`order by` expressions must produce a runtime value."),
@@ -1267,7 +1303,7 @@ impl SemanticAnalyzer {
 						Ok(operand_type)
 					}
 					UnaryOperator::Not => {
-						if operand_type != DataType::Bool {
+						if self.strip_non_null(&operand_type) != &DataType::Bool {
 							return Err(self.compile_error(
 								operand.position(),
 								format!("Logical `not` requires a `bool` operand, found `{}`.", self.data_type_name(&operand_type)),
@@ -1399,6 +1435,22 @@ impl SemanticAnalyzer {
 			return true;
 		}
 
+		match (target, value) {
+			(DataType::NonNull(target_inner), DataType::NonNull(value_inner)) => {
+				return self.is_assignable(target_inner, value_inner);
+			}
+			(DataType::NonNull(target_inner), DataType::EmptyArray) => {
+				return matches!(target_inner.as_ref(), DataType::Array(_));
+			}
+			(DataType::NonNull(_), _) => {
+				return false;
+			}
+			(_, DataType::NonNull(value_inner)) => {
+				return self.is_assignable(target, value_inner);
+			}
+			_ => {}
+		}
+
 		if target == value || (target == &DataType::Dec && value == &DataType::Int) {
 			return true;
 		}
@@ -1418,12 +1470,16 @@ impl SemanticAnalyzer {
 		}
 	}
 
+	fn is_non_null_type(&self, data_type: &DataType) -> bool {
+		matches!(data_type, DataType::NonNull(_))
+	}
+
 	fn is_numeric_type(&self, data_type: &DataType) -> bool {
-		matches!(data_type, DataType::Dec | DataType::Int)
+		matches!(self.strip_non_null(data_type), DataType::Dec | DataType::Int)
 	}
 
 	fn is_truthy_condition_type(&self, data_type: &DataType) -> bool {
-		matches!(data_type, DataType::Bool | DataType::RecordPointer(_))
+		matches!(self.strip_non_null(data_type), DataType::Bool | DataType::RecordPointer(_))
 	}
 
 	fn lookup_function(&self, name: &str) -> Option<&FunctionSignature> {
@@ -1702,31 +1758,55 @@ impl SemanticAnalyzer {
 	}
 
 	fn merge_array_element_types(&self, lhs: &DataType, rhs: &DataType, position: usize) -> Result<DataType, CompileError> {
-		if lhs == rhs {
-			return Ok(lhs.clone());
-		}
+		let lhs_non_null = self.is_non_null_type(lhs);
+		let rhs_non_null = self.is_non_null_type(rhs);
+		let lhs = self.strip_non_null(lhs);
+		let rhs = self.strip_non_null(rhs);
 
-		if self.is_numeric_type(lhs) && self.is_numeric_type(rhs) {
-			return Ok(if lhs == &DataType::Int && rhs == &DataType::Int {
+		let result = if lhs == rhs {
+			lhs.clone()
+		}
+		else if self.is_numeric_type(lhs) && self.is_numeric_type(rhs) {
+			if lhs == &DataType::Int && rhs == &DataType::Int {
 				DataType::Int
 			}
 			else {
 				DataType::Dec
-			});
+			}
 		}
-
-		if let (DataType::Array(lhs_element), DataType::Array(rhs_element)) = (lhs, rhs) {
-			return Ok(DataType::Array(Box::new(self.merge_array_element_types(lhs_element, rhs_element, position)?)));
+		else if let (DataType::Array(lhs_element), DataType::Array(rhs_element)) = (lhs, rhs) {
+			DataType::Array(Box::new(self.merge_array_element_types(lhs_element, rhs_element, position)?))
 		}
+		else {
+			return Err(self.compile_error(
+				position,
+				format!(
+					"Array literal elements must have compatible types, found `{}` and `{}`.",
+					self.data_type_name(lhs),
+					self.data_type_name(rhs),
+				),
+			));
+		};
 
-		Err(self.compile_error(
-			position,
-			format!(
-				"Array literal elements must have compatible types, found `{}` and `{}`.",
-				self.data_type_name(lhs),
-				self.data_type_name(rhs),
-			),
-		))
+		Ok(if lhs_non_null && rhs_non_null && !matches!(result, DataType::EmptyArray) {
+			DataType::NonNull(Box::new(result))
+		}
+		else {
+			result
+		})
+	}
+
+	fn non_null_type_has_implicit_default(&self, data_type: &DataType) -> bool {
+		matches!(
+			data_type,
+			DataType::Array(_)
+				| DataType::Bool
+				| DataType::Date
+				| DataType::Dec
+				| DataType::Int
+				| DataType::Object(_)
+				| DataType::Text
+		)
 	}
 
 	fn numeric_result_type(&self, lhs: &DataType, rhs: &DataType, position: usize) -> Result<DataType, CompileError> {
@@ -1769,7 +1849,7 @@ impl SemanticAnalyzer {
 	}
 
 	fn require_boolean_operands(&self, operator: BinaryOperator, lhs: &DataType, rhs: &DataType, position: usize) -> Result<(), CompileError> {
-		if lhs == &DataType::Bool && rhs == &DataType::Bool {
+		if self.strip_non_null(lhs) == &DataType::Bool && self.strip_non_null(rhs) == &DataType::Bool {
 			return Ok(());
 		}
 
@@ -1785,6 +1865,9 @@ impl SemanticAnalyzer {
 	}
 
 	fn require_equality_operands(&self, lhs: &DataType, rhs: &DataType, position: usize) -> Result<(), CompileError> {
+		let lhs = self.strip_non_null(lhs);
+		let rhs = self.strip_non_null(rhs);
+
 		if lhs == &DataType::Any || rhs == &DataType::Any {
 			return Err(self.compile_error(
 				position,
@@ -1836,6 +1919,9 @@ impl SemanticAnalyzer {
 	}
 
 	fn require_ordering_operands(&self, lhs: &DataType, rhs: &DataType, position: usize) -> Result<(), CompileError> {
+		let lhs = self.strip_non_null(lhs);
+		let rhs = self.strip_non_null(rhs);
+
 		if (lhs == &DataType::Text && rhs == &DataType::Text)
 			|| (lhs == &DataType::Date && rhs == &DataType::Date)
 			|| (self.is_numeric_type(lhs) && self.is_numeric_type(rhs))
@@ -1975,6 +2061,13 @@ impl SemanticAnalyzer {
 		}
 	}
 
+	fn strip_non_null<'a>(&self, data_type: &'a DataType) -> &'a DataType {
+		match data_type {
+			DataType::NonNull(inner) => self.strip_non_null(inner),
+			other => other,
+		}
+	}
+
 	fn validate_block(&mut self, statements: &[Statement]) -> Result<(), CompileError> {
 		self.enter_scope();
 		self.functions.enter_scope();
@@ -2110,6 +2203,19 @@ impl SemanticAnalyzer {
 		match data_type {
 			DataType::Void | DataType::EmptyArray => Err(self.compile_error(position, message)),
 			DataType::Array(element_type) => self.validate_non_void_data_type(element_type, position, message),
+			DataType::NonNull(inner) => {
+				match inner.as_ref() {
+					DataType::Any => Err(self.compile_error(
+						position,
+						String::from("The `any` type may not currently be marked as non-nullable."),
+					)),
+					DataType::Union(_) => Err(self.compile_error(
+						position,
+						String::from("Non-null union types are not yet supported."),
+					)),
+					_ => self.validate_non_void_data_type(inner, position, message),
+				}
+			}
 			DataType::Union(members) => {
 				for member in members {
 					self.validate_non_void_data_type(member, position, message.clone())?;
@@ -2201,6 +2307,7 @@ impl SemanticAnalyzer {
 			Statement::FunctionDeclaration(function) => self.validate_function_declaration(function),
 			Statement::For(ForStatement { body, iterable, position, variable }) => {
 				let iterable_type = self.infer_expression_type(iterable)?;
+				let iterable_type = self.strip_non_null(&iterable_type).clone();
 				let variable_type = match iterable_type {
 					DataType::Array(element_type) => *element_type,
 					DataType::Range(element_type) => *element_type,
@@ -2278,7 +2385,7 @@ impl SemanticAnalyzer {
 				if let Some(where_clause) = where_clause {
 					let where_type = self.infer_query_expression_type(where_clause, table)?;
 
-					if where_type != DataType::Bool {
+					if self.strip_non_null(&where_type) != &DataType::Bool {
 						return Err(self.compile_error(
 							where_clause.position(),
 							format!("`where` clause must evaluate to `bool`, found `{}`.", self.data_type_name(&where_type)),
@@ -2289,7 +2396,7 @@ impl SemanticAnalyzer {
 				for order_by in order_by {
 					let order_type = self.infer_query_expression_type(&order_by.expression, table)?;
 
-					if order_type == DataType::Void {
+					if self.strip_non_null(&order_type) == &DataType::Void {
 						return Err(self.compile_error(
 							order_by.position,
 							String::from("`order by` expressions must produce a runtime value."),
@@ -2364,7 +2471,7 @@ impl SemanticAnalyzer {
 				}
 
 				let initial_type = self.infer_expression_type(initial_value)?;
-				let DataType::RecordPointer(_) = initial_type else {
+				let DataType::RecordPointer(_) = self.strip_non_null(&initial_type) else {
 					return Err(self.compile_error(
 						initial_value.position(),
 						format!(
@@ -2452,7 +2559,7 @@ impl SemanticAnalyzer {
 			Statement::While(WhileStatement { body, condition, position }) => {
 				let condition_type = self.infer_expression_type(condition)?;
 
-				if condition_type != DataType::Bool {
+				if self.strip_non_null(&condition_type) != &DataType::Bool {
 					return Err(self.compile_error(
 						condition.position().max(*position),
 						format!("`while` condition must be of type `bool`, found `{}`.", self.data_type_name(&condition_type)),
@@ -2678,7 +2785,7 @@ mod tests {
 
 		let data_type = analyzer.infer_expression_type(&expression).unwrap();
 
-		assert_eq!(data_type, DataType::Bool);
+		assert_eq!(data_type, DataType::NonNull(Box::new(DataType::Bool)));
 	}
 
 	#[test]
