@@ -1080,18 +1080,12 @@ impl SemanticAnalyzer {
 			Expr::Text(_) => Ok(DataType::Text),
 			Expr::Unary(UnaryExpr { operand, operator, .. }) => {
 				let operand_type = self.infer_expression_type(operand)?;
-				let operand_non_null = operand_type.is_non_nullable();
 				let operand_type = operand_type.without_nullability().clone();
 
 				match operator {
 					UnaryOperator::Negate => {
 						if self.is_numeric_type(&operand_type) {
-							Ok(if operand_non_null {
-								operand_type
-							}
-							else {
-								operand_type
-							})
+							Ok(operand_type)
 						}
 						else {
 							Err(self.compile_error(
@@ -1102,12 +1096,7 @@ impl SemanticAnalyzer {
 					}
 					UnaryOperator::Not => {
 						if operand_type == DataType::Bool {
-							Ok(if operand_non_null {
-								DataType::Bool
-							}
-							else {
-								DataType::Bool
-							})
+							Ok(DataType::Bool)
 						}
 						else {
 							Err(self.compile_error(

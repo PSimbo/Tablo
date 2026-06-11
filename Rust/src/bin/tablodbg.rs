@@ -1065,10 +1065,9 @@ fn run_debug_loop(program: &Program, session: &mut DebuggerSession<'_>, mut stop
 				continue;
 			}
 			DebugCommand::Locals => {
-				if let Some(paused) = stop.paused_state() {
-					if let Some(frame) = paused.current_frame() {
-						print_locals(frame);
-					}
+				if let Some(paused) = stop.paused_state()
+					&& let Some(frame) = paused.current_frame() {
+					print_locals(frame);
 				}
 				continue;
 			}

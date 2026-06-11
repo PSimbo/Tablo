@@ -327,10 +327,9 @@ impl SchemaCatalog {
 		for database_name in active_databases {
 			let database = self.active_database(active_databases, database_name)?;
 
-			if let Some(schema) = database.schema(schema_name) {
-				if let Some(table) = schema.table(table_name) {
-					matches.push(ResolvedTable { database, schema, table });
-				}
+			if let Some(schema) = database.schema(schema_name)
+				&& let Some(table) = schema.table(table_name) {
+				matches.push(ResolvedTable { database, schema, table });
 			}
 		}
 

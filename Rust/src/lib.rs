@@ -96,10 +96,9 @@ fn format_source_location(location: &bytecode::SourceLocation, include_body_name
 		format!("line {}, column {}", location.line(), location.column())
 	};
 
-	if include_body_name {
-		if let Some(body_name) = location.body_name() {
-			return format!("{body_name} ({position})");
-		}
+	if include_body_name
+		&& let Some(body_name) = location.body_name() {
+		return format!("{body_name} ({position})");
 	}
 
 	position
@@ -169,7 +168,7 @@ pub fn run_file_with_database_config(
 
 pub fn run_program(program: &Program) -> Result<Option<Value>, TabloError> {
 	let mut vm = VirtualMachine::new();
-	vm.run(&program).map_err(TabloError::Runtime)
+	vm.run(program).map_err(TabloError::Runtime)
 }
 
 pub fn run_program_with_database_config(

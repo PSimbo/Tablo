@@ -86,7 +86,7 @@ pub struct CompiledFunction {
 	name: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ConstantPool {
 	entries: Vec<Constant>,
 }
@@ -536,14 +536,6 @@ impl SourceLocation {
 
 	pub fn line(&self) -> u32 {
 		self.line
-	}
-}
-
-impl Default for ConstantPool {
-	fn default() -> Self {
-		Self {
-			entries: Vec::new(),
-		}
 	}
 }
 

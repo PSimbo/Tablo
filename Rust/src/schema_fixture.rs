@@ -268,11 +268,8 @@ impl SchemaTextParser {
 				}
 				false
 			}
-			else if self.consume_keyword("null") {
-				true
-			}
 			else {
-				false
+				self.consume_keyword("null")
 			};
 
 			table.add_column(ColumnSchema::new(column_name, data_type, is_nullable))
@@ -423,7 +420,7 @@ fn tokenize_schema_text(source: &str) -> Vec<SchemaToken> {
 			'-' => {
 				if chars.peek().is_some_and(|(_, next)| *next == '-') {
 					chars.next();
-					while let Some((_, next)) = chars.next() {
+					for (_, next) in chars.by_ref() {
 						if next == '\n' {
 							break;
 						}
@@ -439,7 +436,7 @@ fn tokenize_schema_text(source: &str) -> Vec<SchemaToken> {
 			'/' => {
 				if chars.peek().is_some_and(|(_, next)| *next == '/') {
 					chars.next();
-					while let Some((_, next)) = chars.next() {
+					for (_, next) in chars.by_ref() {
 						if next == '\n' {
 							break;
 						}

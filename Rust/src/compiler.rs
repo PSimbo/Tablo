@@ -935,7 +935,7 @@ impl Compiler {
 	}
 }
 
-fn collect_all_function_declarations<'a>(program: &'a AstProgram) -> Vec<&'a FunctionDeclaration> {
+fn collect_all_function_declarations(program: &AstProgram) -> Vec<&FunctionDeclaration> {
 	let mut functions = Vec::new();
 
 	for function in &program.functions {

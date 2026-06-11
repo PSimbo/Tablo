@@ -93,11 +93,10 @@ impl<'a> DebuggerSession<'a> {
 		self.ensure_started();
 
 		loop {
-			if let Some(breakpoint) = self.current_breakpoint() {
-				if self.skip_breakpoint_once != Some(breakpoint) {
-					self.skip_breakpoint_once = Some(breakpoint);
-					return Ok(DebuggerStop::Paused(self.paused_state(PauseReason::Breakpoint)));
-				}
+			if let Some(breakpoint) = self.current_breakpoint()
+				&& self.skip_breakpoint_once != Some(breakpoint) {
+				self.skip_breakpoint_once = Some(breakpoint);
+				return Ok(DebuggerStop::Paused(self.paused_state(PauseReason::Breakpoint)));
 			}
 
 			self.skip_breakpoint_once = None;

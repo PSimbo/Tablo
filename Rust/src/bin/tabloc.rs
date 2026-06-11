@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Parser as ClapParser;
 use tablo::compile_with_source_name_and_schema;
@@ -93,8 +93,8 @@ fn main() {
 	}
 }
 
-fn default_output_path(input_path: &PathBuf) -> PathBuf {
-	let mut output_path = input_path.clone();
+fn default_output_path(input_path: &Path) -> PathBuf {
+	let mut output_path = input_path.to_path_buf();
 	output_path.set_extension("tbo");
 	output_path
 }
