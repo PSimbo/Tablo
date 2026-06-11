@@ -240,7 +240,7 @@ impl<'a> ObjectFileReader<'a> {
 				Ok(DataType::Union(members))
 			}
 			13 => Ok(DataType::Date),
-			14 => Ok(DataType::NonNull(Box::new(self.read_data_type()?))),
+			14 => Ok(DataType::Nullable(Box::new(self.read_data_type()?))),
 			tag => Err(ObjectFileError {
 				offset: tag_offset,
 				message: format!("Unknown data type tag {tag}."),
@@ -622,7 +622,7 @@ fn write_data_type(bytes: &mut Vec<u8>, data_type: &DataType) {
 		DataType::Dec => bytes.push(4),
 		DataType::EmptyArray => bytes.push(5),
 		DataType::Int => bytes.push(6),
-		DataType::NonNull(inner) => {
+		DataType::Nullable(inner) => {
 			bytes.push(14);
 			write_data_type(bytes, inner);
 		}

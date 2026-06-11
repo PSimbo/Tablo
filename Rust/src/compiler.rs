@@ -755,11 +755,11 @@ impl Compiler {
 						format!("Constant `{name}` must currently have an initializer."),
 					));
 				}
-				else if matches!(data_type, crate::ast::DataType::NonNull(_)) {
-					self.emit_default_value(data_type, semantic_program, emission, *position);
+				else if matches!(data_type, crate::ast::DataType::Nullable(_)) {
+					self.emit(emission, Instruction::PushNull, *position);
 				}
 				else {
-					self.emit(emission, Instruction::PushNull, *position);
+					self.emit_default_value(data_type, semantic_program, emission, *position);
 				}
 				self.emit(emission, Instruction::StoreLocal(slot), *position);
 				self.record_local_debug(
@@ -823,76 +823,62 @@ impl Compiler {
 		position: usize,
 	) {
 		match data_type {
-			crate::ast::DataType::Any
-			| crate::ast::DataType::Array(_)
-			| crate::ast::DataType::Bool
-			| crate::ast::DataType::Date
-			| crate::ast::DataType::Dec
-			| crate::ast::DataType::Int
-			| crate::ast::DataType::Object(_)
-			| crate::ast::DataType::Text
-			| crate::ast::DataType::Union(_) => {
+			crate::ast::DataType::Any | crate::ast::DataType::Nullable(_) => {
 				let _ = semantic_program;
 				self.emit(emission, Instruction::PushNull, position);
 			}
-			crate::ast::DataType::NonNull(inner) => {
-				match inner.as_ref() {
-					crate::ast::DataType::Array(_) => {
-						self.emit(emission, Instruction::MakeArray(0), position);
-					}
-					crate::ast::DataType::Bool => {
-						self.emit(emission, Instruction::PushBoolean(false), position);
-					}
-					crate::ast::DataType::Date => {
-						self.emit(emission, Instruction::PushCurrentDate, position);
-					}
-					crate::ast::DataType::Dec => {
-						self.emit(
-							emission,
-							Instruction::PushDecimal(crate::value::Decimal::from_integer(0)),
-							position,
-						);
-					}
-					crate::ast::DataType::Int => {
-						self.emit(emission, Instruction::PushInteger(0), position);
-					}
-					crate::ast::DataType::Object(name) => {
-						let object_declaration = semantic_program.object_declaration(name)
-							.unwrap_or_else(|| panic!("Missing object declaration for `{name}`."));
-						if object_declaration.array_element_type().is_some() {
-							self.emit(emission, Instruction::MakeArray(0), position);
+			crate::ast::DataType::Array(_) => {
+				self.emit(emission, Instruction::MakeArray(0), position);
+			}
+			crate::ast::DataType::Bool => {
+				self.emit(emission, Instruction::PushBoolean(false), position);
+			}
+			crate::ast::DataType::Date => {
+				self.emit(emission, Instruction::PushCurrentDate, position);
+			}
+			crate::ast::DataType::Dec => {
+				self.emit(
+					emission,
+					Instruction::PushDecimal(crate::value::Decimal::from_integer(0)),
+					position,
+				);
+			}
+			crate::ast::DataType::Int => {
+				self.emit(emission, Instruction::PushInteger(0), position);
+			}
+			crate::ast::DataType::Object(name) => {
+				let object_declaration = semantic_program.object_declaration(name)
+					.unwrap_or_else(|| panic!("Missing object declaration for `{name}`."));
+				if object_declaration.array_element_type().is_some() {
+					self.emit(emission, Instruction::MakeArray(0), position);
+				}
+				else {
+					let object_fields = object_declaration.fields()
+						.unwrap_or_else(|| panic!("Missing fields for object `{name}`."));
+
+					for field in object_fields {
+						if let Some(default_value) = &field.default_value {
+							self.compile_into(default_value, semantic_program, emission);
 						}
 						else {
-							let object_fields = object_declaration.fields()
-								.unwrap_or_else(|| panic!("Missing fields for object `{name}`."));
-
-							for field in object_fields {
-								if let Some(default_value) = &field.default_value {
-									self.compile_into(default_value, semantic_program, emission);
-								}
-								else {
-									self.emit_default_value(&field.data_type, semantic_program, emission, position);
-								}
-							}
-
-							self.emit(
-								emission,
-								Instruction::MakeObject(object_fields.iter().map(|field| field.name.clone()).collect()),
-								position,
-							);
+							self.emit_default_value(&field.data_type, semantic_program, emission, position);
 						}
 					}
-					crate::ast::DataType::Text => {
-						self.emit(emission, Instruction::PushText(String::new()), position);
-					}
-					_ => {
-						panic!("Cannot emit an implicit default value for `{}`.", data_type_name(data_type));
-					}
+
+					self.emit(
+						emission,
+						Instruction::MakeObject(object_fields.iter().map(|field| field.name.clone()).collect()),
+						position,
+					);
 				}
+			}
+			crate::ast::DataType::Text => {
+				self.emit(emission, Instruction::PushText(String::new()), position);
 			}
 			crate::ast::DataType::EmptyArray
 			| crate::ast::DataType::Range(_)
 			| crate::ast::DataType::RecordPointer(_)
+			| crate::ast::DataType::Union(_)
 			| crate::ast::DataType::Void => {
 				panic!("Cannot emit an implicit default value for `{}`.", data_type_name(data_type));
 			}
@@ -996,7 +982,7 @@ fn data_type_name(data_type: &crate::ast::DataType) -> String {
 		crate::ast::DataType::Dec => String::from("dec"),
 		crate::ast::DataType::EmptyArray => String::from("empty array"),
 		crate::ast::DataType::Int => String::from("int"),
-		crate::ast::DataType::NonNull(inner) => format!("{}!", data_type_name(inner)),
+		crate::ast::DataType::Nullable(inner) => format!("{}?", data_type_name(inner)),
 		crate::ast::DataType::Object(name) => name.clone(),
 		crate::ast::DataType::Range(element_type) => format!("range<{}>", data_type_name(element_type)),
 		crate::ast::DataType::RecordPointer(_) => String::from("record pointer"),
@@ -1712,7 +1698,7 @@ mod tests {
 	}
 
 	#[test]
-	fn compiles_variable_declaration_without_initializer_to_null() {
+	fn compiles_variable_declaration_without_initializer_to_default() {
 		let program = AstProgram {
 			functions: vec![],
 			objects: vec![],
@@ -1735,7 +1721,7 @@ mod tests {
 		let bytecode = Compiler::new().compile_program(&program).unwrap();
 
 		assert_eq!(bytecode.entry_code().unwrap().instructions, vec![
-			Instruction::PushNull,
+			Instruction::PushInteger(0),
 			Instruction::StoreLocal(0),
 			Instruction::LoadLocal(0),
 		]);
@@ -2072,7 +2058,7 @@ mod tests {
 
 		let error = Compiler::new().compile_program(&program).unwrap_err();
 
-		assert_eq!(error.message, "`if` condition must be of type `bool` or `record pointer`, found `int!`.");
+		assert_eq!(error.message, "`if` condition must be of type `bool` or `record pointer`, found `int`.");
 		assert_eq!(error.position, 3);
 	}
 
@@ -2100,7 +2086,7 @@ mod tests {
 
 		let error = Compiler::new().compile_program(&program).unwrap_err();
 
-		assert_eq!(error.message, "`while` condition must be of type `bool`, found `int!`.");
+		assert_eq!(error.message, "`while` condition must be of type `bool`, found `int`.");
 		assert_eq!(error.position, 6);
 	}
 
@@ -2138,7 +2124,7 @@ mod tests {
 
 		let error = Compiler::new().compile_program(&program).unwrap_err();
 
-		assert_eq!(error.message, "Cannot assign a value of type `text!` to a variable of type `int`.");
+		assert_eq!(error.message, "Cannot assign a value of type `text` to a variable of type `int`.");
 	}
 
 	#[test]
@@ -2164,6 +2150,6 @@ mod tests {
 
 		let error = Compiler::new().compile_program(&program).unwrap_err();
 
-		assert_eq!(error.message, "Cannot assign a value of type `bool!` to a variable of type `int`.");
+		assert_eq!(error.message, "Cannot assign a value of type `bool` to a variable of type `int`.");
 	}
 }

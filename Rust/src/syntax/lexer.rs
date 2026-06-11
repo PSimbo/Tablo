@@ -206,6 +206,7 @@ impl Lexer {
 			}
 			'}' => TokenKind::RightBrace,
 			']' => TokenKind::RightBracket,
+			'?' => TokenKind::Question,
 			'!' if self.peek_next_char() == Some('=') => {
 				self.advance_char();
 				self.advance_char();
@@ -217,7 +218,6 @@ impl Lexer {
 					start,
 				}));
 			}
-			'!' => TokenKind::Bang,
 			'=' if self.peek_next_char() == Some('=') => {
 				self.advance_char();
 				self.advance_char();
@@ -783,11 +783,11 @@ mod tests {
 
 	#[test]
 	fn rejects_unexpected_character() {
-		let mut lexer = Lexer::new(SourceText::new("1 ? 2"));
+		let mut lexer = Lexer::new(SourceText::new("1 $ 2"));
 		let error = lexer.tokenize().unwrap_err();
 
 		assert_eq!(error.position, 2);
-		assert_eq!(error.message, "Unexpected character `?`.");
+		assert_eq!(error.message, "Unexpected character `$`.");
 	}
 
 	#[test]

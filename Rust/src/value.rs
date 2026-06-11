@@ -477,7 +477,7 @@ pub fn sqlite_record_field_runtime_value(
 				deferred_sqlite_value_name(other),
 			)),
 		},
-		DataType::NonNull(inner) => sqlite_record_field_runtime_value(value, inner, false),
+		DataType::Nullable(inner) => sqlite_record_field_runtime_value(value, inner, true),
 		DataType::Text => match value {
 			DeferredSqliteValue::Text(value) => Ok(Value::Text(value.clone())),
 			other => Err(format!(
@@ -511,7 +511,7 @@ fn data_type_name_for_sqlite_runtime(data_type: &DataType) -> &'static str {
 		DataType::Dec => "dec",
 		DataType::EmptyArray => "empty array",
 		DataType::Int => "int",
-		DataType::NonNull(inner) => data_type_name_for_sqlite_runtime(inner),
+		DataType::Nullable(inner) => data_type_name_for_sqlite_runtime(inner),
 		DataType::Object(_) => "object",
 		DataType::Range(_) => "range",
 		DataType::RecordPointer(_) => "record pointer",

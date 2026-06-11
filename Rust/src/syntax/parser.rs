@@ -462,11 +462,11 @@ impl Parser {
 	}
 
 	fn parse_data_type(&mut self) -> Result<DataType, ParseError> {
-		let mut data_types = vec![self.parse_primary_data_type_with_non_null_suffix()?];
+		let mut data_types = vec![self.parse_primary_data_type_with_nullable_suffix()?];
 
 		while self.current().is_some_and(|token| token.kind == TokenKind::Pipe) {
 			self.next();
-			let next_type = self.parse_primary_data_type_with_non_null_suffix()?;
+			let next_type = self.parse_primary_data_type_with_nullable_suffix()?;
 
 			if !data_types.contains(&next_type) {
 				data_types.push(next_type);
@@ -1199,9 +1199,9 @@ impl Parser {
 			(self.parse_primary_data_type()?, vec![])
 		};
 
-		if self.current().is_some_and(|token| token.kind == TokenKind::Bang) {
+		if self.current().is_some_and(|token| token.kind == TokenKind::Question) {
 			self.next();
-			data_type = DataType::NonNull(Box::new(data_type));
+			data_type = DataType::Nullable(Box::new(data_type));
 		}
 
 		Ok((data_type, nested_objects))
@@ -1343,12 +1343,12 @@ impl Parser {
 		}
 	}
 
-	fn parse_primary_data_type_with_non_null_suffix(&mut self) -> Result<DataType, ParseError> {
+	fn parse_primary_data_type_with_nullable_suffix(&mut self) -> Result<DataType, ParseError> {
 		let mut data_type = self.parse_primary_data_type()?;
 
-		if self.current().is_some_and(|token| token.kind == TokenKind::Bang) {
+		if self.current().is_some_and(|token| token.kind == TokenKind::Question) {
 			self.next();
-			data_type = DataType::NonNull(Box::new(data_type));
+			data_type = DataType::Nullable(Box::new(data_type));
 		}
 
 		Ok(data_type)
@@ -3652,9 +3652,24 @@ mod tests {
 	}
 
 	#[test]
-	fn parses_non_null_data_type_in_variable_and_array_positions() {
+	fn parses_not_expression() {
 		assert_eq!(
-			parse_program("fn Main(args: [text]) int { var value: int!; var values: [text]! = []; return 0; }"),
+			parse("not false"),
+			Expr::Unary(UnaryExpr {
+				operand: Box::new(Expr::Boolean(BooleanLiteral {
+					position: 0,
+					value: false,
+				})),
+				operator: UnaryOperator::Not,
+				position: 0,
+			})
+		);
+	}
+
+	#[test]
+	fn parses_nullable_data_type_in_variable_and_array_positions() {
+		assert_eq!(
+			parse_program("fn Main(args: [text]) int { var value: int?; var values: [text]? = []; return 0; }"),
 			Program {
 				functions: vec![
 					FunctionDeclaration {
@@ -3662,14 +3677,14 @@ mod tests {
 							position: 0,
 							statements: vec![
 								Statement::VariableDeclaration(VariableDeclaration {
-									data_type: DataType::NonNull(Box::new(DataType::Int)),
+									data_type: DataType::Nullable(Box::new(DataType::Int)),
 									initial_value: None,
 									is_const: false,
 									name: String::from("value"),
 									position: 0,
 								}),
 								Statement::VariableDeclaration(VariableDeclaration {
-									data_type: DataType::NonNull(Box::new(DataType::Array(Box::new(DataType::Text)))),
+									data_type: DataType::Nullable(Box::new(DataType::Array(Box::new(DataType::Text)))),
 									initial_value: Some(Expr::Array(ArrayLiteral {
 										elements: vec![],
 										position: 0,
@@ -3705,21 +3720,6 @@ mod tests {
 				statements: vec![],
 				with_declarations: vec![],
 			}
-		);
-	}
-
-	#[test]
-	fn parses_not_expression() {
-		assert_eq!(
-			parse("not false"),
-			Expr::Unary(UnaryExpr {
-				operand: Box::new(Expr::Boolean(BooleanLiteral {
-					position: 0,
-					value: false,
-				})),
-				operator: UnaryOperator::Not,
-				position: 0,
-			})
 		);
 	}
 

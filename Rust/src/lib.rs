@@ -361,7 +361,7 @@ mod tests {
 	#[test]
 	fn defaults_omitted_nullable_date_field_to_null() {
 		let result = evaluate_snippet(
-			"obj Example { when: date, };\nvar example: Example = Example { };\nexample.when"
+			"obj Example { when: date?, };\nvar example: Example = Example { };\nexample.when"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Null));
@@ -396,7 +396,7 @@ mod tests {
 
 		assert_eq!(
 			error.format_with_source(&source),
-			"Compile error at line 2, column 14: Cannot assign a value of type `bool!` to a variable of type `int`.\n  |\n2 | var x: int = true;\n  |              ^"
+			"Compile error at line 2, column 14: Cannot assign a value of type `bool` to a variable of type `int`.\n  |\n2 | var x: int = true;\n  |              ^"
 		);
 	}
 
@@ -407,7 +407,7 @@ mod tests {
 
 		assert_eq!(
 			error.format_with_source(&source),
-			"Compile error at line 2, column 4: `if` condition must be of type `bool` or `record pointer`, found `int!`.\n  |\n2 | if 1 {\n  |    ^"
+			"Compile error at line 2, column 4: `if` condition must be of type `bool` or `record pointer`, found `int`.\n  |\n2 | if 1 {\n  |    ^"
 		);
 	}
 
@@ -440,7 +440,7 @@ mod tests {
 
 		assert_eq!(
 			error.format_with_source(source),
-			"Lex error at line 2, column 1: Unexpected character `?`.\n  |\n2 | ?\n  | ^"
+			"Parse error at line 2, column 1: Unexpected token `?` after end of expression.\n  |\n2 | ?\n  | ^"
 		);
 	}
 
@@ -451,7 +451,7 @@ mod tests {
 
 		assert_eq!(
 			error.format_with_source(&source),
-			"Compile error at line 2, column 7: `while` condition must be of type `bool`, found `int!`.\n  |\n2 | while 1 {\n  |       ^"
+			"Compile error at line 2, column 7: `while` condition must be of type `bool`, found `int`.\n  |\n2 | while 1 {\n  |       ^"
 		);
 	}
 
@@ -540,7 +540,7 @@ mod tests {
 		let error = run("fn Main(args: [text]) int { var value: int | text = true; return 0; }").unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
-			message: String::from("Cannot assign a value of type `bool!` to a variable of type `int | text`."),
+			message: String::from("Cannot assign a value of type `bool` to a variable of type `int | text`."),
 			position: 52,
 		}));
 	}
@@ -590,7 +590,7 @@ mod tests {
 		let error = evaluate_snippet("var xs: [int] = [10, 20, 30];\nxs[1.0:2.0]").unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
-			message: String::from("Array slicing requires a range of `int`, found `range<dec!>`."),
+			message: String::from("Array slicing requires a range of `int`, found `range<dec>`."),
 			position: 36,
 		}));
 	}
@@ -600,7 +600,7 @@ mod tests {
 		let error = evaluate_snippet("disp(1)").unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
-			message: String::from("Built-in function `disp` does not accept an argument of type `int!`."),
+			message: String::from("Built-in function `disp` does not accept an argument of type `int`."),
 			position: 5,
 		}));
 	}
@@ -644,7 +644,7 @@ mod tests {
 		let error = evaluate_snippet("len(1)").unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
-			message: String::from("Built-in function `len` does not accept an argument of type `int!`."),
+			message: String::from("Built-in function `len` does not accept an argument of type `int`."),
 			position: 4,
 		}));
 	}
@@ -686,7 +686,7 @@ mod tests {
 		let error = evaluate_snippet("'a':1").unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
-			message: String::from("Range bounds must be numeric, found `text!` and `int!`."),
+			message: String::from("Range bounds must be numeric, found `text` and `int`."),
 			position: 3,
 		}));
 	}
@@ -696,7 +696,7 @@ mod tests {
 		let error = run(standalone_body("rec cust = 1;\nreturn 0;")).unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
-			message: String::from("Record pointer `cust` must be initialized from a record pointer value, found `int!`."),
+			message: String::from("Record pointer `cust` must be initialized from a record pointer value, found `int`."),
 			position: 39,
 		}));
 	}
@@ -834,7 +834,7 @@ mod tests {
 		let error = evaluate_snippet("var x: int = 5;\nx = 'hello'").unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
-			message: String::from("Cannot assign a value of type `text!` to a variable of type `int`."),
+			message: String::from("Cannot assign a value of type `text` to a variable of type `int`."),
 			position: 18,
 		}));
 	}
@@ -844,7 +844,7 @@ mod tests {
 		let error = evaluate_snippet("var x: int = true;\nx").unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
-			message: String::from("Cannot assign a value of type `bool!` to a variable of type `int`."),
+			message: String::from("Cannot assign a value of type `bool` to a variable of type `int`."),
 			position: 13,
 		}));
 	}
@@ -853,9 +853,9 @@ mod tests {
 	fn returns_lex_error_from_single_call_api() {
 		let error = run("1 ? 2").unwrap_err();
 
-		assert_eq!(error, TabloError::Lex(crate::syntax::lexer::LexError {
+		assert_eq!(error, TabloError::Parse(crate::syntax::parser::ParseError {
 			position: 2,
-			message: String::from("Unexpected character `?`."),
+			message: String::from("Unexpected token `?` after end of expression."),
 		}));
 	}
 
@@ -1092,6 +1092,20 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_date_variable_without_initializer_with_current_date_default() {
+		let current_date = crate::value::Date::current_local();
+		let source = format!(
+			"fn Main(args: [text]) int {{ var value: date; if value == @{:04}-{:02}-{:02} {{ return 1; }} return 0; }}",
+			current_date.year,
+			current_date.month,
+			current_date.day,
+		);
+		let result = run(&source).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
 	fn runs_decimal_object_file() {
 		let output_path = unique_test_output_path("runs_decimal_object_file");
 		compile_snippet_to_object_file("1.25 + .5", &output_path).unwrap();
@@ -1290,6 +1304,13 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_integer_variable_without_initializer_with_default() {
+		let result = run("fn Main(args: [text]) int { var value: int; return value; }").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(0)));
+	}
+
+	#[test]
 	fn runs_interpolated_string_source_text() {
 		let result = evaluate_snippet("var name: text = 'world';\n'hello ${name}!'").unwrap();
 
@@ -1397,7 +1418,12 @@ mod tests {
 			"obj Address { line1: text = 'Unknown', };\nobj Person { name: text = '', address: Address, };\nvar person: Person = Person { name: 'Alice' };\nperson.address"
 		).unwrap();
 
-		assert_eq!(result, Some(Value::Null));
+		assert_eq!(
+			result,
+			Some(Value::Object(std::collections::BTreeMap::from([
+				(String::from("line1"), Value::Text(String::from("Unknown"))),
+			]))),
+		);
 	}
 
 	#[test]
@@ -1410,45 +1436,15 @@ mod tests {
 	}
 
 	#[test]
-	fn runs_non_null_date_variable_without_initializer_with_current_date_default() {
-		let current_date = crate::value::Date::current_local();
-		let source = format!(
-			"fn Main(args: [text]) int {{ var value: date!; if value == @{:04}-{:02}-{:02} {{ return 1; }} return 0; }}",
-			current_date.year,
-			current_date.month,
-			current_date.day,
-		);
-		let result = run(&source).unwrap();
-
-		assert_eq!(result, Some(Value::Integer(1)));
-	}
-
-	#[test]
-	fn runs_non_null_integer_variable_without_initializer_with_default() {
-		let result = run("fn Main(args: [text]) int { var value: int!; return value; }").unwrap();
-
-		assert_eq!(result, Some(Value::Integer(0)));
-	}
-
-	#[test]
-	fn runs_non_null_object_field_without_explicit_default_using_non_null_default() {
-		let result = run(
-			"obj Counter { value: int!, };\nfn Main(args: [text]) int { var counter: Counter = Counter { }; return counter.value; }"
-		).unwrap();
-
-		assert_eq!(result, Some(Value::Integer(0)));
-	}
-
-	#[test]
 	fn runs_nullable_array_variable_without_initializer_as_null() {
-		let result = evaluate_snippet("var values: [int];\nvalues").unwrap();
+		let result = evaluate_snippet("var values: [int]?;\nvalues").unwrap();
 
 		assert_eq!(result, Some(Value::Null));
 	}
 
 	#[test]
 	fn runs_nullable_variable_without_initializer_as_null() {
-		let result = evaluate_snippet("var value: int;\nvalue").unwrap();
+		let result = evaluate_snippet("var value: int?;\nvalue").unwrap();
 
 		assert_eq!(result, Some(Value::Null));
 	}
@@ -1491,6 +1487,15 @@ mod tests {
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(2)));
+	}
+
+	#[test]
+	fn runs_object_field_without_explicit_default_using_default() {
+		let result = run(
+			"obj Counter { value: int, };\nfn Main(args: [text]) int { var counter: Counter = Counter { }; return counter.value; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(0)));
 	}
 
 	#[test]
