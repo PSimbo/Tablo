@@ -1201,7 +1201,7 @@ impl Parser {
 
 		if self.current().is_some_and(|token| token.kind == TokenKind::Question) {
 			self.next();
-			data_type = DataType::Nullable(Box::new(data_type));
+			data_type = data_type.into_nullable();
 		}
 
 		Ok((data_type, nested_objects))
@@ -1348,7 +1348,7 @@ impl Parser {
 
 		if self.current().is_some_and(|token| token.kind == TokenKind::Question) {
 			self.next();
-			data_type = DataType::Nullable(Box::new(data_type));
+			data_type = data_type.into_nullable();
 		}
 
 		Ok(data_type)

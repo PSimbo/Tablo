@@ -346,10 +346,10 @@ impl SemanticAnalyzer {
 		rhs: &DataType,
 		position: usize,
 	) -> Result<DataType, CompileError> {
-		let lhs_non_null = self.is_non_null_type(lhs);
-		let rhs_non_null = self.is_non_null_type(rhs);
-		let lhs = self.strip_non_null(lhs);
-		let rhs = self.strip_non_null(rhs);
+		let lhs_non_null = lhs.is_non_nullable();
+		let rhs_non_null = rhs.is_non_nullable();
+		let lhs = lhs.without_nullability();
+		let rhs = rhs.without_nullability();
 
 		let result = match operator {
 			BinaryOperator::Add => {
@@ -392,7 +392,7 @@ impl SemanticAnalyzer {
 		}?;
 
 		Ok(if !lhs_non_null || !rhs_non_null {
-			DataType::Nullable(Box::new(result))
+			result.into_nullable()
 		}
 		else {
 			result
@@ -446,7 +446,7 @@ impl SemanticAnalyzer {
 			self.validate_non_void_data_type(
 				&parameter.data_type,
 				parameter.position,
-				format!("Parameter `{}` cannot have type `{}`.", parameter.name, self.data_type_name(&parameter.data_type)),
+				format!("Parameter `{}` cannot have type `{}`.", parameter.name, parameter.data_type.name()),
 			)?;
 			parameters.push(FunctionParameterSignature {
 				data_type: parameter.data_type.clone(),
@@ -462,7 +462,7 @@ impl SemanticAnalyzer {
 				format!(
 					"Function `{}` cannot return `{}`.",
 					function.name,
-					self.data_type_name(&function.return_type),
+					function.return_type.name(),
 				),
 			)?;
 		}
@@ -523,28 +523,6 @@ impl SemanticAnalyzer {
 		}
 	}
 
-	fn data_type_name(&self, data_type: &DataType) -> String {
-		match data_type {
-			DataType::Any => String::from("any"),
-			DataType::Array(element_type) => format!("[{}]", self.data_type_name(element_type)),
-			DataType::Bool => String::from("bool"),
-			DataType::Date => String::from("date"),
-			DataType::Dec => String::from("dec"),
-			DataType::EmptyArray => String::from("empty array"),
-			DataType::Int => String::from("int"),
-			DataType::Nullable(inner) => format!("{}?", self.data_type_name(inner)),
-			DataType::Object(name) => name.clone(),
-			DataType::Range(element_type) => format!("range<{}>", self.data_type_name(element_type)),
-			DataType::RecordPointer(_) => String::from("record pointer"),
-			DataType::Text => String::from("text"),
-			DataType::Union(members) => members.iter()
-				.map(|member| self.data_type_name(member))
-				.collect::<Vec<_>>()
-				.join(" | "),
-			DataType::Void => String::from("void"),
-		}
-	}
-
 	fn declare_local(&mut self, name: String, local: LocalBinding) {
 		self.locals.declare(name, local);
 	}
@@ -561,7 +539,7 @@ impl SemanticAnalyzer {
 
 				self.semantic_program.object_declaration(name)?
 					.array_element_type()
-					.map(|element_type| DataType::Nullable(Box::new(DataType::Array(Box::new(element_type.clone())))))
+					.map(|element_type| DataType::Array(Box::new(element_type.clone())).into_nullable())
 			}
 			_ => None,
 		}
@@ -576,8 +554,8 @@ impl SemanticAnalyzer {
 			position,
 			format!(
 				"Cannot assign a value of type `{}` to a variable of type `{}`.",
-				self.data_type_name(value),
-				self.data_type_name(target),
+				value.name(),
+				target.name(),
 			),
 		))
 	}
@@ -638,7 +616,7 @@ impl SemanticAnalyzer {
 			format!(
 				"Built-in function `{}` does not accept an argument of type `{}`.",
 				built_in.name(),
-				self.data_type_name(argument_types.first().unwrap()),
+				argument_types.first().unwrap().name(),
 			),
 		))?;
 
@@ -683,7 +661,7 @@ impl SemanticAnalyzer {
 			format!(
 				"Built-in function `{}` does not accept an argument of type `{}`.",
 				built_in.name(),
-				self.data_type_name(argument_types.first().unwrap()),
+				argument_types.first().unwrap().name(),
 			),
 		))?;
 
@@ -698,10 +676,10 @@ impl SemanticAnalyzer {
 		if let Some(where_clause) = &count.where_clause {
 			let where_type = self.infer_query_expression_type(where_clause, &count.table)?;
 
-			if self.strip_non_null(&where_type) != &DataType::Bool {
+			if where_type.without_nullability() != &DataType::Bool {
 				return Err(self.compile_error(
 					where_clause.position(),
-					format!("`where` clause must evaluate to `bool`, found `{}`.", self.data_type_name(&where_type)),
+					format!("`where` clause must evaluate to `bool`, found `{}`.", where_type.name()),
 				));
 			}
 		}
@@ -772,19 +750,19 @@ impl SemanticAnalyzer {
 
 						let index_type = self.infer_expression_type(&target.index)?;
 
-						if self.strip_non_null(&index_type) != &DataType::Int {
+						if index_type.without_nullability() != &DataType::Int {
 							return Err(self.compile_error(
 								target.index.position(),
-								format!("Array index must be of type `int`, found `{}`.", self.data_type_name(&index_type)),
+								format!("Array index must be of type `int`, found `{}`.", index_type.name()),
 							));
 						}
 
-						let element_type = match self.strip_non_null(&local.data_type) {
+						let element_type = match local.data_type.without_nullability() {
 							DataType::Array(element_type) => element_type.as_ref(),
 							other => {
 								return Err(self.compile_error(
 									target.array.position,
-									format!("Indexed assignment requires an array operand, found `{}`.", self.data_type_name(other)),
+									format!("Indexed assignment requires an array operand, found `{}`.", other.name()),
 								));
 							}
 						};
@@ -831,7 +809,7 @@ impl SemanticAnalyzer {
 								ref other => {
 									return Err(self.compile_error(
 										field.position,
-										format!("Field access requires an object operand, found `{}`.", self.data_type_name(other)),
+										format!("Field access requires an object operand, found `{}`.", other.name()),
 									));
 								}
 							}
@@ -893,8 +871,8 @@ impl SemanticAnalyzer {
 									format!(
 										"By-reference argument for parameter `{}` must have type `{}`, found `{}`.",
 										parameter.name,
-										self.data_type_name(&parameter.data_type),
-										self.data_type_name(&argument_type),
+										parameter.data_type.name(),
+										argument_type.name(),
 									),
 								));
 							}
@@ -934,14 +912,14 @@ impl SemanticAnalyzer {
 			Expr::Decimal(_) => Ok(DataType::Dec),
 			Expr::FieldAccess(FieldAccessExpr { field, object, .. }) => {
 				let object_type = self.infer_expression_type(object)?;
-				let object_type = self.strip_non_null(&object_type).clone();
+				let object_type = object_type.without_nullability().clone();
 
 				match object_type {
 					DataType::Object(name) => {
 						if self.semantic_program.object_declaration(&name).and_then(|object| object.array_element_type()).is_some() {
 							return Err(self.compile_error(
 								field.position,
-								format!("Field access requires an object operand, found `{}`.", self.data_type_name(&DataType::Object(name))),
+								format!("Field access requires an object operand, found `{}`.", DataType::Object(name).name()),
 							));
 						}
 
@@ -961,7 +939,7 @@ impl SemanticAnalyzer {
 					),
 					other => Err(self.compile_error(
 						object.position(),
-						format!("Field access requires an object operand, found `{}`.", self.data_type_name(&other)),
+						format!("Field access requires an object operand, found `{}`.", other.name()),
 					)),
 				}
 			}
@@ -980,25 +958,25 @@ impl SemanticAnalyzer {
 					array_type = effective_array_type;
 				}
 				let index_type = self.infer_expression_type(index)?;
-				let index_type = self.strip_non_null(&index_type).clone();
-				let array_type = self.strip_non_null(&array_type).clone();
+				let index_type = index_type.without_nullability().clone();
+				let array_type = array_type.without_nullability().clone();
 
 				match array_type {
 					DataType::Array(element_type) => match index_type {
 						DataType::Int => Ok(*element_type),
-						DataType::Range(index_element_type) if self.strip_non_null(&index_element_type) == &DataType::Int => {
+						DataType::Range(index_element_type) if index_element_type.without_nullability() == &DataType::Int => {
 							Ok(DataType::Array(element_type))
 						}
 						DataType::Range(index_element_type) => Err(self.compile_error(
 							index.position(),
 							format!(
 								"Array slicing requires a range of `int`, found `range<{}>`.",
-								self.data_type_name(&index_element_type),
+								index_element_type.name(),
 							),
 						)),
 						other => Err(self.compile_error(
 							index.position(),
-							format!("Array index must be of type `int`, found `{}`.", self.data_type_name(&other)),
+							format!("Array index must be of type `int`, found `{}`.", other.name()),
 						)),
 					},
 					DataType::EmptyArray => Err(self.compile_error(
@@ -1007,7 +985,7 @@ impl SemanticAnalyzer {
 					)),
 					other => Err(self.compile_error(
 						array.position(),
-						format!("Array indexing requires an array operand, found `{}`.", self.data_type_name(&other)),
+						format!("Array indexing requires an array operand, found `{}`.", other.name()),
 					)),
 				}
 			}
@@ -1071,8 +1049,8 @@ impl SemanticAnalyzer {
 						*position,
 						format!(
 							"Range bounds must be numeric, found `{}` and `{}`.",
-							self.data_type_name(&start_type),
-							self.data_type_name(&end_type),
+							start_type.name(),
+							end_type.name(),
 						),
 					));
 				}
@@ -1083,7 +1061,7 @@ impl SemanticAnalyzer {
 					if !self.is_numeric_type(&step_type) {
 						return Err(self.compile_error(
 							step.position(),
-							format!("Range step must be numeric, found `{}`.", self.data_type_name(&step_type)),
+							format!("Range step must be numeric, found `{}`.", step_type.name()),
 						));
 					}
 
@@ -1102,8 +1080,8 @@ impl SemanticAnalyzer {
 			Expr::Text(_) => Ok(DataType::Text),
 			Expr::Unary(UnaryExpr { operand, operator, .. }) => {
 				let operand_type = self.infer_expression_type(operand)?;
-				let operand_non_null = self.is_non_null_type(&operand_type);
-				let operand_type = self.strip_non_null(&operand_type).clone();
+				let operand_non_null = operand_type.is_non_nullable();
+				let operand_type = operand_type.without_nullability().clone();
 
 				match operator {
 					UnaryOperator::Negate => {
@@ -1118,7 +1096,7 @@ impl SemanticAnalyzer {
 						else {
 							Err(self.compile_error(
 								expression.position(),
-								format!("Unary `-` requires a numeric operand, found `{}`.", self.data_type_name(&operand_type)),
+								format!("Unary `-` requires a numeric operand, found `{}`.", operand_type.name()),
 							))
 						}
 					}
@@ -1134,7 +1112,7 @@ impl SemanticAnalyzer {
 						else {
 							Err(self.compile_error(
 								expression.position(),
-								format!("Unary `not` requires a `bool` operand, found `{}`.", self.data_type_name(&operand_type)),
+								format!("Unary `not` requires a `bool` operand, found `{}`.", operand_type.name()),
 							))
 						}
 					}
@@ -1157,10 +1135,10 @@ impl SemanticAnalyzer {
 		if let Some(where_clause) = &find.where_clause {
 			let where_type = self.infer_query_expression_type(where_clause, &find.table)?;
 
-			if self.strip_non_null(&where_type) != &DataType::Bool {
+			if where_type.without_nullability() != &DataType::Bool {
 				return Err(self.compile_error(
 					where_clause.position(),
-					format!("`where` clause must evaluate to `bool`, found `{}`.", self.data_type_name(&where_type)),
+					format!("`where` clause must evaluate to `bool`, found `{}`.", where_type.name()),
 				));
 			}
 		}
@@ -1168,7 +1146,7 @@ impl SemanticAnalyzer {
 		for order_by in &find.order_by {
 			let order_type = self.infer_query_expression_type(&order_by.expression, &find.table)?;
 
-			if self.strip_non_null(&order_type) == &DataType::Void {
+			if order_type.without_nullability() == &DataType::Void {
 				return Err(self.compile_error(
 					order_by.position,
 					String::from("`order by` expressions must produce a runtime value."),
@@ -1296,17 +1274,17 @@ impl SemanticAnalyzer {
 						if !matches!(operand_type, DataType::Int | DataType::Dec) {
 							return Err(self.compile_error(
 								operand.position(),
-								format!("Unary `-` requires a numeric operand, found `{}`.", self.data_type_name(&operand_type)),
+								format!("Unary `-` requires a numeric operand, found `{}`.", operand_type.name()),
 							));
 						}
 
 						Ok(operand_type)
 					}
 					UnaryOperator::Not => {
-						if self.strip_non_null(&operand_type) != &DataType::Bool {
+						if operand_type.without_nullability() != &DataType::Bool {
 							return Err(self.compile_error(
 								operand.position(),
-								format!("Logical `not` requires a `bool` operand, found `{}`.", self.data_type_name(&operand_type)),
+								format!("Logical `not` requires a `bool` operand, found `{}`.", operand_type.name()),
 							));
 						}
 
@@ -1339,7 +1317,7 @@ impl SemanticAnalyzer {
 					}
 					other => Err(self.compile_error(
 						identifier.position,
-						format!("Field access requires an object operand, found `{}`.", self.data_type_name(other)),
+						format!("Field access requires an object operand, found `{}`.", other.name()),
 					)),
 				};
 			}
@@ -1470,16 +1448,12 @@ impl SemanticAnalyzer {
 		}
 	}
 
-	fn is_non_null_type(&self, data_type: &DataType) -> bool {
-		!matches!(data_type, DataType::Nullable(_))
-	}
-
 	fn is_numeric_type(&self, data_type: &DataType) -> bool {
-		matches!(self.strip_non_null(data_type), DataType::Dec | DataType::Int)
+		matches!(data_type.without_nullability(), DataType::Dec | DataType::Int)
 	}
 
 	fn is_truthy_condition_type(&self, data_type: &DataType) -> bool {
-		matches!(self.strip_non_null(data_type), DataType::Bool | DataType::RecordPointer(_))
+		matches!(data_type.without_nullability(), DataType::Bool | DataType::RecordPointer(_))
 	}
 
 	fn lookup_function(&self, name: &str) -> Option<&FunctionSignature> {
@@ -1758,10 +1732,10 @@ impl SemanticAnalyzer {
 	}
 
 	fn merge_array_element_types(&self, lhs: &DataType, rhs: &DataType, position: usize) -> Result<DataType, CompileError> {
-		let lhs_non_null = self.is_non_null_type(lhs);
-		let rhs_non_null = self.is_non_null_type(rhs);
-		let lhs = self.strip_non_null(lhs);
-		let rhs = self.strip_non_null(rhs);
+		let lhs_non_null = lhs.is_non_nullable();
+		let rhs_non_null = rhs.is_non_nullable();
+		let lhs = lhs.without_nullability();
+		let rhs = rhs.without_nullability();
 
 		let result = if lhs == rhs {
 			lhs.clone()
@@ -1782,14 +1756,14 @@ impl SemanticAnalyzer {
 				position,
 				format!(
 					"Array literal elements must have compatible types, found `{}` and `{}`.",
-					self.data_type_name(lhs),
-					self.data_type_name(rhs),
+					lhs.name(),
+					rhs.name(),
 				),
 			));
 		};
 
 		Ok(if !lhs_non_null || !rhs_non_null {
-			DataType::Nullable(Box::new(result))
+			result.into_nullable()
 		}
 		else {
 			result
@@ -1802,8 +1776,8 @@ impl SemanticAnalyzer {
 				position,
 				format!(
 					"Expected numeric operands, found `{}` and `{}`.",
-					self.data_type_name(lhs),
-					self.data_type_name(rhs),
+					lhs.name(),
+					rhs.name(),
 				),
 			));
 		}
@@ -1836,7 +1810,7 @@ impl SemanticAnalyzer {
 	}
 
 	fn require_boolean_operands(&self, operator: BinaryOperator, lhs: &DataType, rhs: &DataType, position: usize) -> Result<(), CompileError> {
-		if self.strip_non_null(lhs) == &DataType::Bool && self.strip_non_null(rhs) == &DataType::Bool {
+		if lhs.without_nullability() == &DataType::Bool && rhs.without_nullability() == &DataType::Bool {
 			return Ok(());
 		}
 
@@ -1845,23 +1819,23 @@ impl SemanticAnalyzer {
 			format!(
 				"Operator `{}` requires `bool` operands, found `{}` and `{}`.",
 				self.operator_name(operator),
-				self.data_type_name(lhs),
-				self.data_type_name(rhs),
+				lhs.name(),
+				rhs.name(),
 			),
 		))
 	}
 
 	fn require_equality_operands(&self, lhs: &DataType, rhs: &DataType, position: usize) -> Result<(), CompileError> {
-		let lhs = self.strip_non_null(lhs);
-		let rhs = self.strip_non_null(rhs);
+		let lhs = lhs.without_nullability();
+		let rhs = rhs.without_nullability();
 
 		if lhs == &DataType::Any || rhs == &DataType::Any {
 			return Err(self.compile_error(
 				position,
 				format!(
 					"Equality comparison is not supported between `{}` and `{}`.",
-					self.data_type_name(lhs),
-					self.data_type_name(rhs),
+					lhs.name(),
+					rhs.name(),
 				),
 			));
 		}
@@ -1871,8 +1845,8 @@ impl SemanticAnalyzer {
 				position,
 				format!(
 					"Equality comparison is not supported between `{}` and `{}`.",
-					self.data_type_name(lhs),
-					self.data_type_name(rhs),
+					lhs.name(),
+					rhs.name(),
 				),
 			));
 		}
@@ -1890,24 +1864,24 @@ impl SemanticAnalyzer {
 				position,
 				format!(
 					"Equality comparison is not supported between `{}` and `{}`.",
-					self.data_type_name(lhs),
-					self.data_type_name(rhs),
+					lhs.name(),
+					rhs.name(),
 				),
 			)),
 			_ => Err(self.compile_error(
 				position,
 				format!(
 					"Equality comparison is not supported between `{}` and `{}`.",
-					self.data_type_name(lhs),
-					self.data_type_name(rhs),
+					lhs.name(),
+					rhs.name(),
 				),
 			)),
 		}
 	}
 
 	fn require_ordering_operands(&self, lhs: &DataType, rhs: &DataType, position: usize) -> Result<(), CompileError> {
-		let lhs = self.strip_non_null(lhs);
-		let rhs = self.strip_non_null(rhs);
+		let lhs = lhs.without_nullability();
+		let rhs = rhs.without_nullability();
 
 		if (lhs == &DataType::Text && rhs == &DataType::Text)
 			|| (lhs == &DataType::Date && rhs == &DataType::Date)
@@ -1921,8 +1895,8 @@ impl SemanticAnalyzer {
 				position,
 				format!(
 					"Ordering comparison is not supported between `{}` and `{}`.",
-					self.data_type_name(lhs),
-					self.data_type_name(rhs),
+					lhs.name(),
+					rhs.name(),
 				),
 			));
 		}
@@ -1931,8 +1905,8 @@ impl SemanticAnalyzer {
 			position,
 			format!(
 				"Ordering comparison is not supported between `{}` and `{}`.",
-				self.data_type_name(lhs),
-				self.data_type_name(rhs),
+				lhs.name(),
+				rhs.name(),
 			),
 		))
 	}
@@ -2048,13 +2022,6 @@ impl SemanticAnalyzer {
 		}
 	}
 
-	fn strip_non_null<'a>(&self, data_type: &'a DataType) -> &'a DataType {
-		match data_type {
-			DataType::Nullable(inner) => self.strip_non_null(inner),
-			other => other,
-		}
-	}
-
 	fn validate_block(&mut self, statements: &[Statement]) -> Result<(), CompileError> {
 		self.enter_scope();
 		self.functions.enter_scope();
@@ -2093,7 +2060,7 @@ impl SemanticAnalyzer {
 				format!(
 					"Function `{}` must return a value of type `{}` on all paths.",
 					function.name,
-					self.data_type_name(&function.return_type),
+					function.return_type.name(),
 				),
 			));
 		}
@@ -2111,7 +2078,7 @@ impl SemanticAnalyzer {
 		self.validate_non_void_data_type(
 			&parameter.data_type,
 			parameter.position,
-			format!("Parameter `{}` cannot have type `{}`.", parameter.name, self.data_type_name(&parameter.data_type)),
+			format!("Parameter `{}` cannot have type `{}`.", parameter.name, parameter.data_type.name()),
 		)?;
 
 		if self.current_scope_contains(&parameter.name) {
@@ -2232,7 +2199,7 @@ impl SemanticAnalyzer {
 				self.validate_non_void_data_type(
 					element_type,
 					object.position,
-					format!("Array-shaped object `{}` cannot have element type `{}`.", object.name, self.data_type_name(element_type)),
+					format!("Array-shaped object `{}` cannot have element type `{}`.", object.name, element_type.name()),
 				)?;
 			}
 			crate::ast::ObjectDeclarationShape::Fields(fields) => {
@@ -2249,7 +2216,7 @@ impl SemanticAnalyzer {
 					self.validate_non_void_data_type(
 						&field.data_type,
 						field.position,
-						format!("Field `{}` cannot have type `{}`.", field.name, self.data_type_name(&field.data_type)),
+						format!("Field `{}` cannot have type `{}`.", field.name, field.data_type.name()),
 					)?;
 
 					if let Some(default_value) = &field.default_value {
@@ -2294,7 +2261,7 @@ impl SemanticAnalyzer {
 			Statement::FunctionDeclaration(function) => self.validate_function_declaration(function),
 			Statement::For(ForStatement { body, iterable, position, variable }) => {
 				let iterable_type = self.infer_expression_type(iterable)?;
-				let iterable_type = self.strip_non_null(&iterable_type).clone();
+				let iterable_type = iterable_type.without_nullability().clone();
 				let variable_type = match iterable_type {
 					DataType::Array(element_type) => *element_type,
 					DataType::Range(element_type) => *element_type,
@@ -2307,7 +2274,7 @@ impl SemanticAnalyzer {
 					other => {
 						return Err(self.compile_error(
 							iterable.position().max(*position),
-							format!("`for` iterable must be an array or range, found `{}`.", self.data_type_name(&other)),
+							format!("`for` iterable must be an array or range, found `{}`.", other.name()),
 						));
 					}
 				};
@@ -2372,10 +2339,10 @@ impl SemanticAnalyzer {
 				if let Some(where_clause) = where_clause {
 					let where_type = self.infer_query_expression_type(where_clause, table)?;
 
-					if self.strip_non_null(&where_type) != &DataType::Bool {
+					if where_type.without_nullability() != &DataType::Bool {
 						return Err(self.compile_error(
 							where_clause.position(),
-							format!("`where` clause must evaluate to `bool`, found `{}`.", self.data_type_name(&where_type)),
+							format!("`where` clause must evaluate to `bool`, found `{}`.", where_type.name()),
 						));
 					}
 				}
@@ -2383,7 +2350,7 @@ impl SemanticAnalyzer {
 				for order_by in order_by {
 					let order_type = self.infer_query_expression_type(&order_by.expression, table)?;
 
-					if self.strip_non_null(&order_type) == &DataType::Void {
+					if order_type.without_nullability() == &DataType::Void {
 						return Err(self.compile_error(
 							order_by.position,
 							String::from("`order by` expressions must produce a runtime value."),
@@ -2437,7 +2404,7 @@ impl SemanticAnalyzer {
 				if !self.is_truthy_condition_type(&condition_type) {
 					return Err(self.compile_error(
 						condition.position().max(*position),
-						format!("`if` condition must be of type `bool` or `record pointer`, found `{}`.", self.data_type_name(&condition_type)),
+						format!("`if` condition must be of type `bool` or `record pointer`, found `{}`.", condition_type.name()),
 					));
 				}
 
@@ -2458,12 +2425,12 @@ impl SemanticAnalyzer {
 				}
 
 				let initial_type = self.infer_expression_type(initial_value)?;
-				let DataType::RecordPointer(_) = self.strip_non_null(&initial_type) else {
+				let DataType::RecordPointer(_) = initial_type.without_nullability() else {
 					return Err(self.compile_error(
 						initial_value.position(),
 						format!(
 							"Record pointer `{name}` must be initialized from a record pointer value, found `{}`.",
-							self.data_type_name(&initial_type),
+							initial_type.name(),
 						),
 					));
 				};
@@ -2498,7 +2465,7 @@ impl SemanticAnalyzer {
 					}
 					(expected_type, None) => Err(self.compile_error(
 						*position,
-						format!("Function must return a value of type `{}`.", self.data_type_name(&expected_type)),
+						format!("Function must return a value of type `{}`.", expected_type.name()),
 					)),
 				}
 			}
@@ -2509,7 +2476,7 @@ impl SemanticAnalyzer {
 					format!(
 						"{} `{name}` cannot have type `{}`.",
 						if *is_const { "Constant" } else { "Variable" },
-						self.data_type_name(data_type),
+						data_type.name(),
 					),
 				)?;
 
@@ -2546,10 +2513,10 @@ impl SemanticAnalyzer {
 			Statement::While(WhileStatement { body, condition, position }) => {
 				let condition_type = self.infer_expression_type(condition)?;
 
-				if self.strip_non_null(&condition_type) != &DataType::Bool {
+				if condition_type.without_nullability() != &DataType::Bool {
 					return Err(self.compile_error(
 						condition.position().max(*position),
-						format!("`while` condition must be of type `bool`, found `{}`.", self.data_type_name(&condition_type)),
+						format!("`while` condition must be of type `bool`, found `{}`.", condition_type.name()),
 					));
 				}
 

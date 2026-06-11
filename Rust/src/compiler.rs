@@ -222,7 +222,7 @@ impl Compiler {
 				&mut emission,
 				parameter.name.clone(),
 				slot,
-				data_type_name(&parameter.data_type),
+				parameter.data_type.name(),
 				false,
 				0,
 			);
@@ -576,7 +576,7 @@ impl Compiler {
 					emission,
 					variable.name.clone(),
 					variable_slot,
-					data_type_name(variable_type),
+					variable_type.name(),
 					false,
 					emission.instructions.len() as u32,
 				);
@@ -651,7 +651,7 @@ impl Compiler {
 					emission,
 					variable.name.clone(),
 					variable_slot,
-					data_type_name(variable_type),
+					variable_type.name(),
 					!*is_mut,
 					emission.instructions.len() as u32,
 				);
@@ -722,7 +722,7 @@ impl Compiler {
 					emission,
 					name.clone(),
 					slot,
-					data_type_name(data_type),
+					data_type.name(),
 					!*is_mut,
 					emission.instructions.len() as u32,
 				);
@@ -755,7 +755,7 @@ impl Compiler {
 						format!("Constant `{name}` must currently have an initializer."),
 					));
 				}
-				else if matches!(data_type, crate::ast::DataType::Nullable(_)) {
+				else if data_type.is_nullable() {
 					self.emit(emission, Instruction::PushNull, *position);
 				}
 				else {
@@ -766,7 +766,7 @@ impl Compiler {
 					emission,
 					name.clone(),
 					slot,
-					data_type_name(data_type),
+					data_type.name(),
 					*is_const,
 					emission.instructions.len() as u32,
 				);
@@ -880,7 +880,7 @@ impl Compiler {
 			| crate::ast::DataType::RecordPointer(_)
 			| crate::ast::DataType::Union(_)
 			| crate::ast::DataType::Void => {
-				panic!("Cannot emit an implicit default value for `{}`.", data_type_name(data_type));
+				panic!("Cannot emit an implicit default value for `{}`.", data_type.name());
 			}
 		}
 	}
@@ -970,28 +970,6 @@ fn collect_functions_from_statement<'a>(statement: &'a Statement, functions: &mu
 fn collect_functions_from_statements<'a>(statements: &'a [Statement], functions: &mut Vec<&'a FunctionDeclaration>) {
 	for statement in statements {
 		collect_functions_from_statement(statement, functions);
-	}
-}
-
-fn data_type_name(data_type: &crate::ast::DataType) -> String {
-	match data_type {
-		crate::ast::DataType::Any => String::from("any"),
-		crate::ast::DataType::Array(element_type) => format!("[{}]", data_type_name(element_type)),
-		crate::ast::DataType::Bool => String::from("bool"),
-		crate::ast::DataType::Date => String::from("date"),
-		crate::ast::DataType::Dec => String::from("dec"),
-		crate::ast::DataType::EmptyArray => String::from("empty array"),
-		crate::ast::DataType::Int => String::from("int"),
-		crate::ast::DataType::Nullable(inner) => format!("{}?", data_type_name(inner)),
-		crate::ast::DataType::Object(name) => name.clone(),
-		crate::ast::DataType::Range(element_type) => format!("range<{}>", data_type_name(element_type)),
-		crate::ast::DataType::RecordPointer(_) => String::from("record pointer"),
-		crate::ast::DataType::Text => String::from("text"),
-		crate::ast::DataType::Union(members) => members.iter()
-			.map(data_type_name)
-			.collect::<Vec<_>>()
-			.join(" | "),
-		crate::ast::DataType::Void => String::from("void"),
 	}
 }
 

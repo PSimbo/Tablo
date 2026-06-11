@@ -53,6 +53,49 @@ pub enum DataType {
 	Void,
 }
 
+impl DataType {
+	pub fn into_nullable(self) -> Self {
+		match self {
+			Self::Nullable(_) => self,
+			other => Self::Nullable(Box::new(other)),
+		}
+	}
+
+	pub fn is_non_nullable(&self) -> bool {
+		!self.is_nullable()
+	}
+
+	pub fn is_nullable(&self) -> bool {
+		matches!(self, Self::Nullable(_))
+	}
+
+	pub fn name(&self) -> String {
+		match self {
+			Self::Any => String::from("any"),
+			Self::Array(element_type) => format!("[{}]", element_type.name()),
+			Self::Bool => String::from("bool"),
+			Self::Date => String::from("date"),
+			Self::Dec => String::from("dec"),
+			Self::EmptyArray => String::from("empty array"),
+			Self::Int => String::from("int"),
+			Self::Nullable(inner) => format!("{}?", inner.name()),
+			Self::Object(name) => name.clone(),
+			Self::Range(element_type) => format!("range<{}>", element_type.name()),
+			Self::RecordPointer(_) => String::from("record pointer"),
+			Self::Text => String::from("text"),
+			Self::Union(members) => members.iter().map(Self::name).collect::<Vec<_>>().join(" | "),
+			Self::Void => String::from("void"),
+		}
+	}
+
+	pub fn without_nullability(&self) -> &Self {
+		match self {
+			Self::Nullable(inner) => inner.without_nullability(),
+			other => other,
+		}
+	}
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Expr {
 	Array(ArrayLiteral),

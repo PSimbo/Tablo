@@ -53,26 +53,19 @@ impl BuiltInFunction {
 	}
 
 	pub fn return_type(self, argument_types: &[DataType]) -> Option<DataType> {
-		fn strip_nullable(data_type: &DataType) -> &DataType {
-			match data_type {
-				DataType::Nullable(inner) => strip_nullable(inner),
-				other => other,
-			}
-		}
-
 		match self {
 			Self::Len => match argument_types {
-				[arg] if matches!(strip_nullable(arg), DataType::Array(_) | DataType::EmptyArray) => {
+				[arg] if matches!(arg.without_nullability(), DataType::Array(_) | DataType::EmptyArray) => {
 					Some(DataType::Int)
 				}
 				_ => None,
 			},
 			Self::Disp | Self::Displn => match argument_types {
-				[arg] if matches!(strip_nullable(arg), DataType::Text) => Some(DataType::Void),
+				[arg] if matches!(arg.without_nullability(), DataType::Text) => Some(DataType::Void),
 				_ => None,
 			},
 			Self::Exists | Self::Locked => match argument_types {
-				[arg] if matches!(strip_nullable(arg), DataType::RecordPointer(_)) => {
+				[arg] if matches!(arg.without_nullability(), DataType::RecordPointer(_)) => {
 					Some(DataType::Bool)
 				}
 				_ => None,
