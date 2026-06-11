@@ -28,9 +28,9 @@ obj ForumPost {
   ],
 }
 
-fn FindPosts(id: int, madeBy: int, since: date, until: date) [ForumPost]! {
+fn FindPosts(id: int, madeBy: int, since: date, until: date) [ForumPost] {
   // If the user gets the dates in the wrong order, swap them.
-  var tempDate: date = null;
+  var tempDate: date? = null;
 
   if until < since {
     tempDate = since;
@@ -38,7 +38,7 @@ fn FindPosts(id: int, madeBy: int, since: date, until: date) [ForumPost]! {
     until = tempDate;
   }
 
-  var mut forumPosts: [ForumPost]! = [];
+  var mut forumPosts: [ForumPost] = [];
 
   for rec post in posts
                   where posts.id = id
@@ -257,7 +257,7 @@ Keyword Literals
 
 Variables of type `bool` may be assigned the literal values `true` and `false`.
 
-Unless marked as non-null, a variable of any data type may be assigned the null value. This is done using the reserved word `null`.
+The null value may be assigned only to a nullable type. Nullable types are written by adding `?` after the type name. The null value is written using the reserved word `null`.
 
 Unless marked as required, an argument of any data type my hold a void value. The void value cannot be manually assigned. Only arguments that have not been provided when a function is called receive the void value. For the purposes of conversion to and from JSON, the void value is equivalent to `undefined`.
 
@@ -469,35 +469,37 @@ When the `+` operator is used and either operand is of type `text`, the other op
 
 In all of the above cases, if both operands are non-nullable then the result is also a non-nullable type. If either or both operands are nullable then the result is a nullable type.
 
-With one notable exception, no automatic conversions occur when passing arguments to functions. A function must receive exactly the types it expects or a compile error results. The aforementioned exception is the automatic conversion from a nullable type to the corresponding non-nullable type. If a function expects a non-nullable value and the compiler can infer that the provided value cannot be null then the type is automatically converted. Alternatively, the `!` operator may be applied to an expression to assert that it is non-null. If the `!` operator is used on an expression that evaluates to null at runtime then the program fails.
+With one notable exception, no automatic conversions occur when passing arguments to functions. A function must receive exactly the types it expects or a compile error results. The aforementioned exception is the automatic conversion from a non-nullable type to the corresponding nullable type. In other words, a value of type `int` may be used where `int?` is expected, but a value of type `int?` may not be used where `int` is required without first proving or converting away the nullability.
 
 Variables
 ---------
 
-The `var` keyword is used to declare a new variable. At present, the data type must be specified. Optionally, an initial value may be assigned. If no initial value is assigned, a nullable variable contains `null`.
+Types in Tablo are non-nullable by default.
+
+The `var` keyword is used to declare a new variable. At present, the data type must be specified. Optionally, an initial value may be assigned. If no initial value is assigned, a non-nullable variable receives the default value for its type.
 
 Alternatively, the `const` keyword may be used to declare a new constant. Unlike variables declared with `var`, the value of a constant may not be modified.
 
 ~~~
-var boolean: bool; // Initial value is `null`.
+var boolean: bool; // Initial value is `false`.
 const integer: int = 5;
 ~~~
 
-A variable may be declared as non-nullable by adding a `!` after the type name. In this case, if no initial value is assigned, the variable contains the non-null default value for its data type rather than `null`.
+A variable may be declared as nullable by adding a `?` after the type name. In this case, if no initial value is assigned, the variable contains `null`.
 
 ~~~
-var decimal: dec!; // Initial value is 0.0.
-var string: text!; // Initial value is '';
+var decimal: dec;     // Initial value is 0.0.
+var string: text;     // Initial value is '';
+var maybeDate: date?; // Initial value is `null`.
 ~~~
 
-For example, `var d: date;` defaults to `null`, whereas `var d: date!;` defaults to the current local date.
+For example, `var d: date;` defaults to the current local date, whereas `var d: date?;` defaults to `null`.
 
-The `any` type may not currently be marked as non-nullable. Its default value is always `null`.
-
-The non-null default values for each data type are:
+The default values for non-nullable data types are:
 
 | Type          | Default Value                   |
 |---------------|---------------------------------|
+| `[T]`         | `[]`                            |
 | `bin`         | Empty binary sequence           |
 | `bool`        | `false`                         |
 | `date`        | The current local date          |
@@ -505,12 +507,15 @@ The non-null default values for each data type are:
 | `float`       | `0.0`                           |
 | `int`         | `0`                             |
 | `json`        | `{}`                            |
+| `obj`         | A fully constructed instance    |
 | `text`        | `''`                            |
 | `time`        | The current local time          |
 | `timestamp`   | The current local date and time |
 | `timestamptz` | The current local date and time |
 | `timetz`      | The current local time          |
 | `uuid`        | A new random UUID (v4)          |
+
+For object types, the default value is a complete instance of the object. Each field receives its explicit field default if one is defined; otherwise it receives the default value of its declared type. This rule applies recursively to nested object fields.
 
 Objects
 -------
@@ -519,26 +524,26 @@ Tablo supports a somewhat struct-like, somewhat JSON-like construct called "obje
 
 An object type is declared using the `obj` keyword followed by the object name and its field structure.
 
-Each field has a name and a type. A field's type may be a primitive, a known custom data type, an anonymous inline object, or a named inline object. A field may also specify an optional default value using `= <literal>`. Default values are limited to literals rather than arbitrary expressions. String literals, numeric literals, boolean literals, `null`, array literals, and object literals composed only of literals are all valid field defaults.
+Each field has a name and a type. A field's type may be a primitive, a known custom data type, an anonymous inline object, or a named inline object. A nullable field type is written by adding `?` after the type. A field may also specify an optional default value using `= <literal>`. Default values are limited to literals rather than arbitrary expressions. String literals, numeric literals, boolean literals, `null`, array literals, and object literals composed only of literals are all valid field defaults.
 
-If a field does not specify an explicit default value then it receives the ordinary default value for its type. For example, a nullable field defaults to `null`, a non-null `text!` field defaults to `''`, and a non-null array defaults to `[]`.
+If a field does not specify an explicit default value then it receives the ordinary default value for its type. For example, a nullable field defaults to `null`, a `text` field defaults to `''`, and an array defaults to `[]`.
 
 ~~~
 obj LocationData {
   addressLines: {
     line1: text,
-    line2: text,
-    line3: text,
-    line4: text,
+    line2: text?,
+    line3: text?,
+    line4: text?,
   },
-  name: text!,
-  postalCode: text,
+  name: text,
+  postalCode: text?,
 };
 
 obj CustomerCollection [
   {
-    id: int!,
-    name: text,
+    id: int,
+    name: text?,
     location: LocationData,
   }
 ];
@@ -562,9 +567,9 @@ New instances of a named object type are created by writing the object type name
 
 ~~~
 obj Customer {
-  id: int!,
-  name: text! = '',
-  isActive: bool! = true,
+  id: int,
+  name: text = '',
+  isActive: bool = true,
 }
 
 var customer: Customer = Customer {
@@ -575,7 +580,7 @@ var customer: Customer = Customer {
 
 In the example above, the `isActive` field receives its default value because no explicit value was provided.
 
-Each specified field name must exist on the target object type and must not be repeated. Any omitted fields are populated from their explicit field default if one exists, otherwise from the normal default value for the field's data type.
+Each specified field name must exist on the target object type and must not be repeated. Any omitted fields are populated from their explicit field default if one exists, otherwise from the normal default value for the field's data type. As a result, constructing an object always yields a complete instance. If an omitted field is itself a non-nullable object type, that sub-object is constructed recursively according to the same rules. Nullable fields still default to `null` unless an explicit field default overrides that.
 
 Where the expected type is already known, such as when assigning to an inline object-typed field, the type name may be omitted and only the brace-delimited field list is written.
 
@@ -617,7 +622,7 @@ When slicing an array, each index yielded by the range must be within the valid 
 Array elements may be assigned using ordinary assignment and compound assignment operators:
 
 ~~~
-var xs: [int]! = [1, 2, 3];
+var xs: [int] = [1, 2, 3];
 xs[2] = 5;
 xs[3] += 10;
 ~~~
@@ -626,18 +631,18 @@ If an array element assignment uses an index of exactly one greater than the arr
 
 The length of an array may be obtained using the built-in `len(...)` function.
 
-The default value of a nullable array is `null`. Non-null arrays default to the empty array `[]`.
+The default value of an array is the empty array `[]`. The default value of a nullable array such as `[int]?` is `null`.
 
 Arrays use copy-on-write semantics when passed to functions or otherwise assigned by value. In other words, array values may be shared internally until one of the aliases is mutated, at which point a private copy is created for the write.
 
 ~~~
-fn BumpFirst(values: [int]!) [int]! {
+fn BumpFirst(values: [int]) [int] {
   values[1] += 1;
   return values;
 }
 
-var a: [int]! = [1, 2, 3];
-var b: [int]! = BumpFirst(a);
+var a: [int] = [1, 2, 3];
+var b: [int] = BumpFirst(a);
 ~~~
 
 In the example above, `a` remains `[1, 2, 3]` while `b` becomes `[2, 2, 3]`.
@@ -647,12 +652,12 @@ At present, there is no support for multi-dimensional arrays.
 Enumerations
 ------------
 
-Tablo supports enumerations ("enums"). The enum may have a primitive type (excluding the `json` type) specified, in which case all variants within the enum share that same type. If not specified, an enum's type is `int!`.
+Tablo supports enumerations ("enums"). The enum may have a primitive type (excluding the `json` type) specified, in which case all variants within the enum share that same type. If not specified, an enum's type is `int`.
 
-Unless the enum's type is `int!`, each variant must specify a corresponding value. Otherwise, some or all of the values may be omitted, in which case the variants are automatically assigned incrementing values relative to the nearest predecessor for which an explicit value is defined. If the first variant's value is not specified, it receives a value of 1. The variants are numbered in the order in which they are declared.
+Unless the enum's type is `int`, each variant must specify a corresponding value. Otherwise, some or all of the values may be omitted, in which case the variants are automatically assigned incrementing values relative to the nearest predecessor for which an explicit value is defined. If the first variant's value is not specified, it receives a value of 1. The variants are numbered in the order in which they are declared.
 
 ~~~
-enum HttpResponseCode: int! {
+enum HttpResponseCode: int {
   Ok: 200,
   Created,                     // 201
   Accepted,                    // 202
@@ -1139,7 +1144,7 @@ Functions are declared using the `fn` keyword followed by the function name, a p
 By default, a function may only be referenced within the module in which it is declared. In order for a function to be imported by another module, it must be marked with the `pub` keyword.
 
 ~~~
-pub fn FindPosts(id: int, madeBy: int, since: date, until: date) [ForumPost]! {
+pub fn FindPosts(id: int, madeBy: int, since: date, until: date) [ForumPost] {
   ...
 }
 ~~~
@@ -1187,7 +1192,7 @@ For a function that returns `void`, the final `return` statement may be omitted.
 To call a function, use the function name followed by an argument list between `(` and `)` characters:
 
 ~~~
-var ts: timestamp! = timestamp(post.date, post.time);
+var ts: timestamp = timestamp(post.date, post.time);
 ~~~
 
 Arguments may be passed positionally or by name. Arguments corresponding to by-reference parameters must use the explicit `&name` syntax at the call site and are still subject to the usual positional or named-argument rules.
@@ -1238,7 +1243,7 @@ fn Name(<Positional Args>, <Named Args>, <Varargs>) void {}
 To specify that a function accepts a variable number of arguments ("varargs"), the `...` syntax is used to mark the "varargs" argument. If present, this parameter must be the final parameter in the parameter list, must have an array type, and may not define a default value. The "varargs" argument may be provided as a named argument but only if the value is passed as a single array of the appropriate type.
 
 ~~~
-fn Example(arg1: text, arg2: int! = 1, ...args: [int]) void {
+fn Example(arg1: text?, arg2: int = 1, ...args: [int]) void {
 }
 
 // `arg1` set to 'Foo', `arg2` defaults to 1, `args` is [].
@@ -1287,7 +1292,7 @@ Tablo supports concurrency using the principles of structured concurrency.
 Functions are synchronous by default. Each function that supports being run asynchronously must be prefixed with the `async` keyword:
 
 ~~~
-async fn LoadPosts(authorId: int!) [ForumPost]! {
+async fn LoadPosts(authorId: int) [ForumPost] {
   ...
 }
 ~~~
@@ -1295,8 +1300,8 @@ async fn LoadPosts(authorId: int!) [ForumPost]! {
 Synchronous code may introduce a structured asynchronous scope using an `async { ... }` block:
 
 ~~~
-var posts: [ForumPost]! = async {
-  var postsTask: task<[ForumPost]!> = LoadPosts(42);
+var posts: [ForumPost] = async {
+  var postsTask: task<[ForumPost]> = LoadPosts(42);
   return suspend postsTask;
 };
 ~~~
@@ -1307,11 +1312,11 @@ Within an asynchronous context, a plain call to an `async` function does not imm
 
 ~~~
 async {
-  var postsTask: task<[ForumPost]!> = LoadPosts(42);
-  var usersTask: task<[User]!> = LoadUsers();
+  var postsTask: task<[ForumPost]> = LoadPosts(42);
+  var usersTask: task<[User]> = LoadUsers();
 
-  var posts: [ForumPost]! = suspend postsTask;
-  var users: [User]! = suspend usersTask;
+  var posts: [ForumPost] = suspend postsTask;
+  var users: [User] = suspend usersTask;
 }
 ~~~
 
@@ -1320,7 +1325,7 @@ The `suspend` keyword marks a suspension point within an asynchronous context. I
 It is possible to call an `async` function from a synchronous context. When doing so, the caller must use the `block` keyword:
 
 ~~~
-var posts: [ForumPost]! = block LoadPosts(42);
+var posts: [ForumPost] = block LoadPosts(42);
 ~~~
 
 Blocking execution of an `async` function behaves as though the function body were executed inside a fresh implicit structured `async` scope. Child tasks created within that call behave the same way as child tasks created within an explicit `async { ... }` block. Plain calls to `async` functions are therefore only valid within async contexts; synchronous code must use `block`.
@@ -1343,7 +1348,7 @@ Tablo supports structured error handling using `try`, `catch`, and `finally` blo
 Within a function, the `fail` keyword exits the current function by throwing an error. Unless the error is caught by a surrounding `try` / `catch` block, it continues to propagate outward until it reaches a caller or terminates execution.
 
 ~~~
-fn UpdateCustomer(id: int!, name: text!) void {
+fn UpdateCustomer(id: int, name: text) void {
   if name == '' {
     fail 'Customer name must not be empty.';
   }
@@ -1445,27 +1450,27 @@ Built-In Functions
 
 Unless otherwise specified, built-in functions may be used in query expressions such as `where`, `order by`, and `group by` clauses.
 
-### `date(): date!`
+### `date(): date`
 
 Returns the current date in the local time-zone.
 
-### `date(d: datetz!): date!`
+### `date(d: datetz): date`
 
 Returns the date `d`.
 
-### `date(ts: timestamp!): date!`
+### `date(ts: timestamp): date`
 
 Returns the date portion of the timestamp `ts`.
 
-### `date(ts: timestamptz!): date!`
+### `date(ts: timestamptz): date`
 
 Returns the date portion of the timestamp `ts`.
 
-### `date(d: text!): date`
+### `date(d: text): date`
 
 Returns the date obtained by parsing `d`. If `d` cannot be parsed as a date then the function fails.
 
-### `date(tz: dec!): date!`
+### `date(tz: dec): date`
 
 Returns the current date in the time-zone specified by `tz`.
 
@@ -1477,25 +1482,25 @@ Displays the `fmt` text in `stdout`. Note that no new line character is automati
 
 Displays the `fmt` text in `stdout`. A new line character is automatically added to the end of `fmt`.
 
-### `firstof(v1!: any, v2: any, ...): bool!`
+### `firstof(v1: any, v2: any, ...): bool`
 
 Returns `true` when the current iteration of a grouped `for` loop is the first iteration of the group identified by the supplied grouping expression values. Otherwise returns `false`.
 
 It is valid to call `firstof()` only within the body of a grouped database `for` loop. It must not be used in query expressions. The arguments passed to `firstof()` must identify the first grouping level, the first two grouping levels, and so on, in the same order as the enclosing `group by` clause. Each argument must be either the simple field reference from the corresponding grouping expression or the alias assigned to that grouping expression.
 
-### `float(v: dec!): float`
+### `float(v: dec): float`
 
 Returns the `float` obtained by casting `v`. If `v` cannot be converted then the function fails.
 
-### `float(v: int!): float`
+### `float(v: int): float`
 
 Returns the `float` obtained by casting `v`. If `v` cannot be converted then the function fails.
 
-### `float(v: text!): float`
+### `float(v: text): float`
 
 Returns the `float` obtained by parsing `v`. If `v` cannot be parsed as a `float` then the function fails.
 
-### `ilike(v: text!, pattern: text!): bool!`
+### `ilike(v: text, pattern: text): bool`
 
 Returns `true` if `v` matches `pattern` according to Tablo's case-insensitive SQL-style wildcard matching rules. Otherwise returns `false`.
 
@@ -1503,37 +1508,37 @@ As with SQL's `LIKE` syntax, `%` matches zero or more characters and `_` matches
 
 The `\` character is used to escape wildcard characters within the pattern. Therefore `\%` matches a literal percent sign, `\_` matches a literal underscore, and `\\` matches a literal backslash.
 
-### `int(v: dec!): int`
+### `int(v: dec): int`
 
 Returns the `int` obtained by casting `v`. If `v` cannot be converted then the function fails.
 
-### `int(v: float!): int`
+### `int(v: float): int`
 
 Returns the `int` obtained by casting `v`. If `v` cannot be converted then the function fails.
 
-### `int(v: text!): int`
+### `int(v: text): int`
 
 Returns the `int` obtained by parsing `v`. If `v` cannot be parsed as an `int` then the function fails.
 
-### `max(a: int!, b: int!): int!`
+### `max(a: int, b: int): int`
 
 Returns the greater of the two `int` values `a` and `b`.
 
-### `min(a: int!, b: int!): int!`
+### `min(a: int, b: int): int`
 
 Returns the lesser of the two `int` values `a` and `b`.
 
-### `lastof(v1!: any, v2: any, ...): bool!`
+### `lastof(v1: any, v2: any, ...): bool`
 
 Returns `true` when the current iteration of a grouped `for` loop is the last iteration of the group identified by the supplied grouping expression values. Otherwise returns `false`.
 
 It is valid to call `lastof()` only within the body of a grouped database `for` loop. It must not be used in query expressions. The arguments passed to `lastof()` must identify the first grouping level, the first two grouping levels, and so on, in the same order as the enclosing `group by` clause. Each argument must be either the simple field reference from the corresponding grouping expression or the alias assigned to that grouping expression.
 
-### `len(v: [any]!): int!`
+### `len(v: [any]): int`
 
 Returns the number of elements in the array `v`.
 
-### `like(v: text!, pattern: text!): bool!`
+### `like(v: text, pattern: text): bool`
 
 Returns `true` if `v` matches `pattern` according to Tablo's SQL-style wildcard matching rules. Otherwise returns `false`.
 
@@ -1573,71 +1578,71 @@ Returns the string representation of `v`.
 
 Returns the string representation of `v`.
 
-### `time(): time!`
+### `time(): time`
 
 Returns the current time in the local time-zone.
 
-### `time(ts: timestamp!): time!`
+### `time(ts: timestamp): time`
 
 Returns the time portion of the timestamp `ts`.
 
-### `time(ts: timestamptz!): time!`
+### `time(ts: timestamptz): time`
 
 Returns the time portion of the timestamp `ts`.
 
-### `time(t: timetz!): time!`
+### `time(t: timetz): time`
 
 Returns the time `t`.
 
-### `time(v: text!): time!`
+### `time(v: text): time`
 
 Returns the time obtained by parsing `v`. If `v` cannot be parsed as a time then the function fails.
 
-### `time(tz: dec!): time!`
+### `time(tz: dec): time`
 
 Returns the current time in the time-zone specified by `tz`.
 
-### `timestamp(): timestamp!`
+### `timestamp(): timestamp`
 
 Returns the current date and time in the local time-zone.
 
-### `timestamp(ts: timestamptz!): timestamp!`
+### `timestamp(ts: timestamptz): timestamp`
 
 Returns the timestamp `ts`.
 
-### `timestamp(d: date!, t: time!): timestamp!`
+### `timestamp(d: date, t: time): timestamp`
 
 Returns the timestamp formed from the date `d` and the time `t`.
 
-### `timestamp(v: text!): timestamp`
+### `timestamp(v: text): timestamp`
 
 Returns the timestamp obtained by parsing `v`. If `v` cannot be parsed as a timestamp then the function fails.
 
-### `timestamptz(): timestamptz!`
+### `timestamptz(): timestamptz`
 
 Returns the current date and time in the local time-zone.
 
-### `timestamptz(d: date!, t: timetz!): timestamptz!`
+### `timestamptz(d: date, t: timetz): timestamptz`
 
 Returns the timestamp formed from the date `d` and the time `t`.
 
-### `timestamptz(d: date!, t: time!, tz: dec!): timestamptz!`
+### `timestamptz(d: date, t: time, tz: dec): timestamptz`
 
 Returns the timestamp formed from the date `d` and the time `t` in time-zone `tz`.
 
-### `timetz(): timetz!`
+### `timetz(): timetz`
 
 Returns the current time in the local time-zone.
 
-### `timetz(ts: timestamptz!): timetz!`
+### `timetz(ts: timestamptz): timetz`
 
 Returns the time portion of the timestamp `ts`.
 
-### `timetz(v!: text): timetz`
+### `timetz(v: text): timetz`
 
 Returns the timestamp obtained by parsing `v`. If `v` cannot be parsed as a timestamp then the function fails.
 
-### `timetz(t: time!, tz: dec!): timetz!`
+### `timetz(t: time, tz: dec): timetz`
 
 Returns the time `t` in time-zone `tz`.
 
@@ -1680,7 +1685,8 @@ returnStatement = `return` [ expression ]
 ifStatement = `if` expression block [ `else` ( block | ifStatement ) ]
 whileStatement = `while` expression block
 returnType = dataType | `void`
-dataType = typeReference | arrayType
+dataType = baseDataType [ `?` ]
+baseDataType = typeReference | arrayType
 arrayType = `[` dataType `]`
 typeReference = identifier { `.` identifier }
 
