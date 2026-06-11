@@ -216,9 +216,17 @@ impl<'a> ObjectFileReader<'a> {
 		let tag_offset = self.offset;
 		match self.read_u8()? {
 			1 => Ok(crate::bytecode::Constant::Boolean(self.read_bool()?)),
-			2 => Ok(crate::bytecode::Constant::Decimal(self.read_decimal()?)),
-			3 => Ok(crate::bytecode::Constant::Integer(self.read_i64()?)),
-			4 => Ok(crate::bytecode::Constant::Text(self.read_string()?)),
+			2 => Ok(crate::bytecode::Constant::Date(crate::value::Date::from_parts(
+				self.read_i32()?,
+				self.read_u8()?,
+				self.read_u8()?,
+			).map_err(|message| ObjectFileError {
+				offset: self.offset.saturating_sub(6),
+				message,
+			})?)),
+			3 => Ok(crate::bytecode::Constant::Decimal(self.read_decimal()?)),
+			4 => Ok(crate::bytecode::Constant::Integer(self.read_i64()?)),
+			5 => Ok(crate::bytecode::Constant::Text(self.read_string()?)),
 			tag => Err(ObjectFileError {
 				offset: tag_offset,
 				message: format!("Unknown inline constant tag {tag}."),
@@ -822,18 +830,24 @@ fn write_inline_constant(bytes: &mut Vec<u8>, constant: &crate::bytecode::Consta
 			bytes.push(1);
 			bytes.push(u8::from(*value));
 		}
-		crate::bytecode::Constant::Decimal(value) => {
+		crate::bytecode::Constant::Date(value) => {
 			bytes.push(2);
+			bytes.extend_from_slice(&value.year.to_le_bytes());
+			bytes.push(value.month);
+			bytes.push(value.day);
+		}
+		crate::bytecode::Constant::Decimal(value) => {
+			bytes.push(3);
 			bytes.extend_from_slice(&value.coefficient.to_le_bytes());
 			bytes.push(value.precision);
 			bytes.push(value.scale);
 		}
 		crate::bytecode::Constant::Integer(value) => {
-			bytes.push(3);
+			bytes.push(4);
 			bytes.extend_from_slice(&value.to_le_bytes());
 		}
 		crate::bytecode::Constant::Text(value) => {
-			bytes.push(4);
+			bytes.push(5);
 			bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
 			bytes.extend_from_slice(value.as_bytes());
 		}

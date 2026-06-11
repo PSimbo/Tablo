@@ -33,7 +33,6 @@ use crate::ast::WhileStatement;
 use crate::bytecode::CodeBody;
 use crate::bytecode::CodeBodyDebugInfo;
 use crate::bytecode::CompiledFunction;
-use crate::bytecode::Constant;
 use crate::bytecode::DebugInfo;
 use crate::bytecode::Instruction;
 use crate::bytecode::LocalVariableDebugInfo;
@@ -343,19 +342,16 @@ impl Compiler {
 			}
 			Expr::FieldAccess(FieldAccessExpr { field, object, .. }) => {
 				if let Some(enum_value) = semantic_program.enum_variant_value(expression.position()) {
-					match enum_value {
-						EnumValue::Integer(value) => {
-							let enum_name = match object.as_ref() {
-								Expr::Identifier(identifier) => identifier.name.clone(),
-								_ => panic!("Enum variant access must be rooted at an enum identifier."),
-							};
-							self.emit(emission, Instruction::PushEnumValue {
-								backing_value: Constant::Integer(*value),
-								enum_name,
-								variant_name: field.name.clone(),
-							}, expression.position());
-						}
-					}
+					let EnumValue::Constant(backing_value) = enum_value;
+					let enum_name = match object.as_ref() {
+						Expr::Identifier(identifier) => identifier.name.clone(),
+						_ => panic!("Enum variant access must be rooted at an enum identifier."),
+					};
+					self.emit(emission, Instruction::PushEnumValue {
+						backing_value: backing_value.clone(),
+						enum_name,
+						variant_name: field.name.clone(),
+					}, expression.position());
 				}
 				else {
 					self.compile_into(object, semantic_program, emission);
@@ -898,13 +894,12 @@ impl Compiler {
 						.cloned()
 						.unwrap_or_else(|| panic!("Missing resolved default value for enum `{name}`."));
 
-					match value {
-						EnumValue::Integer(value) => self.emit(emission, Instruction::PushEnumValue {
-							backing_value: Constant::Integer(value),
-							enum_name: name.clone(),
-							variant_name: variant.name.clone(),
-						}, position),
-					}
+					let EnumValue::Constant(backing_value) = value;
+					self.emit(emission, Instruction::PushEnumValue {
+						backing_value,
+						enum_name: name.clone(),
+						variant_name: variant.name.clone(),
+					}, position);
 				}
 				else {
 					panic!("Missing named type declaration for `{name}`.");

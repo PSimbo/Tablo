@@ -998,6 +998,15 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_bool_backed_enum_source_text() {
+		let result = run(
+			"enum Flag: bool { Off: false, On: true }\nfn Main(args: [text]) int { var flag: Flag = Flag.On; if (flag == Flag.On) { return 1; } return 0; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
 	fn runs_boolean_source_text() {
 		let result = evaluate_snippet("true").unwrap();
 
@@ -1067,6 +1076,15 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_date_backed_enum_source_text() {
+		let result = run(
+			"enum Holiday: date { NewYear: @2026-01-01, Christmas: @2026-12-25 }\nfn Main(args: [text]) int { var holiday: Holiday = Holiday.Christmas; if (holiday == Holiday.Christmas) { return 1; } return 0; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
 	fn runs_date_equality_object_file() {
 		let output_path = unique_test_output_path("runs_date_equality_object_file");
 		compile_snippet_to_object_file("var same: bool = @2025-06-10 == @2025-06-10;\nsame", &output_path).unwrap();
@@ -1100,6 +1118,15 @@ mod tests {
 			current_date.day,
 		);
 		let result = run(&source).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn runs_decimal_backed_enum_source_text() {
+		let result = run(
+			"enum Rate: dec { Reduced: 0.05, Standard: 0.20 }\nfn Main(args: [text]) int { var rate: Rate = Rate.Standard; if (rate == Rate.Standard) { return 1; } return 0; }"
+		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
 	}
@@ -1917,6 +1944,15 @@ mod tests {
 		let _ = std::fs::remove_file(&database_path);
 
 		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
+	fn runs_text_backed_enum_source_text() {
+		let result = run(
+			"enum Status: text { Pending: 'PENDING', Complete: 'COMPLETE' }\nfn Main(args: [text]) int { var status: Status = Status.Complete; if (status == Status.Complete) { return 1; } return 0; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
 	}
 
 	#[test]

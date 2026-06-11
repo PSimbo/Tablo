@@ -1649,6 +1649,7 @@ fn pow10_i128(exponent: u32) -> Result<i128, String> {
 fn runtime_value_from_constant(constant: &crate::bytecode::Constant) -> Value {
 	match constant {
 		crate::bytecode::Constant::Boolean(value) => Value::Boolean(*value),
+		crate::bytecode::Constant::Date(value) => Value::Date(*value),
 		crate::bytecode::Constant::Decimal(value) => Value::Decimal(value.clone()),
 		crate::bytecode::Constant::Integer(value) => Value::Integer(*value),
 		crate::bytecode::Constant::Text(value) => Value::Text(value.clone()),

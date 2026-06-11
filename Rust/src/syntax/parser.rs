@@ -55,6 +55,7 @@ use super::token::Token;
 use super::token::TokenKind;
 
 pub struct Parser {
+	allow_object_construction_infix: bool,
 	position: usize,
 	tokens: Vec<Token>,
 }
@@ -84,6 +85,7 @@ pub struct ParseError {
 impl Parser {
 	pub fn new(tokens: Vec<Token>) -> Self {
 		Self {
+			allow_object_construction_infix: true,
 			position: 0,
 			tokens,
 		}
@@ -318,6 +320,14 @@ impl Parser {
 			target,
 			value: Box::new(value),
 		}))
+	}
+
+	fn parse_assignment_expression_without_object_construction(&mut self) -> Result<Expr, ParseError> {
+		let previous = self.allow_object_construction_infix;
+		self.allow_object_construction_infix = false;
+		let result = self.parse_assignment_expression();
+		self.allow_object_construction_infix = previous;
+		result
 	}
 
 	fn parse_block_statement(&mut self) -> Result<Statement, ParseError> {
@@ -583,7 +593,7 @@ impl Parser {
 				TokenKind::ForwardSlash => BindingPower::Multiplicative,
 				TokenKind::GreaterThan => BindingPower::Comparison,
 				TokenKind::GreaterThanOrEqual => BindingPower::Comparison,
-				TokenKind::LeftBrace if self.is_qualified_identifier_expr(&left) => BindingPower::Call,
+				TokenKind::LeftBrace if self.allow_object_construction_infix && self.is_qualified_identifier_expr(&left) => BindingPower::Call,
 				TokenKind::LeftBracket => BindingPower::Call,
 				TokenKind::LeftParenthesis => BindingPower::Call,
 				TokenKind::LessThan => BindingPower::Comparison,
@@ -698,7 +708,7 @@ impl Parser {
 
 		let variable = self.expect_token(TokenKind::Identifier, "Expected loop variable name.")?;
 		self.expect_token(TokenKind::InKeyword, "Expected `in` after loop variable name.")?;
-		let iterable = self.parse_assignment_expression()?;
+		let iterable = self.parse_assignment_expression_without_object_construction()?;
 		let body = match self.parse_block_statement()? {
 			Statement::Block(block) => block,
 			_ => unreachable!("Block parser must return a block statement."),
@@ -797,7 +807,7 @@ impl Parser {
 
 	fn parse_if_statement(&mut self) -> Result<Statement, ParseError> {
 		let if_keyword = self.expect_token(TokenKind::IfKeyword, "Expected `if` to start if statement.")?;
-		let condition = self.parse_assignment_expression()?;
+		let condition = self.parse_assignment_expression_without_object_construction()?;
 		let then_branch = match self.parse_block_statement()? {
 			Statement::Block(block) => block,
 			_ => unreachable!("Block parser must return a block statement."),
@@ -1663,7 +1673,7 @@ impl Parser {
 
 	fn parse_while_statement(&mut self) -> Result<Statement, ParseError> {
 		let while_keyword = self.expect_token(TokenKind::WhileKeyword, "Expected `while` to start while statement.")?;
-		let condition = self.parse_assignment_expression()?;
+		let condition = self.parse_assignment_expression_without_object_construction()?;
 		let body = match self.parse_block_statement()? {
 			Statement::Block(block) => block,
 			_ => unreachable!("Block parser must return a block statement."),
@@ -2978,6 +2988,21 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_for_identifier_iterable_followed_by_block() {
+		let program = parse_program(
+			"fn Main(args: [text]) int { for value in items { value; } return 0; }"
+		);
+
+		assert!(matches!(
+			&program.functions[0].body.statements[0],
+			Statement::For(ForStatement {
+				iterable: Expr::Identifier(_),
+				..
+			})
+		));
+	}
+
+	#[test]
 	fn parses_for_record_statement() {
 		assert_eq!(
 			normalize_program(parse_program("for rec mut cust in customers where active = true order by name desc { cust.name; }")),
@@ -3338,6 +3363,28 @@ mod tests {
 				with_declarations: vec![],
 			}
 		);
+	}
+
+	#[test]
+	fn parses_if_record_pointer_condition_followed_by_field_assignment_block() {
+		let program = parse_program(
+			"fn Main(args: [text]) int { rec mut c = find first TblTest; if c { parentObj.InnerObj.FieldA = c.ColC; } return 0; }"
+		);
+
+		assert!(matches!(
+			&program.functions[0].body.statements[1],
+			Statement::If(IfStatement {
+				condition: Expr::Identifier(_),
+				then_branch,
+				..
+			}) if matches!(
+				&then_branch.statements[0],
+				Statement::Expression(Expr::Assignment(AssignmentExpr {
+					target: AssignmentTarget::Field(_),
+					..
+				}))
+			)
+		));
 	}
 
 	#[test]

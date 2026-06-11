@@ -38,6 +38,7 @@ use crate::ast::VariableDeclaration;
 use crate::ast::WhileStatement;
 use crate::ast::WithDeclaration;
 use crate::builtins::BuiltInFunction;
+use crate::bytecode::Constant;
 use crate::compiler::CompileError;
 use crate::query::LoweredBackendQuery;
 use crate::query::QueryBinaryExpr;
@@ -63,7 +64,7 @@ use super::scope::ScopeStack;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EnumValue {
-	Integer(i64),
+	Constant(Constant),
 }
 
 // This pass is responsible for name resolution and type checking. It does not
@@ -633,19 +634,42 @@ impl SemanticAnalyzer {
 		self.locals.enter_scope();
 	}
 
-	fn enum_integer_literal_value(&self, expression: &Expr) -> Option<i64> {
-		match expression {
-			Expr::Integer(integer) => Some(integer.value),
-			Expr::Unary(UnaryExpr {
-				operator: UnaryOperator::Negate,
-				operand,
-				..
-			}) => {
+	fn enum_literal_constant(&self, expression: &Expr, data_type: &DataType) -> Option<Constant> {
+		match (expression, data_type) {
+			(Expr::Boolean(boolean), DataType::Bool) => Some(Constant::Boolean(boolean.value)),
+			(Expr::Date(date), DataType::Date) => Some(Constant::Date(date.value)),
+			(Expr::Decimal(decimal), DataType::Dec) => Some(Constant::Decimal(decimal.value.clone())),
+			(Expr::Integer(integer), DataType::Int) => Some(Constant::Integer(integer.value)),
+			(Expr::Text(text), DataType::Text) => Some(Constant::Text(text.value.clone())),
+			(
+				Expr::Unary(UnaryExpr {
+					operator: UnaryOperator::Negate,
+					operand,
+					..
+				}),
+				DataType::Int,
+			) => {
 				let Expr::Integer(integer) = operand.as_ref() else {
 					return None;
 				};
 
-				integer.value.checked_neg()
+				integer.value.checked_neg().map(Constant::Integer)
+			}
+			(
+				Expr::Unary(UnaryExpr {
+					operator: UnaryOperator::Negate,
+					operand,
+					..
+				}),
+				DataType::Dec,
+			) => {
+				let Expr::Decimal(decimal) = operand.as_ref() else {
+					return None;
+				};
+
+				let mut value = decimal.value.clone();
+				value.coefficient = value.coefficient.checked_neg()?;
+				Some(Constant::Decimal(value))
 			}
 			_ => None,
 		}
@@ -1550,6 +1574,10 @@ impl SemanticAnalyzer {
 		matches!(data_type.without_nullability(), DataType::Bool | DataType::RecordPointer(_))
 	}
 
+	fn is_valid_enum_backing_type(&self, data_type: &DataType) -> bool {
+		matches!(data_type, DataType::Bool | DataType::Date | DataType::Dec | DataType::Int | DataType::Text)
+	}
+
 	fn lookup_enum(&self, name: &str) -> Option<&EnumBinding> {
 		self.enums.lookup(name)
 	}
@@ -2017,11 +2045,11 @@ impl SemanticAnalyzer {
 			));
 		}
 
-		if enum_declaration.backing_type != DataType::Int {
+		if !self.is_valid_enum_backing_type(&enum_declaration.backing_type) {
 			return Err(self.compile_error(
 				enum_declaration.position,
 				format!(
-					"Enum backing type `{}` is not yet implemented. Only `int`-backed enums are currently supported.",
+					"Enum backing type `{}` is not supported. Enum backing types must be non-nullable primitive types other than `json`.",
 					enum_declaration.backing_type.name(),
 				),
 			));
@@ -2038,31 +2066,41 @@ impl SemanticAnalyzer {
 				));
 			}
 
-			let value = if let Some(expression) = &variant.value {
-				let Some(value) = self.enum_integer_literal_value(expression) else {
+			let (value, advance_next_int) = if let Some(expression) = &variant.value {
+				let Some(value) = self.enum_literal_constant(expression, &enum_declaration.backing_type) else {
 					return Err(self.compile_error(
 						expression.position(),
 						format!(
-							"Enum variant `{}` on enum `{}` must use an `int` literal value.",
+							"Enum variant `{}` on enum `{}` must use a literal value of type `{}`.",
 							variant.name,
 							enum_declaration.name,
+							enum_declaration.backing_type.name(),
 						),
 					));
 				};
 
-				next_value = value.checked_add(1).ok_or(self.compile_error(
-					expression.position(),
-					format!(
-						"Enum variant `{}` on enum `{}` exceeds the supported `int` range.",
-						variant.name,
-						enum_declaration.name,
-					),
-				))?;
-				value
+				(value, enum_declaration.backing_type == DataType::Int)
 			}
 			else {
+				if enum_declaration.backing_type != DataType::Int {
+					return Err(self.compile_error(
+						variant.position,
+						format!(
+							"Enum variant `{}` on enum `{}` must specify a value because the backing type is `{}`.",
+							variant.name,
+							enum_declaration.name,
+							enum_declaration.backing_type.name(),
+						),
+					));
+				}
+
 				let value = next_value;
-				next_value = next_value.checked_add(1).ok_or(self.compile_error(
+				(Constant::Integer(value), true)
+			};
+
+			if advance_next_int
+				&& let Constant::Integer(value) = &value {
+				next_value = value.checked_add(1).ok_or(self.compile_error(
 					variant.position,
 					format!(
 						"Enum variant `{}` on enum `{}` exceeds the supported `int` range.",
@@ -2070,10 +2108,9 @@ impl SemanticAnalyzer {
 						enum_declaration.name,
 					),
 				))?;
-				value
-			};
+			}
 
-			variants.insert(variant.name.clone(), EnumValue::Integer(value));
+			variants.insert(variant.name.clone(), EnumValue::Constant(value));
 		}
 
 		Ok(variants)
@@ -2214,20 +2251,20 @@ impl SemanticAnalyzer {
 			format!("Enum `{}` was not registered before validation.", enum_declaration.name),
 		))?;
 
-		if binding.backing_type != DataType::Int {
-			return Err(self.compile_error(
-				enum_declaration.position,
-				format!(
-					"Enum backing type `{}` is not yet implemented. Only `int`-backed enums are currently supported.",
-					binding.backing_type.name(),
-				),
-			));
-		}
-
 		if binding.backing_type.is_nullable() {
 			return Err(self.compile_error(
 				enum_declaration.position,
 				String::from("Enum backing types must be non-nullable."),
+			));
+		}
+
+		if !self.is_valid_enum_backing_type(&binding.backing_type) {
+			return Err(self.compile_error(
+				enum_declaration.position,
+				format!(
+					"Enum backing type `{}` is not supported. Enum backing types must be non-nullable primitive types other than `json`.",
+					binding.backing_type.name(),
+				),
 			));
 		}
 

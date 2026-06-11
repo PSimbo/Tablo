@@ -11,6 +11,7 @@ use crate::value::Decimal;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Constant {
 	Boolean(bool),
+	Date(crate::value::Date),
 	Decimal(Decimal),
 	Integer(i64),
 	Text(String),
