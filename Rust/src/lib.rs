@@ -1292,6 +1292,15 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_int_backed_enum_source_text() {
+		let result = run(
+			"enum Color { Red, Green: 3, Blue }\nfn Main(args: [text]) int { var color: Color; if (color == Color.Red) { color = Color.Blue; } if (color == Color.Blue) { return 1; } return 0; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
 	fn runs_integer_range_source_text() {
 		let result = evaluate_snippet("0:10").unwrap();
 

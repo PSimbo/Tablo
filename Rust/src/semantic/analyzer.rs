@@ -12,6 +12,7 @@ use crate::ast::CallExpr;
 use crate::ast::ContinueStatement;
 use crate::ast::CountExpr;
 use crate::ast::DataType;
+use crate::ast::EnumDeclaration;
 use crate::ast::Expr;
 use crate::ast::FieldAccessExpr;
 use crate::ast::FindExpr;
@@ -60,6 +61,11 @@ use crate::schema::SchemaError;
 
 use super::scope::ScopeStack;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EnumValue {
+	Integer(i64),
+}
+
 // This pass is responsible for name resolution and type checking. It does not
 // emit bytecode directly, but it resolves locals and function targets so code
 // generation can remain simple.
@@ -67,12 +73,19 @@ use super::scope::ScopeStack;
 pub struct SemanticAnalyzer {
 	current_return_type: Option<DataType>,
 	current_schema_catalog: Option<SchemaCatalog>,
+	enums: ScopeStack<EnumBinding>,
 	functions: ScopeStack<FunctionSignature>,
 	locals: ScopeStack<LocalBinding>,
 	loop_depth: usize,
 	next_function_index: u32,
 	next_local_slot: u32,
 	semantic_program: SemanticProgram,
+}
+
+#[derive(Clone)]
+struct EnumBinding {
+	backing_type: DataType,
+	variants: BTreeMap<String, EnumValue>,
 }
 
 #[derive(Clone)]
@@ -117,6 +130,9 @@ pub struct SemanticProgram {
 	declaration_types: BTreeMap<usize, DataType>,
 	entry_point_function_index: Option<u32>,
 	entry_point_position: Option<usize>,
+	enum_declarations: BTreeMap<String, EnumDeclaration>,
+	enum_variant_values: BTreeMap<usize, EnumValue>,
+	enum_variants: BTreeMap<String, BTreeMap<String, EnumValue>>,
 	function_declaration_targets: BTreeMap<usize, u32>,
 	identifier_slots: BTreeMap<usize, u32>,
 	iterator_slots: BTreeMap<usize, u32>,
@@ -176,6 +192,18 @@ impl SemanticProgram {
 		self.entry_point_position
 	}
 
+	pub fn enum_declaration(&self, name: &str) -> Option<&EnumDeclaration> {
+		self.enum_declarations.get(name)
+	}
+
+	pub fn enum_variant(&self, enum_name: &str, variant_name: &str) -> Option<&EnumValue> {
+		self.enum_variants.get(enum_name)?.get(variant_name)
+	}
+
+	pub fn enum_variant_value(&self, position: usize) -> Option<&EnumValue> {
+		self.enum_variant_values.get(&position)
+	}
+
 	pub fn function_declaration_target(&self, position: usize) -> Option<u32> {
 		self.function_declaration_targets.get(&position).copied()
 	}
@@ -214,6 +242,7 @@ impl SemanticAnalyzer {
 		Self {
 			current_return_type: None,
 			current_schema_catalog: None,
+			enums: ScopeStack::default(),
 			functions: ScopeStack::default(),
 			locals: ScopeStack::default(),
 			loop_depth: 0,
@@ -234,6 +263,7 @@ impl SemanticAnalyzer {
 	) -> Result<SemanticProgram, CompileError> {
 		self.current_return_type = None;
 		self.functions = ScopeStack::default();
+		self.enums = ScopeStack::default();
 		self.locals = ScopeStack::default();
 		self.loop_depth = 0;
 		self.next_function_index = 0;
@@ -243,6 +273,8 @@ impl SemanticAnalyzer {
 
 		self.validate_with_declarations(&program.with_declarations, schema_catalog)?;
 		self.collect_object_declarations(&program.objects)?;
+		self.enums.enter_scope();
+		self.collect_scope_enum_declarations(&program.statements)?;
 		self.functions.enter_scope();
 		self.collect_scope_function_signatures(&program.functions, &program.statements)?;
 
@@ -266,6 +298,7 @@ impl SemanticAnalyzer {
 
 		self.exit_scope();
 		self.functions.exit_scope();
+		self.enums.exit_scope();
 
 		Ok(self.semantic_program.clone())
 	}
@@ -418,6 +451,16 @@ impl SemanticAnalyzer {
 		Ok(())
 	}
 
+	fn collect_scope_enum_declarations(&mut self, statements: &[Statement]) -> Result<(), CompileError> {
+		for statement in statements {
+			if let Statement::EnumDeclaration(enum_declaration) = statement {
+				self.declare_enum_signature(enum_declaration)?;
+			}
+		}
+
+		Ok(())
+	}
+
 	fn collect_scope_function_signatures(&mut self, functions: &[FunctionDeclaration], statements: &[Statement]) -> Result<(), CompileError> {
 		for function in functions {
 			self.declare_function_signature(function)?;
@@ -429,6 +472,32 @@ impl SemanticAnalyzer {
 			}
 		}
 
+		Ok(())
+	}
+
+	fn declare_enum_signature(&mut self, enum_declaration: &EnumDeclaration) -> Result<(), CompileError> {
+		if self.enums.contains_in_current_scope(&enum_declaration.name) {
+			return Err(self.compile_error(
+				enum_declaration.position,
+				format!("Enum `{}` is already declared in this scope.", enum_declaration.name),
+			));
+		}
+
+		if self.semantic_program.object_declarations.contains_key(&enum_declaration.name)
+			|| self.semantic_program.enum_declarations.contains_key(&enum_declaration.name) {
+			return Err(self.compile_error(
+				enum_declaration.position,
+				format!("Enum `{}` is already declared in this module.", enum_declaration.name),
+			));
+		}
+
+		let variants = self.resolve_enum_variants(enum_declaration)?;
+		self.enums.declare(enum_declaration.name.clone(), EnumBinding {
+			backing_type: enum_declaration.backing_type.clone(),
+			variants: variants.clone(),
+		});
+		self.semantic_program.enum_declarations.insert(enum_declaration.name.clone(), enum_declaration.clone());
+		self.semantic_program.enum_variants.insert(enum_declaration.name.clone(), variants);
 		Ok(())
 	}
 
@@ -562,6 +631,28 @@ impl SemanticAnalyzer {
 
 	fn enter_scope(&mut self) {
 		self.locals.enter_scope();
+	}
+
+	fn enum_integer_literal_value(&self, expression: &Expr) -> Option<i64> {
+		match expression {
+			Expr::Integer(integer) => Some(integer.value),
+			Expr::Unary(UnaryExpr {
+				operator: UnaryOperator::Negate,
+				operand,
+				..
+			}) => {
+				let Expr::Integer(integer) = operand.as_ref() else {
+					return None;
+				};
+
+				integer.value.checked_neg()
+			}
+			_ => None,
+		}
+	}
+
+	fn enum_variant_binding(&self, enum_name: &str, variant_name: &str) -> Option<&EnumValue> {
+		self.lookup_enum(enum_name)?.variants.get(variant_name)
 	}
 
 	fn exit_scope(&mut self) {
@@ -911,11 +1002,25 @@ impl SemanticAnalyzer {
 			Expr::Date(_) => Ok(DataType::Date),
 			Expr::Decimal(_) => Ok(DataType::Dec),
 			Expr::FieldAccess(FieldAccessExpr { field, object, .. }) => {
+				if let Expr::Identifier(identifier) = object.as_ref()
+					&& self.lookup_local(&identifier.name).is_none()
+					&& let Some(enum_value) = self.enum_variant_binding(&identifier.name, &field.name) {
+					self.semantic_program.enum_variant_values.insert(expression.position(), enum_value.clone());
+					return Ok(DataType::Object(identifier.name.clone()));
+				}
+
 				let object_type = self.infer_expression_type(object)?;
 				let object_type = object_type.without_nullability().clone();
 
 				match object_type {
 					DataType::Object(name) => {
+						if self.lookup_enum(&name).is_some() {
+							return Err(self.compile_error(
+								field.position,
+								format!("Enum `{name}` does not contain a variant named `{}`.", field.name),
+							));
+						}
+
 						if self.semantic_program.object_declaration(&name).and_then(|object| object.array_element_type()).is_some() {
 							return Err(self.compile_error(
 								field.position,
@@ -1445,6 +1550,10 @@ impl SemanticAnalyzer {
 		matches!(data_type.without_nullability(), DataType::Bool | DataType::RecordPointer(_))
 	}
 
+	fn lookup_enum(&self, name: &str) -> Option<&EnumBinding> {
+		self.enums.lookup(name)
+	}
+
 	fn lookup_function(&self, name: &str) -> Option<&FunctionSignature> {
 		self.functions.lookup(name)
 	}
@@ -1900,6 +2009,76 @@ impl SemanticAnalyzer {
 		))
 	}
 
+	fn resolve_enum_variants(&self, enum_declaration: &EnumDeclaration) -> Result<BTreeMap<String, EnumValue>, CompileError> {
+		if enum_declaration.variants.is_empty() {
+			return Err(self.compile_error(
+				enum_declaration.position,
+				format!("Enum `{}` must declare at least one variant.", enum_declaration.name),
+			));
+		}
+
+		if enum_declaration.backing_type != DataType::Int {
+			return Err(self.compile_error(
+				enum_declaration.position,
+				format!(
+					"Enum backing type `{}` is not yet implemented. Only `int`-backed enums are currently supported.",
+					enum_declaration.backing_type.name(),
+				),
+			));
+		}
+
+		let mut variants = BTreeMap::new();
+		let mut next_value = 1_i64;
+
+		for variant in &enum_declaration.variants {
+			if variants.contains_key(&variant.name) {
+				return Err(self.compile_error(
+					variant.position,
+					format!("Enum variant `{}` is already declared on enum `{}`.", variant.name, enum_declaration.name),
+				));
+			}
+
+			let value = if let Some(expression) = &variant.value {
+				let Some(value) = self.enum_integer_literal_value(expression) else {
+					return Err(self.compile_error(
+						expression.position(),
+						format!(
+							"Enum variant `{}` on enum `{}` must use an `int` literal value.",
+							variant.name,
+							enum_declaration.name,
+						),
+					));
+				};
+
+				next_value = value.checked_add(1).ok_or(self.compile_error(
+					expression.position(),
+					format!(
+						"Enum variant `{}` on enum `{}` exceeds the supported `int` range.",
+						variant.name,
+						enum_declaration.name,
+					),
+				))?;
+				value
+			}
+			else {
+				let value = next_value;
+				next_value = next_value.checked_add(1).ok_or(self.compile_error(
+					variant.position,
+					format!(
+						"Enum variant `{}` on enum `{}` exceeds the supported `int` range.",
+						variant.name,
+						enum_declaration.name,
+					),
+				))?;
+				value
+			};
+
+			variants.insert(variant.name.clone(), EnumValue::Integer(value));
+		}
+
+		Ok(variants)
+	}
+
 	fn resolve_table_reference(
 		&mut self,
 		table: &TableReference,
@@ -2000,6 +2179,7 @@ impl SemanticAnalyzer {
 		match statement {
 			Statement::Block(block) => self.block_guarantees_return(block),
 			Statement::Break(_) | Statement::Continue(_) => false,
+			Statement::EnumDeclaration(_) => false,
 			Statement::FunctionDeclaration(_) => false,
 			Statement::If(if_statement) => {
 				self.block_guarantees_return(&if_statement.then_branch)
@@ -2013,7 +2193,9 @@ impl SemanticAnalyzer {
 
 	fn validate_block(&mut self, statements: &[Statement]) -> Result<(), CompileError> {
 		self.enter_scope();
+		self.enums.enter_scope();
 		self.functions.enter_scope();
+		self.collect_scope_enum_declarations(statements)?;
 		self.collect_scope_function_signatures(&[], statements)?;
 
 		for statement in statements {
@@ -2021,7 +2203,27 @@ impl SemanticAnalyzer {
 		}
 
 		self.functions.exit_scope();
+		self.enums.exit_scope();
 		self.exit_scope();
+		Ok(())
+	}
+
+	fn validate_enum_declaration(&mut self, enum_declaration: &EnumDeclaration) -> Result<(), CompileError> {
+		let binding = self.lookup_enum(&enum_declaration.name).ok_or(self.compile_error(
+			enum_declaration.position,
+			format!("Enum `{}` was not registered before validation.", enum_declaration.name),
+		))?;
+
+		if binding.backing_type != DataType::Int {
+			return Err(self.compile_error(
+				enum_declaration.position,
+				format!(
+					"Enum backing type `{}` is not yet implemented. Only `int`-backed enums are currently supported.",
+					binding.backing_type.name(),
+				),
+			));
+		}
+
 		Ok(())
 	}
 
@@ -2113,7 +2315,7 @@ impl SemanticAnalyzer {
 	}
 
 	fn validate_main_entry_point(&self, program: &Program, main_function: &FunctionDeclaration) -> Result<(), CompileError> {
-		if let Some(statement) = program.statements.first() {
+		if let Some(statement) = program.statements.iter().find(|statement| !matches!(statement, Statement::EnumDeclaration(_))) {
 			return Err(self.compile_error(
 				statement_position(statement),
 				String::from("Top-level executable statements are not permitted when `Main` is defined."),
@@ -2167,7 +2369,8 @@ impl SemanticAnalyzer {
 				Ok(())
 			}
 			DataType::Object(name) => {
-				if self.semantic_program.object_declarations.contains_key(name) {
+				if self.semantic_program.object_declarations.contains_key(name)
+					|| self.lookup_enum(name).is_some() {
 					Ok(())
 				}
 				else {
@@ -2243,6 +2446,7 @@ impl SemanticAnalyzer {
 
 				Ok(())
 			}
+			Statement::EnumDeclaration(enum_declaration) => self.validate_enum_declaration(enum_declaration),
 			Statement::Expression(expression) => {
 				self.infer_expression_type(expression)?;
 				Ok(())
@@ -2611,6 +2815,7 @@ fn statement_position(statement: &Statement) -> usize {
 		Statement::Block(block) => block.position,
 		Statement::Break(statement) => statement.position,
 		Statement::Continue(statement) => statement.position,
+		Statement::EnumDeclaration(statement) => statement.position,
 		Statement::Expression(expression) => expression.position(),
 		Statement::For(statement) => statement.position,
 		Statement::ForRecord(statement) => statement.position,

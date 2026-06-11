@@ -23,6 +23,7 @@ pub enum TokenKind {
 	Dot,
 	ElseKeyword,
 	EndOfFile,
+	EnumKeyword,
 	Equal,
 	EqualEqual,
 	FalseKeyword,

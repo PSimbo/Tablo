@@ -357,6 +357,7 @@ impl Lexer {
 			"dec" => TokenKind::DecKeyword,
 			"desc" => TokenKind::DescKeyword,
 			"else" => TokenKind::ElseKeyword,
+			"enum" => TokenKind::EnumKeyword,
 			"false" => TokenKind::FalseKeyword,
 			"find" => TokenKind::FindKeyword,
 			"first" => TokenKind::FirstKeyword,

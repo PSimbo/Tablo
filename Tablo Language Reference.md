@@ -652,7 +652,7 @@ At present, there is no support for multi-dimensional arrays.
 Enumerations
 ------------
 
-Tablo supports enumerations ("enums"). The enum may have a primitive type (excluding the `json` type) specified, in which case all variants within the enum share that same type. If not specified, an enum's type is `int`.
+Tablo supports enumerations ("enums"). The enum may have a non-nullable primitive type (excluding the `json` type) specified, in which case all variants within the enum share that same type. If not specified, an enum's type is `int`.
 
 Unless the enum's type is `int`, each variant must specify a corresponding value. Otherwise, some or all of the values may be omitted, in which case the variants are automatically assigned incrementing values relative to the nearest predecessor for which an explicit value is defined. If the first variant's value is not specified, it receives a value of 1. The variants are numbered in the order in which they are declared.
 

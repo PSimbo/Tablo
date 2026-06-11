@@ -38,6 +38,7 @@ use crate::bytecode::Instruction;
 use crate::bytecode::LocalVariableDebugInfo;
 use crate::bytecode::Program;
 use crate::schema::SchemaCatalog;
+use crate::semantic::analyzer::EnumValue;
 use crate::semantic::analyzer::SemanticAnalyzer;
 use crate::semantic::analyzer::SemanticProgram;
 
@@ -340,8 +341,17 @@ impl Compiler {
 				self.emit(emission, Instruction::PushDecimal(value.clone()), expression.position());
 			}
 			Expr::FieldAccess(FieldAccessExpr { field, object, .. }) => {
-				self.compile_into(object, semantic_program, emission);
-				self.emit(emission, Instruction::LoadField(field.name.clone()), expression.position());
+				if let Some(enum_value) = semantic_program.enum_variant_value(expression.position()) {
+					match enum_value {
+						EnumValue::Integer(value) => {
+							self.emit(emission, Instruction::PushInteger(*value), expression.position());
+						}
+					}
+				}
+				else {
+					self.compile_into(object, semantic_program, emission);
+					self.emit(emission, Instruction::LoadField(field.name.clone()), expression.position());
+				}
 			}
 			Expr::Find(_) => {
 				let query = semantic_program.compiled_find_query(expression.position())
@@ -523,6 +533,7 @@ impl Compiler {
 				self.emit(emission, Instruction::Jump(0), *position);
 				Ok(())
 			}
+			Statement::EnumDeclaration(_) => Ok(()),
 			Statement::Expression(expression) => {
 				self.compile_into(expression, semantic_program, emission);
 
@@ -847,29 +858,43 @@ impl Compiler {
 				self.emit(emission, Instruction::PushInteger(0), position);
 			}
 			crate::ast::DataType::Object(name) => {
-				let object_declaration = semantic_program.object_declaration(name)
-					.unwrap_or_else(|| panic!("Missing object declaration for `{name}`."));
-				if object_declaration.array_element_type().is_some() {
-					self.emit(emission, Instruction::MakeArray(0), position);
+				if let Some(object_declaration) = semantic_program.object_declaration(name) {
+					if object_declaration.array_element_type().is_some() {
+						self.emit(emission, Instruction::MakeArray(0), position);
+					}
+					else {
+						let object_fields = object_declaration.fields()
+							.unwrap_or_else(|| panic!("Missing fields for object `{name}`."));
+
+						for field in object_fields {
+							if let Some(default_value) = &field.default_value {
+								self.compile_into(default_value, semantic_program, emission);
+							}
+							else {
+								self.emit_default_value(&field.data_type, semantic_program, emission, position);
+							}
+						}
+
+						self.emit(
+							emission,
+							Instruction::MakeObject(object_fields.iter().map(|field| field.name.clone()).collect()),
+							position,
+						);
+					}
+				}
+				else if let Some(enum_declaration) = semantic_program.enum_declaration(name) {
+					let variant = enum_declaration.variants.first()
+						.unwrap_or_else(|| panic!("Missing variants for enum `{name}`."));
+					let value = semantic_program.enum_variant(name, &variant.name)
+						.cloned()
+						.unwrap_or_else(|| panic!("Missing resolved default value for enum `{name}`."));
+
+					match value {
+						EnumValue::Integer(value) => self.emit(emission, Instruction::PushInteger(value), position),
+					}
 				}
 				else {
-					let object_fields = object_declaration.fields()
-						.unwrap_or_else(|| panic!("Missing fields for object `{name}`."));
-
-					for field in object_fields {
-						if let Some(default_value) = &field.default_value {
-							self.compile_into(default_value, semantic_program, emission);
-						}
-						else {
-							self.emit_default_value(&field.data_type, semantic_program, emission, position);
-						}
-					}
-
-					self.emit(
-						emission,
-						Instruction::MakeObject(object_fields.iter().map(|field| field.name.clone()).collect()),
-						position,
-					);
+					panic!("Missing named type declaration for `{name}`.");
 				}
 			}
 			crate::ast::DataType::Text => {
@@ -953,6 +978,7 @@ fn collect_function_declaration<'a>(function: &'a FunctionDeclaration, functions
 fn collect_functions_from_statement<'a>(statement: &'a Statement, functions: &mut Vec<&'a FunctionDeclaration>) {
 	match statement {
 		Statement::Block(block) => collect_functions_from_statements(block.statements.as_slice(), functions),
+		Statement::EnumDeclaration(_) => {}
 		Statement::For(statement) => collect_functions_from_statements(statement.body.statements.as_slice(), functions),
 		Statement::ForRecord(statement) => collect_functions_from_statements(statement.body.statements.as_slice(), functions),
 		Statement::FunctionDeclaration(function) => collect_function_declaration(function, functions),
@@ -985,6 +1011,7 @@ fn statement_position(statement: &Statement) -> usize {
 		Statement::Block(block) => block.position,
 		Statement::Break(statement) => statement.position,
 		Statement::Continue(statement) => statement.position,
+		Statement::EnumDeclaration(statement) => statement.position,
 		Statement::Expression(expression) => expression.position(),
 		Statement::For(statement) => statement.position,
 		Statement::ForRecord(statement) => statement.position,

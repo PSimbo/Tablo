@@ -15,6 +15,8 @@ use crate::ast::CountExpr;
 use crate::ast::DataType;
 use crate::ast::DateLiteral;
 use crate::ast::DecimalLiteral;
+use crate::ast::EnumDeclaration;
+use crate::ast::EnumVariantDeclaration;
 use crate::ast::Expr;
 use crate::ast::FieldAccessExpr;
 use crate::ast::FindExpr;
@@ -112,7 +114,7 @@ impl Parser {
 				Some(token) if token.kind == TokenKind::WithKeyword => {
 					with_declarations.push(self.parse_with_declaration()?);
 				}
-				Some(token) if matches!(token.kind, TokenKind::BreakKeyword | TokenKind::ConstKeyword | TokenKind::ContinueKeyword | TokenKind::ForKeyword | TokenKind::IfKeyword | TokenKind::LeftBrace | TokenKind::RecKeyword | TokenKind::ReturnKeyword | TokenKind::VarKeyword | TokenKind::WhileKeyword) => {
+				Some(token) if matches!(token.kind, TokenKind::BreakKeyword | TokenKind::ConstKeyword | TokenKind::ContinueKeyword | TokenKind::EnumKeyword | TokenKind::ForKeyword | TokenKind::IfKeyword | TokenKind::LeftBrace | TokenKind::RecKeyword | TokenKind::ReturnKeyword | TokenKind::VarKeyword | TokenKind::WhileKeyword) => {
 					statements.push(self.parse_statement()?);
 				}
 				Some(_) => {
@@ -503,6 +505,63 @@ impl Parser {
 			position: token.start,
 			value,
 		}))
+	}
+
+	fn parse_enum_backing_type(&mut self) -> Result<DataType, ParseError> {
+		if !self.current().is_some_and(|token| token.kind == TokenKind::Colon) {
+			return Ok(DataType::Int);
+		}
+
+		self.next();
+		self.parse_primary_data_type()
+	}
+
+	fn parse_enum_declaration(&mut self) -> Result<EnumDeclaration, ParseError> {
+		let enum_keyword = self.expect_token(TokenKind::EnumKeyword, "Expected `enum` to start enum declaration.")?;
+		let name = self.expect_token(TokenKind::Identifier, "Expected enum type name.")?;
+		let backing_type = self.parse_enum_backing_type()?;
+		self.expect_token(TokenKind::LeftBrace, "Expected `{` to start enum variant list.")?;
+
+		let mut variants = Vec::new();
+
+		if !self.current().is_some_and(|token| token.kind == TokenKind::RightBrace) {
+			loop {
+				let variant = self.expect_token(TokenKind::Identifier, "Expected enum variant name.")?;
+				let value = if self.current().is_some_and(|token| token.kind == TokenKind::Colon) {
+					self.next();
+					Some(self.parse_assignment_expression()?)
+				}
+				else {
+					None
+				};
+
+				variants.push(EnumVariantDeclaration {
+					name: variant.lexeme,
+					position: variant.start,
+					value,
+				});
+
+				match self.current() {
+					Some(token) if token.kind == TokenKind::Comma => {
+						self.next();
+
+						if self.current().is_some_and(|token| token.kind == TokenKind::RightBrace) {
+							break;
+						}
+					}
+					_ => break,
+				}
+			}
+		}
+
+		self.expect_token(TokenKind::RightBrace, "Expected `}` to close enum declaration.")?;
+
+		Ok(EnumDeclaration {
+			backing_type,
+			name: name.lexeme,
+			position: enum_keyword.start,
+			variants,
+		})
 	}
 
 	fn parse_expression_with_binding_power(
@@ -1502,6 +1561,9 @@ impl Parser {
 		match self.current() {
 			Some(token) if token.kind == TokenKind::BreakKeyword => self.parse_break_statement(),
 			Some(token) if token.kind == TokenKind::ContinueKeyword => self.parse_continue_statement(),
+			Some(token) if token.kind == TokenKind::EnumKeyword => {
+				Ok(Statement::EnumDeclaration(self.parse_enum_declaration()?))
+			}
 			Some(token) if token.kind == TokenKind::ForKeyword => self.parse_for_statement(),
 			Some(token) if token.kind == TokenKind::FnKeyword => {
 				Ok(Statement::FunctionDeclaration(self.parse_function_declaration()?))
@@ -1677,6 +1739,8 @@ mod tests {
 	use crate::ast::DataType;
 	use crate::ast::DateLiteral;
 	use crate::ast::DecimalLiteral;
+	use crate::ast::EnumDeclaration;
+	use crate::ast::EnumVariantDeclaration;
 	use crate::ast::Expr;
 	use crate::ast::FieldAccessExpr;
 	use crate::ast::FindExpr;
@@ -1743,6 +1807,23 @@ mod tests {
 			is_by_ref: argument.is_by_ref,
 			position: 0,
 			value: normalize_expr(argument.value),
+		}
+	}
+
+	fn normalize_enum_declaration(declaration: EnumDeclaration) -> EnumDeclaration {
+		EnumDeclaration {
+			backing_type: declaration.backing_type,
+			name: declaration.name,
+			position: 0,
+			variants: declaration.variants.into_iter().map(normalize_enum_variant_declaration).collect(),
+		}
+	}
+
+	fn normalize_enum_variant_declaration(variant: EnumVariantDeclaration) -> EnumVariantDeclaration {
+		EnumVariantDeclaration {
+			name: variant.name,
+			position: 0,
+			value: variant.value.map(normalize_expr),
 		}
 	}
 
@@ -1987,6 +2068,9 @@ mod tests {
 			Statement::Continue(_) => Statement::Continue(ContinueStatement {
 				position: 0,
 			}),
+			Statement::EnumDeclaration(declaration) => {
+				Statement::EnumDeclaration(normalize_enum_declaration(declaration))
+			}
 			Statement::Expression(expression) => Statement::Expression(normalize_expr(expression)),
 			Statement::For(for_statement) => Statement::For(normalize_for_statement(for_statement)),
 			Statement::ForRecord(for_statement) => Statement::ForRecord(normalize_for_record_statement(for_statement)),
@@ -2699,6 +2783,45 @@ mod tests {
 				value: Decimal::from_literal(".5").unwrap(),
 			})
 		);
+	}
+
+	#[test]
+	fn parses_enum_declaration_statement() {
+		let program = parse_program("enum Color { Red, Green: 3, Blue }");
+
+		assert_eq!(program, Program {
+			functions: vec![],
+			objects: vec![],
+			result: None,
+			statements: vec![
+				Statement::EnumDeclaration(EnumDeclaration {
+					backing_type: DataType::Int,
+					name: String::from("Color"),
+					position: 0,
+					variants: vec![
+						EnumVariantDeclaration {
+							name: String::from("Red"),
+							position: 0,
+							value: None,
+						},
+						EnumVariantDeclaration {
+							name: String::from("Green"),
+							position: 0,
+							value: Some(Expr::Integer(IntegerLiteral {
+								position: 0,
+								value: 3,
+							})),
+						},
+						EnumVariantDeclaration {
+							name: String::from("Blue"),
+							position: 0,
+							value: None,
+						},
+					],
+				}),
+			],
+			with_declarations: vec![],
+		});
 	}
 
 	#[test]

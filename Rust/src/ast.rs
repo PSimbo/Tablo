@@ -141,6 +141,7 @@ pub enum Statement {
 	Block(BlockStatement),
 	Break(BreakStatement),
 	Continue(ContinueStatement),
+	EnumDeclaration(EnumDeclaration),
 	Expression(Expr),
 	For(ForStatement),
 	ForRecord(ForRecordStatement),
@@ -240,6 +241,21 @@ pub struct DateLiteral {
 pub struct DecimalLiteral {
 	pub position: usize,
 	pub value: Decimal,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnumDeclaration {
+	pub backing_type: DataType,
+	pub name: String,
+	pub position: usize,
+	pub variants: Vec<EnumVariantDeclaration>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnumVariantDeclaration {
+	pub name: String,
+	pub position: usize,
+	pub value: Option<Expr>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
