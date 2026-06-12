@@ -579,6 +579,7 @@ impl<'a> ObjectFileReader<'a> {
 		for _ in 0..parameter_count {
 			parameters.push(SqlParameter {
 				data_type: self.read_data_type()?,
+				field_path: self.read_string_vec()?,
 				index: self.read_u32()?,
 				slot: self.read_u32()?,
 			});
@@ -901,6 +902,11 @@ fn write_sql_query(bytes: &mut Vec<u8>, query: &SqlQuery) {
 
 	for parameter in &query.parameters {
 		write_data_type(bytes, &parameter.data_type);
+		bytes.extend_from_slice(&(parameter.field_path.len() as u32).to_le_bytes());
+		for component in &parameter.field_path {
+			bytes.extend_from_slice(&(component.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(component.as_bytes());
+		}
 		bytes.extend_from_slice(&parameter.index.to_le_bytes());
 		bytes.extend_from_slice(&parameter.slot.to_le_bytes());
 	}

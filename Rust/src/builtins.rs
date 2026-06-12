@@ -2,11 +2,16 @@ use crate::ast::DataType;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BuiltInFunction {
+	BoolCast,
+	DateCast,
+	DecCast,
 	Disp,
 	Displn,
 	Exists,
+	IntCast,
 	Len,
 	Locked,
+	TextCast,
 }
 
 impl BuiltInFunction {
@@ -17,6 +22,11 @@ impl BuiltInFunction {
 			3 => Some(Self::Displn),
 			4 => Some(Self::Exists),
 			5 => Some(Self::Locked),
+			6 => Some(Self::IntCast),
+			7 => Some(Self::TextCast),
+			8 => Some(Self::DecCast),
+			9 => Some(Self::BoolCast),
+			10 => Some(Self::DateCast),
 			_ => None,
 		}
 	}
@@ -28,6 +38,11 @@ impl BuiltInFunction {
 			"displn" => Some(Self::Displn),
 			"exists" => Some(Self::Exists),
 			"locked" => Some(Self::Locked),
+			"int" => Some(Self::IntCast),
+			"text" => Some(Self::TextCast),
+			"dec" => Some(Self::DecCast),
+			"bool" => Some(Self::BoolCast),
+			"date" => Some(Self::DateCast),
 			_ => None,
 		}
 	}
@@ -39,6 +54,11 @@ impl BuiltInFunction {
 			Self::Displn => 3,
 			Self::Exists => 4,
 			Self::Locked => 5,
+			Self::IntCast => 6,
+			Self::TextCast => 7,
+			Self::DecCast => 8,
+			Self::BoolCast => 9,
+			Self::DateCast => 10,
 		}
 	}
 
@@ -49,6 +69,11 @@ impl BuiltInFunction {
 			Self::Displn => "displn",
 			Self::Exists => "exists",
 			Self::Locked => "locked",
+			Self::IntCast => "int",
+			Self::TextCast => "text",
+			Self::DecCast => "dec",
+			Self::BoolCast => "bool",
+			Self::DateCast => "date",
 		}
 	}
 
@@ -70,18 +95,21 @@ impl BuiltInFunction {
 				}
 				_ => None,
 			},
+			Self::IntCast | Self::TextCast | Self::DecCast | Self::BoolCast | Self::DateCast => None,
 		}
 	}
 
 	pub fn supports_arity(self, argument_count: usize) -> bool {
 		match self {
-			Self::Len | Self::Disp | Self::Displn | Self::Exists | Self::Locked => argument_count == 1,
+			Self::Len | Self::Disp | Self::Displn | Self::Exists | Self::Locked
+			| Self::IntCast | Self::TextCast | Self::DecCast | Self::BoolCast | Self::DateCast => argument_count == 1,
 		}
 	}
 
 	pub fn produces_runtime_value(self) -> bool {
 		match self {
-			Self::Len | Self::Exists | Self::Locked => true,
+			Self::Len | Self::Exists | Self::Locked
+			| Self::IntCast | Self::TextCast | Self::DecCast | Self::BoolCast | Self::DateCast => true,
 			Self::Disp | Self::Displn => false,
 		}
 	}

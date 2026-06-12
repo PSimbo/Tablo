@@ -698,7 +698,7 @@ impl VirtualMachine {
 			format!("Failed to prepare SQLite query: {error}"),
 		))?;
 		let parameter_values = query.parameters.iter()
-			.map(|parameter| self.sqlite_parameter_value(parameter.slot, locals, instruction_index))
+			.map(|parameter| self.sqlite_parameter_value(parameter.slot, &parameter.field_path, locals, instruction_index))
 			.collect::<Result<Vec<_>, _>>()?;
 
 		match &query.result_shape {
@@ -978,12 +978,28 @@ impl VirtualMachine {
 					format!("Built-in function `locked` expects 1 argument(s), found {}.", arguments.len()),
 				)),
 			},
+			BuiltInFunction::IntCast
+			| BuiltInFunction::TextCast
+			| BuiltInFunction::DecCast
+			| BuiltInFunction::BoolCast
+			| BuiltInFunction::DateCast => match arguments.as_slice() {
+				[Value::Enum(value)] => Ok(Some((*value.backing_value).clone())),
+				[value] => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `{}` does not accept a `{}` value.", built_in.name(), type_name(value)),
+				)),
+				_ => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `{}` expects 1 argument(s), found {}.", built_in.name(), arguments.len()),
+				)),
+			},
 		}
 	}
 
 	fn sqlite_parameter_value(
 		&self,
 		slot: u32,
+		field_path: &[String],
 		locals: &[Value],
 		instruction_index: usize,
 	) -> Result<SqlValue, VmError> {
@@ -992,6 +1008,12 @@ impl VirtualMachine {
 			format!("Local slot {} has not been initialized.", slot),
 		))?;
 		let value = self.resolve_runtime_value(value, instruction_index)?;
+		let value = if field_path.is_empty() {
+			value
+		}
+		else {
+			load_field_path_value(value, field_path, instruction_index)?
+		};
 
 		match value {
 			Value::Boolean(value) => Ok(SqlValue::Integer(if value { 1 } else { 0 })),

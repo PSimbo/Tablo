@@ -615,6 +615,18 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_enum_downcast_to_wrong_backing_type() {
+		let error = run(
+			"enum Color { Red, Blue }\nfn Main(args: [text]) int { var color: Color = Color.Red; var value: text = text(color); return 0; }"
+		).unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Built-in function `text` cannot cast enum `Color` because its backing type is `int`."),
+			position: 105,
+		}));
+	}
+
+	#[test]
 	fn rejects_equality_comparison_on_any_values() {
 		let error = run("fn Main(args: [text]) int { var left: any = 1; var right: any = 2; var same: bool = left == right; return 0; }").unwrap_err();
 
@@ -1188,6 +1200,24 @@ mod tests {
 		let result = evaluate_snippet("var xs: [int] = [];\nxs").unwrap();
 
 		assert_eq!(result, Some(Value::Array(vec![])));
+	}
+
+	#[test]
+	fn runs_enum_downcast_to_int_backing_type() {
+		let result = run(
+			"enum Color { Red, Green: 3, Blue }\nfn Main(args: [text]) int { var color: Color = Color.Green; return int(color); }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
+	fn runs_enum_downcast_to_text_backing_type() {
+		let result = run(
+			"enum Status: text { Pending: 'PENDING', Complete: 'COMPLETE' }\nfn Main(args: [text]) int { var status: Status = Status.Complete; if text(status) == 'COMPLETE' { return 1; } return 0; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
 	}
 
 	#[test]
@@ -1860,6 +1890,43 @@ mod tests {
 		let _ = std::fs::remove_file(&database_path);
 
 		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn runs_sqlite_find_query_with_record_pointer_field_parameter() {
+		let database_path = create_sqlite_test_database(
+			"runs_sqlite_find_query_with_record_pointer_field_parameter",
+			r#"
+				CREATE TABLE OuterTable (
+					Id INTEGER NOT NULL
+				);
+				CREATE TABLE InnerTable (
+					Id INTEGER NOT NULL
+				);
+				INSERT INTO OuterTable (Id) VALUES (2);
+				INSERT INTO InnerTable (Id) VALUES (1), (2), (3);
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int {\n    rec outer = find first OuterTable where Id = 2;\n    if outer {\n        rec inner = find first InnerTable where InnerTable.Id = outer.Id;\n        if inner {\n            return inner.Id;\n        }\n    }\n    return 0;\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table OuterTable (
+					Id int not null
+				);
+				create table InnerTable (
+					Id int not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(2)));
 	}
 
 	#[test]

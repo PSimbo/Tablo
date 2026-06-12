@@ -278,6 +278,7 @@ pub struct QueryOrderByItem {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryParameter {
 	pub data_type: DataType,
+	pub field_path: Vec<String>,
 	pub slot: u32,
 }
 
@@ -297,6 +298,7 @@ pub struct QueryUnaryExpr {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SqlParameter {
 	pub data_type: DataType,
+	pub field_path: Vec<String>,
 	pub index: u32,
 	pub slot: u32,
 }
@@ -365,6 +367,7 @@ fn lower_query_expr_sqlite(expression: &QueryExpr, parameters: &mut Vec<SqlParam
 			let index = parameters.len() as u32 + 1;
 			parameters.push(SqlParameter {
 				data_type: parameter.data_type.clone(),
+				field_path: parameter.field_path.clone(),
 				index,
 				slot: parameter.slot,
 			});
@@ -446,6 +449,7 @@ mod tests {
 					operator: QueryBinaryOperator::Equal,
 					right: Box::new(QueryExpr::Parameter(QueryParameter {
 						data_type: DataType::Int,
+						field_path: Vec::new(),
 						slot: 3,
 					})),
 				})),
@@ -474,6 +478,7 @@ mod tests {
 			parameters: vec![
 				SqlParameter {
 					data_type: DataType::Int,
+					field_path: Vec::new(),
 					index: 1,
 					slot: 3,
 				},

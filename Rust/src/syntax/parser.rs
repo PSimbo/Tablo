@@ -1366,6 +1366,11 @@ impl Parser {
 			TokenKind::Dash => self.parse_negation_expression_with_position(token.start),
 			TokenKind::DateLiteral => self.parse_date_literal(token),
 			TokenKind::DecimalLiteral => self.parse_decimal_literal(token),
+			TokenKind::DateKeyword
+			| TokenKind::DecKeyword
+			| TokenKind::BoolKeyword
+			| TokenKind::IntKeyword
+			| TokenKind::TextKeyword => Ok(self.parse_identifier_expression(token)),
 			TokenKind::EndOfFile => Err(ParseError {
 				message: String::from("Expected an expression."),
 				position: token.start,
@@ -2634,6 +2639,30 @@ mod tests {
 				statements: vec![],
 				with_declarations: vec![],
 			}
+		);
+	}
+
+	#[test]
+	fn parses_cast_builtin_call_expression() {
+		assert_eq!(
+			parse("int(value)"),
+			Expr::Call(CallExpr {
+				arguments: vec![
+					CallArgument {
+						is_by_ref: false,
+						position: 0,
+						value: Expr::Identifier(IdentifierExpr {
+							name: String::from("value"),
+							position: 0,
+						}),
+					},
+				],
+				callee: IdentifierExpr {
+					name: String::from("int"),
+					position: 0,
+				},
+				position: 0,
+			})
 		);
 	}
 

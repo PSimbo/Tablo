@@ -738,6 +738,12 @@ impl SemanticAnalyzer {
 			.map(|argument| self.infer_expression_type(&argument.value))
 			.collect::<Result<Vec<_>, _>>()?;
 
+		if let Some(return_type) = self.infer_enum_downcast_built_in_type(built_in, &argument_types, position)? {
+			self.semantic_program.built_in_call_targets.insert(position, built_in);
+			self.semantic_program.call_return_types.insert(position, return_type.clone());
+			return Ok(return_type);
+		}
+
 		let return_type = built_in.return_type(&argument_types).ok_or(self.compile_error(
 			arguments.first().map_or(position, |argument| argument.value.position()),
 			format!(
@@ -819,6 +825,48 @@ impl SemanticAnalyzer {
 		self.semantic_program.compiled_count_queries.insert(count.position, compiled_query);
 		self.semantic_program.lowered_count_queries.insert(count.position, lowered_query);
 		Ok(DataType::Int)
+	}
+
+	fn infer_enum_downcast_built_in_type(
+		&self,
+		built_in: BuiltInFunction,
+		argument_types: &[DataType],
+		position: usize,
+	) -> Result<Option<DataType>, CompileError> {
+		let target_type = match built_in {
+			BuiltInFunction::IntCast => DataType::Int,
+			BuiltInFunction::TextCast => DataType::Text,
+			BuiltInFunction::DecCast => DataType::Dec,
+			BuiltInFunction::BoolCast => DataType::Bool,
+			BuiltInFunction::DateCast => DataType::Date,
+			_ => return Ok(None),
+		};
+
+		let [argument_type] = argument_types else {
+			return Ok(None);
+		};
+
+		let DataType::Object(enum_name) = argument_type.without_nullability() else {
+			return Ok(None);
+		};
+
+		let Some(enum_binding) = self.lookup_enum(enum_name) else {
+			return Ok(None);
+		};
+
+		if enum_binding.backing_type != target_type {
+			return Err(self.compile_error(
+				position,
+				format!(
+					"Built-in function `{}` cannot cast enum `{}` because its backing type is `{}`.",
+					built_in.name(),
+					enum_name,
+					enum_binding.backing_type.name(),
+				),
+			));
+		}
+
+		Ok(Some(target_type))
 	}
 
 	fn infer_expression_type(&mut self, expression: &Expr) -> Result<DataType, CompileError> {
@@ -1447,6 +1495,11 @@ impl SemanticAnalyzer {
 							.clone();
 						Ok(field_type)
 					}
+					DataType::RecordPointer(record_pointer) => self.infer_record_pointer_field_access_type(
+						record_pointer,
+						field_access.field.position,
+						&field_access.field.name,
+					),
 					other => Err(self.compile_error(
 						identifier.position,
 						format!("Field access requires an object operand, found `{}`.", other.name()),
@@ -1774,6 +1827,7 @@ impl SemanticAnalyzer {
 					self.semantic_program.identifier_slots.insert(identifier.position, local.slot);
 					return Ok(QueryExpr::Parameter(QueryParameter {
 						data_type: local.data_type,
+						field_path: Vec::new(),
 						slot: local.slot,
 					}));
 				}
@@ -1827,6 +1881,15 @@ impl SemanticAnalyzer {
 		if let Expr::Identifier(identifier) = field_access.object.as_ref() {
 			if let Some(local) = self.lookup_local(&identifier.name) {
 				self.semantic_program.identifier_slots.insert(identifier.position, local.slot);
+
+				if matches!(local.data_type.without_nullability(), DataType::RecordPointer(_)) {
+					let data_type = self.infer_query_field_access_type(field_access, table)?;
+					return Ok(QueryExpr::Parameter(QueryParameter {
+						data_type,
+						field_path: vec![field_access.field.name.clone()],
+						slot: local.slot,
+					}));
+				}
 
 				return Err(self.compile_error(
 					field_access.position,
@@ -3128,6 +3191,7 @@ mod tests {
 					operator: QueryBinaryOperator::Equal,
 					right: Box::new(QueryExpr::Parameter(QueryParameter {
 						data_type: DataType::Int,
+						field_path: Vec::new(),
 						slot: 7,
 					})),
 				})),
@@ -3145,6 +3209,63 @@ mod tests {
 			schema_is_implicit: true,
 			schema_name: String::from("Main"),
 			table_name: String::from("Customers"),
+		});
+	}
+
+	#[test]
+	fn lowers_record_pointer_field_access_in_where_clause_to_query_parameter() {
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table OuterTable (
+					Id int not null
+				);
+				create table InnerTable (
+					Id int not null
+				);
+			"#,
+			"ExampleDb",
+		);
+		let count = parse_count_expression("count InnerTable where InnerTable.Id = outer.Id");
+		let mut analyzer = SemanticAnalyzer::new();
+		analyzer.current_schema_catalog = Some(schema);
+		analyzer.semantic_program.active_databases = vec![String::from("exampledb")];
+		analyzer.enter_scope();
+		analyzer.declare_local(
+			String::from("outer"),
+			LocalBinding {
+				data_type: DataType::RecordPointer(RecordPointerType {
+					database_name: String::from("ExampleDb"),
+					schema_name: String::from("Main"),
+					table_name: String::from("OuterTable"),
+				}),
+				is_const: false,
+				slot: 4,
+			},
+		);
+
+		let query = analyzer.lower_count_query(&count).unwrap();
+
+		assert_eq!(query, QueryCountPlan {
+			backend: DatabaseBackend::Sqlite,
+			database_name: String::from("ExampleDb"),
+			filter: Some(QueryExpr::Binary(QueryBinaryExpr {
+				left: Box::new(QueryExpr::Column(QueryColumnReference {
+					column_name: String::from("Id"),
+					data_type: DataType::Int,
+					table_name: String::from("InnerTable"),
+				})),
+				operator: QueryBinaryOperator::Equal,
+				right: Box::new(QueryExpr::Parameter(QueryParameter {
+					data_type: DataType::Int,
+					field_path: vec![String::from("Id")],
+					slot: 4,
+				})),
+			})),
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
+			table_name: String::from("InnerTable"),
 		});
 	}
 }
