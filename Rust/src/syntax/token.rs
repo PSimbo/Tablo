@@ -52,6 +52,7 @@ pub enum TokenKind {
 	MultiplyEqual,
 	MutKeyword,
 	NotKeyword,
+	NullKeyword,
 	ObjKeyword,
 	OrKeyword,
 	OrderKeyword,

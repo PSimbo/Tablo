@@ -29,6 +29,7 @@ use crate::ast::IdentifierExpr;
 use crate::ast::IfStatement;
 use crate::ast::IndexExpr;
 use crate::ast::IntegerLiteral;
+use crate::ast::NullLiteral;
 use crate::ast::ObjectConstructionExpr;
 use crate::ast::ObjectConstructionField;
 use crate::ast::ObjectDeclaration;
@@ -1377,6 +1378,9 @@ impl Parser {
 			TokenKind::LeftBracket => self.parse_array_literal(token.start),
 			TokenKind::LeftParenthesis => self.parse_group_expression(token.start),
 			TokenKind::NotKeyword => self.parse_not_expression(token.start),
+			TokenKind::NullKeyword => Ok(Expr::Null(NullLiteral {
+				position: token.start,
+			})),
 			TokenKind::StringLiteral => Ok(self.parse_text_literal(token)),
 			_ => Err(ParseError {
 				message: format!("Unexpected token `{}` at start of expression.", token.lexeme),
@@ -1763,6 +1767,7 @@ mod tests {
 	use crate::ast::IfStatement;
 	use crate::ast::IndexExpr;
 	use crate::ast::IntegerLiteral;
+	use crate::ast::NullLiteral;
 	use crate::ast::ObjectConstructionExpr;
 	use crate::ast::ObjectConstructionField;
 	use crate::ast::ObjectDeclaration;
@@ -1912,6 +1917,9 @@ mod tests {
 			Expr::Integer(IntegerLiteral { value, .. }) => Expr::Integer(IntegerLiteral {
 				position: 0,
 				value,
+			}),
+			Expr::Null(_) => Expr::Null(NullLiteral {
+				position: 0,
 			}),
 			Expr::ObjectConstruction(ObjectConstructionExpr {
 				fields,
@@ -3837,6 +3845,14 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_null_literal() {
+		assert_eq!(
+			parse("null"),
+			Expr::Null(NullLiteral { position: 0 })
+		);
+	}
+
+	#[test]
 	fn parses_nullable_data_type_in_variable_and_array_positions() {
 		assert_eq!(
 			parse_program("fn Main(args: [text]) int { var value: int?; var values: [text]? = []; return 0; }"),
@@ -4114,6 +4130,17 @@ mod tests {
 			statements: vec![],
 			with_declarations: vec![],
 		});
+	}
+
+	#[test]
+	fn parses_quoted_identifier_expression() {
+		assert_eq!(
+			parse("\"return\""),
+			Expr::Identifier(IdentifierExpr {
+				name: String::from("return"),
+				position: 0,
+			})
+		);
 	}
 
 	#[test]

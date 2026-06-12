@@ -98,6 +98,18 @@ impl Lexer {
 			return Ok(Some(self.lex_string_token(StringTokenMode::Start)?));
 		}
 
+		if next == '"' {
+			let (kind, lexeme) = self.lex_quoted_identifier()?;
+			let end = self.position;
+
+			return Ok(Some(Token {
+				end,
+				kind,
+				lexeme,
+				start,
+			}));
+		}
+
 		if next == '@' {
 			let (kind, lexeme) = self.lex_date_literal()?;
 			let end = self.position;
@@ -368,6 +380,7 @@ impl Lexer {
 			"int" => TokenKind::IntKeyword,
 			"last" => TokenKind::LastKeyword,
 			"mut" => TokenKind::MutKeyword,
+			"null" => TokenKind::NullKeyword,
 			"not" => TokenKind::NotKeyword,
 			"obj" => TokenKind::ObjKeyword,
 			"or" => TokenKind::OrKeyword,
@@ -406,6 +419,35 @@ impl Lexer {
 		}
 
 		(TokenKind::IntegerLiteral, self.source.as_str()[start..self.position].to_string())
+	}
+
+	fn lex_quoted_identifier(&mut self) -> Result<(TokenKind, String), LexError> {
+		let start = self.position;
+		self.advance_char();
+
+		let mut value = String::new();
+
+		while let Some(next) = self.peek_char() {
+			if next == '"' {
+				self.advance_char();
+
+				if self.peek_char() == Some('"') {
+					self.advance_char();
+					value.push('"');
+					continue;
+				}
+
+				return Ok((TokenKind::Identifier, value));
+			}
+
+			self.advance_char();
+			value.push(next);
+		}
+
+		Err(LexError {
+			position: start,
+			message: String::from("Unterminated quoted identifier."),
+		})
 	}
 
 	fn lex_string_token(&mut self, mode: StringTokenMode) -> Result<Token, LexError> {
@@ -792,6 +834,15 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_unterminated_quoted_identifier() {
+		let mut lexer = Lexer::new(SourceText::new("\"unfinished"));
+		let error = lexer.tokenize().unwrap_err();
+
+		assert_eq!(error.position, 0);
+		assert_eq!(error.message, "Unterminated quoted identifier.");
+	}
+
+	#[test]
 	fn tokenizes_all_supported_arithmetic_operators() {
 		let mut lexer = Lexer::new(SourceText::new("1 - 2 * 3 / 4 % 5 + 6"));
 		let tokens = lexer.tokenize().unwrap();
@@ -1081,6 +1132,39 @@ mod tests {
 		assert_eq!(tokens[3].kind, TokenKind::IntegerLiteral);
 		assert_eq!(tokens[4].kind, TokenKind::RightParenthesis);
 		assert_eq!(tokens[5].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
+	fn tokenizes_quoted_identifier() {
+		let mut lexer = Lexer::new(SourceText::new("\"Customer Name\""));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens.len(), 2);
+		assert_eq!(tokens[0].kind, TokenKind::Identifier);
+		assert_eq!(tokens[0].lexeme, "Customer Name");
+		assert_eq!(tokens[1].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
+	fn tokenizes_quoted_identifier_matching_keyword() {
+		let mut lexer = Lexer::new(SourceText::new("\"return\""));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens.len(), 2);
+		assert_eq!(tokens[0].kind, TokenKind::Identifier);
+		assert_eq!(tokens[0].lexeme, "return");
+		assert_eq!(tokens[1].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
+	fn tokenizes_quoted_identifier_with_embedded_quote() {
+		let mut lexer = Lexer::new(SourceText::new("\"say \"\"hello\"\"\""));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens.len(), 2);
+		assert_eq!(tokens[0].kind, TokenKind::Identifier);
+		assert_eq!(tokens[0].lexeme, "say \"hello\"");
+		assert_eq!(tokens[1].kind, TokenKind::EndOfFile);
 	}
 
 	#[test]

@@ -379,6 +379,9 @@ impl Compiler {
 			Expr::Integer(integer) => {
 				self.emit(emission, Instruction::PushInteger(integer.value), expression.position());
 			}
+			Expr::Null(_) => {
+				self.emit(emission, Instruction::PushNull, expression.position());
+			}
 			Expr::ObjectConstruction(ObjectConstructionExpr { fields, object_type_name, .. }) => {
 				let object_declaration = semantic_program.object_declaration(object_type_name);
 
@@ -909,6 +912,7 @@ impl Compiler {
 				self.emit(emission, Instruction::PushText(String::new()), position);
 			}
 			crate::ast::DataType::EmptyArray
+			| crate::ast::DataType::Null
 			| crate::ast::DataType::Range(_)
 			| crate::ast::DataType::RecordPointer(_)
 			| crate::ast::DataType::Union(_)

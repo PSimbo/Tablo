@@ -525,6 +525,16 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_assigning_null_to_non_nullable_variable() {
+		let error = run("fn Main(args: [text]) int { var value: text = null; return 0; }").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Cannot assign a value of type `null` to a variable of type `text`."),
+			position: 46,
+		}));
+	}
+
+	#[test]
 	fn rejects_assignment_from_any_to_specific_type() {
 		let error = run("fn Main(args: [text]) int { var value: any = 1; var total: int = value; return total; }").unwrap_err();
 
@@ -1471,6 +1481,15 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_null_literal_assignment_and_comparison() {
+		let result = run(
+			"fn Main(args: [text]) int { var value: text? = null; if value == null { return 1; } return 0; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
 	fn runs_nullable_array_variable_without_initializer_as_null() {
 		let result = evaluate_snippet("var values: [int]?;\nvalues").unwrap();
 
@@ -1576,6 +1595,15 @@ mod tests {
 		let result = run_program(&program).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(2)));
+	}
+
+	#[test]
+	fn runs_quoted_identifier_matching_keyword() {
+		let result = run(
+			"fn Main(args: [text]) int { var \"return\": int = 1; return \"return\"; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
 	}
 
 	#[test]

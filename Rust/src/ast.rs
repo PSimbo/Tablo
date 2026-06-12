@@ -44,6 +44,7 @@ pub enum DataType {
 	Dec,
 	EmptyArray,
 	Int,
+	Null,
 	Nullable(Box<DataType>),
 	Object(String),
 	Range(Box<DataType>),
@@ -78,6 +79,7 @@ impl DataType {
 			Self::Dec => String::from("dec"),
 			Self::EmptyArray => String::from("empty array"),
 			Self::Int => String::from("int"),
+			Self::Null => String::from("null"),
 			Self::Nullable(inner) => format!("{}?", inner.name()),
 			Self::Object(name) => name.clone(),
 			Self::Range(element_type) => format!("range<{}>", element_type.name()),
@@ -111,6 +113,7 @@ pub enum Expr {
 	Identifier(IdentifierExpr),
 	Index(IndexExpr),
 	Integer(IntegerLiteral),
+	Null(NullLiteral),
 	ObjectConstruction(ObjectConstructionExpr),
 	Range(RangeExpr),
 	Text(TextLiteral),
@@ -338,6 +341,11 @@ pub struct IntegerLiteral {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NullLiteral {
+	pub position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectConstructionExpr {
 	pub fields: Vec<ObjectConstructionField>,
 	pub object_type_name: String,
@@ -491,6 +499,7 @@ impl Expr {
 			Expr::Identifier(expression) => expression.position,
 			Expr::Index(expression) => expression.position,
 			Expr::Integer(expression) => expression.position,
+			Expr::Null(expression) => expression.position,
 			Expr::ObjectConstruction(expression) => expression.position,
 			Expr::Range(expression) => expression.position,
 			Expr::Text(expression) => expression.position,

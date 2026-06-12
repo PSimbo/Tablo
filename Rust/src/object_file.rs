@@ -650,6 +650,7 @@ fn write_data_type(bytes: &mut Vec<u8>, data_type: &DataType) {
 		DataType::Dec => bytes.push(4),
 		DataType::EmptyArray => bytes.push(5),
 		DataType::Int => bytes.push(6),
+		DataType::Null => panic!("internal data type `null` must not be serialized into object files"),
 		DataType::Nullable(inner) => {
 			bytes.push(14);
 			write_data_type(bytes, inner);

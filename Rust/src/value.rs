@@ -520,6 +520,7 @@ fn data_type_name_for_sqlite_runtime(data_type: &DataType) -> &'static str {
 		DataType::Dec => "dec",
 		DataType::EmptyArray => "empty array",
 		DataType::Int => "int",
+		DataType::Null => "null",
 		DataType::Nullable(inner) => data_type_name_for_sqlite_runtime(inner),
 		DataType::Object(_) => "object",
 		DataType::Range(_) => "range",

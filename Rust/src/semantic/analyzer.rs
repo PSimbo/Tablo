@@ -382,6 +382,17 @@ impl SemanticAnalyzer {
 	) -> Result<DataType, CompileError> {
 		let lhs_non_null = lhs.is_non_nullable();
 		let rhs_non_null = rhs.is_non_nullable();
+
+		if matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual) {
+			if lhs == &DataType::Null && (rhs == &DataType::Null || rhs.is_nullable()) {
+				return Ok(DataType::Bool);
+			}
+
+			if rhs == &DataType::Null && lhs.is_nullable() {
+				return Ok(DataType::Bool);
+			}
+		}
+
 		let lhs = lhs.without_nullability();
 		let rhs = rhs.without_nullability();
 
@@ -587,6 +598,7 @@ impl SemanticAnalyzer {
 			| DataType::Union(_) => true,
 			DataType::Nullable(_) => true,
 			DataType::EmptyArray
+			| DataType::Null
 			| DataType::Range(_)
 			| DataType::RecordPointer(_)
 			| DataType::Void => false,
@@ -1119,6 +1131,7 @@ impl SemanticAnalyzer {
 				}
 			}
 			Expr::Integer(_) => Ok(DataType::Int),
+			Expr::Null(_) => Ok(DataType::Null),
 			Expr::ObjectConstruction(ObjectConstructionExpr {
 				fields,
 				object_type_name,
@@ -1383,6 +1396,7 @@ impl SemanticAnalyzer {
 				String::from("This expression form is not yet supported in `where` clauses."),
 			)),
 			Expr::Integer(_) => Ok(DataType::Int),
+			Expr::Null(_) => Ok(DataType::Null),
 			Expr::Text(_) => Ok(DataType::Text),
 			Expr::Unary(UnaryExpr { operand, operator, .. }) => {
 				let operand_type = self.infer_query_expression_type(operand, table)?;
@@ -1532,6 +1546,9 @@ impl SemanticAnalyzer {
 		}
 
 		match (target, value) {
+			(DataType::Nullable(_), DataType::Null) => {
+				return true;
+			}
 			(DataType::Nullable(target_inner), DataType::Nullable(value_inner)) => {
 				return self.is_assignable(target_inner, value_inner);
 			}
@@ -2344,7 +2361,7 @@ impl SemanticAnalyzer {
 				}
 				Ok(())
 			}
-			Expr::Boolean(_) | Expr::Date(_) | Expr::Decimal(_) | Expr::Integer(_) | Expr::Text(_) => Ok(()),
+			Expr::Boolean(_) | Expr::Date(_) | Expr::Decimal(_) | Expr::Integer(_) | Expr::Null(_) | Expr::Text(_) => Ok(()),
 			Expr::ObjectConstruction(construction) => {
 				for field in &construction.fields {
 					self.validate_literal_expression(&field.value)?;
@@ -2390,7 +2407,7 @@ impl SemanticAnalyzer {
 
 	fn validate_non_void_data_type(&self, data_type: &DataType, position: usize, message: String) -> Result<(), CompileError> {
 		match data_type {
-			DataType::Void | DataType::EmptyArray => Err(self.compile_error(position, message)),
+			DataType::Void | DataType::EmptyArray | DataType::Null => Err(self.compile_error(position, message)),
 			DataType::Array(element_type) => self.validate_non_void_data_type(element_type, position, message),
 			DataType::Nullable(inner) => {
 				match inner.as_ref() {
