@@ -547,7 +547,7 @@ impl VirtualMachine {
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::Not => {
-				let value = self.pop_boolean(instruction_index)?;
+				let value = self.pop_condition_value(instruction_index)?;
 				self.stack.push(Value::Boolean(!value));
 				Ok(ExecutionOutcome::Continue(None))
 			}

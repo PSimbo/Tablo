@@ -484,6 +484,28 @@ fn tokenize_schema_text(source: &str) -> Vec<SchemaToken> {
 				kind: SchemaTokenKind::Semicolon,
 				position: index,
 			}),
+			'"' => {
+				let mut value = String::new();
+
+				while let Some((_, next)) = chars.next() {
+					if next == '"' {
+						if chars.peek().is_some_and(|(_, following)| *following == '"') {
+							value.push('"');
+							chars.next();
+							continue;
+						}
+
+						break;
+					}
+
+					value.push(next);
+				}
+
+				tokens.push(SchemaToken {
+					kind: SchemaTokenKind::Identifier(value),
+					position: index,
+				});
+			}
 			_ => {
 				if ch.is_ascii_alphanumeric() || ch == '_' {
 					let mut value = String::from(ch);
@@ -554,6 +576,28 @@ mod tests {
 		let column = table.column("balance").unwrap();
 
 		assert_eq!(column.data_type(), &SchemaDataType::Dec);
+		assert!(!column.is_nullable());
+	}
+
+	#[test]
+	fn accepts_quoted_identifier_with_hash_in_sql_like_schema() {
+		let catalog = read_schema_catalog_from_str(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table "os_user" (
+					"userid#" INTEGER not null
+				);
+			"#,
+		).unwrap();
+
+		let database = catalog.database("exampledb").unwrap();
+		let schema = database.schema("main").unwrap();
+		let table = schema.table("os_user").unwrap();
+		let column = table.column("userid#").unwrap();
+
+		assert_eq!(column.name(), "userid#");
+		assert_eq!(column.data_type(), &SchemaDataType::Int);
 		assert!(!column.is_nullable());
 	}
 

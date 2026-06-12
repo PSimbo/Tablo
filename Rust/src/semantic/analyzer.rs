@@ -1285,13 +1285,13 @@ impl SemanticAnalyzer {
 						}
 					}
 					UnaryOperator::Not => {
-						if operand_type == DataType::Bool {
+						if self.is_truthy_condition_type(&operand_type) {
 							Ok(DataType::Bool)
 						}
 						else {
 							Err(self.compile_error(
 								expression.position(),
-								format!("Unary `not` requires a `bool` operand, found `{}`.", operand_type.name()),
+								format!("Unary `not` requires a `bool` or `record pointer` operand, found `{}`.", operand_type.name()),
 							))
 						}
 					}

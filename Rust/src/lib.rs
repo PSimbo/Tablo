@@ -1511,6 +1511,35 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_not_on_record_pointer() {
+		let database_path = create_sqlite_test_database(
+			"runs_not_on_record_pointer",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL
+				);
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int { rec user = find first Customers where Id = 1; if not user { return -1; } return 1; }",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(-1)));
+	}
+
+	#[test]
 	fn runs_null_literal_assignment_and_comparison() {
 		let result = run(
 			"fn Main(args: [text]) int { var value: text? = null; if value == null { return 1; } return 0; }"
