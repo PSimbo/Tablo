@@ -7,6 +7,14 @@ When launched from a `.tablo` file, the extension attempts to compile the
 source to a hidden `.tbo` file before starting the debugger. In future, I plan
 to add LSP capabilities to this extension, but not yet.
 
+The extension now also includes an initial native VS Code completion provider
+for `.tablo` files. This currently offers:
+
+- keyword, primitive-type, and built-in-function completions
+- document-symbol completions for functions, objects, enums, and local names
+- member completions for `Enum.Variant` and simple `obj`-typed variables where
+  the type can be inferred directly from the current document
+
 Planned structure:
 
 - `src/extension.ts`
