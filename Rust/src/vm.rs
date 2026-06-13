@@ -1049,6 +1049,31 @@ impl VirtualMachine {
 					format!("Built-in function `locked` expects 1 argument(s), found {}.", arguments.len()),
 				)),
 			},
+			BuiltInFunction::Split => match arguments.as_slice() {
+				[Value::Text(value), Value::Text(separator)] => {
+					if separator.is_empty() {
+						return Ok(Some(Value::Array(vec![Value::Text(value.clone())])));
+					}
+
+					Ok(Some(Value::Array(
+						value.split(separator)
+							.map(|part| Value::Text(part.to_string()))
+							.collect(),
+					)))
+				}
+				[left, right] => Err(vm_error(
+					instruction_index,
+					format!(
+						"Built-in function `split` does not accept `{}` and `{}` values.",
+						type_name(left),
+						type_name(right),
+					),
+				)),
+				_ => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `split` expects 2 argument(s), found {}.", arguments.len()),
+				)),
+			},
 			BuiltInFunction::Trim => match arguments.as_slice() {
 				[Value::Text(value)] => Ok(Some(Value::Text(value.trim().to_string()))),
 				[value] => Err(vm_error(

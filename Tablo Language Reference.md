@@ -1617,6 +1617,10 @@ As with SQL's `LIKE` syntax, `%` matches zero or more characters and `_` matches
 
 The `\` character is used to escape wildcard characters within the pattern. Therefore `\%` matches a literal percent sign, `\_` matches a literal underscore, and `\\` matches a literal backslash.
 
+### `split(str: text, by: text): [text]`
+
+Splits `str` at each place where the sub-string `by` is found and returns an array of the resulting parts.
+
 ### `text(v: bool): text`
 
 Returns the string representation of `v`.

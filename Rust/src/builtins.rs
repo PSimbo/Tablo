@@ -14,6 +14,7 @@ pub enum BuiltInFunction {
 	IntCast,
 	Len,
 	Locked,
+	Split,
 	TextCast,
 	Trim,
 }
@@ -35,6 +36,7 @@ impl BuiltInFunction {
 			12 => Some(Self::Trim),
 			13 => Some(Self::CountOf),
 			14 => Some(Self::IndexOf),
+			15 => Some(Self::Split),
 			_ => None,
 		}
 	}
@@ -53,6 +55,7 @@ impl BuiltInFunction {
 			"int" => Some(Self::IntCast),
 			"len" => Some(Self::Len),
 			"locked" => Some(Self::Locked),
+			"split" => Some(Self::Split),
 			"text" => Some(Self::TextCast),
 			"trim" => Some(Self::Trim),
 			_ => None,
@@ -75,6 +78,7 @@ impl BuiltInFunction {
 			Self::Trim => 12,
 			Self::CountOf => 13,
 			Self::IndexOf => 14,
+			Self::Split => 15,
 		}
 	}
 
@@ -92,6 +96,7 @@ impl BuiltInFunction {
 			Self::IntCast => "int",
 			Self::Len => "len",
 			Self::Locked => "locked",
+			Self::Split => "split",
 			Self::TextCast => "text",
 			Self::Trim => "trim",
 		}
@@ -163,6 +168,14 @@ impl BuiltInFunction {
 				}
 				_ => None,
 			},
+			Self::Split => match argument_types {
+				[left, right]
+					if matches!(left.without_nullability(), DataType::Text)
+						&& matches!(right.without_nullability(), DataType::Text) => {
+					Some(DataType::Array(Box::new(DataType::Text)))
+				}
+				_ => None,
+			},
 			Self::Trim => match argument_types {
 				[arg] if matches!(arg.without_nullability(), DataType::Text) => Some(DataType::Text),
 				_ => None,
@@ -173,7 +186,7 @@ impl BuiltInFunction {
 
 	pub fn supports_arity(self, argument_count: usize) -> bool {
 		match self {
-			Self::Contains | Self::CountOf | Self::IndexOf => argument_count == 2,
+			Self::Contains | Self::CountOf | Self::IndexOf | Self::Split => argument_count == 2,
 			Self::Len | Self::Disp | Self::Displn | Self::Exists | Self::Locked
 			| Self::Trim
 			| Self::IntCast | Self::TextCast | Self::DecCast | Self::BoolCast | Self::DateCast => argument_count == 1,
@@ -182,7 +195,7 @@ impl BuiltInFunction {
 
 	pub fn produces_runtime_value(self) -> bool {
 		match self {
-			Self::Len | Self::Contains | Self::CountOf | Self::Exists | Self::IndexOf | Self::Locked | Self::Trim
+			Self::Len | Self::Contains | Self::CountOf | Self::Exists | Self::IndexOf | Self::Locked | Self::Split | Self::Trim
 			| Self::IntCast | Self::TextCast | Self::DecCast | Self::BoolCast | Self::DateCast => true,
 			Self::Disp | Self::Displn => false,
 		}

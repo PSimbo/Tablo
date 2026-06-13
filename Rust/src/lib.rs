@@ -825,6 +825,16 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_split_with_non_text_argument_source_text() {
+		let error = evaluate_snippet("split(1, ',')").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Built-in function `split` does not accept an argument of type `int`."),
+			position: 6,
+		}));
+	}
+
+	#[test]
 	fn rejects_top_level_code_when_main_is_present_source_text() {
 		let error = run("fn Main(args: [text]) int { return 0; }\n1 + 2").unwrap_err();
 
@@ -2016,6 +2026,26 @@ mod tests {
 		let result = run(standalone_body("var x: int = 1;\nvar y: int = 2;\nreturn x + y;")).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
+	fn runs_split_source_text() {
+		let result = evaluate_snippet("split('Alpha,Beta,Gamma', ',')").unwrap();
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Text(String::from("Alpha")),
+			Value::Text(String::from("Beta")),
+			Value::Text(String::from("Gamma")),
+		])));
+	}
+
+	#[test]
+	fn runs_split_with_empty_separator_source_text() {
+		let result = evaluate_snippet("split('Alpha', '')").unwrap();
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Text(String::from("Alpha")),
+		])));
 	}
 
 	#[test]
