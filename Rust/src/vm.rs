@@ -937,6 +937,29 @@ impl VirtualMachine {
 					format!("Built-in function `contains` expects 2 argument(s), found {}.", arguments.len()),
 				)),
 			},
+			BuiltInFunction::CountOf => match arguments.as_slice() {
+				[Value::Text(value), Value::Array(values)] => {
+					let count = values.iter()
+						.filter(|item| matches!(item, Value::Text(element) if element == value))
+						.count() as i64;
+					Ok(Some(Value::Integer(count)))
+				}
+				[Value::Text(substring), Value::Text(value)] => {
+					Ok(Some(Value::Integer(count_non_overlapping_substrings(value, substring) as i64)))
+				}
+				[left, right] => Err(vm_error(
+					instruction_index,
+					format!(
+						"Built-in function `countof` does not accept `{}` and `{}` values.",
+						type_name(left),
+						type_name(right),
+					),
+				)),
+				_ => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `countof` expects 2 argument(s), found {}.", arguments.len()),
+				)),
+			},
 			BuiltInFunction::Len => match arguments.as_slice() {
 				[Value::Array(values)] => Ok(Some(Value::Integer(values.len() as i64))),
 				[value] => Err(vm_error(
@@ -986,6 +1009,33 @@ impl VirtualMachine {
 				_ => Err(vm_error(
 					instruction_index,
 					format!("Built-in function `exists` expects 1 argument(s), found {}.", arguments.len()),
+				)),
+			},
+			BuiltInFunction::IndexOf => match arguments.as_slice() {
+				[Value::Text(value), Value::Array(values)] => {
+					let index = values.iter()
+						.position(|item| matches!(item, Value::Text(element) if element == value))
+						.map(|index| Value::Integer(index as i64 + 1))
+						.unwrap_or(Value::Null);
+					Ok(Some(index))
+				}
+				[Value::Text(substring), Value::Text(value)] => {
+					let result = value.find(substring)
+						.map(|index| Value::Integer(index as i64 + 1))
+						.unwrap_or(Value::Null);
+					Ok(Some(result))
+				}
+				[left, right] => Err(vm_error(
+					instruction_index,
+					format!(
+						"Built-in function `indexof` does not accept `{}` and `{}` values.",
+						type_name(left),
+						type_name(right),
+					),
+				)),
+				_ => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `indexof` expects 2 argument(s), found {}.", arguments.len()),
 				)),
 			},
 			BuiltInFunction::Locked => match arguments.as_slice() {
@@ -1213,6 +1263,22 @@ fn compare_values(lhs: Value, rhs: Value, instruction_index: usize, kind: Compar
 	};
 
 	Ok(Value::Boolean(value))
+}
+
+fn count_non_overlapping_substrings(value: &str, substring: &str) -> usize {
+	if substring.is_empty() {
+		return 0;
+	}
+
+	let mut count = 0;
+	let mut offset = 0;
+
+	while let Some(index) = value[offset..].find(substring) {
+		count += 1;
+		offset += index + substring.len();
+	}
+
+	count
 }
 
 fn deferred_sqlite_value(value: SqlValueRef<'_>) -> Result<DeferredSqliteValue, String> {

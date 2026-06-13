@@ -379,6 +379,18 @@ fn lower_query_expr_sqlite(expression: &QueryExpr, parameters: &mut Vec<SqlParam
 					}
 				}
 			}
+			BuiltInFunction::CountOf => {
+				let left = lower_query_expr_sqlite(&call.arguments[0], parameters);
+				let right = lower_query_expr_sqlite(&call.arguments[1], parameters);
+				format!(
+					"CASE WHEN LENGTH({left}) = 0 THEN 0 ELSE ((LENGTH({right}) - LENGTH(REPLACE({right}, {left}, ''))) / LENGTH({left})) END"
+				)
+			}
+			BuiltInFunction::IndexOf => {
+				let left = lower_query_expr_sqlite(&call.arguments[0], parameters);
+				let right = lower_query_expr_sqlite(&call.arguments[1], parameters);
+				format!("NULLIF(INSTR({right}, {left}), 0)")
+			}
 			BuiltInFunction::Trim => {
 				let value = lower_query_expr_sqlite(&call.arguments[0], parameters);
 				format!("TRIM({value})")
@@ -543,6 +555,52 @@ mod tests {
 			result_shape: SqlQueryResultShape::IntegerScalar,
 			statement: String::from(
 				"SELECT COUNT(*) FROM \"Tbl\" WHERE (\"Tbl\".\"Code\" IN ('ALPHA', 'BRAVO'))"
+			),
+		}));
+	}
+
+	#[test]
+	fn lowers_sqlite_countof_and_indexof_text_functions() {
+		let query = QueryCountPlan {
+			backend: DatabaseBackend::Sqlite,
+			database_name: String::from("ExampleDb"),
+			filter: Some(QueryExpr::Binary(QueryBinaryExpr {
+				left: Box::new(QueryExpr::BuiltInCall(QueryBuiltInCall {
+					arguments: vec![
+						QueryExpr::Literal(QueryLiteral::Text(String::from("Ada"))),
+						QueryExpr::Column(QueryColumnReference {
+							column_name: String::from("Name"),
+							data_type: DataType::Text,
+							table_name: String::from("Customers"),
+						}),
+					],
+					built_in: BuiltInFunction::CountOf,
+				})),
+				operator: QueryBinaryOperator::GreaterThan,
+				right: Box::new(QueryExpr::BuiltInCall(QueryBuiltInCall {
+					arguments: vec![
+						QueryExpr::Literal(QueryLiteral::Text(String::from("A"))),
+						QueryExpr::Column(QueryColumnReference {
+							column_name: String::from("Name"),
+							data_type: DataType::Text,
+							table_name: String::from("Customers"),
+						}),
+					],
+					built_in: BuiltInFunction::IndexOf,
+				})),
+			})),
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
+			table_name: String::from("Customers"),
+		}.lower_to_backend().unwrap();
+
+		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
+			database_name: String::from("ExampleDb"),
+			dialect: SqlDialect::Sqlite,
+			parameters: vec![],
+			result_shape: SqlQueryResultShape::IntegerScalar,
+			statement: String::from(
+				"SELECT COUNT(*) FROM \"Customers\" WHERE (CASE WHEN LENGTH('Ada') = 0 THEN 0 ELSE ((LENGTH(\"Customers\".\"Name\") - LENGTH(REPLACE(\"Customers\".\"Name\", 'Ada', ''))) / LENGTH('Ada')) END > NULLIF(INSTR(\"Customers\".\"Name\", 'A'), 0))"
 			),
 		}));
 	}

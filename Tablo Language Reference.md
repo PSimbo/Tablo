@@ -1505,6 +1505,14 @@ Returns `true` if `sub` is a sub-string within `str`.
 
 Returns `true` if `elem` exists as an element in `arr`.
 
+### `countof(str: text, arr: [text]): int`
+
+Returns the number of instances of `str` within `arr`.
+
+### `countof(sub: text, str: text): int`
+
+Returns the number of non-overlapping instances of the sub-string `sub` within `str`.
+
 ### `date(): date`
 
 Returns the current date in the local time-zone.
@@ -1562,6 +1570,14 @@ Returns `true` if `v` matches `pattern` according to Tablo's case-insensitive SQ
 As with SQL's `LIKE` syntax, `%` matches zero or more characters and `_` matches exactly one character. Matching is against the entire string rather than an arbitrary substring.
 
 The `\` character is used to escape wildcard characters within the pattern. Therefore `\%` matches a literal percent sign, `\_` matches a literal underscore, and `\\` matches a literal backslash.
+
+### `indexof(str: text, arr: [text]): int?`
+
+Returns the index of the first instance of `str` within `arr` or `null` if `str` is not an element in `arr`.
+
+### `indexof(sub: text, str) int?`
+
+Returns the index of the first instance of the sub-string `sub` within `str` or `null` if `str` does not contain `sub`.
 
 ### `int(v: dec): int`
 

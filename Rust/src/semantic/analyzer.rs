@@ -1859,6 +1859,22 @@ impl SemanticAnalyzer {
 							));
 						}
 					}
+					BuiltInFunction::CountOf | BuiltInFunction::IndexOf => {
+						let right_type = self.infer_query_expression_type(&arguments[1].value, table)?;
+
+						if matches!(
+							right_type.without_nullability(),
+							DataType::Array(element_type) if matches!(element_type.without_nullability(), DataType::Text)
+						) {
+							return Err(self.compile_error(
+								expression.position(),
+								format!(
+									"Built-in function `{}` is not yet supported for array arguments in lowered database query expressions.",
+									built_in.name(),
+								),
+							));
+						}
+					}
 					BuiltInFunction::Trim => {}
 					_ => {
 						return Err(self.compile_error(

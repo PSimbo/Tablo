@@ -605,6 +605,16 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_countof_with_non_text_or_text_array_argument_source_text() {
+		let error = evaluate_snippet("countof(1, 'x')").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Built-in function `countof` does not accept an argument of type `int`."),
+			position: 8,
+		}));
+	}
+
+	#[test]
 	fn rejects_decimal_range_array_slice_source_text() {
 		let error = evaluate_snippet("var xs: [int] = [10, 20, 30];\nxs[1.0:2.0]").unwrap_err();
 
@@ -681,6 +691,16 @@ mod tests {
 			}
 			other => panic!("expected compile error, found {other:?}"),
 		}
+	}
+
+	#[test]
+	fn rejects_indexof_with_non_text_or_text_array_argument_source_text() {
+		let error = evaluate_snippet("indexof(1, 'x')").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Built-in function `indexof` does not accept an argument of type `int`."),
+			position: 8,
+		}));
 	}
 
 	#[test]
@@ -1155,6 +1175,20 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_countof_on_array_of_text_source_text() {
+		let result = evaluate_snippet("var xs: [text] = ['Ada', 'Bea', 'Ada'];\ncountof('Ada', xs)").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(2)));
+	}
+
+	#[test]
+	fn runs_countof_on_text_source_text() {
+		let result = evaluate_snippet("countof('na', 'banana')").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(2)));
+	}
+
+	#[test]
 	fn runs_date_backed_enum_source_text() {
 		let result = run(
 			"enum Holiday: date { NewYear: @2026-01-01, Christmas: @2026-12-25 }\nfn Main(args: [text]) int { var holiday: Holiday = Holiday.Christmas; if (holiday == Holiday.Christmas) { return 1; } return 0; }"
@@ -1361,6 +1395,40 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_find_query_with_countof_and_indexof_text_functions() {
+		let database_path = create_sqlite_test_database(
+			"runs_find_query_with_countof_and_indexof_text_functions",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO Customers (Id, Name) VALUES
+					(1, 'Banana'),
+					(2, 'Pear');
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int { rec cust = find first Customers where countof('na', Name) = 2 and indexof('Ba', Name) = 1; if cust { return cust.Id; } return 0; }",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
 	fn runs_find_query_with_trim_and_contains() {
 		let database_path = create_sqlite_test_database(
 			"runs_find_query_with_trim_and_contains",
@@ -1548,6 +1616,27 @@ mod tests {
 			Value::Integer(99),
 			Value::Integer(30),
 		])));
+	}
+
+	#[test]
+	fn runs_indexof_on_array_of_text_source_text() {
+		let result = evaluate_snippet("var xs: [text] = ['Ada', 'Bea'];\nindexof('Bea', xs)").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(2)));
+	}
+
+	#[test]
+	fn runs_indexof_on_text_source_text() {
+		let result = evaluate_snippet("indexof('na', 'banana')").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
+	fn runs_indexof_returns_null_when_not_found_source_text() {
+		let result = evaluate_snippet("indexof('zz', 'banana')").unwrap();
+
+		assert_eq!(result, Some(Value::Null));
 	}
 
 	#[test]

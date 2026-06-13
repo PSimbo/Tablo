@@ -4,11 +4,13 @@ use crate::ast::DataType;
 pub enum BuiltInFunction {
 	BoolCast,
 	Contains,
+	CountOf,
 	DateCast,
 	DecCast,
 	Disp,
 	Displn,
 	Exists,
+	IndexOf,
 	IntCast,
 	Len,
 	Locked,
@@ -31,6 +33,8 @@ impl BuiltInFunction {
 			10 => Some(Self::DateCast),
 			11 => Some(Self::Contains),
 			12 => Some(Self::Trim),
+			13 => Some(Self::CountOf),
+			14 => Some(Self::IndexOf),
 			_ => None,
 		}
 	}
@@ -39,11 +43,13 @@ impl BuiltInFunction {
 		match name {
 			"bool" => Some(Self::BoolCast),
 			"contains" => Some(Self::Contains),
+			"countof" => Some(Self::CountOf),
 			"date" => Some(Self::DateCast),
 			"dec" => Some(Self::DecCast),
 			"disp" => Some(Self::Disp),
 			"displn" => Some(Self::Displn),
 			"exists" => Some(Self::Exists),
+			"indexof" => Some(Self::IndexOf),
 			"int" => Some(Self::IntCast),
 			"len" => Some(Self::Len),
 			"locked" => Some(Self::Locked),
@@ -67,6 +73,8 @@ impl BuiltInFunction {
 			Self::DateCast => 10,
 			Self::Contains => 11,
 			Self::Trim => 12,
+			Self::CountOf => 13,
+			Self::IndexOf => 14,
 		}
 	}
 
@@ -74,11 +82,13 @@ impl BuiltInFunction {
 		match self {
 			Self::BoolCast => "bool",
 			Self::Contains => "contains",
+			Self::CountOf => "countof",
 			Self::DateCast => "date",
 			Self::DecCast => "dec",
 			Self::Disp => "disp",
 			Self::Displn => "displn",
 			Self::Exists => "exists",
+			Self::IndexOf => "indexof",
 			Self::IntCast => "int",
 			Self::Len => "len",
 			Self::Locked => "locked",
@@ -105,6 +115,22 @@ impl BuiltInFunction {
 				}
 				_ => None,
 			},
+			Self::CountOf => match argument_types {
+				[left, right]
+					if matches!(left.without_nullability(), DataType::Text)
+						&& matches!(right.without_nullability(), DataType::Text) => {
+					Some(DataType::Int)
+				}
+				[left, right]
+					if matches!(left.without_nullability(), DataType::Text)
+						&& matches!(
+							right.without_nullability(),
+							DataType::Array(element_type) if matches!(element_type.without_nullability(), DataType::Text)
+						) => {
+					Some(DataType::Int)
+				}
+				_ => None,
+			},
 			Self::Disp | Self::Displn => match argument_types {
 				[arg] if matches!(arg.without_nullability(), DataType::Text) => Some(DataType::Void),
 				_ => None,
@@ -112,6 +138,22 @@ impl BuiltInFunction {
 			Self::Exists | Self::Locked => match argument_types {
 				[arg] if matches!(arg.without_nullability(), DataType::RecordPointer(_)) => {
 					Some(DataType::Bool)
+				}
+				_ => None,
+			},
+			Self::IndexOf => match argument_types {
+				[left, right]
+					if matches!(left.without_nullability(), DataType::Text)
+						&& matches!(right.without_nullability(), DataType::Text) => {
+					Some(DataType::Int.into_nullable())
+				}
+				[left, right]
+					if matches!(left.without_nullability(), DataType::Text)
+						&& matches!(
+							right.without_nullability(),
+							DataType::Array(element_type) if matches!(element_type.without_nullability(), DataType::Text)
+						) => {
+					Some(DataType::Int.into_nullable())
 				}
 				_ => None,
 			},
@@ -131,7 +173,7 @@ impl BuiltInFunction {
 
 	pub fn supports_arity(self, argument_count: usize) -> bool {
 		match self {
-			Self::Contains => argument_count == 2,
+			Self::Contains | Self::CountOf | Self::IndexOf => argument_count == 2,
 			Self::Len | Self::Disp | Self::Displn | Self::Exists | Self::Locked
 			| Self::Trim
 			| Self::IntCast | Self::TextCast | Self::DecCast | Self::BoolCast | Self::DateCast => argument_count == 1,
@@ -140,7 +182,7 @@ impl BuiltInFunction {
 
 	pub fn produces_runtime_value(self) -> bool {
 		match self {
-			Self::Len | Self::Contains | Self::Exists | Self::Locked | Self::Trim
+			Self::Len | Self::Contains | Self::CountOf | Self::Exists | Self::IndexOf | Self::Locked | Self::Trim
 			| Self::IntCast | Self::TextCast | Self::DecCast | Self::BoolCast | Self::DateCast => true,
 			Self::Disp | Self::Displn => false,
 		}
