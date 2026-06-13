@@ -18,6 +18,7 @@ use crate::ast::ForRecordStatement;
 use crate::ast::ForStatement;
 use crate::ast::FunctionDeclaration;
 use crate::ast::IdentifierExpr;
+use crate::ast::IfCondition;
 use crate::ast::IfStatement;
 use crate::ast::IndexExpr;
 use crate::ast::ObjectConstructionExpr;
@@ -702,11 +703,44 @@ impl Compiler {
 				then_branch,
 				..
 			}) => {
-				self.compile_into(condition, semantic_program, emission);
-				let jump_if_false_index = emission.instructions.len();
-				self.emit(emission, Instruction::JumpIfFalse(0), condition.position());
-
-				self.compile_statement(&Statement::Block(then_branch.clone()), semantic_program, emission)?;
+				let jump_if_false_index = match condition {
+					IfCondition::Expression(condition) => {
+						self.compile_into(condition, semantic_program, emission);
+						let jump_if_false_index = emission.instructions.len();
+						self.emit(emission, Instruction::JumpIfFalse(0), condition.position());
+						self.compile_statement(&Statement::Block(then_branch.clone()), semantic_program, emission)?;
+						jump_if_false_index
+					}
+					IfCondition::RecordPointerBinding(RecordPointerDeclaration { initial_value, name, position, .. }) => {
+						let slot = semantic_program.declaration_slot(*position).ok_or(self.compile_error(
+							*position,
+							format!("Missing slot for `if rec` binding `{name}`."),
+						))?;
+						let data_type = semantic_program.declaration_type(*position).ok_or(self.compile_error(
+							*position,
+							format!("Missing type for `if rec` binding `{name}`."),
+						))?;
+						self.compile_into(initial_value, semantic_program, emission);
+						self.emit(emission, Instruction::StoreLocal(slot), *position);
+						self.emit(emission, Instruction::LoadLocal(slot), *position);
+						let jump_if_false_index = emission.instructions.len();
+						self.emit(emission, Instruction::JumpIfFalse(0), *position);
+						self.enter_debug_scope(emission);
+						self.record_local_debug(
+							emission,
+							name.clone(),
+							slot,
+							data_type.name(),
+							true,
+							emission.instructions.len() as u32,
+						);
+						for statement in &then_branch.statements {
+							self.compile_statement(statement, semantic_program, emission)?;
+						}
+						self.exit_debug_scope(emission);
+						jump_if_false_index
+					}
+				};
 
 				if let Some(else_branch) = else_branch {
 					let jump_to_end_index = emission.instructions.len();
@@ -1055,6 +1089,7 @@ mod tests {
 	use crate::ast::Expr;
 	use crate::ast::ForStatement;
 	use crate::ast::IdentifierExpr;
+	use crate::ast::IfCondition;
 	use crate::ast::IfStatement;
 	use crate::ast::IntegerLiteral;
 	use crate::ast::Program as AstProgram;
@@ -1478,10 +1513,10 @@ mod tests {
 					position: 0,
 				}),
 				Statement::If(IfStatement {
-					condition: Expr::Boolean(BooleanLiteral {
+					condition: IfCondition::Expression(Expr::Boolean(BooleanLiteral {
 						position: 0,
 						value: false,
-					}),
+					})),
 					else_branch: Some(Box::new(Statement::Block(BlockStatement {
 						position: 0,
 						statements: vec![
@@ -1550,10 +1585,10 @@ mod tests {
 			result: None,
 			statements: vec![
 				Statement::If(IfStatement {
-					condition: Expr::Boolean(BooleanLiteral {
+					condition: IfCondition::Expression(Expr::Boolean(BooleanLiteral {
 						position: 0,
 						value: true,
-					}),
+					})),
 					else_branch: None,
 					position: 0,
 					then_branch: BlockStatement {
@@ -1914,7 +1949,7 @@ mod tests {
 								})),
 							})),
 							Statement::If(IfStatement {
-								condition: Expr::Binary(BinaryExpr {
+								condition: IfCondition::Expression(Expr::Binary(BinaryExpr {
 									left: Box::new(Expr::Identifier(IdentifierExpr {
 										name: String::from("x"),
 										position: 0,
@@ -1925,7 +1960,7 @@ mod tests {
 										position: 0,
 										value: 2,
 									})),
-								}),
+								})),
 								else_branch: None,
 								position: 0,
 								then_branch: BlockStatement {
@@ -2058,10 +2093,10 @@ mod tests {
 			result: None,
 			statements: vec![
 				Statement::If(IfStatement {
-					condition: Expr::Integer(IntegerLiteral {
+					condition: IfCondition::Expression(Expr::Integer(IntegerLiteral {
 						position: 3,
 						value: 1,
-					}),
+					})),
 					else_branch: None,
 					position: 0,
 					then_branch: BlockStatement {

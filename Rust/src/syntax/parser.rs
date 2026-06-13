@@ -26,6 +26,7 @@ use crate::ast::ForStatement;
 use crate::ast::FunctionDeclaration;
 use crate::ast::FunctionParameter;
 use crate::ast::IdentifierExpr;
+use crate::ast::IfCondition;
 use crate::ast::IfStatement;
 use crate::ast::IndexExpr;
 use crate::ast::IntegerLiteral;
@@ -808,7 +809,21 @@ impl Parser {
 
 	fn parse_if_statement(&mut self) -> Result<Statement, ParseError> {
 		let if_keyword = self.expect_token(TokenKind::IfKeyword, "Expected `if` to start if statement.")?;
-		let condition = self.parse_assignment_expression_without_object_construction()?;
+		let condition = if self.current().is_some_and(|token| token.kind == TokenKind::RecKeyword) {
+			self.next();
+			let name = self.expect_token(TokenKind::Identifier, "Expected record pointer name after `if rec`.")?;
+			self.expect_token(TokenKind::Equal, "Expected `=` after record pointer name in `if rec` statement.")?;
+			let initial_value = self.parse_assignment_expression_without_object_construction()?;
+			IfCondition::RecordPointerBinding(RecordPointerDeclaration {
+				initial_value,
+				is_mut: false,
+				name: name.lexeme,
+				position: if_keyword.start,
+			})
+		}
+		else {
+			IfCondition::Expression(self.parse_assignment_expression_without_object_construction()?)
+		};
 		let then_branch = match self.parse_block_statement()? {
 			Statement::Block(block) => block,
 			_ => unreachable!("Block parser must return a block statement."),
@@ -1769,6 +1784,7 @@ mod tests {
 	use crate::ast::FunctionDeclaration;
 	use crate::ast::FunctionParameter;
 	use crate::ast::IdentifierExpr;
+	use crate::ast::IfCondition;
 	use crate::ast::IfStatement;
 	use crate::ast::IndexExpr;
 	use crate::ast::IntegerLiteral;
@@ -2011,7 +2027,17 @@ mod tests {
 
 	fn normalize_if_statement(if_statement: IfStatement) -> IfStatement {
 		IfStatement {
-			condition: normalize_expr(if_statement.condition),
+			condition: match if_statement.condition {
+				IfCondition::Expression(expression) => IfCondition::Expression(normalize_expr(expression)),
+				IfCondition::RecordPointerBinding(binding) => IfCondition::RecordPointerBinding(
+					RecordPointerDeclaration {
+						initial_value: normalize_expr(binding.initial_value),
+						is_mut: binding.is_mut,
+						name: binding.name,
+						position: 0,
+					}
+				),
+			},
 			else_branch: if_statement.else_branch.map(|branch| Box::new(normalize_statement(*branch))),
 			position: 0,
 			then_branch: normalize_block(if_statement.then_branch),
@@ -3300,15 +3326,15 @@ mod tests {
 				result: None,
 				statements: vec![
 					Statement::If(IfStatement {
-						condition: Expr::Boolean(BooleanLiteral {
+						condition: IfCondition::Expression(Expr::Boolean(BooleanLiteral {
 							position: 0,
 							value: false,
-						}),
+						})),
 						else_branch: Some(Box::new(Statement::If(IfStatement {
-							condition: Expr::Boolean(BooleanLiteral {
+							condition: IfCondition::Expression(Expr::Boolean(BooleanLiteral {
 								position: 0,
 								value: true,
-							}),
+							})),
 							else_branch: None,
 							position: 0,
 							then_branch: BlockStatement {
@@ -3360,10 +3386,10 @@ mod tests {
 				result: None,
 				statements: vec![
 					Statement::If(IfStatement {
-						condition: Expr::Boolean(BooleanLiteral {
+						condition: IfCondition::Expression(Expr::Boolean(BooleanLiteral {
 							position: 0,
 							value: true,
-						}),
+						})),
 						else_branch: Some(Box::new(Statement::Block(BlockStatement {
 							position: 0,
 							statements: vec![
@@ -3403,6 +3429,73 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_if_rec_statement() {
+		assert_eq!(
+			parse_program("if rec foo = find first customers where customers.id = 1 { return 1; }"),
+			Program {
+				functions: vec![],
+				objects: vec![],
+				result: None,
+				statements: vec![
+					Statement::If(IfStatement {
+						condition: IfCondition::RecordPointerBinding(RecordPointerDeclaration {
+							initial_value: Expr::Find(FindExpr {
+								kind: FindKind::First,
+								order_by: vec![],
+								position: 0,
+								table: TableReference {
+									components: vec![IdentifierExpr {
+										name: String::from("customers"),
+										position: 0,
+									}],
+									position: 0,
+								},
+								where_clause: Some(Box::new(Expr::Binary(BinaryExpr {
+									left: Box::new(Expr::FieldAccess(FieldAccessExpr {
+										field: IdentifierExpr {
+											name: String::from("id"),
+											position: 0,
+										},
+										object: Box::new(Expr::Identifier(IdentifierExpr {
+											name: String::from("customers"),
+											position: 0,
+										})),
+										position: 0,
+									})),
+									operator: BinaryOperator::Equal,
+									position: 0,
+									right: Box::new(Expr::Integer(IntegerLiteral {
+										position: 0,
+										value: 1,
+									})),
+								}))),
+							}),
+							is_mut: false,
+							name: String::from("foo"),
+							position: 0,
+						}),
+						else_branch: None,
+						position: 0,
+						then_branch: BlockStatement {
+							position: 0,
+							statements: vec![
+								Statement::Return(ReturnStatement {
+									position: 0,
+									value: Some(Expr::Integer(IntegerLiteral {
+										position: 0,
+										value: 1,
+									})),
+								}),
+							],
+						},
+					}),
+				],
+				with_declarations: vec![],
+			}
+		);
+	}
+
+	#[test]
 	fn parses_if_record_pointer_condition_followed_by_field_assignment_block() {
 		let program = parse_program(
 			"fn Main(args: [text]) int { rec mut c = find first TblTest; if c { parentObj.InnerObj.FieldA = c.ColC; } return 0; }"
@@ -3411,7 +3504,7 @@ mod tests {
 		assert!(matches!(
 			&program.functions[0].body.statements[1],
 			Statement::If(IfStatement {
-				condition: Expr::Identifier(_),
+				condition: IfCondition::Expression(Expr::Identifier(_)),
 				then_branch,
 				..
 			}) if matches!(
@@ -3434,10 +3527,10 @@ mod tests {
 				result: None,
 				statements: vec![
 					Statement::If(IfStatement {
-						condition: Expr::Boolean(BooleanLiteral {
+						condition: IfCondition::Expression(Expr::Boolean(BooleanLiteral {
 							position: 0,
 							value: true,
-						}),
+						})),
 						else_branch: None,
 						position: 0,
 						then_branch: BlockStatement {

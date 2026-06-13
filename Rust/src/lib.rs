@@ -637,6 +637,29 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_if_rec_binding_used_inside_its_condition() {
+		let error = compile_source_to_program_with_name_and_schema(
+			"with exampledb;\nfn Main(args: [text]) int { if rec user = find first Customers where Id = 1 and user.Id = 1 { return user.Id; } return -1; }",
+			None,
+			CompilationTarget::Standalone,
+			Some(&read_schema_catalog_from_str(
+				r#"
+					database ExampleDb;
+					schema Main implicit;
+					create table Customers (
+						Id int not null
+					);
+				"#,
+			).unwrap()),
+		).unwrap_err();
+
+		assert_eq!(
+			error.format_with_source("with exampledb;\nfn Main(args: [text]) int { if rec user = find first Customers where Id = 1 and user.Id = 1 { return user.Id; } return -1; }"),
+			"Compile error at line 2, column 81: Qualified field reference must use the target table name `Customers`.\n  |\n2 | fn Main(args: [text]) int { if rec user = find first Customers where Id = 1 and user.Id = 1 { return user.Id; } return -1; }\n  |                                                                                 ^"
+		);
+	}
+
+	#[test]
 	fn rejects_implicit_outer_variable_capture_in_nested_function_source_text() {
 		let error = run(
 			"fn Main(args: [text]) int { var x: int = 1; fn inner() int { return x; } return inner(); }"
@@ -1327,6 +1350,70 @@ mod tests {
 		let result = run(standalone_body("var x: int = 1;\nif false { x = 2; } else { x = 3; }\nreturn x;")).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
+	fn runs_if_rec_else_when_record_is_missing() {
+		let database_path = create_sqlite_test_database(
+			"runs_if_rec_else_when_record_is_missing",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int { if rec user = find first Customers where Id = 1 { return user.Id; } else { return -1; } }",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(-1)));
+	}
+
+	#[test]
+	fn runs_if_rec_when_record_is_found() {
+		let database_path = create_sqlite_test_database(
+			"runs_if_rec_when_record_is_found",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO Customers (Id, Name) VALUES
+					(1, 'Ada');
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int { if rec user = find first Customers where Id = 1 { return user.Id; } return -1; }",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(1)));
 	}
 
 	#[test]

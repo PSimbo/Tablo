@@ -21,6 +21,7 @@ use crate::ast::ForStatement;
 use crate::ast::FunctionDeclaration;
 use crate::ast::FunctionParameter;
 use crate::ast::IdentifierExpr;
+use crate::ast::IfCondition;
 use crate::ast::IfStatement;
 use crate::ast::IndexExpr;
 use crate::ast::ObjectConstructionExpr;
@@ -2716,16 +2717,46 @@ impl SemanticAnalyzer {
 				validation_result
 			}
 			Statement::If(IfStatement { condition, else_branch, position, then_branch }) => {
-				let condition_type = self.infer_expression_type(condition)?;
+				match condition {
+					IfCondition::Expression(condition) => {
+						let condition_type = self.infer_expression_type(condition)?;
 
-				if !self.is_truthy_condition_type(&condition_type) {
-					return Err(self.compile_error(
-						condition.position().max(*position),
-						format!("`if` condition must be of type `bool` or `record pointer`, found `{}`.", condition_type.name()),
-					));
+						if !self.is_truthy_condition_type(&condition_type) {
+							return Err(self.compile_error(
+								condition.position().max(*position),
+								format!("`if` condition must be of type `bool` or `record pointer`, found `{}`.", condition_type.name()),
+							));
+						}
+
+						self.validate_statement(&Statement::Block(then_branch.clone()))?;
+					}
+					IfCondition::RecordPointerBinding(RecordPointerDeclaration { initial_value, name, position, .. }) => {
+						let initial_type = self.infer_expression_type(initial_value)?;
+						let DataType::RecordPointer(_) = initial_type.without_nullability() else {
+							return Err(self.compile_error(
+								initial_value.position(),
+								format!(
+									"`if rec` binding `{name}` must be initialized from a record pointer value, found `{}`.",
+									initial_type.name(),
+								),
+							));
+						};
+
+						self.enter_scope();
+						let slot = self.next_local_slot;
+						self.next_local_slot += 1;
+						self.semantic_program.declaration_slots.insert(*position, slot);
+						self.semantic_program.declaration_types.insert(*position, initial_type.clone());
+						self.declare_local(name.clone(), LocalBinding {
+							data_type: initial_type,
+							is_const: true,
+							slot,
+						});
+						let validation_result = self.validate_statement(&Statement::Block(then_branch.clone()));
+						self.exit_scope();
+						validation_result?;
+					}
 				}
-
-				self.validate_statement(&Statement::Block(then_branch.clone()))?;
 
 				if let Some(else_branch) = else_branch {
 					self.validate_statement(else_branch)?;
@@ -2957,6 +2988,7 @@ mod tests {
 	use crate::ast::BlockStatement;
 	use crate::ast::Expr;
 	use crate::ast::IdentifierExpr;
+	use crate::ast::IfCondition;
 	use crate::ast::IfStatement;
 	use crate::ast::RecordPointerType;
 	use crate::ast::Statement;
@@ -3008,10 +3040,10 @@ mod tests {
 	#[test]
 	fn accepts_record_pointer_as_if_condition() {
 		let statement = Statement::If(IfStatement {
-			condition: Expr::Identifier(IdentifierExpr {
+			condition: IfCondition::Expression(Expr::Identifier(IdentifierExpr {
 				name: String::from("cust"),
 				position: 3,
-			}),
+			})),
 			else_branch: None,
 			position: 0,
 			then_branch: BlockStatement {

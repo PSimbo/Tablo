@@ -128,6 +128,12 @@ pub enum FindKind {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum IfCondition {
+	Expression(Expr),
+	RecordPointerBinding(RecordPointerDeclaration),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ObjectDeclarationShape {
 	Array(DataType),
 	Fields(Vec<ObjectFieldDeclaration>),
@@ -321,7 +327,7 @@ pub struct IdentifierExpr {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IfStatement {
-	pub condition: Expr,
+	pub condition: IfCondition,
 	pub else_branch: Option<Box<Statement>>,
 	pub position: usize,
 	pub then_branch: BlockStatement,
