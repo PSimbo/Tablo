@@ -575,6 +575,16 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_contains_with_non_text_or_text_array_argument_source_text() {
+		let error = evaluate_snippet("contains(1, 'x')").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Built-in function `contains` does not accept an argument of type `int`."),
+			position: 9,
+		}));
+	}
+
+	#[test]
 	fn rejects_count_expression_for_unsupported_backend() {
 		let error = compile_snippet_with_schema_fixture_and_backends(
 			"with exampledb;\ncount customers where active = true",
@@ -801,6 +811,16 @@ mod tests {
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Top-level executable statements are not permitted when `Main` is defined."),
 			position: 42,
+		}));
+	}
+
+	#[test]
+	fn rejects_trim_with_non_text_argument_source_text() {
+		let error = evaluate_snippet("trim(1)").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Built-in function `trim` does not accept an argument of type `int`."),
+			position: 5,
 		}));
 	}
 
@@ -1121,6 +1141,20 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_contains_on_array_of_text_source_text() {
+		let result = evaluate_snippet("var xs: [text] = ['Ada', 'Bea'];\ncontains(xs, 'Bea')").unwrap();
+
+		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
+	fn runs_contains_on_text_source_text() {
+		let result = evaluate_snippet("contains('  Ada  ', 'Ada')").unwrap();
+
+		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
 	fn runs_date_backed_enum_source_text() {
 		let result = run(
 			"enum Holiday: date { NewYear: @2026-01-01, Christmas: @2026-12-25 }\nfn Main(args: [text]) int { var holiday: Holiday = Holiday.Christmas; if (holiday == Holiday.Christmas) { return 1; } return 0; }"
@@ -1287,6 +1321,40 @@ mod tests {
 		let result = run(standalone_body("var x: int = 5;\nx += 1;\nreturn x;")).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(6)));
+	}
+
+	#[test]
+	fn runs_find_query_with_trim_and_contains() {
+		let database_path = create_sqlite_test_database(
+			"runs_find_query_with_trim_and_contains",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO Customers (Id, Name) VALUES
+					(1, '  Ada Lovelace  '),
+					(2, 'Bea');
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int { rec cust = find first Customers where contains(trim(Name), 'Ada'); if cust { return cust.Id; } return 0; }",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(1)));
 	}
 
 	#[test]
@@ -2185,6 +2253,13 @@ mod tests {
 		let result = evaluate_snippet("'hello'").unwrap();
 
 		assert_eq!(result, Some(Value::Text(String::from("hello"))));
+	}
+
+	#[test]
+	fn runs_trim_source_text() {
+		let result = evaluate_snippet("trim('  Ada  ')").unwrap();
+
+		assert_eq!(result, Some(Value::Text(String::from("Ada"))));
 	}
 
 	#[test]

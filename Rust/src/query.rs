@@ -1,3 +1,4 @@
+use crate::builtins::BuiltInFunction;
 use crate::ast::DataType;
 use crate::ast::FindKind;
 use crate::ast::OrderByDirection;
@@ -31,6 +32,7 @@ pub enum QueryBinaryOperator {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum QueryExpr {
 	Binary(QueryBinaryExpr),
+	BuiltInCall(QueryBuiltInCall),
 	Column(QueryColumnReference),
 	Literal(QueryLiteral),
 	Parameter(QueryParameter),
@@ -80,6 +82,12 @@ pub struct QueryBinaryExpr {
 	pub left: Box<QueryExpr>,
 	pub operator: QueryBinaryOperator,
 	pub right: Box<QueryExpr>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryBuiltInCall {
+	pub arguments: Vec<QueryExpr>,
+	pub built_in: BuiltInFunction,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -349,6 +357,21 @@ fn lower_query_expr_sqlite(expression: &QueryExpr, parameters: &mut Vec<SqlParam
 
 			format!("({left} {operator} {right})")
 		}
+		QueryExpr::BuiltInCall(call) => match call.built_in {
+			BuiltInFunction::Contains => {
+				let left = lower_query_expr_sqlite(&call.arguments[0], parameters);
+				let right = lower_query_expr_sqlite(&call.arguments[1], parameters);
+				format!("(INSTR({left}, {right}) > 0)")
+			}
+			BuiltInFunction::Trim => {
+				let value = lower_query_expr_sqlite(&call.arguments[0], parameters);
+				format!("TRIM({value})")
+			}
+			other => panic!(
+				"Built-in function `{}` is not supported in lowered SQLite query expressions.",
+				other.name(),
+			),
+		},
 		QueryExpr::Column(column) => {
 			format!(
 				"{}.{}",
@@ -412,12 +435,14 @@ mod tests {
 	use crate::ast::DataType;
 	use crate::ast::FindKind;
 	use crate::ast::OrderByDirection;
+	use crate::builtins::BuiltInFunction;
 	use crate::schema::DatabaseBackend;
 	use crate::value::Decimal;
 
 	use super::LoweredBackendQuery;
 	use super::QueryBinaryExpr;
 	use super::QueryBinaryOperator;
+	use super::QueryBuiltInCall;
 	use super::QueryColumnReference;
 	use super::QueryCountPlan;
 	use super::QueryExpr;
@@ -433,6 +458,43 @@ mod tests {
 	use super::SqlParameter;
 	use super::SqlQuery;
 	use super::SqlQueryResultShape;
+
+	#[test]
+	fn lowers_sqlite_built_in_text_functions() {
+		let query = QueryCountPlan {
+			backend: DatabaseBackend::Sqlite,
+			database_name: String::from("ExampleDb"),
+			filter: Some(QueryExpr::BuiltInCall(QueryBuiltInCall {
+				arguments: vec![
+					QueryExpr::BuiltInCall(QueryBuiltInCall {
+						arguments: vec![
+							QueryExpr::Column(QueryColumnReference {
+								column_name: String::from("Name"),
+								data_type: DataType::Text,
+								table_name: String::from("Customers"),
+							}),
+						],
+						built_in: BuiltInFunction::Trim,
+					}),
+					QueryExpr::Literal(QueryLiteral::Text(String::from("Ada"))),
+				],
+				built_in: BuiltInFunction::Contains,
+			})),
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
+			table_name: String::from("Customers"),
+		}.lower_to_backend().unwrap();
+
+		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
+			database_name: String::from("ExampleDb"),
+			dialect: SqlDialect::Sqlite,
+			parameters: vec![],
+			result_shape: SqlQueryResultShape::IntegerScalar,
+			statement: String::from(
+				"SELECT COUNT(*) FROM \"Customers\" WHERE (INSTR(TRIM(\"Customers\".\"Name\"), 'Ada') > 0)"
+			),
+		}));
+	}
 
 	#[test]
 	fn lowers_sqlite_count_plan_to_sql_query() {

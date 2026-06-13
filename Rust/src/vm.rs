@@ -916,6 +916,27 @@ impl VirtualMachine {
 		instruction_index: usize,
 	) -> Result<Option<Value>, VmError> {
 		match built_in {
+			BuiltInFunction::Contains => match arguments.as_slice() {
+				[Value::Text(value), Value::Text(substring)] => {
+					Ok(Some(Value::Boolean(value.contains(substring))))
+				}
+				[Value::Array(values), Value::Text(element)] => {
+					let contains = values.iter().any(|value| matches!(value, Value::Text(item) if item == element));
+					Ok(Some(Value::Boolean(contains)))
+				}
+				[left, right] => Err(vm_error(
+					instruction_index,
+					format!(
+						"Built-in function `contains` does not accept `{}` and `{}` values.",
+						type_name(left),
+						type_name(right),
+					),
+				)),
+				_ => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `contains` expects 2 argument(s), found {}.", arguments.len()),
+				)),
+			},
 			BuiltInFunction::Len => match arguments.as_slice() {
 				[Value::Array(values)] => Ok(Some(Value::Integer(values.len() as i64))),
 				[value] => Err(vm_error(
@@ -976,6 +997,17 @@ impl VirtualMachine {
 				_ => Err(vm_error(
 					instruction_index,
 					format!("Built-in function `locked` expects 1 argument(s), found {}.", arguments.len()),
+				)),
+			},
+			BuiltInFunction::Trim => match arguments.as_slice() {
+				[Value::Text(value)] => Ok(Some(Value::Text(value.trim().to_string()))),
+				[value] => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `trim` does not accept a `{}` value.", type_name(value)),
+				)),
+				_ => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `trim` expects 1 argument(s), found {}.", arguments.len()),
 				)),
 			},
 			BuiltInFunction::IntCast

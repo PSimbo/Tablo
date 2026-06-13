@@ -44,6 +44,7 @@ use crate::compiler::CompileError;
 use crate::query::LoweredBackendQuery;
 use crate::query::QueryBinaryExpr;
 use crate::query::QueryBinaryOperator;
+use crate::query::QueryBuiltInCall;
 use crate::query::QueryColumnReference;
 use crate::query::QueryCountPlan;
 use crate::query::QueryExpr;
@@ -1816,10 +1817,46 @@ impl SemanticAnalyzer {
 				right: Box::new(self.lower_query_expression(right, table, backend)?),
 			})),
 			Expr::Boolean(boolean) => Ok(QueryExpr::Literal(QueryLiteral::Boolean(boolean.value))),
-			Expr::Call(CallExpr { callee, .. }) => Err(self.compile_error(
-				expression.position(),
-				format!("Function `{}` is not yet supported in lowered database query expressions.", callee.name),
-			)),
+			Expr::Call(CallExpr { arguments, callee, .. }) => {
+				let Some(built_in) = BuiltInFunction::from_name(&callee.name) else {
+					return Err(self.compile_error(
+						expression.position(),
+						format!("Function `{}` is not yet supported in lowered database query expressions.", callee.name),
+					));
+				};
+
+				match built_in {
+					BuiltInFunction::Contains => {
+						let left_type = self.infer_query_expression_type(&arguments[0].value, table)?;
+
+						if matches!(
+							left_type.without_nullability(),
+							DataType::Array(element_type) if matches!(element_type.without_nullability(), DataType::Text)
+						) {
+							return Err(self.compile_error(
+								expression.position(),
+								String::from(
+									"Built-in function `contains` is not yet supported for array arguments in lowered database query expressions.",
+								),
+							));
+						}
+					}
+					BuiltInFunction::Trim => {}
+					_ => {
+						return Err(self.compile_error(
+							expression.position(),
+							format!("Function `{}` is not yet supported in lowered database query expressions.", callee.name),
+						));
+					}
+				}
+
+				Ok(QueryExpr::BuiltInCall(QueryBuiltInCall {
+					arguments: arguments.iter()
+						.map(|argument| self.lower_query_expression(&argument.value, table, backend))
+						.collect::<Result<Vec<_>, _>>()?,
+					built_in,
+				}))
+			}
 			Expr::Date(date) => Ok(QueryExpr::Literal(QueryLiteral::Date(date.value))),
 			Expr::Decimal(decimal) => Ok(QueryExpr::Literal(QueryLiteral::Decimal(decimal.value.clone()))),
 			Expr::FieldAccess(field_access) => self.lower_query_field_access(field_access, table, backend),

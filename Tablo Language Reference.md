@@ -1497,6 +1497,14 @@ Built-In Functions
 
 Unless otherwise specified, built-in functions may be used in query expressions such as `where`, `order by`, and `group by` clauses.
 
+### `contains(str: text, sub: text): bool`
+
+Returns `true` if `sub` is a sub-string within `str`.
+
+### `contains(arr: [text], elem: text): bool`
+
+Returns `true` if `elem` exists as an element in `arr`.
+
 ### `date(): date`
 
 Returns the current date in the local time-zone.
@@ -1692,6 +1700,10 @@ Returns the timestamp obtained by parsing `v`. If `v` cannot be parsed as a time
 ### `timetz(t: time, tz: dec): timetz`
 
 Returns the time `t` in time-zone `tz`.
+
+### `trim(str: text): text`
+
+Trims whitespace from both ends of `str`.
 
 Grammar
 -------
