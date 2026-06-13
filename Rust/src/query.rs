@@ -31,6 +31,7 @@ pub enum QueryBinaryOperator {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum QueryExpr {
+	ArrayLiteral(Vec<QueryExpr>),
 	Binary(QueryBinaryExpr),
 	BuiltInCall(QueryBuiltInCall),
 	Column(QueryColumnReference),
@@ -332,6 +333,9 @@ fn effective_find_order_direction(kind: FindKind, direction: OrderByDirection) -
 
 fn lower_query_expr_sqlite(expression: &QueryExpr, parameters: &mut Vec<SqlParameter>) -> String {
 	match expression {
+		QueryExpr::ArrayLiteral(_) => {
+			panic!("Array literals are only supported within specific lowered SQLite query expressions.")
+		}
 		QueryExpr::Binary(binary) => {
 			let left = lower_query_expr_sqlite(&binary.left, parameters);
 			let right = lower_query_expr_sqlite(&binary.right, parameters);
@@ -359,9 +363,21 @@ fn lower_query_expr_sqlite(expression: &QueryExpr, parameters: &mut Vec<SqlParam
 		}
 		QueryExpr::BuiltInCall(call) => match call.built_in {
 			BuiltInFunction::Contains => {
-				let left = lower_query_expr_sqlite(&call.arguments[0], parameters);
-				let right = lower_query_expr_sqlite(&call.arguments[1], parameters);
-				format!("(INSTR({left}, {right}) > 0)")
+				match &call.arguments[0] {
+					QueryExpr::ArrayLiteral(values) => {
+						let right = lower_query_expr_sqlite(&call.arguments[1], parameters);
+						let values = values.iter()
+							.map(|value| lower_query_expr_sqlite(value, parameters))
+							.collect::<Vec<_>>()
+							.join(", ");
+						format!("({right} IN ({values}))")
+					}
+					_ => {
+						let left = lower_query_expr_sqlite(&call.arguments[0], parameters);
+						let right = lower_query_expr_sqlite(&call.arguments[1], parameters);
+						format!("(INSTR({left}, {right}) > 0)")
+					}
+				}
 			}
 			BuiltInFunction::Trim => {
 				let value = lower_query_expr_sqlite(&call.arguments[0], parameters);
@@ -492,6 +508,41 @@ mod tests {
 			result_shape: SqlQueryResultShape::IntegerScalar,
 			statement: String::from(
 				"SELECT COUNT(*) FROM \"Customers\" WHERE (INSTR(TRIM(\"Customers\".\"Name\"), 'Ada') > 0)"
+			),
+		}));
+	}
+
+	#[test]
+	fn lowers_sqlite_contains_with_array_literal_to_in_expression() {
+		let query = QueryCountPlan {
+			backend: DatabaseBackend::Sqlite,
+			database_name: String::from("ExampleDb"),
+			filter: Some(QueryExpr::BuiltInCall(QueryBuiltInCall {
+				arguments: vec![
+					QueryExpr::ArrayLiteral(vec![
+						QueryExpr::Literal(QueryLiteral::Text(String::from("ALPHA"))),
+						QueryExpr::Literal(QueryLiteral::Text(String::from("BRAVO"))),
+					]),
+					QueryExpr::Column(QueryColumnReference {
+						column_name: String::from("Code"),
+						data_type: DataType::Text,
+						table_name: String::from("Tbl"),
+					}),
+				],
+				built_in: BuiltInFunction::Contains,
+			})),
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
+			table_name: String::from("Tbl"),
+		}.lower_to_backend().unwrap();
+
+		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
+			database_name: String::from("ExampleDb"),
+			dialect: SqlDialect::Sqlite,
+			parameters: vec![],
+			result_shape: SqlQueryResultShape::IntegerScalar,
+			statement: String::from(
+				"SELECT COUNT(*) FROM \"Tbl\" WHERE (\"Tbl\".\"Code\" IN ('ALPHA', 'BRAVO'))"
 			),
 		}));
 	}

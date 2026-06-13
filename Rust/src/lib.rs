@@ -1324,6 +1324,43 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_find_query_with_contains_array_literal_membership() {
+		let database_path = create_sqlite_test_database(
+			"runs_find_query_with_contains_array_literal_membership",
+			r#"
+				CREATE TABLE Tbl (
+					Id INTEGER NOT NULL,
+					Code TEXT NOT NULL,
+					TableNum INTEGER NOT NULL
+				);
+				INSERT INTO Tbl (Id, Code, TableNum) VALUES
+					(1, 'ALPHA', 7),
+					(2, 'BRAVO', 7),
+					(3, 'CHARLIE', 9);
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int { rec c = find first Tbl where TableNum = 7 and contains(['ALPHA', 'CHARLIE'], Code) order by Id; if c { return c.Id; } return 0; }",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Tbl (
+					Id int not null,
+					Code text not null,
+					TableNum int not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
 	fn runs_find_query_with_trim_and_contains() {
 		let database_path = create_sqlite_test_database(
 			"runs_find_query_with_trim_and_contains",

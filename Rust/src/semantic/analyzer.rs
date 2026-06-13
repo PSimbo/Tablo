@@ -1351,10 +1351,7 @@ impl SemanticAnalyzer {
 		table: &TableReference,
 	) -> Result<DataType, CompileError> {
 		match expression {
-			Expr::Array(_) => Err(self.compile_error(
-				expression.position(),
-				String::from("Array literals are not yet supported in `where` clauses."),
-			)),
+			Expr::Array(array) => self.infer_array_literal_type(&array.elements, array.position),
 			Expr::Assignment(_) => Err(self.compile_error(
 				expression.position(),
 				String::from("Assignments are not permitted in `where` clauses."),
@@ -1811,6 +1808,12 @@ impl SemanticAnalyzer {
 		let _ = backend;
 
 		match expression {
+			Expr::Array(_) => Err(self.compile_error(
+				expression.position(),
+				String::from(
+					"Array literals are only supported as the first argument to `contains(...)` in lowered database query expressions.",
+				),
+			)),
 			Expr::Binary(BinaryExpr { left, operator, right, .. }) => Ok(QueryExpr::Binary(QueryBinaryExpr {
 				left: Box::new(self.lower_query_expression(left, table, backend)?),
 				operator: self.lower_query_binary_operator(*operator),
@@ -1831,12 +1834,27 @@ impl SemanticAnalyzer {
 
 						if matches!(
 							left_type.without_nullability(),
+							DataType::Array(element_type) if !matches!(element_type.without_nullability(), DataType::Text)
+						) {
+							return Err(self.compile_error(
+								expression.position(),
+								String::from(
+									"Built-in function `contains` is only supported for `[text]` array arguments in lowered database query expressions.",
+								),
+							));
+						}
+
+						if matches!(
+							arguments[0].value,
+							Expr::Array(_)
+						) && !matches!(
+							left_type.without_nullability(),
 							DataType::Array(element_type) if matches!(element_type.without_nullability(), DataType::Text)
 						) {
 							return Err(self.compile_error(
 								expression.position(),
 								String::from(
-									"Built-in function `contains` is not yet supported for array arguments in lowered database query expressions.",
+									"Built-in function `contains` is only supported for `[text]` array arguments in lowered database query expressions.",
 								),
 							));
 						}
@@ -1852,7 +1870,19 @@ impl SemanticAnalyzer {
 
 				Ok(QueryExpr::BuiltInCall(QueryBuiltInCall {
 					arguments: arguments.iter()
-						.map(|argument| self.lower_query_expression(&argument.value, table, backend))
+						.enumerate()
+						.map(|(index, argument)| {
+							if built_in == BuiltInFunction::Contains && index == 0
+								&& let Expr::Array(array) = &argument.value {
+								return Ok(QueryExpr::ArrayLiteral(
+									array.elements.iter()
+										.map(|element| self.lower_query_expression(element, table, backend))
+										.collect::<Result<Vec<_>, _>>()?,
+								));
+							}
+
+							self.lower_query_expression(&argument.value, table, backend)
+						})
 						.collect::<Result<Vec<_>, _>>()?,
 					built_in,
 				}))
