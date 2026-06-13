@@ -163,7 +163,7 @@ impl BuiltInFunction {
 				_ => None,
 			},
 			Self::Len => match argument_types {
-				[arg] if matches!(arg.without_nullability(), DataType::Array(_) | DataType::EmptyArray) => {
+				[arg] if matches!(arg.without_nullability(), DataType::Array(_) | DataType::EmptyArray | DataType::Text) => {
 					Some(DataType::Int)
 				}
 				_ => None,

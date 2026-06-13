@@ -962,6 +962,7 @@ impl VirtualMachine {
 			},
 			BuiltInFunction::Len => match arguments.as_slice() {
 				[Value::Array(values)] => Ok(Some(Value::Integer(values.len() as i64))),
+				[Value::Text(value)] => Ok(Some(Value::Integer(value.chars().count() as i64))),
 				[value] => Err(vm_error(
 					instruction_index,
 					format!("Built-in function `len` does not accept a `{}` value.", type_name(value)),

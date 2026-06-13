@@ -1609,6 +1609,10 @@ It is valid to call `lastof()` only within the body of a grouped database `for` 
 
 Returns the number of elements in the array `v`.
 
+### `len(str: text): int`
+
+Returns the number of characters in `str`.
+
 ### `like(v: text, pattern: text): bool`
 
 Returns `true` if `v` matches `pattern` according to Tablo's SQL-style wildcard matching rules. Otherwise returns `false`.

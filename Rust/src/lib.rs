@@ -2398,6 +2398,13 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_text_length_source_text() {
+		let result = evaluate_snippet("len('hello')").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(5)));
+	}
+
+	#[test]
 	fn runs_text_relational_source_text() {
 		let result = evaluate_snippet("'apple' < 'banana'").unwrap();
 
