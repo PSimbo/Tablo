@@ -774,6 +774,24 @@ else {
 }
 ~~~
 
+Tablo also provides a ternary `if` expression:
+
+~~~
+var label: text = total > 0 ? 'positive' : 'zero-or-negative';
+~~~
+
+The syntax is `<condition> ? <true path> : <false path>`.
+
+The condition follows the same rules as an `if` statement condition. It must evaluate to either a `bool` value or a record pointer. A record pointer condition evaluates to `true` if the record exists and is not locked. Otherwise it evaluates to `false`.
+
+Both the true path and the false path must be expressions. The ternary expression itself evaluates to the result of exactly one of those two branch expressions.
+
+The two branch expressions must have compatible types. If both branches have the same type then that is the type of the overall ternary expression. If one branch may be assigned to the type of the other branch via Tablo's ordinary type-compatibility rules, then the overall ternary expression has the corresponding compatible type. Otherwise compilation fails.
+
+The ternary `if` expression is right-associative.
+
+Because Tablo also uses `:` to form ranges, ternary expressions have lower precedence than range expressions. For example, `cond ? 1 : 2 : 4` is interpreted as `cond ? 1 : (2:4)`.
+
 While Statements
 ----------------
 
@@ -1778,7 +1796,8 @@ arrayType = `[` dataType `]`
 typeReference = identifier { `.` identifier }
 
 expression = assignment
-assignment = range [ assignmentOperator assignment ]
+assignment = ternary [ assignmentOperator assignment ]
+ternary = range [ `?` expression `:` ternary ]
 range = logicalOr [ `:` logicalOr [ `:` logicalOr ] ]
 groupExpression = `(` expression `)`
 logicalOr = logicalXor { `or` logicalXor }
