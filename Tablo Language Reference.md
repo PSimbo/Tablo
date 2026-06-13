@@ -706,8 +706,6 @@ If Statements
 
 Tablo supports `if` statements. There is no need to enclose the condition in parentheses.
 
-The condition expression must evaluate to a `bool` value.
-
 Each branch body must be a block enclosed between `{` and `}`. An `else` branch may either introduce its own block or be followed immediately by another `if` statement to form an `else if` chain.
 
 ~~~
@@ -718,6 +716,55 @@ if allowAnyDates {
   ...
 }
 else if curDate > @2029-12-31 or curDate < @2000-01-01 {
+  ...
+}
+else {
+  ...
+}
+~~~
+
+The condition expression must evaluate to either a `bool` value or a record pointer. A record pointer condition evaluates to `true` if the record exists and is not locked. Otherwise it evaluates to `false`.
+
+As a special case, an `if` statement may begin with a record-pointer binding written using the `rec` keyword:
+
+~~~
+if rec foo = find first customers where customers.id = targetId {
+  ...
+}
+else {
+  ...
+}
+~~~
+
+This form is valid only when the right-hand side is an expression of record-pointer type. The bound record pointer is in scope only within the associated `then` block. It is not in scope within the condition in which it is declared, it is not in scope after the `if` statement, and it is not in scope within any `else` or `else if` branch that belongs to a different condition.
+
+The following is invalid:
+
+~~~
+if rec foo = find first customers where customers.country == 'CN' and foo.id == targetId {
+  ...
+}
+~~~
+
+However, the following is valid:
+
+~~~
+if rec foo = find first customers where customers.country == 'CN' {
+  if foo.id == targetId {
+    ...
+  }
+}
+~~~
+
+The `if rec ...` form is specific to record pointers. It is not a general-purpose assignment expression and it does not apply to ordinary variables.
+
+An `else if` branch may also use its own record-pointer binding:
+
+~~~
+if rec cust = find first customers where customers.id = customerId {
+  ...
+}
+else if rec supplier = find first suppliers where suppliers.id = supplierId {
   ...
 }
 else {
