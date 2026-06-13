@@ -462,7 +462,7 @@ impl Parser {
 		let table = self.parse_table_reference()?;
 		let where_clause = if self.current().is_some_and(|token| token.kind == TokenKind::WhereKeyword) {
 			self.next();
-			Some(Box::new(self.parse_query_expression_with_binding_power(BindingPower::Default, true)?))
+			Some(Box::new(self.parse_query_expression_with_binding_power(BindingPower::Default)?))
 		}
 		else {
 			None
@@ -646,7 +646,7 @@ impl Parser {
 		let table = self.parse_table_reference()?;
 		let where_clause = if self.current().is_some_and(|token| token.kind == TokenKind::WhereKeyword) {
 			self.next();
-			Some(Box::new(self.parse_query_expression_with_binding_power(BindingPower::Default, true)?))
+			Some(Box::new(self.parse_query_expression_with_binding_power(BindingPower::Default)?))
 		}
 		else {
 			None
@@ -676,7 +676,7 @@ impl Parser {
 		let table = self.parse_table_reference()?;
 		let where_clause = if self.current().is_some_and(|token| token.kind == TokenKind::WhereKeyword) {
 			self.next();
-			Some(Box::new(self.parse_query_expression_with_binding_power(BindingPower::Default, true)?))
+			Some(Box::new(self.parse_query_expression_with_binding_power(BindingPower::Default)?))
 		}
 		else {
 			None
@@ -1341,7 +1341,7 @@ impl Parser {
 		let mut items = Vec::new();
 
 		loop {
-			let expression = self.parse_query_expression_with_binding_power(BindingPower::Default, true)?;
+			let expression = self.parse_query_expression_with_binding_power(BindingPower::Default)?;
 			let direction = match self.current().map(|token| token.kind) {
 				Some(TokenKind::AscKeyword) => {
 					self.next();
@@ -1463,7 +1463,6 @@ impl Parser {
 	fn parse_query_expression_with_binding_power(
 		&mut self,
 		binding_power: BindingPower,
-		treat_equal_as_equality: bool,
 	) -> Result<Expr, ParseError> {
 		let mut left = self.parse_prefix()?;
 
@@ -1474,7 +1473,6 @@ impl Parser {
 				TokenKind::BangEqual => BindingPower::Equality,
 				TokenKind::Dash => BindingPower::Additive,
 				TokenKind::Dot => BindingPower::Call,
-				TokenKind::Equal if treat_equal_as_equality => BindingPower::Equality,
 				TokenKind::EqualEqual => BindingPower::Equality,
 				TokenKind::ForwardSlash => BindingPower::Multiplicative,
 				TokenKind::GreaterThan => BindingPower::Comparison,
@@ -1495,7 +1493,15 @@ impl Parser {
 			}
 
 			let operator = self.next().unwrap();
-			left = self.parse_infix(left, operator, next_binding_power, treat_equal_as_equality)?;
+			left = self.parse_infix(left, operator, next_binding_power, false)?;
+		}
+
+		if let Some(token) = self.current()
+			&& token.kind == TokenKind::Equal {
+			return Err(ParseError {
+				message: String::from("Expected `==` for equality comparison in query expressions. `=` is assignment only."),
+				position: token.start,
+			});
 		}
 
 		Ok(left)
@@ -2798,7 +2804,7 @@ mod tests {
 
 	#[test]
 	fn parses_count_expression_with_where_clause() {
-		let program = parse_program("count sales.customers where active = true");
+		let program = parse_program("count sales.customers where active == true");
 
 		assert_eq!(normalize_program(program), Program {
 			functions: vec![],
@@ -2983,7 +2989,7 @@ mod tests {
 
 	#[test]
 	fn parses_find_first_expression_with_where_clause() {
-		let program = parse_program("find first sales.customers where active = true");
+		let program = parse_program("find first sales.customers where active == true");
 
 		assert_eq!(normalize_program(program), Program {
 			functions: vec![],
@@ -3068,7 +3074,7 @@ mod tests {
 	#[test]
 	fn parses_for_record_statement() {
 		assert_eq!(
-			normalize_program(parse_program("for rec mut cust in customers where active = true order by name desc { cust.name; }")),
+			normalize_program(parse_program("for rec mut cust in customers where active == true order by name desc { cust.name; }")),
 			Program {
 				functions: vec![],
 				objects: vec![],
@@ -3431,7 +3437,7 @@ mod tests {
 	#[test]
 	fn parses_if_rec_statement() {
 		assert_eq!(
-			parse_program("if rec foo = find first customers where customers.id = 1 { return 1; }"),
+			parse_program("if rec foo = find first customers where customers.id == 1 { return 1; }"),
 			Program {
 				functions: vec![],
 				objects: vec![],
@@ -4267,7 +4273,7 @@ mod tests {
 
 	#[test]
 	fn parses_record_pointer_declaration() {
-		let program = parse_program("rec mut cust = find first customers where active = true;");
+		let program = parse_program("rec mut cust = find first customers where active == true;");
 
 		assert_eq!(normalize_program(program), Program {
 			functions: vec![],
@@ -4763,6 +4769,17 @@ mod tests {
 
 		assert_eq!(error.message, "Expected `)` to close grouped expression, found ``.");
 		assert_eq!(error.position, 6);
+	}
+
+	#[test]
+	fn rejects_single_equal_in_query_expression() {
+		let mut lexer = Lexer::new(SourceText::new("find customers where active = true"));
+		let tokens = lexer.tokenize().unwrap();
+		let mut parser = Parser::new(tokens);
+		let error = parser.parse_program().unwrap_err();
+
+		assert_eq!(error.message, "Expected `==` for equality comparison in query expressions. `=` is assignment only.");
+		assert_eq!(error.position, 28);
 	}
 
 	#[test]

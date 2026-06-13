@@ -3223,7 +3223,7 @@ mod tests {
 			"#,
 			"ExampleDb",
 		);
-		let find = parse_find_expression("find first customers where id = 1");
+		let find = parse_find_expression("find first customers where id == 1");
 		let mut analyzer = SemanticAnalyzer::new();
 		analyzer.current_schema_catalog = Some(schema);
 		analyzer.semantic_program.active_databases = vec![String::from("exampledb")];
@@ -3277,7 +3277,7 @@ mod tests {
 			"#,
 			"ExampleDb",
 		);
-		let count = parse_count_expression("count customers where id = targetId and active = true");
+		let count = parse_count_expression("count customers where id == targetId and active == true");
 		let mut analyzer = SemanticAnalyzer::new();
 		analyzer.current_schema_catalog = Some(schema);
 		analyzer.semantic_program.active_databases = vec![String::from("exampledb")];
@@ -3342,7 +3342,7 @@ mod tests {
 			"#,
 			"ExampleDb",
 		);
-		let count = parse_count_expression("count InnerTable where InnerTable.Id = outer.Id");
+		let count = parse_count_expression("count InnerTable where InnerTable.Id == outer.Id");
 		let mut analyzer = SemanticAnalyzer::new();
 		analyzer.current_schema_catalog = Some(schema);
 		analyzer.semantic_program.active_databases = vec![String::from("exampledb")];

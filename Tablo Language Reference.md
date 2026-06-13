@@ -41,8 +41,8 @@ fn FindPosts(id: int, madeBy: int, since: date, until: date) [ForumPost] {
   var mut forumPosts: [ForumPost] = [];
 
   for rec post in posts
-                  where posts.id = id
-                    and author = madeBy
+                  where posts.id == id
+                    and author == madeBy
                     and "date" >= since
                     and "date" <= until
                   order by "date" desc, "time" desc {
@@ -55,7 +55,7 @@ fn FindPosts(id: int, madeBy: int, since: date, until: date) [ForumPost] {
     };
 
     for rec comment in comments
-                       where comments.id = post.id
+                       where comments.id == post.id
                        order by "timestamp" {
       forumPost.comments += {
         comment: comment.text,
@@ -339,6 +339,8 @@ Operators
 The `==` operator is used to compare two values for equality. It evaluates to `true` if the values are equal.
 
 The `!=` operator is used to compare two values for inequality. It evaluates to `false` if the values are equal.
+
+The `=` operator is not an equality operator in Tablo. It is used only for assignment.
 
 Equality comparison is supported for primitive scalar types such as numeric values, `bool`, date/time values, and `text`.
 
@@ -728,7 +730,7 @@ The condition expression must evaluate to either a `bool` value or a record poin
 As a special case, an `if` statement may begin with a record-pointer binding written using the `rec` keyword:
 
 ~~~
-if rec foo = find first customers where customers.id = targetId {
+if rec foo = find first customers where customers.id == targetId {
   ...
 }
 else {
@@ -761,10 +763,10 @@ The `if rec ...` form is specific to record pointers. It is not a general-purpos
 An `else if` branch may also use its own record-pointer binding:
 
 ~~~
-if rec cust = find first customers where customers.id = customerId {
+if rec cust = find first customers where customers.id == customerId {
   ...
 }
-else if rec supplier = find first suppliers where suppliers.id = supplierId {
+else if rec supplier = find first suppliers where suppliers.id == supplierId {
   ...
 }
 else {
@@ -883,12 +885,14 @@ If any table reference remains ambiguous after applying the above rules then com
 A `where` clause filters the records considered by a database query. The syntax is intentionally similar to SQL. The expression following the `where` keyword must evaluate to a `bool` value.
 
 ~~~
-for rec post in posts where posts.id = id and "date" >= since {
+for rec post in posts where posts.id == id and "date" >= since {
   ...
 }
 ~~~
 
 The expression in a `where` clause uses normal Tablo expression syntax. This includes literals, variables, field references, comparison operators, logical operators, grouping with parentheses, and function calls.
+
+This means that equality comparison in query expressions also uses `==` and `!=`. A bare `=` remains assignment syntax and is therefore invalid within a `where` clause.
 
 Any unquoted field references that match the name of a variable or function in scope must be specified as `<table>.<field>`.
 
@@ -904,7 +908,7 @@ An `order by` clause specifies the order in which records are returned by a data
 
 ~~~
 for rec post in posts
-                where posts.id = id
+                where posts.id == id
                 order by "date" desc, "time" desc {
   ...
 }
@@ -950,7 +954,7 @@ If a `group by` clause contains an expression that cannot be converted into vali
 A `limit` clause specifies the maximum number of records that may be returned by a database query. The syntax is intentionally similar to SQL.
 
 ~~~
-for rec post in posts where author = madeBy limit 10 {
+for rec post in posts where author == madeBy limit 10 {
   ...
 }
 ~~~
@@ -968,7 +972,7 @@ A record pointer is a variable that provides the user with the ability to get an
 There are two valid ways to construct a record pointer. The first is with a database query of some kind. The second is as a mutable record pointer for the creation of a new record.
 
 ~~~
-rec loc = find tblLocations where id = 42;
+rec loc = find tblLocations where id == 42;
 
 rec mut comp = new tblCompanies;
 comp.name = 'Acme Ltd.';
@@ -992,7 +996,7 @@ When a `for` loop's loop variable is preceded by the `rec` keyword, the `for` lo
 In order to modify the database data via the loop variable, it must be marked as `mut`.
 
 ~~~
-for rec mut comp in tblCompanies where countryCode = 'JP' {
+for rec mut comp in tblCompanies where countryCode == 'JP' {
   ...
 }
 ~~~
@@ -1003,7 +1007,7 @@ Database access for loops may be nested:
 for rec cust in tblCustomers where id >= 10 {
   var n: text = cust.name;
 
-  for rec loc in tblCustomerLocations where id = cust.id {
+  for rec loc in tblCustomerLocations where id == cust.id {
     var address: [text] = [loc.addr1, loc.addr2, loc.addr3, loc.addr4];
 
     ...
@@ -1028,7 +1032,7 @@ The built-in functions `firstof()` and `lastof()` may be used within the body of
 
 ~~~
 for rec cust in tblCustomers
-             where active = true
+             where active == true
              group by lower(countryCode) as country {
   if firstof(country) {
     // First record in the current country group.
@@ -1056,8 +1060,8 @@ For database backends that support record locking, the `for` loop will include l
 A `find` statement searches the database for a single record. By default, the first matching record is returned. This can be made explicit by writing `find first`. Alternatively, to return the last matching record, use `find last`. In determining which record is the first or last, the `order by` clause is considered. If no `order by` clause is specified then Tablo can make no guarantees about which record will be returned in either scenario.
 
 ~~~
-rec custAcme = find first tblCustomers where name = 'Acme';
-var l = count tblCustomerLocations where id = custAcme.id;
+rec custAcme = find first tblCustomers where name == 'Acme';
+var l = count tblCustomerLocations where id == custAcme.id;
 ~~~
 
 The following query syntax is valid for `find` statements:
@@ -1074,7 +1078,7 @@ When no result can be assigned to the record pointer, it ends up in one of two "
 
 ~~~
 {
-  rec mut custAcme = find first tblCustomers where name = 'Acme';
+  rec mut custAcme = find first tblCustomers where name == 'Acme';
 
   if custAcme {
     custAcme.name += ' Ltd.';
@@ -1089,7 +1093,7 @@ As with `for` loops, the field list for the query is automatically determined ba
 The `count` statement executes a database query and returns the number of matching records. The result of a `count` statement is of type `int`.
 
 ~~~
-var numCompanies: int = count tblCompanies where active = true;
+var numCompanies: int = count tblCompanies where active == true;
 ~~~
 
 The following query syntax is valid for `count` statements:
@@ -1115,7 +1119,7 @@ Following a `create` statement, the record pointer remains valid and mutable and
 The `update` keyword is used to manually commit database changes via a mutable record pointer. Note that any changes made to a mutable record pointer's fields are automatically committed when code execution leaves the enclosing scope. This includes the case where the end of the scope is reached and when a `return` or `break` statement is encountered. The only exception is when a runtime error is thrown, in which case no database changes are committed.
 
 ~~~
-rec mut loc = find first tblLocations where id = 101;
+rec mut loc = find first tblLocations where id == 101;
 loc.country = 'AU';
 update loc;
 ~~~
@@ -1129,7 +1133,7 @@ Following an `update` statement, the record pointer remains valid and mutable an
 The `delete` keyword is used to delete a database record via a mutable record pointer. Any modifications made to the record pointers field data is discarded.
 
 ~~~
-rec mut invalidComp = find first tblCompanies where id = -1;
+rec mut invalidComp = find first tblCompanies where id == -1;
 
 if invalidComp {
   delete invalidComp;
@@ -1155,8 +1159,8 @@ If a `transaction { ... }` block is entered while another transaction is already
 
 ~~~
 transaction {
-  rec mut cust = find first tblCustomers where id = 42;
-  rec mut loc = find first tblLocations where id = cust.locationId;
+  rec mut cust = find first tblCustomers where id == 42;
+  rec mut loc = find first tblLocations where id == cust.locationId;
 
   if cust and loc {
     cust.name = "Acme Ltd.";
@@ -1169,7 +1173,7 @@ In the example above, both database modifications are part of the same transacti
 
 ~~~
 transaction {
-  rec mut cust = find first tblCustomers where id = 42;
+  rec mut cust = find first tblCustomers where id == 42;
 
   transaction {
     if cust {
@@ -1400,7 +1404,7 @@ fn UpdateCustomer(id: int, name: text) void {
     fail 'Customer name must not be empty.';
   }
 
-  rec mut cust = find first tblCustomers where id = id;
+  rec mut cust = find first tblCustomers where id == id;
 
   if not cust {
     fail 'Customer not found.';
@@ -1431,7 +1435,7 @@ The `finally` block is always executed after the `try` block and any associated 
 ~~~
 try {
   transaction {
-    rec mut cust = find first tblCustomers where id = 42;
+    rec mut cust = find first tblCustomers where id == 42;
 
     if cust {
       cust.name = 'Acme Ltd.';

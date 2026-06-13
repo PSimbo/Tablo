@@ -587,7 +587,7 @@ mod tests {
 	#[test]
 	fn rejects_count_expression_for_unsupported_backend() {
 		let error = compile_snippet_with_schema_fixture_and_backends(
-			"with exampledb;\ncount customers where active = true",
+			"with exampledb;\ncount customers where active == true",
 			r#"
 				database ExampleDb;
 				schema Public;
@@ -659,7 +659,7 @@ mod tests {
 	#[test]
 	fn rejects_if_rec_binding_used_inside_its_condition() {
 		let error = compile_source_to_program_with_name_and_schema(
-			"with exampledb;\nfn Main(args: [text]) int { if rec user = find first Customers where Id = 1 and user.Id = 1 { return user.Id; } return -1; }",
+			"with exampledb;\nfn Main(args: [text]) int { if rec user = find first Customers where Id == 1 and user.Id == 1 { return user.Id; } return -1; }",
 			None,
 			CompilationTarget::Standalone,
 			Some(&read_schema_catalog_from_str(
@@ -674,8 +674,8 @@ mod tests {
 		).unwrap_err();
 
 		assert_eq!(
-			error.format_with_source("with exampledb;\nfn Main(args: [text]) int { if rec user = find first Customers where Id = 1 and user.Id = 1 { return user.Id; } return -1; }"),
-			"Compile error at line 2, column 81: Qualified field reference must use the target table name `Customers`.\n  |\n2 | fn Main(args: [text]) int { if rec user = find first Customers where Id = 1 and user.Id = 1 { return user.Id; } return -1; }\n  |                                                                                 ^"
+			error.format_with_source("with exampledb;\nfn Main(args: [text]) int { if rec user = find first Customers where Id == 1 and user.Id == 1 { return user.Id; } return -1; }"),
+			"Compile error at line 2, column 82: Qualified field reference must use the target table name `Customers`.\n  |\n2 | fn Main(args: [text]) int { if rec user = find first Customers where Id == 1 and user.Id == 1 { return user.Id; } return -1; }\n  |                                                                                  ^"
 		);
 	}
 
@@ -1341,7 +1341,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_snippet_with_schema_fixture_and_backends(
-			"with exampledb;\nexists(find first customers where id = 999)",
+			"with exampledb;\nexists(find first customers where id == 999)",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -1384,7 +1384,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { rec c = find first Tbl where TableNum = 7 and contains(['ALPHA', 'CHARLIE'], Code) order by Id; if c { return c.Id; } return 0; }",
+			"with exampledb;\nfn Main(args: [text]) int { rec c = find first Tbl where TableNum == 7 and contains(['ALPHA', 'CHARLIE'], Code) order by Id; if c { return c.Id; } return 0; }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -1419,7 +1419,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { rec cust = find first Customers where countof('na', Name) = 2 and indexof('Ba', Name) = 1; if cust { return cust.Id; } return 0; }",
+			"with exampledb;\nfn Main(args: [text]) int { rec cust = find first Customers where countof('na', Name) == 2 and indexof('Ba', Name) == 1; if cust { return cust.Id; } return 0; }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -1547,7 +1547,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { if rec user = find first Customers where Id = 1 { return user.Id; } else { return -1; } }",
+			"with exampledb;\nfn Main(args: [text]) int { if rec user = find first Customers where Id == 1 { return user.Id; } else { return -1; } }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -1580,7 +1580,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { if rec user = find first Customers where Id = 1 { return user.Id; } return -1; }",
+			"with exampledb;\nfn Main(args: [text]) int { if rec user = find first Customers where Id == 1 { return user.Id; } return -1; }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -1812,7 +1812,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { rec user = find first Customers where Id = 1; if not user { return -1; } return 1; }",
+			"with exampledb;\nfn Main(args: [text]) int { rec user = find first Customers where Id == 1; if not user { return -1; } return 1; }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -2061,7 +2061,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_snippet_with_schema_fixture_and_backends(
-			"with exampledb;\ncount customers where active = true",
+			"with exampledb;\ncount customers where active == true",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -2094,7 +2094,7 @@ mod tests {
 		);
 		let output_path = unique_test_output_path("sqlite_count_query_program");
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { var targetId: int = 2; return count customers where id = targetId; }",
+			"with exampledb;\nfn Main(args: [text]) int { var targetId: int = 2; return count customers where id == targetId; }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -2133,7 +2133,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_snippet_with_schema_fixture_and_backends(
-			"with exampledb;\n(find first customers where active = true order by id).name",
+			"with exampledb;\n(find first customers where active == true order by id).name",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -2172,7 +2172,7 @@ mod tests {
 		);
 		let output_path = unique_test_output_path("sqlite_find_query_program");
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { return (find last customers where active = true order by id).id; }",
+			"with exampledb;\nfn Main(args: [text]) int { return (find last customers where active == true order by id).id; }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -2212,7 +2212,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { rec cust = find first customers where active = true order by id; if cust.name == 'Ada' { return cust.id; } return 0; }",
+			"with exampledb;\nfn Main(args: [text]) int { rec cust = find first customers where active == true order by id; if cust.name == 'Ada' { return cust.id; } return 0; }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -2248,7 +2248,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    rec outer = find first OuterTable where Id = 2;\n    if outer {\n        rec inner = find first InnerTable where InnerTable.Id = outer.Id;\n        if inner {\n            return inner.Id;\n        }\n    }\n    return 0;\n}",
+			"with exampledb;\nfn Main(args: [text]) int {\n    rec outer = find first OuterTable where Id == 2;\n    if outer {\n        rec inner = find first InnerTable where InnerTable.Id == outer.Id;\n        if inner {\n            return inner.Id;\n        }\n    }\n    return 0;\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -2361,7 +2361,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { var total: int = 0; for rec cust in customers where active = true order by id { total += cust.id; } return total; }",
+			"with exampledb;\nfn Main(args: [text]) int { var total: int = 0; for rec cust in customers where active == true order by id { total += cust.id; } return total; }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
