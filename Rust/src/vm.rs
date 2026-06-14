@@ -856,12 +856,12 @@ impl VirtualMachine {
 		}
 
 		if matches!(value, Value::RecordPointer(_)) {
-				return Err(VmError {
-					instruction_index,
-					message: format!("Expected a numeric operand, found a {} value.", type_name(&value)),
-					source_location: None,
-					stack_trace: Vec::new(),
-				});
+			return Err(VmError {
+				instruction_index,
+				message: format!("Expected a numeric operand, found a {} value.", type_name(&value)),
+				source_location: None,
+				stack_trace: Vec::new(),
+			});
 		}
 
 		Ok(value)

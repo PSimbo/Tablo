@@ -1,5 +1,5 @@
-use std::path::Path;
 use std::fmt::Display;
+use std::path::Path;
 
 pub mod ast;
 pub mod builtins;
@@ -247,15 +247,15 @@ mod tests {
 	use crate::value::Value;
 	use crate::vm::RuntimeDatabaseConfig;
 
-	use super::compile_source_to_program_with_name_and_schema;
+	use super::CompilationTarget;
+	use super::TabloError;
 	use super::compile;
+	use super::compile_source_to_program_with_name_and_schema;
 	use super::compile_with_source_name;
 	use super::run;
 	use super::run_file;
 	use super::run_program;
 	use super::run_program_with_database_config;
-	use super::CompilationTarget;
-	use super::TabloError;
 
 	fn standalone_expression(expression: &str) -> String {
 		format!("fn Main(args: [text]) int {{ return {expression}; }}")
@@ -439,7 +439,7 @@ mod tests {
 
 		assert_eq!(
 			error.format_with_source(source),
-			"Parse error at line 2, column 1: Unexpected token `?` after end of expression.\n  |\n2 | ?\n  | ^"
+			"Parse error at line 2, column 1: Expected `:` after ternary true branch.\n  |\n2 | ?\n  | ^"
 		);
 	}
 
@@ -949,7 +949,7 @@ mod tests {
 
 		assert_eq!(error, TabloError::Parse(crate::syntax::parser::ParseError {
 			position: 2,
-			message: String::from("Unexpected token `?` after end of expression."),
+			message: String::from("Expected `:` after ternary true branch."),
 		}));
 	}
 

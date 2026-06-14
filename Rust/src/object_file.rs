@@ -1080,9 +1080,9 @@ mod tests {
 	use crate::bytecode::Instruction;
 	use crate::bytecode::Program;
 
+	use super::ObjectFileError;
 	use super::read_program;
 	use super::write_program;
-	use super::ObjectFileError;
 
 	#[test]
 	fn rejects_invalid_magic_bytes() {

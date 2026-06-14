@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use clap::Parser as ClapParser;
-use tablo::compile_with_source_name_and_schema;
 use tablo::compile_with_source_name;
+use tablo::compile_with_source_name_and_schema;
 use tablo::runtime_config::read_schema_catalog_from_runtime_config_path;
 use tablo::schema_fixture::read_schema_catalog_from_path;
 

@@ -45,6 +45,7 @@ use crate::ast::RecordPointerDeclaration;
 use crate::ast::ReturnStatement;
 use crate::ast::Statement;
 use crate::ast::TableReference;
+use crate::ast::TernaryExpr;
 use crate::ast::TextLiteral;
 use crate::ast::UnaryExpr;
 use crate::ast::UnaryOperator;
@@ -267,7 +268,7 @@ impl Parser {
 	}
 
 	fn parse_assignment_expression(&mut self) -> Result<Expr, ParseError> {
-		let left = self.parse_range_expression()?;
+		let left = self.parse_ternary_expression()?;
 		let Some(token) = self.current() else {
 			return Ok(left);
 		};
@@ -574,6 +575,22 @@ impl Parser {
 			position: enum_keyword.start,
 			variants,
 		})
+	}
+
+	fn parse_expression_in_token_range(
+		&self,
+		start: usize,
+		end: usize,
+	) -> Result<Expr, ParseError> {
+		let mut tokens = self.tokens[start..end].to_vec();
+		tokens.push(Token {
+			end: tokens.last().map_or(0, |token| token.end),
+			kind: TokenKind::EndOfFile,
+			lexeme: String::new(),
+			start: tokens.last().map_or(0, |token| token.end),
+		});
+		let mut parser = Parser::new(tokens);
+		parser.parse_expression()
 	}
 
 	fn parse_expression_with_binding_power(
@@ -1657,6 +1674,34 @@ impl Parser {
 		})
 	}
 
+	fn parse_ternary_expression(&mut self) -> Result<Expr, ParseError> {
+		let condition = self.parse_range_expression()?;
+
+		if !self
+			.current()
+			.is_some_and(|token| token.kind == TokenKind::Question)
+		{
+			return Ok(condition);
+		}
+
+		let question = self.next().unwrap();
+		let true_branch_start = self.position;
+		let colon_index = self.scan_matching_ternary_colon().ok_or(ParseError {
+			message: String::from("Expected `:` after ternary true branch."),
+			position: question.start,
+		})?;
+		let true_branch = self.parse_expression_in_token_range(true_branch_start, colon_index)?;
+		self.position = colon_index + 1;
+		let false_branch = self.parse_ternary_expression()?;
+
+		Ok(Expr::Ternary(TernaryExpr {
+			condition: Box::new(condition),
+			false_branch: Box::new(false_branch),
+			position: question.start,
+			true_branch: Box::new(true_branch),
+		}))
+	}
+
 	fn parse_text_literal(&self, token: Token) -> Expr {
 		Expr::Text(TextLiteral {
 			position: token.start,
@@ -1758,6 +1803,37 @@ impl Parser {
 			}),
 		}
 	}
+
+	fn scan_matching_ternary_colon(&self) -> Option<usize> {
+		let mut brace_depth = 0usize;
+		let mut bracket_depth = 0usize;
+		let mut parenthesis_depth = 0usize;
+		let mut candidates = Vec::new();
+
+		for index in self.position..self.tokens.len() {
+			match self.tokens[index].kind {
+				TokenKind::LeftBrace => brace_depth += 1,
+				TokenKind::RightBrace => brace_depth = brace_depth.saturating_sub(1),
+				TokenKind::LeftBracket => bracket_depth += 1,
+				TokenKind::RightBracket => bracket_depth = bracket_depth.saturating_sub(1),
+				TokenKind::LeftParenthesis => parenthesis_depth += 1,
+				TokenKind::RightParenthesis => {
+					parenthesis_depth = parenthesis_depth.saturating_sub(1)
+				}
+				TokenKind::Colon
+					if brace_depth == 0 && bracket_depth == 0 && parenthesis_depth == 0 =>
+				{
+					candidates.push(index);
+				}
+				_ => {}
+			}
+		}
+
+		candidates.into_iter().rev().find(|index| {
+			self.parse_expression_in_token_range(self.position, *index)
+				.is_ok()
+		})
+	}
 }
 
 #[cfg(test)]
@@ -1809,6 +1885,7 @@ mod tests {
 	use crate::ast::ReturnStatement;
 	use crate::ast::Statement;
 	use crate::ast::TableReference;
+	use crate::ast::TernaryExpr;
 	use crate::ast::TextLiteral;
 	use crate::ast::UnaryExpr;
 	use crate::ast::UnaryOperator;
@@ -1967,6 +2044,17 @@ mod tests {
 				step: step.map(|step| Box::new(normalize_expr(*step))),
 				end: Box::new(normalize_expr(*end)),
 				position: 0,
+			}),
+			Expr::Ternary(TernaryExpr {
+				condition,
+				false_branch,
+				true_branch,
+				..
+			}) => Expr::Ternary(TernaryExpr {
+				condition: Box::new(normalize_expr(*condition)),
+				false_branch: Box::new(normalize_expr(*false_branch)),
+				position: 0,
+				true_branch: Box::new(normalize_expr(*true_branch)),
 			}),
 			Expr::Text(TextLiteral { value, .. }) => Expr::Text(TextLiteral {
 				position: 0,
@@ -4044,27 +4132,27 @@ mod tests {
 			Program {
 				functions: vec![],
 				objects: vec![
-				ObjectDeclaration {
-					shape: ObjectDeclarationShape::Fields(vec![
-						ObjectFieldDeclaration {
-								data_type: DataType::Text,
-								default_value: Some(Expr::Text(TextLiteral {
-									position: 0,
-									value: String::from(""),
-								})),
-								name: String::from("name"),
-								position: 0,
-							},
+					ObjectDeclaration {
+						shape: ObjectDeclarationShape::Fields(vec![
 							ObjectFieldDeclaration {
-								data_type: DataType::Int,
-								default_value: None,
-								name: String::from("age"),
-								position: 0,
-							},
-					]),
-					name: String::from("Person"),
-					position: 0,
-				},
+									data_type: DataType::Text,
+									default_value: Some(Expr::Text(TextLiteral {
+										position: 0,
+										value: String::from(""),
+									})),
+									name: String::from("name"),
+									position: 0,
+								},
+								ObjectFieldDeclaration {
+									data_type: DataType::Int,
+									default_value: None,
+									name: String::from("age"),
+									position: 0,
+								},
+						]),
+						name: String::from("Person"),
+						position: 0,
+					},
 				],
 				result: Some(Expr::FieldAccess(FieldAccessExpr {
 					field: IdentifierExpr {
@@ -4272,6 +4360,47 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_range_more_tightly_than_ternary() {
+		assert_eq!(
+			parse("flag ? 0:2:10 : 1:3"),
+			Expr::Ternary(TernaryExpr {
+				condition: Box::new(Expr::Identifier(IdentifierExpr {
+					name: String::from("flag"),
+					position: 0,
+				})),
+				false_branch: Box::new(Expr::Range(RangeExpr {
+					start: Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
+						value: 1,
+					})),
+					step: None,
+					end: Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
+						value: 3,
+					})),
+					position: 0,
+				})),
+				position: 0,
+				true_branch: Box::new(Expr::Range(RangeExpr {
+					start: Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
+						value: 0,
+					})),
+					step: Some(Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
+						value: 2,
+					}))),
+					end: Box::new(Expr::Integer(IntegerLiteral {
+						position: 0,
+						value: 10,
+					})),
+					position: 0,
+				})),
+			})
+		);
+	}
+
+	#[test]
 	fn parses_record_pointer_declaration() {
 		let program = parse_program("rec mut cust = find first customers where active == true;");
 
@@ -4453,6 +4582,61 @@ mod tests {
 			Expr::Text(TextLiteral {
 				position: 0,
 				value: String::from("hello"),
+			})
+		);
+	}
+
+	#[test]
+	fn parses_ternary_expression() {
+		assert_eq!(
+			parse("flag ? 1 : 2"),
+			Expr::Ternary(TernaryExpr {
+				condition: Box::new(Expr::Identifier(IdentifierExpr {
+					name: String::from("flag"),
+					position: 0,
+				})),
+				false_branch: Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
+					value: 2,
+				})),
+				position: 0,
+				true_branch: Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
+					value: 1,
+				})),
+			})
+		);
+	}
+
+	#[test]
+	fn parses_ternary_expression_right_associatively() {
+		assert_eq!(
+			parse("a ? b : c ? d : e"),
+			Expr::Ternary(TernaryExpr {
+				condition: Box::new(Expr::Identifier(IdentifierExpr {
+					name: String::from("a"),
+					position: 0,
+				})),
+				false_branch: Box::new(Expr::Ternary(TernaryExpr {
+					condition: Box::new(Expr::Identifier(IdentifierExpr {
+						name: String::from("c"),
+						position: 0,
+					})),
+					false_branch: Box::new(Expr::Identifier(IdentifierExpr {
+						name: String::from("e"),
+						position: 0,
+					})),
+					position: 0,
+					true_branch: Box::new(Expr::Identifier(IdentifierExpr {
+						name: String::from("d"),
+						position: 0,
+					})),
+				})),
+				position: 0,
+				true_branch: Box::new(Expr::Identifier(IdentifierExpr {
+					name: String::from("b"),
+					position: 0,
+				})),
 			})
 		);
 	}

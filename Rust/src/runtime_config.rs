@@ -181,9 +181,9 @@ mod tests {
 	use std::path::Path;
 	use std::time::{SystemTime, UNIX_EPOCH};
 
+	use super::RuntimeConfigError;
 	use super::read_runtime_database_config_from_str;
 	use super::read_schema_catalog_from_runtime_config_path;
-	use super::RuntimeConfigError;
 
 	#[test]
 	fn loads_runtime_database_config_from_toml() {

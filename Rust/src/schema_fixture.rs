@@ -534,8 +534,8 @@ fn tokenize_schema_text(source: &str) -> Vec<SchemaToken> {
 mod tests {
 	use crate::schema::SchemaDataType;
 
-	use super::read_schema_catalog_from_str;
 	use super::SchemaFixtureError;
+	use super::read_schema_catalog_from_str;
 
 	#[test]
 	fn accepts_integer_alias_in_sql_like_schema() {

@@ -27,6 +27,7 @@ use crate::ast::RangeExpr;
 use crate::ast::RecordPointerDeclaration;
 use crate::ast::ReturnStatement;
 use crate::ast::Statement;
+use crate::ast::TernaryExpr;
 use crate::ast::TextLiteral;
 use crate::ast::UnaryExpr;
 use crate::ast::VariableDeclaration;
@@ -432,6 +433,24 @@ impl Compiler {
 					self.compile_into(end, semantic_program, emission);
 					self.emit(emission, Instruction::MakeRange, expression.position());
 				}
+			}
+			Expr::Ternary(TernaryExpr {
+				condition,
+				false_branch,
+				true_branch,
+				..
+			}) => {
+				self.compile_into(condition, semantic_program, emission);
+				let jump_to_false_index = emission.instructions.len();
+				self.emit(emission, Instruction::JumpIfFalse(0), condition.position());
+				self.compile_into(true_branch, semantic_program, emission);
+				let jump_to_end_index = emission.instructions.len();
+				self.emit(emission, Instruction::Jump(0), expression.position());
+				let false_target = emission.instructions.len() as u32;
+				emission.instructions[jump_to_false_index] = Instruction::JumpIfFalse(false_target);
+				self.compile_into(false_branch, semantic_program, emission);
+				let end_target = emission.instructions.len() as u32;
+				emission.instructions[jump_to_end_index] = Instruction::Jump(end_target);
 			}
 			Expr::Text(TextLiteral { value, .. }) => {
 				self.emit(emission, Instruction::PushText(value.clone()), expression.position());
@@ -1095,6 +1114,7 @@ mod tests {
 	use crate::ast::Program as AstProgram;
 	use crate::ast::RangeExpr;
 	use crate::ast::Statement;
+	use crate::ast::TernaryExpr;
 	use crate::ast::TextLiteral;
 	use crate::ast::UnaryExpr;
 	use crate::ast::UnaryOperator;
@@ -1746,6 +1766,35 @@ mod tests {
 			Instruction::LoadLocal(0),
 			Instruction::PushInteger(2),
 			Instruction::Add,
+		]);
+	}
+
+	#[test]
+	fn compiles_ternary_expression() {
+		let expression = Expr::Ternary(TernaryExpr {
+			condition: Box::new(Expr::Boolean(BooleanLiteral {
+				position: 0,
+				value: true,
+			})),
+			false_branch: Box::new(Expr::Integer(IntegerLiteral {
+				position: 0,
+				value: 2,
+			})),
+			position: 0,
+			true_branch: Box::new(Expr::Integer(IntegerLiteral {
+				position: 0,
+				value: 1,
+			})),
+		});
+
+		let program = Compiler::new().compile_expression(&expression);
+
+		assert_eq!(program.entry_code().unwrap().instructions, vec![
+			Instruction::PushBoolean(true),
+			Instruction::JumpIfFalse(4),
+			Instruction::PushInteger(1),
+			Instruction::Jump(5),
+			Instruction::PushInteger(2),
 		]);
 	}
 

@@ -1,7 +1,7 @@
-use crate::builtins::BuiltInFunction;
 use crate::ast::DataType;
 use crate::ast::FindKind;
 use crate::ast::OrderByDirection;
+use crate::builtins::BuiltInFunction;
 use crate::schema::DatabaseBackend;
 use crate::value::Date;
 use crate::value::Decimal;

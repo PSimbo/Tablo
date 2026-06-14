@@ -33,6 +33,7 @@ use crate::ast::RecordPointerType;
 use crate::ast::ReturnStatement;
 use crate::ast::Statement;
 use crate::ast::TableReference;
+use crate::ast::TernaryExpr;
 use crate::ast::UnaryExpr;
 use crate::ast::UnaryOperator;
 use crate::ast::VariableDeclaration;
@@ -57,8 +58,8 @@ use crate::query::QueryParameter;
 use crate::query::QueryResultColumn;
 use crate::query::QueryUnaryExpr;
 use crate::query::QueryUnaryOperator;
-use crate::schema::SchemaCatalog;
 use crate::schema::DatabaseBackend;
+use crate::schema::SchemaCatalog;
 use crate::schema::SchemaDataType;
 use crate::schema::SchemaError;
 
@@ -1269,6 +1270,25 @@ impl SemanticAnalyzer {
 
 				Ok(DataType::Range(Box::new(element_type)))
 			}
+			Expr::Ternary(TernaryExpr {
+				condition,
+				false_branch,
+				position,
+				true_branch,
+			}) => {
+				let condition_type = self.infer_expression_type(condition)?;
+
+				if !self.is_truthy_condition_type(&condition_type) {
+					return Err(self.compile_error(
+						condition.position().max(*position),
+						format!("Ternary condition must be of type `bool` or `record pointer`, found `{}`.", condition_type.name()),
+					));
+				}
+
+				let true_type = self.infer_expression_type(true_branch)?;
+				let false_type = self.infer_expression_type(false_branch)?;
+				self.infer_ternary_result_type(&true_type, &false_type, *position)
+			}
 			Expr::Text(_) => Ok(DataType::Text),
 			Expr::Unary(UnaryExpr { operand, operator, .. }) => {
 				let operand_type = self.infer_expression_type(operand)?;
@@ -1438,7 +1458,7 @@ impl SemanticAnalyzer {
 				let _ = table_name;
 				self.data_type_from_schema_type(&column_type)
 			}
-			Expr::Index(_) | Expr::ObjectConstruction(_) | Expr::Range(_) => Err(self.compile_error(
+			Expr::Index(_) | Expr::ObjectConstruction(_) | Expr::Range(_) | Expr::Ternary(_) => Err(self.compile_error(
 				expression.position(),
 				String::from("This expression form is not yet supported in `where` clauses."),
 			)),
@@ -1582,6 +1602,36 @@ impl SemanticAnalyzer {
 		))?;
 
 		self.data_type_from_schema_type(column.data_type())
+	}
+
+	fn infer_ternary_result_type(
+		&self,
+		true_type: &DataType,
+		false_type: &DataType,
+		position: usize,
+	) -> Result<DataType, CompileError> {
+		if self.is_assignable(true_type, false_type) {
+			return Ok(true_type.clone());
+		}
+
+		if self.is_assignable(false_type, true_type) {
+			return Ok(false_type.clone());
+		}
+
+		match (true_type, false_type) {
+			(DataType::Null, other) => return Ok(other.clone().into_nullable()),
+			(other, DataType::Null) => return Ok(other.clone().into_nullable()),
+			_ => {}
+		}
+
+		Err(self.compile_error(
+			position,
+			format!(
+				"Ternary branches must produce compatible types, found `{}` and `{}`.",
+				true_type.name(),
+				false_type.name(),
+			),
+		))
 	}
 
 	fn is_assignable(&self, target: &DataType, value: &DataType) -> bool {
@@ -3075,6 +3125,7 @@ mod tests {
 	use crate::ast::IfStatement;
 	use crate::ast::RecordPointerType;
 	use crate::ast::Statement;
+	use crate::ast::TernaryExpr;
 	use crate::query::QueryBinaryExpr;
 	use crate::query::QueryBinaryOperator;
 	use crate::query::QueryColumnReference;
@@ -3211,6 +3262,27 @@ mod tests {
 	}
 
 	#[test]
+	fn infers_nullable_ternary_expression_type_when_one_branch_is_null() {
+		let expression = Expr::Ternary(TernaryExpr {
+			condition: Box::new(Expr::Boolean(crate::ast::BooleanLiteral {
+				position: 0,
+				value: true,
+			})),
+			false_branch: Box::new(Expr::Null(crate::ast::NullLiteral { position: 0 })),
+			position: 0,
+			true_branch: Box::new(Expr::Text(crate::ast::TextLiteral {
+				position: 0,
+				value: String::from("value"),
+			})),
+		});
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let data_type = analyzer.infer_expression_type(&expression).unwrap();
+
+		assert_eq!(data_type, DataType::Nullable(Box::new(DataType::Text)));
+	}
+
+	#[test]
 	fn infers_record_pointer_type_for_find_expression() {
 		let schema = sqlite_test_schema(
 			r#"
@@ -3262,6 +3334,30 @@ mod tests {
 			schema_name: String::from("Main"),
 			table_name: String::from("Customers"),
 		}));
+	}
+
+	#[test]
+	fn infers_ternary_expression_type() {
+		let expression = Expr::Ternary(TernaryExpr {
+			condition: Box::new(Expr::Boolean(crate::ast::BooleanLiteral {
+				position: 0,
+				value: true,
+			})),
+			false_branch: Box::new(Expr::Integer(crate::ast::IntegerLiteral {
+				position: 0,
+				value: 2,
+			})),
+			position: 0,
+			true_branch: Box::new(Expr::Decimal(crate::ast::DecimalLiteral {
+				position: 0,
+				value: crate::value::Decimal::from_literal("1.5").unwrap(),
+			})),
+		});
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let data_type = analyzer.infer_expression_type(&expression).unwrap();
+
+		assert_eq!(data_type, DataType::Dec);
 	}
 
 	#[test]

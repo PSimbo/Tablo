@@ -116,6 +116,7 @@ pub enum Expr {
 	Null(NullLiteral),
 	ObjectConstruction(ObjectConstructionExpr),
 	Range(RangeExpr),
+	Ternary(TernaryExpr),
 	Text(TextLiteral),
 	Unary(UnaryExpr),
 }
@@ -455,6 +456,14 @@ pub struct TableReference {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TernaryExpr {
+	pub condition: Box<Expr>,
+	pub false_branch: Box<Expr>,
+	pub position: usize,
+	pub true_branch: Box<Expr>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TextLiteral {
 	pub position: usize,
 	pub value: String,
@@ -508,6 +517,7 @@ impl Expr {
 			Expr::Null(expression) => expression.position,
 			Expr::ObjectConstruction(expression) => expression.position,
 			Expr::Range(expression) => expression.position,
+			Expr::Ternary(expression) => expression.position,
 			Expr::Text(expression) => expression.position,
 			Expr::Unary(expression) => expression.position,
 		}

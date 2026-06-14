@@ -1,7 +1,7 @@
 use crate::source::SourceText;
 
-use super::token::TokenKind;
 use super::token::Token;
+use super::token::TokenKind;
 
 #[derive(Clone, Copy)]
 struct MultilineStringLayout {
