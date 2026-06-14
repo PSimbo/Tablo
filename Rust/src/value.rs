@@ -116,7 +116,7 @@ pub struct ArrayIterator {
 	pub next_index: usize,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Date {
 	pub day: u8,
 	pub month: u8,
@@ -186,6 +186,18 @@ impl Date {
 impl Display for Date {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		write!(f, "{:04}-{:02}-{:02}", self.year, self.month, self.day)
+	}
+}
+
+impl Ord for Date {
+	fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+		(self.year, self.month, self.day).cmp(&(other.year, other.month, other.day))
+	}
+}
+
+impl PartialOrd for Date {
+	fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+		Some(self.cmp(other))
 	}
 }
 

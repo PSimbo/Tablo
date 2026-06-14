@@ -1208,6 +1208,40 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_date_comparison_operators_object_file() {
+		let output_path = unique_test_output_path("runs_date_comparison_operators_object_file");
+		compile_snippet_to_object_file(
+			"var results: [bool] = [@2025-06-10 == @2025-06-10, @2025-06-10 != @2025-06-11, @2025-06-10 < @2025-06-11, @2025-06-10 <= @2025-06-10, @2025-06-11 > @2025-06-10, @2025-06-11 >= @2025-06-11];\nresults",
+			&output_path,
+		).unwrap();
+		let result = run_file(&output_path).unwrap();
+		let _ = std::fs::remove_file(&output_path);
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+		])));
+	}
+
+	#[test]
+	fn runs_date_comparison_operators_source_text() {
+		let result = evaluate_snippet("[@2025-06-10 == @2025-06-10, @2025-06-10 != @2025-06-11, @2025-06-10 < @2025-06-11, @2025-06-10 <= @2025-06-10, @2025-06-11 > @2025-06-10, @2025-06-11 >= @2025-06-11]").unwrap();
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+		])));
+	}
+
+	#[test]
 	fn runs_date_equality_object_file() {
 		let output_path = unique_test_output_path("runs_date_equality_object_file");
 		compile_snippet_to_object_file("var same: bool = @2025-06-10 == @2025-06-10;\nsame", &output_path).unwrap();
@@ -1229,6 +1263,15 @@ mod tests {
 		let result = evaluate_snippet("@2025-06-10 < @2025-06-11").unwrap();
 
 		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
+	fn runs_date_variable_comparison_in_if_source_text() {
+		let result = run(
+			"fn Main(args: [text]) int { const dateToday: date = @2026-06-14; const later: date = @2026-07-01; if dateToday > later { return 1; } return 0; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(0)));
 	}
 
 	#[test]
@@ -2480,6 +2523,40 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_time_comparison_operators_object_file() {
+		let output_path = unique_test_output_path("runs_time_comparison_operators_object_file");
+		compile_snippet_to_object_file(
+			"var results: [bool] = [@12:34:56 == @12:34:56, @12:34:56 != @12:34:57, @12:34:56 < @12:34:57, @12:34:56 <= @12:34:56, @12:34:57 > @12:34:56, @12:34:57 >= @12:34:57];\nresults",
+			&output_path,
+		).unwrap();
+		let result = run_file(&output_path).unwrap();
+		let _ = std::fs::remove_file(&output_path);
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+		])));
+	}
+
+	#[test]
+	fn runs_time_comparison_operators_source_text() {
+		let result = evaluate_snippet("[@12:34:56 == @12:34:56, @12:34:56 != @12:34:57, @12:34:56 < @12:34:57, @12:34:56 <= @12:34:56, @12:34:57 > @12:34:56, @12:34:57 >= @12:34:57]").unwrap();
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+		])));
+	}
+
+	#[test]
 	fn runs_time_equality_source_text() {
 		let result = evaluate_snippet("var value: time;\nvalue == value").unwrap();
 
@@ -2501,6 +2578,40 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_timestamp_comparison_operators_object_file() {
+		let output_path = unique_test_output_path("runs_timestamp_comparison_operators_object_file");
+		compile_snippet_to_object_file(
+			"var results: [bool] = [@2025-06-14T12:34:56 == @2025-06-14T12:34:56, @2025-06-14T12:34:56 != @2025-06-14T12:34:57, @2025-06-14T12:34:56 < @2025-06-14T12:34:57, @2025-06-14T12:34:56 <= @2025-06-14T12:34:56, @2025-06-14T12:34:57 > @2025-06-14T12:34:56, @2025-06-14T12:34:57 >= @2025-06-14T12:34:57];\nresults",
+			&output_path,
+		).unwrap();
+		let result = run_file(&output_path).unwrap();
+		let _ = std::fs::remove_file(&output_path);
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+		])));
+	}
+
+	#[test]
+	fn runs_timestamp_comparison_operators_source_text() {
+		let result = evaluate_snippet("[@2025-06-14T12:34:56 == @2025-06-14T12:34:56, @2025-06-14T12:34:56 != @2025-06-14T12:34:57, @2025-06-14T12:34:56 < @2025-06-14T12:34:57, @2025-06-14T12:34:56 <= @2025-06-14T12:34:56, @2025-06-14T12:34:57 > @2025-06-14T12:34:56, @2025-06-14T12:34:57 >= @2025-06-14T12:34:57]").unwrap();
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+		])));
+	}
+
+	#[test]
 	fn runs_timestamp_literal_source_text() {
 		let result = evaluate_snippet("@2019-11-28T05:19:03").unwrap();
 
@@ -2515,10 +2626,53 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_timestamp_variable_comparison_in_if_source_text() {
+		let result = run(
+			"fn Main(args: [text]) int { const earlier: timestamp = @2026-06-14T12:00:00; const later: timestamp = @2026-07-01T00:00:00; if earlier > later { return 1; } return 0; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(0)));
+	}
+
+	#[test]
 	fn runs_timestamp_variable_without_initializer_with_timestamp_default() {
 		let result = evaluate_snippet("var value: timestamp;\nvalue").unwrap();
 
 		assert!(matches!(result, Some(Value::Timestamp(_))));
+	}
+
+	#[test]
+	fn runs_timestamptz_comparison_operators_object_file() {
+		let output_path = unique_test_output_path("runs_timestamptz_comparison_operators_object_file");
+		compile_snippet_to_object_file(
+			"var results: [bool] = [@2025-06-14T11:00+01:00 == @2025-06-14T10:00Z, @2025-06-14T11:00+01:00 != @2025-06-14T10:30Z, @2025-06-14T11:00+01:00 < @2025-06-14T10:30+00:00, @2025-06-14T11:00+01:00 <= @2025-06-14T10:00Z, @2025-06-14T10:30+00:00 > @2025-06-14T11:00+01:00, @2025-06-14T10:00Z >= @2025-06-14T11:00+01:00];\nresults",
+			&output_path,
+		).unwrap();
+		let result = run_file(&output_path).unwrap();
+		let _ = std::fs::remove_file(&output_path);
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+		])));
+	}
+
+	#[test]
+	fn runs_timestamptz_comparison_operators_source_text() {
+		let result = evaluate_snippet("[@2025-06-14T11:00+01:00 == @2025-06-14T10:00Z, @2025-06-14T11:00+01:00 != @2025-06-14T10:30Z, @2025-06-14T11:00+01:00 < @2025-06-14T10:30+00:00, @2025-06-14T11:00+01:00 <= @2025-06-14T10:00Z, @2025-06-14T10:30+00:00 > @2025-06-14T11:00+01:00, @2025-06-14T10:00Z >= @2025-06-14T11:00+01:00]").unwrap();
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+		])));
 	}
 
 	#[test]
@@ -2533,6 +2687,40 @@ mod tests {
 		let result = evaluate_snippet("var value: timestamptz;\nvalue").unwrap();
 
 		assert!(matches!(result, Some(Value::TimestampTz(_))));
+	}
+
+	#[test]
+	fn runs_timetz_comparison_operators_object_file() {
+		let output_path = unique_test_output_path("runs_timetz_comparison_operators_object_file");
+		compile_snippet_to_object_file(
+			"var results: [bool] = [@11:00+01:00 == @10:00Z, @11:00+01:00 != @10:30Z, @11:00+01:00 < @10:30+00:00, @11:00+01:00 <= @10:00Z, @10:30+00:00 > @11:00+01:00, @10:00Z >= @11:00+01:00];\nresults",
+			&output_path,
+		).unwrap();
+		let result = run_file(&output_path).unwrap();
+		let _ = std::fs::remove_file(&output_path);
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+		])));
+	}
+
+	#[test]
+	fn runs_timetz_comparison_operators_source_text() {
+		let result = evaluate_snippet("[@11:00+01:00 == @10:00Z, @11:00+01:00 != @10:30Z, @11:00+01:00 < @10:30+00:00, @11:00+01:00 <= @10:00Z, @10:30+00:00 > @11:00+01:00, @10:00Z >= @11:00+01:00]").unwrap();
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+			Value::Boolean(true),
+		])));
 	}
 
 	#[test]
