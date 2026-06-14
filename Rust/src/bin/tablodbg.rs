@@ -636,6 +636,10 @@ fn variable_type_name(value: &Value) -> &'static str {
 		Value::RecordPointer(_) => "record pointer",
 		Value::Reference(_) => "reference",
 		Value::Text(_) => "text",
+		Value::Time(_) => "time",
+		Value::TimeTz(_) => "timetz",
+		Value::Timestamp(_) => "timestamp",
+		Value::TimestampTz(_) => "timestamptz",
 	}
 }
 

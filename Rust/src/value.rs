@@ -45,6 +45,10 @@ pub enum Value {
 	RecordPointer(RecordPointerValue),
 	Reference(LocalReference),
 	Text(String),
+	Time(Time),
+	TimeTz(TimeTz),
+	Timestamp(Timestamp),
+	TimestampTz(TimestampTz),
 }
 
 impl Display for Value {
@@ -98,6 +102,10 @@ impl Display for Value {
 			}
 			Value::Reference(_) => write!(f, "<reference>"),
 			Value::Text(value) => write!(f, "{value}"),
+			Value::Time(value) => write!(f, "{value}"),
+			Value::TimeTz(value) => write!(f, "{value}"),
+			Value::Timestamp(value) => write!(f, "{value}"),
+			Value::TimestampTz(value) => write!(f, "{value}"),
 		}
 	}
 }
@@ -446,6 +454,250 @@ pub struct RecordPointerValue {
 	pub locked: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct Time {
+	inner: time::Time,
+}
+
+impl Time {
+	pub fn current_local() -> Self {
+		Self {
+			inner: time::OffsetDateTime::now_local()
+				.unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+				.time(),
+		}
+	}
+
+	pub fn from_parts(hour: u8, minute: u8, second: u8, nanosecond: u32) -> Result<Self, String> {
+		let inner = time::Time::from_hms_nano(hour, minute, second, nanosecond)
+			.map_err(|_| String::from("Time components are out of range."))?;
+		Ok(Self { inner })
+	}
+
+	pub fn from_sqlite_text(value: &str) -> Result<Self, String> {
+		parse_time_text(value, &format!("Invalid SQLite time value `{value}`."))
+	}
+
+	pub fn hour(&self) -> u8 {
+		self.inner.hour()
+	}
+
+	pub fn minute(&self) -> u8 {
+		self.inner.minute()
+	}
+
+	pub fn nanosecond(&self) -> u32 {
+		self.inner.nanosecond()
+	}
+
+	pub fn second(&self) -> u8 {
+		self.inner.second()
+	}
+}
+
+impl Display for Time {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write_time_value(f, self.inner)
+	}
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TimeTz {
+	offset_minutes: i16,
+	time: Time,
+}
+
+impl TimeTz {
+	pub fn current_local() -> Self {
+		let now = time::OffsetDateTime::now_local()
+			.unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+
+		Self {
+			offset_minutes: now.offset().whole_minutes() as i16,
+			time: Time {
+				inner: now.time(),
+			},
+		}
+	}
+
+	pub fn from_parts(time: Time, offset_minutes: i16) -> Result<Self, String> {
+		validate_offset_minutes(offset_minutes)?;
+		Ok(Self {
+			offset_minutes,
+			time,
+		})
+	}
+
+	pub fn from_sqlite_text(value: &str) -> Result<Self, String> {
+		let (time_text, offset_minutes) = parse_offset_suffix(value, &format!("Invalid SQLite timetz value `{value}`."))?;
+		let time = parse_time_text(time_text, &format!("Invalid SQLite timetz value `{value}`."))?;
+		Self::from_parts(time, offset_minutes)
+	}
+
+	pub fn offset_minutes(&self) -> i16 {
+		self.offset_minutes
+	}
+
+	pub fn time(&self) -> Time {
+		self.time
+	}
+}
+
+impl Display for TimeTz {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write_time_value(f, self.time.inner)?;
+		write!(f, "{}", format_offset_minutes(self.offset_minutes))
+	}
+}
+
+impl Eq for TimeTz {}
+
+impl Ord for TimeTz {
+	fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+		normalized_time_tz_nanoseconds(self).cmp(&normalized_time_tz_nanoseconds(other))
+	}
+}
+
+impl PartialEq for TimeTz {
+	fn eq(&self, other: &Self) -> bool {
+		normalized_time_tz_nanoseconds(self) == normalized_time_tz_nanoseconds(other)
+	}
+}
+
+impl PartialOrd for TimeTz {
+	fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+		Some(self.cmp(other))
+	}
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct Timestamp {
+	date: Date,
+	time: Time,
+}
+
+impl Timestamp {
+	pub fn current_local() -> Self {
+		let now = time::OffsetDateTime::now_local()
+			.unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+
+		Self {
+			date: Date {
+				day: now.day(),
+				month: now.month() as u8,
+				year: now.year(),
+			},
+			time: Time {
+				inner: now.time(),
+			},
+		}
+	}
+
+	pub fn date(&self) -> Date {
+		self.date
+	}
+
+	pub fn from_parts(date: Date, time: Time) -> Self {
+		Self {
+			date,
+			time,
+		}
+	}
+
+	pub fn from_sqlite_text(value: &str) -> Result<Self, String> {
+		let (date_text, time_text) = split_timestamp_text(value, &format!("Invalid SQLite timestamp value `{value}`."))?;
+		Ok(Self {
+			date: Date::from_sqlite_text(date_text)?,
+			time: parse_time_text(time_text, &format!("Invalid SQLite timestamp value `{value}`."))?,
+		})
+	}
+
+	pub fn time(&self) -> Time {
+		self.time
+	}
+}
+
+impl Display for Timestamp {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}T{}", self.date, self.time)
+	}
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TimestampTz {
+	offset_minutes: i16,
+	timestamp: Timestamp,
+}
+
+impl TimestampTz {
+	pub fn current_local() -> Self {
+		let now = time::OffsetDateTime::now_local()
+			.unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+
+		Self {
+			offset_minutes: now.offset().whole_minutes() as i16,
+			timestamp: Timestamp {
+				date: Date {
+					day: now.day(),
+					month: now.month() as u8,
+					year: now.year(),
+				},
+				time: Time {
+					inner: now.time(),
+				},
+			},
+		}
+	}
+
+	pub fn from_parts(timestamp: Timestamp, offset_minutes: i16) -> Result<Self, String> {
+		validate_offset_minutes(offset_minutes)?;
+		Ok(Self {
+			offset_minutes,
+			timestamp,
+		})
+	}
+
+	pub fn from_sqlite_text(value: &str) -> Result<Self, String> {
+		let (timestamp_text, offset_minutes) = parse_offset_suffix(value, &format!("Invalid SQLite timestamptz value `{value}`."))?;
+		let timestamp = Timestamp::from_sqlite_text(timestamp_text)?;
+		Self::from_parts(timestamp, offset_minutes)
+	}
+
+	pub fn offset_minutes(&self) -> i16 {
+		self.offset_minutes
+	}
+
+	pub fn timestamp(&self) -> Timestamp {
+		self.timestamp
+	}
+}
+
+impl Display for TimestampTz {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}{}", self.timestamp, format_offset_minutes(self.offset_minutes))
+	}
+}
+
+impl Eq for TimestampTz {}
+
+impl Ord for TimestampTz {
+	fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+		normalized_timestamp_tz(self).cmp(&normalized_timestamp_tz(other))
+	}
+}
+
+impl PartialEq for TimestampTz {
+	fn eq(&self, other: &Self) -> bool {
+		normalized_timestamp_tz(self) == normalized_timestamp_tz(other)
+	}
+}
+
+impl PartialOrd for TimestampTz {
+	fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+		Some(self.cmp(other))
+	}
+}
+
 pub fn sqlite_record_field_runtime_value(
 	value: &DeferredSqliteValue,
 	data_type: &DataType,
@@ -494,6 +746,34 @@ pub fn sqlite_record_field_runtime_value(
 				deferred_sqlite_value_name(other),
 			)),
 		},
+		DataType::Time => match value {
+			DeferredSqliteValue::Text(value) => Ok(Value::Time(Time::from_sqlite_text(value)?)),
+			other => Err(format!(
+				"Cannot convert SQLite value `{}` to `time`.",
+				deferred_sqlite_value_name(other),
+			)),
+		},
+		DataType::TimeTz => match value {
+			DeferredSqliteValue::Text(value) => Ok(Value::TimeTz(TimeTz::from_sqlite_text(value)?)),
+			other => Err(format!(
+				"Cannot convert SQLite value `{}` to `timetz`.",
+				deferred_sqlite_value_name(other),
+			)),
+		},
+		DataType::Timestamp => match value {
+			DeferredSqliteValue::Text(value) => Ok(Value::Timestamp(Timestamp::from_sqlite_text(value)?)),
+			other => Err(format!(
+				"Cannot convert SQLite value `{}` to `timestamp`.",
+				deferred_sqlite_value_name(other),
+			)),
+		},
+		DataType::TimestampTz => match value {
+			DeferredSqliteValue::Text(value) => Ok(Value::TimestampTz(TimestampTz::from_sqlite_text(value)?)),
+			other => Err(format!(
+				"Cannot convert SQLite value `{}` to `timestamptz`.",
+				deferred_sqlite_value_name(other),
+			)),
+		},
 		other => Err(format!(
 			"SQLite record pointer fields do not yet support runtime conversion to `{}`.",
 			data_type_name_for_sqlite_runtime(other),
@@ -511,6 +791,11 @@ fn align_decimal_operands(lhs: &Decimal, rhs: &Decimal) -> Result<(i128, i128, u
 	Ok((lhs_coefficient, rhs_coefficient, scale))
 }
 
+fn date_to_time_date(date: Date) -> time::Date {
+	let month = time::Month::try_from(date.month).unwrap();
+	time::Date::from_calendar_date(date.year, month, date.day).unwrap()
+}
+
 fn data_type_name_for_sqlite_runtime(data_type: &DataType) -> &'static str {
 	match data_type {
 		DataType::Any => "any",
@@ -526,6 +811,10 @@ fn data_type_name_for_sqlite_runtime(data_type: &DataType) -> &'static str {
 		DataType::Range(_) => "range",
 		DataType::RecordPointer(_) => "record pointer",
 		DataType::Text => "text",
+		DataType::Time => "time",
+		DataType::TimeTz => "timetz",
+		DataType::Timestamp => "timestamp",
+		DataType::TimestampTz => "timestamptz",
 		DataType::Union(_) => "union",
 		DataType::Void => "void",
 	}
@@ -562,6 +851,14 @@ fn deferred_sqlite_value_name(value: &DeferredSqliteValue) -> &'static str {
 	}
 }
 
+fn format_offset_minutes(offset_minutes: i16) -> String {
+	let sign = if offset_minutes < 0 { '-' } else { '+' };
+	let absolute_minutes = offset_minutes.unsigned_abs();
+	let hours = absolute_minutes / 60;
+	let minutes = absolute_minutes % 60;
+	format!("{sign}{hours:02}:{minutes:02}")
+}
+
 fn is_leap_year(year: i32) -> bool {
 	(year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
@@ -591,6 +888,112 @@ fn normalize_integer_digits(integer_part: &str) -> String {
 	}
 }
 
+fn normalized_time_tz_nanoseconds(value: &TimeTz) -> i128 {
+	let day_nanoseconds = 86_400_i128 * 1_000_000_000;
+	let time_nanoseconds =
+		(value.time.hour() as i128 * 3_600
+			+ value.time.minute() as i128 * 60
+			+ value.time.second() as i128) * 1_000_000_000
+			+ value.time.nanosecond() as i128;
+	let offset_nanoseconds = value.offset_minutes as i128 * 60 * 1_000_000_000;
+	(time_nanoseconds - offset_nanoseconds).rem_euclid(day_nanoseconds)
+}
+
+fn normalized_timestamp_tz(value: &TimestampTz) -> time::PrimitiveDateTime {
+	time::PrimitiveDateTime::new(
+		date_to_time_date(value.timestamp.date),
+		value.timestamp.time.inner,
+	) - time::Duration::minutes(value.offset_minutes as i64)
+}
+
+fn parse_fractional_nanoseconds(value: &str, message: &str) -> Result<u32, String> {
+	if value.is_empty() || value.len() > 9 || !value.chars().all(|ch| ch.is_ascii_digit()) {
+		return Err(message.to_string());
+	}
+
+	let mut digits = value.to_string();
+
+	while digits.len() < 9 {
+		digits.push('0');
+	}
+
+	digits.parse::<u32>().map_err(|_| message.to_string())
+}
+
+fn parse_offset_suffix<'a>(value: &'a str, message: &str) -> Result<(&'a str, i16), String> {
+	if let Some(prefix) = value.strip_suffix('Z') {
+		return Ok((prefix, 0));
+	}
+
+	for (index, ch) in value.char_indices().rev() {
+		if index == 0 {
+			break;
+		}
+
+		if ch != '+' && ch != '-' {
+			continue;
+		}
+
+		let time_text = &value[..index];
+		let offset_text = &value[index..];
+		let (hours_text, minutes_text) = offset_text[1..].split_once(':').ok_or_else(|| message.to_string())?;
+
+		if hours_text.len() != 2 || minutes_text.len() != 2 {
+			return Err(message.to_string());
+		}
+
+		let hours = hours_text.parse::<i16>().map_err(|_| message.to_string())?;
+		let minutes = minutes_text.parse::<i16>().map_err(|_| message.to_string())?;
+
+		if hours > 23 || minutes > 59 {
+			return Err(message.to_string());
+		}
+
+		let total_minutes = hours * 60 + minutes;
+		let signed_minutes = if ch == '-' { -total_minutes } else { total_minutes };
+		validate_offset_minutes(signed_minutes)?;
+		return Ok((time_text, signed_minutes));
+	}
+
+	Err(message.to_string())
+}
+
+fn parse_time_text(value: &str, message: &str) -> Result<Time, String> {
+	let mut parts = value.split(':');
+	let hour_text = parts.next().ok_or_else(|| message.to_string())?;
+	let minute_text = parts.next().ok_or_else(|| message.to_string())?;
+	let second_text = parts.next();
+
+	if parts.next().is_some() || hour_text.len() != 2 || minute_text.len() != 2 {
+		return Err(message.to_string());
+	}
+
+	let hour = hour_text.parse::<u8>().map_err(|_| message.to_string())?;
+	let minute = minute_text.parse::<u8>().map_err(|_| message.to_string())?;
+	let (second, nanosecond) = match second_text {
+		None => (0, 0),
+		Some(second_text) => {
+			let (whole_seconds, fractional_seconds) = match second_text.split_once('.') {
+				Some((whole_seconds, fractional_seconds)) => {
+					(whole_seconds, parse_fractional_nanoseconds(fractional_seconds, message)?)
+				}
+				None => (second_text, 0),
+			};
+
+			if whole_seconds.len() != 2 {
+				return Err(message.to_string());
+			}
+
+			(
+				whole_seconds.parse::<u8>().map_err(|_| message.to_string())?,
+				fractional_seconds,
+			)
+		}
+	};
+
+	Time::from_parts(hour, minute, second, nanosecond).map_err(|_| message.to_string())
+}
+
 fn pow10(exponent: u32) -> Result<i128, String> {
 	let mut value = 1_i128;
 
@@ -601,6 +1004,20 @@ fn pow10(exponent: u32) -> Result<i128, String> {
 	Ok(value)
 }
 
+fn split_timestamp_text<'a>(value: &'a str, message: &str) -> Result<(&'a str, &'a str), String> {
+	value.split_once('T')
+		.or_else(|| value.split_once(' '))
+		.ok_or_else(|| message.to_string())
+}
+
+fn validate_offset_minutes(offset_minutes: i16) -> Result<(), String> {
+	if !(-23 * 60 - 59..=23 * 60 + 59).contains(&offset_minutes) {
+		return Err(String::from("Time-zone offset is out of range."));
+	}
+
+	Ok(())
+}
+
 fn whole_digits_required(whole_part: i128) -> usize {
 	if whole_part == 0 {
 		1
@@ -608,6 +1025,25 @@ fn whole_digits_required(whole_part: i128) -> usize {
 	else {
 		whole_part.to_string().len()
 	}
+}
+
+fn write_time_value(
+	f: &mut std::fmt::Formatter<'_>,
+	value: time::Time,
+) -> std::fmt::Result {
+	write!(f, "{:02}:{:02}:{:02}", value.hour(), value.minute(), value.second())?;
+
+	if value.nanosecond() != 0 {
+		let mut fractional = format!("{:09}", value.nanosecond());
+
+		while fractional.ends_with('0') {
+			fractional.pop();
+		}
+
+		write!(f, ".{fractional}")?;
+	}
+
+	Ok(())
 }
 
 #[cfg(test)]

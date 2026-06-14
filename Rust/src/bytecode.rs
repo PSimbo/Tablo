@@ -54,6 +54,10 @@ pub enum Instruction {
 	Pop,
 	PushBoolean(bool),
 	PushCurrentDate,
+	PushCurrentTime,
+	PushCurrentTimeTz,
+	PushCurrentTimestamp,
+	PushCurrentTimestampTz,
 	PushDate(crate::value::Date),
 	PushDecimal(Decimal),
 	PushEnumValue {

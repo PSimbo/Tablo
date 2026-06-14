@@ -388,6 +388,10 @@ impl Lexer {
 			"rec" => TokenKind::RecKeyword,
 			"return" => TokenKind::ReturnKeyword,
 			"text" => TokenKind::TextKeyword,
+			"time" => TokenKind::TimeKeyword,
+			"timestamp" => TokenKind::TimestampKeyword,
+			"timestamptz" => TokenKind::TimestampTzKeyword,
+			"timetz" => TokenKind::TimeTzKeyword,
 			"true" => TokenKind::TrueKeyword,
 			"var" => TokenKind::VarKeyword,
 			"void" => TokenKind::VoidKeyword,
@@ -983,10 +987,10 @@ mod tests {
 
 	#[test]
 	fn tokenizes_keyword_literals() {
-		let mut lexer = Lexer::new(SourceText::new("any asc and bool break by const continue count date dec desc else find first fn for if in last mut not order or rec return text true var void where while with xor"));
+		let mut lexer = Lexer::new(SourceText::new("any asc and bool break by const continue count date dec desc else find first fn for if in last mut not order or rec return text time timestamp timestamptz timetz true var void where while with xor"));
 		let tokens = lexer.tokenize().unwrap();
 
-		assert_eq!(tokens.len(), 35);
+		assert_eq!(tokens.len(), 39);
 		assert_eq!(tokens[0].kind, TokenKind::AnyKeyword);
 		assert_eq!(tokens[0].lexeme, "any");
 		assert_eq!(tokens[1].kind, TokenKind::AscKeyword);
@@ -1015,14 +1019,18 @@ mod tests {
 		assert_eq!(tokens[24].kind, TokenKind::RecKeyword);
 		assert_eq!(tokens[25].kind, TokenKind::ReturnKeyword);
 		assert_eq!(tokens[26].kind, TokenKind::TextKeyword);
-		assert_eq!(tokens[27].kind, TokenKind::TrueKeyword);
-		assert_eq!(tokens[28].kind, TokenKind::VarKeyword);
-		assert_eq!(tokens[29].kind, TokenKind::VoidKeyword);
-		assert_eq!(tokens[30].kind, TokenKind::WhereKeyword);
-		assert_eq!(tokens[31].kind, TokenKind::WhileKeyword);
-		assert_eq!(tokens[32].kind, TokenKind::WithKeyword);
-		assert_eq!(tokens[33].kind, TokenKind::XorKeyword);
-		assert_eq!(tokens[34].kind, TokenKind::EndOfFile);
+		assert_eq!(tokens[27].kind, TokenKind::TimeKeyword);
+		assert_eq!(tokens[28].kind, TokenKind::TimestampKeyword);
+		assert_eq!(tokens[29].kind, TokenKind::TimestampTzKeyword);
+		assert_eq!(tokens[30].kind, TokenKind::TimeTzKeyword);
+		assert_eq!(tokens[31].kind, TokenKind::TrueKeyword);
+		assert_eq!(tokens[32].kind, TokenKind::VarKeyword);
+		assert_eq!(tokens[33].kind, TokenKind::VoidKeyword);
+		assert_eq!(tokens[34].kind, TokenKind::WhereKeyword);
+		assert_eq!(tokens[35].kind, TokenKind::WhileKeyword);
+		assert_eq!(tokens[36].kind, TokenKind::WithKeyword);
+		assert_eq!(tokens[37].kind, TokenKind::XorKeyword);
+		assert_eq!(tokens[38].kind, TokenKind::EndOfFile);
 	}
 
 	#[test]

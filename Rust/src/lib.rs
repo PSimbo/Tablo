@@ -2437,6 +2437,48 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_time_equality_source_text() {
+		let result = evaluate_snippet("var value: time;\nvalue == value").unwrap();
+
+		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
+	fn runs_time_variable_without_initializer_with_time_default() {
+		let result = evaluate_snippet("var value: time;\nvalue").unwrap();
+
+		assert!(matches!(result, Some(Value::Time(_))));
+	}
+
+	#[test]
+	fn runs_timestamp_ordering_source_text() {
+		let result = evaluate_snippet("var value: timestamp;\nvalue <= value").unwrap();
+
+		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
+	fn runs_timestamp_variable_without_initializer_with_timestamp_default() {
+		let result = evaluate_snippet("var value: timestamp;\nvalue").unwrap();
+
+		assert!(matches!(result, Some(Value::Timestamp(_))));
+	}
+
+	#[test]
+	fn runs_timestamptz_variable_without_initializer_with_timestamptz_default() {
+		let result = evaluate_snippet("var value: timestamptz;\nvalue").unwrap();
+
+		assert!(matches!(result, Some(Value::TimestampTz(_))));
+	}
+
+	#[test]
+	fn runs_timetz_variable_without_initializer_with_timetz_default() {
+		let result = evaluate_snippet("var value: timetz;\nvalue").unwrap();
+
+		assert!(matches!(result, Some(Value::TimeTz(_))));
+	}
+
+	#[test]
 	fn runs_trim_source_text() {
 		let result = evaluate_snippet("trim('  Ada  ')").unwrap();
 

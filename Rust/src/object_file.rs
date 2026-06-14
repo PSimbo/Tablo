@@ -47,6 +47,10 @@ const OPCODE_MULTIPLY: u8 = 17;
 const OPCODE_PUSH_BOOLEAN: u8 = 18;
 const OPCODE_PUSH_DATE: u8 = 46;
 const OPCODE_PUSH_CURRENT_DATE: u8 = 47;
+const OPCODE_PUSH_CURRENT_TIME: u8 = 49;
+const OPCODE_PUSH_CURRENT_TIME_TZ: u8 = 50;
+const OPCODE_PUSH_CURRENT_TIMESTAMP: u8 = 51;
+const OPCODE_PUSH_CURRENT_TIMESTAMP_TZ: u8 = 52;
 const OPCODE_PUSH_DECIMAL: u8 = 19;
 const OPCODE_PUSH_ENUM_VALUE: u8 = 48;
 const OPCODE_PUSH_INTEGER: u8 = 20;
@@ -264,6 +268,10 @@ impl<'a> ObjectFileReader<'a> {
 			}
 			13 => Ok(DataType::Date),
 			14 => Ok(DataType::Nullable(Box::new(self.read_data_type()?))),
+			15 => Ok(DataType::Time),
+			16 => Ok(DataType::TimeTz),
+			17 => Ok(DataType::Timestamp),
+			18 => Ok(DataType::TimestampTz),
 			tag => Err(ObjectFileError {
 				offset: tag_offset,
 				message: format!("Unknown data type tag {tag}."),
@@ -438,6 +446,10 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_POP => Ok(Instruction::Pop),
 			OPCODE_PUSH_BOOLEAN => Ok(Instruction::PushBoolean(self.read_bool()?)),
 			OPCODE_PUSH_CURRENT_DATE => Ok(Instruction::PushCurrentDate),
+			OPCODE_PUSH_CURRENT_TIME => Ok(Instruction::PushCurrentTime),
+			OPCODE_PUSH_CURRENT_TIME_TZ => Ok(Instruction::PushCurrentTimeTz),
+			OPCODE_PUSH_CURRENT_TIMESTAMP => Ok(Instruction::PushCurrentTimestamp),
+			OPCODE_PUSH_CURRENT_TIMESTAMP_TZ => Ok(Instruction::PushCurrentTimestampTz),
 			OPCODE_PUSH_DATE => Ok(Instruction::PushDate(crate::value::Date::from_parts(
 				self.read_i32()?,
 				self.read_u8()?,
@@ -666,6 +678,10 @@ fn write_data_type(bytes: &mut Vec<u8>, data_type: &DataType) {
 			write_data_type(bytes, element_type);
 		}
 		DataType::Text => bytes.push(9),
+		DataType::Time => bytes.push(15),
+		DataType::TimeTz => bytes.push(16),
+		DataType::Timestamp => bytes.push(17),
+		DataType::TimestampTz => bytes.push(18),
 		DataType::Void => bytes.push(10),
 		DataType::RecordPointer(record_pointer) => {
 			bytes.push(11);
@@ -771,6 +787,10 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.push(u8::from(*value));
 		}
 		Instruction::PushCurrentDate => bytes.push(OPCODE_PUSH_CURRENT_DATE),
+		Instruction::PushCurrentTime => bytes.push(OPCODE_PUSH_CURRENT_TIME),
+		Instruction::PushCurrentTimeTz => bytes.push(OPCODE_PUSH_CURRENT_TIME_TZ),
+		Instruction::PushCurrentTimestamp => bytes.push(OPCODE_PUSH_CURRENT_TIMESTAMP),
+		Instruction::PushCurrentTimestampTz => bytes.push(OPCODE_PUSH_CURRENT_TIMESTAMP_TZ),
 		Instruction::PushDate(value) => {
 			bytes.push(OPCODE_PUSH_DATE);
 			bytes.extend_from_slice(&value.year.to_le_bytes());

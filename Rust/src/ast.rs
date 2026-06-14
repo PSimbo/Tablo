@@ -50,6 +50,10 @@ pub enum DataType {
 	Range(Box<DataType>),
 	RecordPointer(RecordPointerType),
 	Text,
+	Time,
+	TimeTz,
+	Timestamp,
+	TimestampTz,
 	Union(Vec<DataType>),
 	Void,
 }
@@ -85,6 +89,10 @@ impl DataType {
 			Self::Range(element_type) => format!("range<{}>", element_type.name()),
 			Self::RecordPointer(_) => String::from("record pointer"),
 			Self::Text => String::from("text"),
+			Self::Time => String::from("time"),
+			Self::TimeTz => String::from("timetz"),
+			Self::Timestamp => String::from("timestamp"),
+			Self::TimestampTz => String::from("timestamptz"),
 			Self::Union(members) => members.iter().map(Self::name).collect::<Vec<_>>().join(" | "),
 			Self::Void => String::from("void"),
 		}

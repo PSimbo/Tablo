@@ -1402,7 +1402,11 @@ impl Parser {
 			| TokenKind::DecKeyword
 			| TokenKind::BoolKeyword
 			| TokenKind::IntKeyword
-			| TokenKind::TextKeyword => Ok(self.parse_identifier_expression(token)),
+			| TokenKind::TextKeyword
+			| TokenKind::TimeKeyword
+			| TokenKind::TimeTzKeyword
+			| TokenKind::TimestampKeyword
+			| TokenKind::TimestampTzKeyword => Ok(self.parse_identifier_expression(token)),
 			TokenKind::EndOfFile => Err(ParseError {
 				message: String::from("Expected an expression."),
 				position: token.start,
@@ -1445,6 +1449,10 @@ impl Parser {
 				Ok(DataType::Array(Box::new(element_type)))
 			}
 			TokenKind::TextKeyword => Ok(DataType::Text),
+			TokenKind::TimeKeyword => Ok(DataType::Time),
+			TokenKind::TimeTzKeyword => Ok(DataType::TimeTz),
+			TokenKind::TimestampKeyword => Ok(DataType::Timestamp),
+			TokenKind::TimestampTzKeyword => Ok(DataType::TimestampTz),
 			TokenKind::VoidKeyword => Ok(DataType::Void),
 			_ => Err(ParseError {
 				message: format!("Expected a supported data type, found `{}`.", token.lexeme),
@@ -4658,6 +4666,49 @@ mod tests {
 						})),
 						is_const: false,
 						name: String::from("name"),
+						position: 0,
+					}),
+				],
+				with_declarations: vec![],
+			}
+		);
+	}
+
+	#[test]
+	fn parses_time_related_variable_declarations() {
+		assert_eq!(
+			parse_program("var a: time; var b: timetz; var c: timestamp; var d: timestamptz;"),
+			Program {
+				functions: vec![],
+				objects: vec![],
+				result: None,
+				statements: vec![
+					Statement::VariableDeclaration(VariableDeclaration {
+						data_type: DataType::Time,
+						initial_value: None,
+						is_const: false,
+						name: String::from("a"),
+						position: 0,
+					}),
+					Statement::VariableDeclaration(VariableDeclaration {
+						data_type: DataType::TimeTz,
+						initial_value: None,
+						is_const: false,
+						name: String::from("b"),
+						position: 0,
+					}),
+					Statement::VariableDeclaration(VariableDeclaration {
+						data_type: DataType::Timestamp,
+						initial_value: None,
+						is_const: false,
+						name: String::from("c"),
+						position: 0,
+					}),
+					Statement::VariableDeclaration(VariableDeclaration {
+						data_type: DataType::TimestampTz,
+						initial_value: None,
+						is_const: false,
+						name: String::from("d"),
 						position: 0,
 					}),
 				],

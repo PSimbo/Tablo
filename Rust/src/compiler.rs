@@ -964,6 +964,18 @@ impl Compiler {
 			crate::ast::DataType::Text => {
 				self.emit(emission, Instruction::PushText(String::new()), position);
 			}
+			crate::ast::DataType::Time => {
+				self.emit(emission, Instruction::PushCurrentTime, position);
+			}
+			crate::ast::DataType::TimeTz => {
+				self.emit(emission, Instruction::PushCurrentTimeTz, position);
+			}
+			crate::ast::DataType::Timestamp => {
+				self.emit(emission, Instruction::PushCurrentTimestamp, position);
+			}
+			crate::ast::DataType::TimestampTz => {
+				self.emit(emission, Instruction::PushCurrentTimestampTz, position);
+			}
 			crate::ast::DataType::EmptyArray
 			| crate::ast::DataType::Null
 			| crate::ast::DataType::Range(_)

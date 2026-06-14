@@ -581,6 +581,10 @@ impl SemanticAnalyzer {
 			SchemaDataType::Dec | SchemaDataType::Float => Ok(DataType::Dec),
 			SchemaDataType::Int => Ok(DataType::Int),
 			SchemaDataType::Text => Ok(DataType::Text),
+			SchemaDataType::Time => Ok(DataType::Time),
+			SchemaDataType::TimeTz => Ok(DataType::TimeTz),
+			SchemaDataType::Timestamp => Ok(DataType::Timestamp),
+			SchemaDataType::TimestampTz => Ok(DataType::TimestampTz),
 			other => Err(self.compile_error(
 				0,
 				format!("Schema data type `{:?}` is not yet supported by database query semantic analysis.", other),
@@ -598,6 +602,10 @@ impl SemanticAnalyzer {
 			| DataType::Int
 			| DataType::Object(_)
 			| DataType::Text
+			| DataType::Time
+			| DataType::TimeTz
+			| DataType::Timestamp
+			| DataType::TimestampTz
 			| DataType::Union(_) => true,
 			DataType::Nullable(_) => true,
 			DataType::EmptyArray
@@ -1694,7 +1702,18 @@ impl SemanticAnalyzer {
 	}
 
 	fn is_valid_enum_backing_type(&self, data_type: &DataType) -> bool {
-		matches!(data_type, DataType::Bool | DataType::Date | DataType::Dec | DataType::Int | DataType::Text)
+		matches!(
+			data_type,
+			DataType::Bool
+				| DataType::Date
+				| DataType::Dec
+				| DataType::Int
+				| DataType::Text
+				| DataType::Time
+				| DataType::TimeTz
+				| DataType::Timestamp
+				| DataType::TimestampTz
+		)
 	}
 
 	fn lookup_enum(&self, name: &str) -> Option<&EnumBinding> {
@@ -2225,6 +2244,10 @@ impl SemanticAnalyzer {
 
 		if (lhs == &DataType::Text && rhs == &DataType::Text)
 			|| (lhs == &DataType::Date && rhs == &DataType::Date)
+			|| (lhs == &DataType::Time && rhs == &DataType::Time)
+			|| (lhs == &DataType::TimeTz && rhs == &DataType::TimeTz)
+			|| (lhs == &DataType::Timestamp && rhs == &DataType::Timestamp)
+			|| (lhs == &DataType::TimestampTz && rhs == &DataType::TimestampTz)
 			|| (self.is_numeric_type(lhs) && self.is_numeric_type(rhs))
 		{
 			return Ok(());
