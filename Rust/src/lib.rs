@@ -1847,6 +1847,24 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_nullable_date_comparison_with_null_when_value_is_non_null() {
+		let result = run(
+			"fn Main(args: [text]) int { var value: date? = @2026-06-14; if value == null { return 1; } return 0; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(0)));
+	}
+
+	#[test]
+	fn runs_nullable_date_comparison_with_null_when_value_is_null() {
+		let result = run(
+			"fn Main(args: [text]) int { var value: date? = null; if value == null { return 1; } return 0; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
 	fn runs_nullable_variable_without_initializer_as_null() {
 		let result = evaluate_snippet("var value: int?;\nvalue").unwrap();
 

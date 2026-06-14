@@ -1346,6 +1346,7 @@ fn equals_value(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Valu
 			lhs.enum_name == rhs.enum_name && equals_value(*lhs.backing_value, *rhs.backing_value, instruction_index)? == Value::Boolean(true)
 		}
 		(Value::Null, Value::Null) => true,
+		(Value::Null, _) | (_, Value::Null) => false,
 		(Value::Object(lhs), Value::Object(rhs)) => lhs == rhs,
 		(Value::RecordPointer(lhs), Value::RecordPointer(rhs)) => lhs == rhs,
 		(Value::Text(lhs), Value::Text(rhs)) => lhs == rhs,
@@ -1392,12 +1393,6 @@ fn equals_value(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Valu
 			));
 		}
 		(lhs @ Value::Boolean(_), rhs) | (lhs, rhs @ Value::Boolean(_)) => {
-			return Err(vm_error(
-				instruction_index,
-				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
-			));
-		}
-		(lhs @ Value::Null, rhs) | (lhs, rhs @ Value::Null) => {
 			return Err(vm_error(
 				instruction_index,
 				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
