@@ -1572,7 +1572,7 @@ function resolveMemberType(
 		return undefined;
 	}
 
-	let currentType = visibleBindings.get(chain[0]) ?? context.variableTypes.get(chain[0]) ?? chain[0];
+	let currentType = visibleBindings.get(chain[0]) ?? chain[0];
 
 	for (const fieldName of chain.slice(1)) {
 		const objectFields = context.objects.get(currentType);
