@@ -47,6 +47,10 @@ use crate::ast::Statement;
 use crate::ast::TableReference;
 use crate::ast::TernaryExpr;
 use crate::ast::TextLiteral;
+use crate::ast::TimeLiteral;
+use crate::ast::TimeTzLiteral;
+use crate::ast::TimestampLiteral;
+use crate::ast::TimestampTzLiteral;
 use crate::ast::UnaryExpr;
 use crate::ast::UnaryOperator;
 use crate::ast::VariableDeclaration;
@@ -494,18 +498,6 @@ impl Parser {
 		else {
 			Ok(DataType::Union(data_types))
 		}
-	}
-
-	fn parse_date_literal(&self, token: Token) -> Result<Expr, ParseError> {
-		let value = crate::value::Date::from_literal(&token.lexeme).map_err(|message| ParseError {
-			message,
-			position: token.start,
-		})?;
-
-		Ok(Expr::Date(DateLiteral {
-			position: token.start,
-			value,
-		}))
 	}
 
 	fn parse_decimal_literal(&self, token: Token) -> Result<Expr, ParseError> {
@@ -1396,7 +1388,7 @@ impl Parser {
 		match token.kind {
 			TokenKind::CountKeyword => self.parse_count_expression(token.start),
 			TokenKind::Dash => self.parse_negation_expression_with_position(token.start),
-			TokenKind::DateLiteral => self.parse_date_literal(token),
+			TokenKind::DateLiteral => self.parse_temporal_literal(token),
 			TokenKind::DecimalLiteral => self.parse_decimal_literal(token),
 			TokenKind::DateKeyword
 			| TokenKind::DecKeyword
@@ -1682,6 +1674,78 @@ impl Parser {
 		})
 	}
 
+	fn parse_temporal_literal(&self, token: Token) -> Result<Expr, ParseError> {
+		let lexeme = token.lexeme.as_str();
+		let body = lexeme.strip_prefix('@').unwrap_or(lexeme);
+		let has_time = body.contains(':');
+		let has_timestamp_separator = body.contains('T');
+		let has_timezone = if has_timestamp_separator {
+			body.split_once('T')
+				.is_some_and(|(_, time_part)| time_part.ends_with('Z') || self.time_component_has_timezone_offset(time_part))
+		}
+		else {
+			body.ends_with('Z') || self.time_component_has_timezone_offset(body)
+		};
+
+		if has_timestamp_separator {
+			if has_timezone {
+				let value = crate::value::TimestampTz::from_literal(lexeme).map_err(|message| ParseError {
+					message,
+					position: token.start,
+				})?;
+
+				return Ok(Expr::TimestampTz(TimestampTzLiteral {
+					position: token.start,
+					value,
+				}));
+			}
+
+			let value = crate::value::Timestamp::from_literal(lexeme).map_err(|message| ParseError {
+				message,
+				position: token.start,
+			})?;
+
+			return Ok(Expr::Timestamp(TimestampLiteral {
+				position: token.start,
+				value,
+			}));
+		}
+
+		if has_time {
+			if has_timezone {
+				let value = crate::value::TimeTz::from_literal(lexeme).map_err(|message| ParseError {
+					message,
+					position: token.start,
+				})?;
+
+				return Ok(Expr::TimeTz(TimeTzLiteral {
+					position: token.start,
+					value,
+				}));
+			}
+
+			let value = crate::value::Time::from_literal(lexeme).map_err(|message| ParseError {
+				message,
+				position: token.start,
+			})?;
+
+			return Ok(Expr::Time(TimeLiteral {
+				position: token.start,
+				value,
+			}));
+		}
+
+		let value = crate::value::Date::from_literal(lexeme).map_err(|message| ParseError {
+			message,
+			position: token.start,
+		})?;
+
+		Ok(Expr::Date(DateLiteral {
+			position: token.start,
+			value,
+		}))
+	}
+
 	fn parse_ternary_expression(&mut self) -> Result<Expr, ParseError> {
 		let condition = self.parse_range_expression()?;
 
@@ -1842,6 +1906,10 @@ impl Parser {
 				.is_ok()
 		})
 	}
+
+	fn time_component_has_timezone_offset(&self, value: &str) -> bool {
+		value.char_indices().skip(1).any(|(_, ch)| ch == '+' || ch == '-')
+	}
 }
 
 #[cfg(test)]
@@ -1895,6 +1963,10 @@ mod tests {
 	use crate::ast::TableReference;
 	use crate::ast::TernaryExpr;
 	use crate::ast::TextLiteral;
+	use crate::ast::TimeLiteral;
+	use crate::ast::TimeTzLiteral;
+	use crate::ast::TimestampLiteral;
+	use crate::ast::TimestampTzLiteral;
 	use crate::ast::UnaryExpr;
 	use crate::ast::UnaryOperator;
 	use crate::ast::VariableDeclaration;
@@ -2065,6 +2137,22 @@ mod tests {
 				true_branch: Box::new(normalize_expr(*true_branch)),
 			}),
 			Expr::Text(TextLiteral { value, .. }) => Expr::Text(TextLiteral {
+				position: 0,
+				value,
+			}),
+			Expr::Time(TimeLiteral { value, .. }) => Expr::Time(TimeLiteral {
+				position: 0,
+				value,
+			}),
+			Expr::TimeTz(TimeTzLiteral { value, .. }) => Expr::TimeTz(TimeTzLiteral {
+				position: 0,
+				value,
+			}),
+			Expr::Timestamp(TimestampLiteral { value, .. }) => Expr::Timestamp(TimestampLiteral {
+				position: 0,
+				value,
+			}),
+			Expr::TimestampTz(TimestampTzLiteral { value, .. }) => Expr::TimestampTz(TimestampTzLiteral {
 				position: 0,
 				value,
 			}),
@@ -4675,6 +4763,17 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_time_literal() {
+		assert_eq!(
+			parse("@12:34:56.98765"),
+			Expr::Time(TimeLiteral {
+				position: 0,
+				value: crate::value::Time::from_literal("@12:34:56.98765").unwrap(),
+			})
+		);
+	}
+
+	#[test]
 	fn parses_time_related_variable_declarations() {
 		assert_eq!(
 			parse_program("var a: time; var b: timetz; var c: timestamp; var d: timestamptz;"),
@@ -4714,6 +4813,39 @@ mod tests {
 				],
 				with_declarations: vec![],
 			}
+		);
+	}
+
+	#[test]
+	fn parses_timestamp_literal() {
+		assert_eq!(
+			parse("@2019-11-28T05:19:03"),
+			Expr::Timestamp(TimestampLiteral {
+				position: 0,
+				value: crate::value::Timestamp::from_literal("@2019-11-28T05:19:03").unwrap(),
+			})
+		);
+	}
+
+	#[test]
+	fn parses_timestamptz_literal() {
+		assert_eq!(
+			parse("@2009-01-09T13:47Z"),
+			Expr::TimestampTz(TimestampTzLiteral {
+				position: 0,
+				value: crate::value::TimestampTz::from_literal("@2009-01-09T13:47Z").unwrap(),
+			})
+		);
+	}
+
+	#[test]
+	fn parses_timetz_literal() {
+		assert_eq!(
+			parse("@11:22:33+04:30"),
+			Expr::TimeTz(TimeTzLiteral {
+				position: 0,
+				value: crate::value::TimeTz::from_literal("@11:22:33+04:30").unwrap(),
+			})
 		);
 	}
 

@@ -623,6 +623,22 @@ impl VirtualMachine {
 				self.stack.push(Value::Text(value.clone()));
 				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::PushTime(value) => {
+				self.stack.push(Value::Time(*value));
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::PushTimeTz(value) => {
+				self.stack.push(Value::TimeTz(*value));
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::PushTimestamp(value) => {
+				self.stack.push(Value::Timestamp(*value));
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::PushTimestampTz(value) => {
+				self.stack.push(Value::TimestampTz(*value));
+				Ok(ExecutionOutcome::Continue(None))
+			}
 			Instruction::Return => Ok(ExecutionOutcome::Return(Some(self.pop_value(instruction_index)?))),
 			Instruction::ReturnVoid => Ok(ExecutionOutcome::Return(None)),
 			Instruction::Subtract => {

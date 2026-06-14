@@ -111,7 +111,7 @@ impl Lexer {
 		}
 
 		if next == '@' {
-			let (kind, lexeme) = self.lex_date_literal()?;
+			let (kind, lexeme) = self.lex_temporal_literal()?;
 			let end = self.position;
 
 			return Ok(Some(Token {
@@ -303,28 +303,6 @@ impl Lexer {
 		let next = self.peek_char()?;
 		self.position += next.len_utf8();
 		Some(next)
-	}
-
-	fn lex_date_literal(&mut self) -> Result<(TokenKind, String), LexError> {
-		let start = self.position;
-		self.advance_char();
-
-		let mut digit_count = 0;
-		while self.peek_char().is_some_and(|next| next.is_ascii_digit() || next == '-') {
-			if self.peek_char().unwrap().is_ascii_digit() {
-				digit_count += 1;
-			}
-			self.advance_char();
-		}
-
-		if digit_count == 0 {
-			return Err(LexError {
-				position: start,
-				message: String::from("Expected a date literal after `@`."),
-			});
-		}
-
-		Ok((TokenKind::DateLiteral, self.source.as_str()[start..self.position].to_string()))
 	}
 
 	fn lex_digit_sequence(&mut self) {
@@ -561,6 +539,30 @@ impl Lexer {
 			position: start,
 			message: String::from("Unterminated string literal."),
 		})
+	}
+
+	fn lex_temporal_literal(&mut self) -> Result<(TokenKind, String), LexError> {
+		let start = self.position;
+		self.advance_char();
+
+		let mut digit_count = 0;
+		while self.peek_char().is_some_and(|next| {
+			next.is_ascii_digit() || matches!(next, '-' | ':' | '.' | 'T' | 'Z' | '+' )
+		}) {
+			if self.peek_char().unwrap().is_ascii_digit() {
+				digit_count += 1;
+			}
+			self.advance_char();
+		}
+
+		if digit_count == 0 {
+			return Err(LexError {
+				position: start,
+				message: String::from("Expected a date/time literal after `@`."),
+			});
+		}
+
+		Ok((TokenKind::DateLiteral, self.source.as_str()[start..self.position].to_string()))
 	}
 
 	fn line_character_count_including(&self, position: usize) -> usize {
@@ -1215,6 +1217,19 @@ mod tests {
 		assert_eq!(tokens[0].kind, TokenKind::StringLiteral);
 		assert_eq!(tokens[0].lexeme, "hello\nworld");
 		assert_eq!(tokens[1].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
+	fn tokenizes_time_related_temporal_literals() {
+		for source in ["@12:34", "@11:22:33+04:30", "@2019-11-28T05:19:03", "@2009-01-09T13:47Z"] {
+			let mut lexer = Lexer::new(SourceText::new(source));
+			let tokens = lexer.tokenize().unwrap();
+
+			assert_eq!(tokens.len(), 2);
+			assert_eq!(tokens[0].kind, TokenKind::DateLiteral);
+			assert_eq!(tokens[0].lexeme, source);
+			assert_eq!(tokens[1].kind, TokenKind::EndOfFile);
+		}
 	}
 
 	#[test]

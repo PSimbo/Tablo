@@ -126,6 +126,10 @@ pub enum Expr {
 	Range(RangeExpr),
 	Ternary(TernaryExpr),
 	Text(TextLiteral),
+	Time(TimeLiteral),
+	TimeTz(TimeTzLiteral),
+	Timestamp(TimestampLiteral),
+	TimestampTz(TimestampTzLiteral),
 	Unary(UnaryExpr),
 }
 
@@ -478,6 +482,30 @@ pub struct TextLiteral {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimeLiteral {
+	pub position: usize,
+	pub value: crate::value::Time,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimeTzLiteral {
+	pub position: usize,
+	pub value: crate::value::TimeTz,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimestampLiteral {
+	pub position: usize,
+	pub value: crate::value::Timestamp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimestampTzLiteral {
+	pub position: usize,
+	pub value: crate::value::TimestampTz,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UnaryExpr {
 	pub operand: Box<Expr>,
 	pub operator: UnaryOperator,
@@ -527,6 +555,10 @@ impl Expr {
 			Expr::Range(expression) => expression.position,
 			Expr::Ternary(expression) => expression.position,
 			Expr::Text(expression) => expression.position,
+			Expr::Time(expression) => expression.position,
+			Expr::TimeTz(expression) => expression.position,
+			Expr::Timestamp(expression) => expression.position,
+			Expr::TimestampTz(expression) => expression.position,
 			Expr::Unary(expression) => expression.position,
 		}
 	}

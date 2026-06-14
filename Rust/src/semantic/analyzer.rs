@@ -1298,6 +1298,10 @@ impl SemanticAnalyzer {
 				self.infer_ternary_result_type(&true_type, &false_type, *position)
 			}
 			Expr::Text(_) => Ok(DataType::Text),
+			Expr::Time(_) => Ok(DataType::Time),
+			Expr::TimeTz(_) => Ok(DataType::TimeTz),
+			Expr::Timestamp(_) => Ok(DataType::Timestamp),
+			Expr::TimestampTz(_) => Ok(DataType::TimestampTz),
 			Expr::Unary(UnaryExpr { operand, operator, .. }) => {
 				let operand_type = self.infer_expression_type(operand)?;
 				let operand_type = operand_type.without_nullability().clone();
@@ -1473,6 +1477,10 @@ impl SemanticAnalyzer {
 			Expr::Integer(_) => Ok(DataType::Int),
 			Expr::Null(_) => Ok(DataType::Null),
 			Expr::Text(_) => Ok(DataType::Text),
+			Expr::Time(_) => Ok(DataType::Time),
+			Expr::TimeTz(_) => Ok(DataType::TimeTz),
+			Expr::Timestamp(_) => Ok(DataType::Timestamp),
+			Expr::TimestampTz(_) => Ok(DataType::TimestampTz),
 			Expr::Unary(UnaryExpr { operand, operator, .. }) => {
 				let operand_type = self.infer_query_expression_type(operand, table)?;
 
@@ -2009,6 +2017,10 @@ impl SemanticAnalyzer {
 			}
 			Expr::Integer(integer) => Ok(QueryExpr::Literal(QueryLiteral::Integer(integer.value))),
 			Expr::Text(text) => Ok(QueryExpr::Literal(QueryLiteral::Text(text.value.clone()))),
+			Expr::Time(time) => Ok(QueryExpr::Literal(QueryLiteral::Time(time.value))),
+			Expr::TimeTz(time) => Ok(QueryExpr::Literal(QueryLiteral::TimeTz(time.value))),
+			Expr::Timestamp(timestamp) => Ok(QueryExpr::Literal(QueryLiteral::Timestamp(timestamp.value))),
+			Expr::TimestampTz(timestamp) => Ok(QueryExpr::Literal(QueryLiteral::TimestampTz(timestamp.value))),
 			Expr::Unary(UnaryExpr { operand, operator, .. }) => Ok(QueryExpr::Unary(QueryUnaryExpr {
 				operand: Box::new(self.lower_query_expression(operand, table, backend)?),
 				operator: match operator {
@@ -2581,7 +2593,16 @@ impl SemanticAnalyzer {
 				}
 				Ok(())
 			}
-			Expr::Boolean(_) | Expr::Date(_) | Expr::Decimal(_) | Expr::Integer(_) | Expr::Null(_) | Expr::Text(_) => Ok(()),
+			Expr::Boolean(_)
+			| Expr::Date(_)
+			| Expr::Decimal(_)
+			| Expr::Integer(_)
+			| Expr::Null(_)
+			| Expr::Text(_)
+			| Expr::Time(_)
+			| Expr::TimeTz(_)
+			| Expr::Timestamp(_)
+			| Expr::TimestampTz(_) => Ok(()),
 			Expr::ObjectConstruction(construction) => {
 				for field in &construction.fields {
 					self.validate_literal_expression(&field.value)?;

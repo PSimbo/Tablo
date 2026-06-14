@@ -5,6 +5,10 @@ use crate::builtins::BuiltInFunction;
 use crate::schema::DatabaseBackend;
 use crate::value::Date;
 use crate::value::Decimal;
+use crate::value::Time;
+use crate::value::TimeTz;
+use crate::value::Timestamp;
+use crate::value::TimestampTz;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LoweredBackendQuery {
@@ -47,6 +51,10 @@ pub enum QueryLiteral {
 	Decimal(Decimal),
 	Integer(i64),
 	Text(String),
+	Time(Time),
+	TimeTz(TimeTz),
+	Timestamp(Timestamp),
+	TimestampTz(TimestampTz),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -414,6 +422,10 @@ fn lower_query_expr_sqlite(expression: &QueryExpr, parameters: &mut Vec<SqlParam
 		QueryExpr::Literal(QueryLiteral::Decimal(value)) => value.to_string(),
 		QueryExpr::Literal(QueryLiteral::Integer(value)) => value.to_string(),
 		QueryExpr::Literal(QueryLiteral::Text(value)) => quote_text_literal(value),
+		QueryExpr::Literal(QueryLiteral::Time(value)) => quote_text_literal(&value.to_string()),
+		QueryExpr::Literal(QueryLiteral::TimeTz(value)) => quote_text_literal(&value.to_string()),
+		QueryExpr::Literal(QueryLiteral::Timestamp(value)) => quote_text_literal(&value.to_string()),
+		QueryExpr::Literal(QueryLiteral::TimestampTz(value)) => quote_text_literal(&value.to_string()),
 		QueryExpr::Parameter(parameter) => {
 			let index = parameters.len() as u32 + 1;
 			parameters.push(SqlParameter {

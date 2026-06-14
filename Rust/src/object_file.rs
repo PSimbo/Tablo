@@ -29,8 +29,12 @@ const MAGIC_BYTES: [u8; 4] = *b"TBO0";
 const FORMAT_VERSION: u16 = 1;
 const OPCODE_ADD: u8 = 1;
 const OPCODE_AND: u8 = 2;
+const OPCODE_CALL: u8 = 30;
+const OPCODE_CALL_BUILT_IN: u8 = 36;
 const OPCODE_DIVIDE: u8 = 3;
+const OPCODE_DUP2: u8 = 37;
 const OPCODE_EQUAL: u8 = 4;
+const OPCODE_EXECUTE_QUERY: u8 = 44;
 const OPCODE_GREATER_THAN: u8 = 5;
 const OPCODE_GREATER_THAN_OR_EQUAL: u8 = 6;
 const OPCODE_ITER_HAS_NEXT: u8 = 7;
@@ -40,45 +44,45 @@ const OPCODE_JUMP: u8 = 10;
 const OPCODE_JUMP_IF_FALSE: u8 = 11;
 const OPCODE_LESS_THAN: u8 = 12;
 const OPCODE_LESS_THAN_OR_EQUAL: u8 = 13;
+const OPCODE_LOAD_FIELD: u8 = 41;
+const OPCODE_LOAD_FIELD_PATH: u8 = 42;
+const OPCODE_LOAD_INDEX: u8 = 34;
 const OPCODE_LOAD_LOCAL: u8 = 14;
 const OPCODE_LOAD_REFERENCE: u8 = 15;
+const OPCODE_MAKE_ARRAY: u8 = 33;
+const OPCODE_MAKE_OBJECT: u8 = 40;
+const OPCODE_MAKE_RANGE: u8 = 38;
+const OPCODE_MAKE_STEPPED_RANGE: u8 = 39;
 const OPCODE_MODULO: u8 = 16;
 const OPCODE_MULTIPLY: u8 = 17;
+const OPCODE_NEGATE: u8 = 23;
+const OPCODE_NOT: u8 = 25;
+const OPCODE_NOT_EQUAL: u8 = 24;
+const OPCODE_OR: u8 = 26;
+const OPCODE_POP: u8 = 28;
 const OPCODE_PUSH_BOOLEAN: u8 = 18;
-const OPCODE_PUSH_DATE: u8 = 46;
 const OPCODE_PUSH_CURRENT_DATE: u8 = 47;
 const OPCODE_PUSH_CURRENT_TIME: u8 = 49;
-const OPCODE_PUSH_CURRENT_TIME_TZ: u8 = 50;
 const OPCODE_PUSH_CURRENT_TIMESTAMP: u8 = 51;
 const OPCODE_PUSH_CURRENT_TIMESTAMP_TZ: u8 = 52;
+const OPCODE_PUSH_CURRENT_TIME_TZ: u8 = 50;
+const OPCODE_PUSH_DATE: u8 = 46;
 const OPCODE_PUSH_DECIMAL: u8 = 19;
 const OPCODE_PUSH_ENUM_VALUE: u8 = 48;
 const OPCODE_PUSH_INTEGER: u8 = 20;
-const OPCODE_STORE_LOCAL: u8 = 21;
-const OPCODE_SUBTRACT: u8 = 22;
-const OPCODE_NEGATE: u8 = 23;
-const OPCODE_NOT_EQUAL: u8 = 24;
-const OPCODE_NOT: u8 = 25;
-const OPCODE_OR: u8 = 26;
-const OPCODE_XOR: u8 = 27;
-const OPCODE_POP: u8 = 28;
+const OPCODE_PUSH_NULL: u8 = 45;
 const OPCODE_PUSH_TEXT: u8 = 29;
-const OPCODE_CALL: u8 = 30;
+const OPCODE_PUSH_TIME: u8 = 53;
+const OPCODE_PUSH_TIMESTAMP: u8 = 55;
+const OPCODE_PUSH_TIMESTAMP_TZ: u8 = 56;
+const OPCODE_PUSH_TIME_TZ: u8 = 54;
 const OPCODE_RETURN: u8 = 31;
 const OPCODE_RETURN_VOID: u8 = 32;
-const OPCODE_MAKE_ARRAY: u8 = 33;
-const OPCODE_LOAD_INDEX: u8 = 34;
-const OPCODE_STORE_INDEX: u8 = 35;
-const OPCODE_CALL_BUILT_IN: u8 = 36;
-const OPCODE_DUP2: u8 = 37;
-const OPCODE_MAKE_RANGE: u8 = 38;
-const OPCODE_MAKE_STEPPED_RANGE: u8 = 39;
-const OPCODE_MAKE_OBJECT: u8 = 40;
-const OPCODE_LOAD_FIELD: u8 = 41;
-const OPCODE_LOAD_FIELD_PATH: u8 = 42;
 const OPCODE_STORE_FIELD_PATH: u8 = 43;
-const OPCODE_EXECUTE_QUERY: u8 = 44;
-const OPCODE_PUSH_NULL: u8 = 45;
+const OPCODE_STORE_INDEX: u8 = 35;
+const OPCODE_STORE_LOCAL: u8 = 21;
+const OPCODE_SUBTRACT: u8 = 22;
+const OPCODE_XOR: u8 = 27;
 const QUERY_KIND_SQL: u8 = 1;
 const SQL_DIALECT_SQLITE: u8 = 1;
 const SQL_RESULT_INTEGER_SCALAR: u8 = 1;
@@ -458,6 +462,22 @@ impl<'a> ObjectFileReader<'a> {
 				offset: self.offset.saturating_sub(6),
 				message,
 			})?)),
+			OPCODE_PUSH_TIME => Ok(Instruction::PushTime(crate::value::Time::from_sqlite_text(&self.read_string()?).map_err(|message| ObjectFileError {
+				offset: self.offset,
+				message,
+			})?)),
+			OPCODE_PUSH_TIME_TZ => Ok(Instruction::PushTimeTz(crate::value::TimeTz::from_sqlite_text(&self.read_string()?).map_err(|message| ObjectFileError {
+				offset: self.offset,
+				message,
+			})?)),
+			OPCODE_PUSH_TIMESTAMP => Ok(Instruction::PushTimestamp(crate::value::Timestamp::from_sqlite_text(&self.read_string()?).map_err(|message| ObjectFileError {
+				offset: self.offset,
+				message,
+			})?)),
+			OPCODE_PUSH_TIMESTAMP_TZ => Ok(Instruction::PushTimestampTz(crate::value::TimestampTz::from_sqlite_text(&self.read_string()?).map_err(|message| ObjectFileError {
+				offset: self.offset,
+				message,
+			})?)),
 			OPCODE_PUSH_DECIMAL => Ok(Instruction::PushDecimal(self.read_decimal()?)),
 			OPCODE_PUSH_ENUM_VALUE => Ok(Instruction::PushEnumValue {
 				backing_value: self.read_constant_value()?,
@@ -796,6 +816,30 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.extend_from_slice(&value.year.to_le_bytes());
 			bytes.push(value.month);
 			bytes.push(value.day);
+		}
+		Instruction::PushTime(value) => {
+			bytes.push(OPCODE_PUSH_TIME);
+			let text = value.to_string();
+			bytes.extend_from_slice(&(text.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(text.as_bytes());
+		}
+		Instruction::PushTimeTz(value) => {
+			bytes.push(OPCODE_PUSH_TIME_TZ);
+			let text = value.to_string();
+			bytes.extend_from_slice(&(text.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(text.as_bytes());
+		}
+		Instruction::PushTimestamp(value) => {
+			bytes.push(OPCODE_PUSH_TIMESTAMP);
+			let text = value.to_string();
+			bytes.extend_from_slice(&(text.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(text.as_bytes());
+		}
+		Instruction::PushTimestampTz(value) => {
+			bytes.push(OPCODE_PUSH_TIMESTAMP_TZ);
+			let text = value.to_string();
+			bytes.extend_from_slice(&(text.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(text.as_bytes());
 		}
 		Instruction::PushDecimal(value) => {
 			bytes.push(OPCODE_PUSH_DECIMAL);

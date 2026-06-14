@@ -468,6 +468,11 @@ impl Time {
 		}
 	}
 
+	pub fn from_literal(literal: &str) -> Result<Self, String> {
+		let value = literal.strip_prefix('@').ok_or(String::from("Time literals must begin with `@`."))?;
+		parse_time_text(value, &format!("Invalid time literal `{literal}`."))
+	}
+
 	pub fn from_parts(hour: u8, minute: u8, second: u8, nanosecond: u32) -> Result<Self, String> {
 		let inner = time::Time::from_hms_nano(hour, minute, second, nanosecond)
 			.map_err(|_| String::from("Time components are out of range."))?;
@@ -518,6 +523,13 @@ impl TimeTz {
 				inner: now.time(),
 			},
 		}
+	}
+
+	pub fn from_literal(literal: &str) -> Result<Self, String> {
+		let value = literal.strip_prefix('@').ok_or(String::from("Time literals must begin with `@`."))?;
+		let (time_text, offset_minutes) = parse_offset_suffix(value, &format!("Invalid timetz literal `{literal}`."))?;
+		let time = parse_time_text(time_text, &format!("Invalid timetz literal `{literal}`."))?;
+		Self::from_parts(time, offset_minutes)
 	}
 
 	pub fn from_parts(time: Time, offset_minutes: i16) -> Result<Self, String> {
@@ -597,6 +609,15 @@ impl Timestamp {
 		self.date
 	}
 
+	pub fn from_literal(literal: &str) -> Result<Self, String> {
+		let value = literal.strip_prefix('@').ok_or(String::from("Timestamp literals must begin with `@`."))?;
+		let (date_text, time_text) = split_timestamp_text(value, &format!("Invalid timestamp literal `{literal}`."))?;
+		Ok(Self {
+			date: Date::from_sqlite_text(date_text)?,
+			time: parse_time_text(time_text, &format!("Invalid timestamp literal `{literal}`."))?,
+		})
+	}
+
 	pub fn from_parts(date: Date, time: Time) -> Self {
 		Self {
 			date,
@@ -647,6 +668,13 @@ impl TimestampTz {
 				},
 			},
 		}
+	}
+
+	pub fn from_literal(literal: &str) -> Result<Self, String> {
+		let value = literal.strip_prefix('@').ok_or(String::from("Timestamp literals must begin with `@`."))?;
+		let (timestamp_text, offset_minutes) = parse_offset_suffix(value, &format!("Invalid timestamptz literal `{literal}`."))?;
+		let timestamp = Timestamp::from_sqlite_text(timestamp_text)?;
+		Self::from_parts(timestamp, offset_minutes)
 	}
 
 	pub fn from_parts(timestamp: Timestamp, offset_minutes: i16) -> Result<Self, String> {

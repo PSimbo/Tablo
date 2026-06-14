@@ -2444,10 +2444,24 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_time_literal_source_text() {
+		let result = evaluate_snippet("@12:34:56.98765").unwrap();
+
+		assert_eq!(result, Some(Value::Time(crate::value::Time::from_literal("@12:34:56.98765").unwrap())));
+	}
+
+	#[test]
 	fn runs_time_variable_without_initializer_with_time_default() {
 		let result = evaluate_snippet("var value: time;\nvalue").unwrap();
 
 		assert!(matches!(result, Some(Value::Time(_))));
+	}
+
+	#[test]
+	fn runs_timestamp_literal_source_text() {
+		let result = evaluate_snippet("@2019-11-28T05:19:03").unwrap();
+
+		assert_eq!(result, Some(Value::Timestamp(crate::value::Timestamp::from_literal("@2019-11-28T05:19:03").unwrap())));
 	}
 
 	#[test]
@@ -2465,10 +2479,24 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_timestamptz_literal_source_text() {
+		let result = evaluate_snippet("@2009-01-09T13:47Z").unwrap();
+
+		assert_eq!(result, Some(Value::TimestampTz(crate::value::TimestampTz::from_literal("@2009-01-09T13:47Z").unwrap())));
+	}
+
+	#[test]
 	fn runs_timestamptz_variable_without_initializer_with_timestamptz_default() {
 		let result = evaluate_snippet("var value: timestamptz;\nvalue").unwrap();
 
 		assert!(matches!(result, Some(Value::TimestampTz(_))));
+	}
+
+	#[test]
+	fn runs_timetz_literal_source_text() {
+		let result = evaluate_snippet("@11:22:33+04:30").unwrap();
+
+		assert_eq!(result, Some(Value::TimeTz(crate::value::TimeTz::from_literal("@11:22:33+04:30").unwrap())));
 	}
 
 	#[test]

@@ -29,6 +29,10 @@ use crate::ast::ReturnStatement;
 use crate::ast::Statement;
 use crate::ast::TernaryExpr;
 use crate::ast::TextLiteral;
+use crate::ast::TimeLiteral;
+use crate::ast::TimeTzLiteral;
+use crate::ast::TimestampLiteral;
+use crate::ast::TimestampTzLiteral;
 use crate::ast::UnaryExpr;
 use crate::ast::VariableDeclaration;
 use crate::ast::WhileStatement;
@@ -454,6 +458,18 @@ impl Compiler {
 			}
 			Expr::Text(TextLiteral { value, .. }) => {
 				self.emit(emission, Instruction::PushText(value.clone()), expression.position());
+			}
+			Expr::Time(TimeLiteral { value, .. }) => {
+				self.emit(emission, Instruction::PushTime(*value), expression.position());
+			}
+			Expr::TimeTz(TimeTzLiteral { value, .. }) => {
+				self.emit(emission, Instruction::PushTimeTz(*value), expression.position());
+			}
+			Expr::Timestamp(TimestampLiteral { value, .. }) => {
+				self.emit(emission, Instruction::PushTimestamp(*value), expression.position());
+			}
+			Expr::TimestampTz(TimestampTzLiteral { value, .. }) => {
+				self.emit(emission, Instruction::PushTimestampTz(*value), expression.position());
 			}
 			Expr::Unary(UnaryExpr { operand, operator, .. }) => {
 				self.compile_into(operand, semantic_program, emission);
