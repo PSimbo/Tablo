@@ -1510,7 +1510,7 @@ impl Parser {
 			}
 
 			let operator = self.next().unwrap();
-			left = self.parse_infix(left, operator, next_binding_power, false)?;
+			left = self.parse_query_infix(left, operator, next_binding_power)?;
 		}
 
 		if let Some(token) = self.current()
@@ -1522,6 +1522,174 @@ impl Parser {
 		}
 
 		Ok(left)
+	}
+
+	fn parse_query_index_expression(&mut self, array: Expr, start: usize) -> Result<Expr, ParseError> {
+		let index = self.parse_query_expression_with_binding_power(BindingPower::Default)?;
+		self.expect_token(TokenKind::RightBracket, "Expected `]` to close array index expression.")?;
+
+		Ok(Expr::Index(IndexExpr {
+			array: Box::new(array),
+			index: Box::new(index),
+			position: start,
+		}))
+	}
+
+	fn parse_query_infix(
+		&mut self,
+		left: Expr,
+		operator: Token,
+		binding_power: BindingPower,
+	) -> Result<Expr, ParseError> {
+		match operator.kind {
+			TokenKind::AndKeyword => {
+				let right = self.parse_query_expression_with_binding_power(binding_power)?;
+
+				Ok(Expr::Binary(BinaryExpr {
+					left: Box::new(left),
+					operator: BinaryOperator::And,
+					position: operator.start,
+					right: Box::new(right),
+				}))
+			}
+			TokenKind::Asterisk => {
+				let right = self.parse_query_expression_with_binding_power(binding_power)?;
+
+				Ok(Expr::Binary(BinaryExpr {
+					left: Box::new(left),
+					operator: BinaryOperator::Multiply,
+					position: operator.start,
+					right: Box::new(right),
+				}))
+			}
+			TokenKind::BangEqual => {
+				let right = self.parse_query_expression_with_binding_power(binding_power)?;
+
+				Ok(Expr::Binary(BinaryExpr {
+					left: Box::new(left),
+					operator: BinaryOperator::NotEqual,
+					position: operator.start,
+					right: Box::new(right),
+				}))
+			}
+			TokenKind::Dash => {
+				let right = self.parse_query_expression_with_binding_power(binding_power)?;
+
+				Ok(Expr::Binary(BinaryExpr {
+					left: Box::new(left),
+					operator: BinaryOperator::Subtract,
+					position: operator.start,
+					right: Box::new(right),
+				}))
+			}
+			TokenKind::Dot => self.parse_field_access_expression(left, operator.start),
+			TokenKind::EqualEqual => {
+				let right = self.parse_query_expression_with_binding_power(binding_power)?;
+
+				Ok(Expr::Binary(BinaryExpr {
+					left: Box::new(left),
+					operator: BinaryOperator::Equal,
+					position: operator.start,
+					right: Box::new(right),
+				}))
+			}
+			TokenKind::ForwardSlash => {
+				let right = self.parse_query_expression_with_binding_power(binding_power)?;
+
+				Ok(Expr::Binary(BinaryExpr {
+					left: Box::new(left),
+					operator: BinaryOperator::Divide,
+					position: operator.start,
+					right: Box::new(right),
+				}))
+			}
+			TokenKind::GreaterThan => {
+				let right = self.parse_query_expression_with_binding_power(binding_power)?;
+
+				Ok(Expr::Binary(BinaryExpr {
+					left: Box::new(left),
+					operator: BinaryOperator::GreaterThan,
+					position: operator.start,
+					right: Box::new(right),
+				}))
+			}
+			TokenKind::GreaterThanOrEqual => {
+				let right = self.parse_query_expression_with_binding_power(binding_power)?;
+
+				Ok(Expr::Binary(BinaryExpr {
+					left: Box::new(left),
+					operator: BinaryOperator::GreaterThanOrEqual,
+					position: operator.start,
+					right: Box::new(right),
+				}))
+			}
+			TokenKind::LeftBracket => self.parse_query_index_expression(left, operator.start),
+			TokenKind::LeftParenthesis => self.parse_call_expression(left, operator.start),
+			TokenKind::LessThan => {
+				let right = self.parse_query_expression_with_binding_power(binding_power)?;
+
+				Ok(Expr::Binary(BinaryExpr {
+					left: Box::new(left),
+					operator: BinaryOperator::LessThan,
+					position: operator.start,
+					right: Box::new(right),
+				}))
+			}
+			TokenKind::LessThanOrEqual => {
+				let right = self.parse_query_expression_with_binding_power(binding_power)?;
+
+				Ok(Expr::Binary(BinaryExpr {
+					left: Box::new(left),
+					operator: BinaryOperator::LessThanOrEqual,
+					position: operator.start,
+					right: Box::new(right),
+				}))
+			}
+			TokenKind::OrKeyword => {
+				let right = self.parse_query_expression_with_binding_power(binding_power)?;
+
+				Ok(Expr::Binary(BinaryExpr {
+					left: Box::new(left),
+					operator: BinaryOperator::Or,
+					position: operator.start,
+					right: Box::new(right),
+				}))
+			}
+			TokenKind::Percent => {
+				let right = self.parse_query_expression_with_binding_power(binding_power)?;
+
+				Ok(Expr::Binary(BinaryExpr {
+					left: Box::new(left),
+					operator: BinaryOperator::Modulo,
+					position: operator.start,
+					right: Box::new(right),
+				}))
+			}
+			TokenKind::Plus => {
+				let right = self.parse_query_expression_with_binding_power(binding_power)?;
+
+				Ok(Expr::Binary(BinaryExpr {
+					left: Box::new(left),
+					operator: BinaryOperator::Add,
+					position: operator.start,
+					right: Box::new(right),
+				}))
+			}
+			TokenKind::XorKeyword => {
+				let right = self.parse_query_expression_with_binding_power(binding_power)?;
+
+				Ok(Expr::Binary(BinaryExpr {
+					left: Box::new(left),
+					operator: BinaryOperator::Xor,
+					position: operator.start,
+					right: Box::new(right),
+				}))
+			}
+			_ => Err(ParseError {
+				message: format!("Unexpected infix operator `{}`.", operator.lexeme),
+				position: operator.start,
+			}),
+		}
 	}
 
 	fn parse_range_expression(&mut self) -> Result<Expr, ParseError> {
@@ -2883,25 +3051,6 @@ mod tests {
 	}
 
 	#[test]
-	fn parses_compound_assignment_expression() {
-		assert_eq!(
-			parse("x += 1"),
-			Expr::Assignment(AssignmentExpr {
-				operator: AssignmentOperator::AddAssign,
-				position: 0,
-				target: AssignmentTarget::Identifier(IdentifierExpr {
-					name: String::from("x"),
-					position: 0,
-				}),
-				value: Box::new(Expr::Integer(IntegerLiteral {
-					position: 0,
-					value: 1,
-				})),
-			})
-		);
-	}
-
-	#[test]
 	fn parses_comparison_more_tightly_than_equality() {
 		assert_eq!(
 			parse("1 < 2 == true"),
@@ -2926,6 +3075,41 @@ mod tests {
 				})),
 			})
 		);
+	}
+
+	#[test]
+	fn parses_compound_assignment_expression() {
+		assert_eq!(
+			parse("x += 1"),
+			Expr::Assignment(AssignmentExpr {
+				operator: AssignmentOperator::AddAssign,
+				position: 0,
+				target: AssignmentTarget::Identifier(IdentifierExpr {
+					name: String::from("x"),
+					position: 0,
+				}),
+				value: Box::new(Expr::Integer(IntegerLiteral {
+					position: 0,
+					value: 1,
+				})),
+			})
+		);
+	}
+
+	#[test]
+	fn parses_compound_assignment_of_single_element_array_literal_inside_for_record_loop() {
+		let program = parse_program(
+			"if rec t = find first tablehead where LongDesc == 'Home Location' {\n    for rec c in codetable where TableNum == t.TableNum {\n        actualHome += [codetable.LongDesc];\n    }\n}"
+		);
+
+		assert!(matches!(program.statements.first(), Some(Statement::If(_))));
+	}
+
+	#[test]
+	fn parses_compound_assignment_of_single_element_array_literal_with_field_access() {
+		let program = parse_program("actualHome += [codetable.LongDesc];");
+
+		assert!(matches!(program.statements.first(), Some(Statement::Expression(_))));
 	}
 
 	#[test]
@@ -3253,6 +3437,15 @@ mod tests {
 				..
 			})
 		));
+	}
+
+	#[test]
+	fn parses_for_record_loop_with_compound_assignment_of_single_element_array_literal() {
+		let program = parse_program(
+			"for rec c in codetable where TableNum == t.TableNum {\n    actualHome += [codetable.LongDesc];\n}"
+		);
+
+		assert!(matches!(program.statements.first(), Some(Statement::ForRecord(_))));
 	}
 
 	#[test]
