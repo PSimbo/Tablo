@@ -1559,6 +1559,14 @@ Returns the date obtained by parsing `d`. If `d` cannot be parsed as a date then
 
 Returns the current date in the time-zone specified by `tz`.
 
+### `day(d: date): int`
+
+Returns the days component of `d`.
+
+### `day(t: timestamp): int`
+
+Returns the days component of `t`.
+
 ### `disp(fmt: text) void`
 
 Displays the `fmt` text in `stdout`. Note that no new line character is automatically added to the end of `fmt`.
@@ -1584,6 +1592,14 @@ Returns the `float` obtained by casting `v`. If `v` cannot be converted then the
 ### `float(v: text): float`
 
 Returns the `float` obtained by parsing `v`. If `v` cannot be parsed as a `float` then the function fails.
+
+### `hour(t: time): int`
+
+Returns the hours component of `t`.
+
+### `hour(t: timestamp): int`
+
+Returns the hours component of `t`.
 
 ### `ilike(v: text, pattern: text): bool`
 
@@ -1621,6 +1637,22 @@ Returns the greater of the two `int` values `a` and `b`.
 
 Returns the lesser of the two `int` values `a` and `b`.
 
+### `minute(t: time): int`
+
+Returns the minutes component of `t`.
+
+### `minute(t: timestamp): int`
+
+Returns the minutes component of `t`.
+
+### `month(d: date): int`
+
+Returns the months component of `d`. January is represented by a value of 1.
+
+### `month(t: timestamp): int`
+
+Returns the months component of `t`. January is represented by a value of 1.
+
 ### `lastof(v1: any, v2: any, ...): bool`
 
 Returns `true` when the current iteration of a grouped `for` loop is the last iteration of the group identified by the supplied grouping expression values. Otherwise returns `false`.
@@ -1642,6 +1674,14 @@ Returns `true` if `v` matches `pattern` according to Tablo's SQL-style wildcard 
 As with SQL's `LIKE` syntax, `%` matches zero or more characters and `_` matches exactly one character. Matching is against the entire string rather than an arbitrary substring.
 
 The `\` character is used to escape wildcard characters within the pattern. Therefore `\%` matches a literal percent sign, `\_` matches a literal underscore, and `\\` matches a literal backslash.
+
+### `second(t: time): int`
+
+Returns the seconds component of `t`.
+
+### `second(t: timestamp): int`
+
+Returns the seconds component of `t`.
 
 ### `split(str: text, by: text): [text]`
 
@@ -1750,6 +1790,14 @@ Returns the time `t` in time-zone `tz`.
 ### `trim(str: text): text`
 
 Trims whitespace from both ends of `str`.
+
+### `year(d: date): int`
+
+Returns the years component of `d`.
+
+### `year(t: timestamp): int`
+
+Returns the years component of `t`.
 
 Grammar
 -------

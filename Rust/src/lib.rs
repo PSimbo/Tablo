@@ -1246,6 +1246,17 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_day_month_year_built_ins() {
+		let result = evaluate_snippet("[day(@2025-06-14), month(@2025-06-14), year(@2025-06-14)]").unwrap();
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Integer(14),
+			Value::Integer(6),
+			Value::Integer(2025),
+		])));
+	}
+
+	#[test]
 	fn runs_decimal_backed_enum_source_text() {
 		let result = run(
 			"enum Rate: dec { Reduced: 0.05, Standard: 0.20 }\nfn Main(args: [text]) int { var rate: Rate = Rate.Standard; if (rate == Rate.Standard) { return 1; } return 0; }"
@@ -1519,6 +1530,17 @@ mod tests {
 		let _ = std::fs::remove_file(&output_path);
 
 		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
+	fn runs_hour_minute_second_built_ins() {
+		let result = evaluate_snippet("[hour(@12:34:56), minute(@12:34:56), second(@12:34:56)]").unwrap();
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Integer(12),
+			Value::Integer(34),
+			Value::Integer(56),
+		])));
 	}
 
 	#[test]
@@ -2397,6 +2419,27 @@ mod tests {
 		let _ = std::fs::remove_file(&database_path);
 
 		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
+	fn runs_temporal_component_built_ins_on_timestamp() {
+		let result = evaluate_snippet("[day(@2025-06-14T12:34:56), hour(@2025-06-14T12:34:56), second(@2025-06-14T12:34:56)]").unwrap();
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Integer(14),
+			Value::Integer(12),
+			Value::Integer(56),
+		])));
+	}
+
+	#[test]
+	fn runs_temporal_component_built_ins_on_timezoned_values() {
+		let result = evaluate_snippet("[hour(@11:22:33+04:30), day(@2009-01-09T13:47Z)]").unwrap();
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Integer(11),
+			Value::Integer(9),
+		])));
 	}
 
 	#[test]

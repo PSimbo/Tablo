@@ -6,17 +6,23 @@ pub enum BuiltInFunction {
 	Contains,
 	CountOf,
 	DateCast,
+	Day,
 	DecCast,
 	Disp,
 	Displn,
 	Exists,
+	Hour,
 	IndexOf,
 	IntCast,
 	Len,
 	Locked,
+	Minute,
+	Month,
+	Second,
 	Split,
 	TextCast,
 	Trim,
+	Year,
 }
 
 impl BuiltInFunction {
@@ -37,6 +43,12 @@ impl BuiltInFunction {
 			13 => Some(Self::CountOf),
 			14 => Some(Self::IndexOf),
 			15 => Some(Self::Split),
+			16 => Some(Self::Day),
+			17 => Some(Self::Month),
+			18 => Some(Self::Year),
+			19 => Some(Self::Hour),
+			20 => Some(Self::Minute),
+			21 => Some(Self::Second),
 			_ => None,
 		}
 	}
@@ -47,17 +59,23 @@ impl BuiltInFunction {
 			"contains" => Some(Self::Contains),
 			"countof" => Some(Self::CountOf),
 			"date" => Some(Self::DateCast),
+			"day" => Some(Self::Day),
 			"dec" => Some(Self::DecCast),
 			"disp" => Some(Self::Disp),
 			"displn" => Some(Self::Displn),
 			"exists" => Some(Self::Exists),
+			"hour" => Some(Self::Hour),
 			"indexof" => Some(Self::IndexOf),
 			"int" => Some(Self::IntCast),
 			"len" => Some(Self::Len),
 			"locked" => Some(Self::Locked),
+			"minute" => Some(Self::Minute),
+			"month" => Some(Self::Month),
+			"second" => Some(Self::Second),
 			"split" => Some(Self::Split),
 			"text" => Some(Self::TextCast),
 			"trim" => Some(Self::Trim),
+			"year" => Some(Self::Year),
 			_ => None,
 		}
 	}
@@ -79,6 +97,12 @@ impl BuiltInFunction {
 			Self::CountOf => 13,
 			Self::IndexOf => 14,
 			Self::Split => 15,
+			Self::Day => 16,
+			Self::Month => 17,
+			Self::Year => 18,
+			Self::Hour => 19,
+			Self::Minute => 20,
+			Self::Second => 21,
 		}
 	}
 
@@ -88,17 +112,23 @@ impl BuiltInFunction {
 			Self::Contains => "contains",
 			Self::CountOf => "countof",
 			Self::DateCast => "date",
+			Self::Day => "day",
 			Self::DecCast => "dec",
 			Self::Disp => "disp",
 			Self::Displn => "displn",
 			Self::Exists => "exists",
+			Self::Hour => "hour",
 			Self::IndexOf => "indexof",
 			Self::IntCast => "int",
 			Self::Len => "len",
 			Self::Locked => "locked",
+			Self::Minute => "minute",
+			Self::Month => "month",
+			Self::Second => "second",
 			Self::Split => "split",
 			Self::TextCast => "text",
 			Self::Trim => "trim",
+			Self::Year => "year",
 		}
 	}
 
@@ -136,6 +166,10 @@ impl BuiltInFunction {
 				}
 				_ => None,
 			},
+			Self::Day => match argument_types {
+				[arg] if matches!(arg.without_nullability(), DataType::Date | DataType::Timestamp | DataType::TimestampTz) => Some(DataType::Int),
+				_ => None,
+			},
 			Self::Disp | Self::Displn => match argument_types {
 				[arg] if matches!(arg.without_nullability(), DataType::Text) => Some(DataType::Void),
 				_ => None,
@@ -144,6 +178,10 @@ impl BuiltInFunction {
 				[arg] if matches!(arg.without_nullability(), DataType::RecordPointer(_)) => {
 					Some(DataType::Bool)
 				}
+				_ => None,
+			},
+			Self::Hour => match argument_types {
+				[arg] if matches!(arg.without_nullability(), DataType::Time | DataType::TimeTz | DataType::Timestamp | DataType::TimestampTz) => Some(DataType::Int),
 				_ => None,
 			},
 			Self::IndexOf => match argument_types {
@@ -168,6 +206,18 @@ impl BuiltInFunction {
 				}
 				_ => None,
 			},
+			Self::Minute => match argument_types {
+				[arg] if matches!(arg.without_nullability(), DataType::Time | DataType::TimeTz | DataType::Timestamp | DataType::TimestampTz) => Some(DataType::Int),
+				_ => None,
+			},
+			Self::Month => match argument_types {
+				[arg] if matches!(arg.without_nullability(), DataType::Date | DataType::Timestamp | DataType::TimestampTz) => Some(DataType::Int),
+				_ => None,
+			},
+			Self::Second => match argument_types {
+				[arg] if matches!(arg.without_nullability(), DataType::Time | DataType::TimeTz | DataType::Timestamp | DataType::TimestampTz) => Some(DataType::Int),
+				_ => None,
+			},
 			Self::Split => match argument_types {
 				[left, right]
 					if matches!(left.without_nullability(), DataType::Text)
@@ -180,23 +230,61 @@ impl BuiltInFunction {
 				[arg] if matches!(arg.without_nullability(), DataType::Text) => Some(DataType::Text),
 				_ => None,
 			},
+			Self::Year => match argument_types {
+				[arg] if matches!(arg.without_nullability(), DataType::Date | DataType::Timestamp | DataType::TimestampTz) => Some(DataType::Int),
+				_ => None,
+			},
 			Self::IntCast | Self::TextCast | Self::DecCast | Self::BoolCast | Self::DateCast => None,
 		}
 	}
 
 	pub fn supports_arity(self, argument_count: usize) -> bool {
 		match self {
-			Self::Contains | Self::CountOf | Self::IndexOf | Self::Split => argument_count == 2,
-			Self::Len | Self::Disp | Self::Displn | Self::Exists | Self::Locked
+			Self::Contains
+			| Self::CountOf
+			| Self::IndexOf
+			| Self::Split => argument_count == 2,
+			Self::BoolCast
+			| Self::DateCast
+			| Self::Day
+			| Self::DecCast
+			| Self::Disp
+			| Self::Displn
+			| Self::Exists
+			| Self::Hour
+			| Self::IntCast
+			| Self::Len
+			| Self::Locked
+			| Self::Minute
+			| Self::Month
+			| Self::Second
+			| Self::TextCast
 			| Self::Trim
-			| Self::IntCast | Self::TextCast | Self::DecCast | Self::BoolCast | Self::DateCast => argument_count == 1,
+			| Self::Year => argument_count == 1,
 		}
 	}
 
 	pub fn produces_runtime_value(self) -> bool {
 		match self {
-			Self::Len | Self::Contains | Self::CountOf | Self::Exists | Self::IndexOf | Self::Locked | Self::Split | Self::Trim
-			| Self::IntCast | Self::TextCast | Self::DecCast | Self::BoolCast | Self::DateCast => true,
+			Self::BoolCast
+			| Self::Contains
+			| Self::CountOf
+			| Self::DateCast
+			| Self::Day
+			| Self::DecCast
+			| Self::Exists
+			| Self::Hour
+			| Self::IndexOf
+			| Self::IntCast
+			| Self::Len
+			| Self::Locked
+			| Self::Minute
+			| Self::Month
+			| Self::Second
+			| Self::Split
+			| Self::TextCast
+			| Self::Trim
+			| Self::Year => true,
 			Self::Disp | Self::Displn => false,
 		}
 	}

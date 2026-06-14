@@ -1006,16 +1006,17 @@ impl VirtualMachine {
 					format!("Built-in function `countof` expects 2 argument(s), found {}.", arguments.len()),
 				)),
 			},
-			BuiltInFunction::Len => match arguments.as_slice() {
-				[Value::Array(values)] => Ok(Some(Value::Integer(values.len() as i64))),
-				[Value::Text(value)] => Ok(Some(Value::Integer(value.chars().count() as i64))),
+			BuiltInFunction::Day => match arguments.as_slice() {
+				[Value::Date(value)] => Ok(Some(Value::Integer(value.day as i64))),
+				[Value::Timestamp(value)] => Ok(Some(Value::Integer(value.date().day as i64))),
+				[Value::TimestampTz(value)] => Ok(Some(Value::Integer(value.timestamp().date().day as i64))),
 				[value] => Err(vm_error(
 					instruction_index,
-					format!("Built-in function `len` does not accept a `{}` value.", type_name(value)),
+					format!("Built-in function `day` does not accept a `{}` value.", type_name(value)),
 				)),
 				_ => Err(vm_error(
 					instruction_index,
-					format!("Built-in function `len` expects 1 argument(s), found {}.", arguments.len()),
+					format!("Built-in function `day` expects 1 argument(s), found {}.", arguments.len()),
 				)),
 			},
 			BuiltInFunction::Disp => match arguments.as_slice() {
@@ -1058,6 +1059,20 @@ impl VirtualMachine {
 					format!("Built-in function `exists` expects 1 argument(s), found {}.", arguments.len()),
 				)),
 			},
+			BuiltInFunction::Hour => match arguments.as_slice() {
+				[Value::Time(value)] => Ok(Some(Value::Integer(value.hour() as i64))),
+				[Value::TimeTz(value)] => Ok(Some(Value::Integer(value.time().hour() as i64))),
+				[Value::Timestamp(value)] => Ok(Some(Value::Integer(value.time().hour() as i64))),
+				[Value::TimestampTz(value)] => Ok(Some(Value::Integer(value.timestamp().time().hour() as i64))),
+				[value] => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `hour` does not accept a `{}` value.", type_name(value)),
+				)),
+				_ => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `hour` expects 1 argument(s), found {}.", arguments.len()),
+				)),
+			},
 			BuiltInFunction::IndexOf => match arguments.as_slice() {
 				[Value::Text(value), Value::Array(values)] => {
 					let index = values.iter()
@@ -1085,6 +1100,18 @@ impl VirtualMachine {
 					format!("Built-in function `indexof` expects 2 argument(s), found {}.", arguments.len()),
 				)),
 			},
+			BuiltInFunction::Len => match arguments.as_slice() {
+				[Value::Array(values)] => Ok(Some(Value::Integer(values.len() as i64))),
+				[Value::Text(value)] => Ok(Some(Value::Integer(value.chars().count() as i64))),
+				[value] => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `len` does not accept a `{}` value.", type_name(value)),
+				)),
+				_ => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `len` expects 1 argument(s), found {}.", arguments.len()),
+				)),
+			},
 			BuiltInFunction::Locked => match arguments.as_slice() {
 				[Value::RecordPointer(record)] => Ok(Some(Value::Boolean(record.locked))),
 				[value] => Err(vm_error(
@@ -1094,6 +1121,47 @@ impl VirtualMachine {
 				_ => Err(vm_error(
 					instruction_index,
 					format!("Built-in function `locked` expects 1 argument(s), found {}.", arguments.len()),
+				)),
+			},
+			BuiltInFunction::Minute => match arguments.as_slice() {
+				[Value::Time(value)] => Ok(Some(Value::Integer(value.minute() as i64))),
+				[Value::TimeTz(value)] => Ok(Some(Value::Integer(value.time().minute() as i64))),
+				[Value::Timestamp(value)] => Ok(Some(Value::Integer(value.time().minute() as i64))),
+				[Value::TimestampTz(value)] => Ok(Some(Value::Integer(value.timestamp().time().minute() as i64))),
+				[value] => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `minute` does not accept a `{}` value.", type_name(value)),
+				)),
+				_ => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `minute` expects 1 argument(s), found {}.", arguments.len()),
+				)),
+			},
+			BuiltInFunction::Month => match arguments.as_slice() {
+				[Value::Date(value)] => Ok(Some(Value::Integer(value.month as i64))),
+				[Value::Timestamp(value)] => Ok(Some(Value::Integer(value.date().month as i64))),
+				[Value::TimestampTz(value)] => Ok(Some(Value::Integer(value.timestamp().date().month as i64))),
+				[value] => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `month` does not accept a `{}` value.", type_name(value)),
+				)),
+				_ => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `month` expects 1 argument(s), found {}.", arguments.len()),
+				)),
+			},
+			BuiltInFunction::Second => match arguments.as_slice() {
+				[Value::Time(value)] => Ok(Some(Value::Integer(value.second() as i64))),
+				[Value::TimeTz(value)] => Ok(Some(Value::Integer(value.time().second() as i64))),
+				[Value::Timestamp(value)] => Ok(Some(Value::Integer(value.time().second() as i64))),
+				[Value::TimestampTz(value)] => Ok(Some(Value::Integer(value.timestamp().time().second() as i64))),
+				[value] => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `second` does not accept a `{}` value.", type_name(value)),
+				)),
+				_ => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `second` expects 1 argument(s), found {}.", arguments.len()),
 				)),
 			},
 			BuiltInFunction::Split => match arguments.as_slice() {
@@ -1130,6 +1198,19 @@ impl VirtualMachine {
 				_ => Err(vm_error(
 					instruction_index,
 					format!("Built-in function `trim` expects 1 argument(s), found {}.", arguments.len()),
+				)),
+			},
+			BuiltInFunction::Year => match arguments.as_slice() {
+				[Value::Date(value)] => Ok(Some(Value::Integer(value.year as i64))),
+				[Value::Timestamp(value)] => Ok(Some(Value::Integer(value.date().year as i64))),
+				[Value::TimestampTz(value)] => Ok(Some(Value::Integer(value.timestamp().date().year as i64))),
+				[value] => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `year` does not accept a `{}` value.", type_name(value)),
+				)),
+				_ => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `year` expects 1 argument(s), found {}.", arguments.len()),
 				)),
 			},
 			BuiltInFunction::IntCast
