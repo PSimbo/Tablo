@@ -735,6 +735,16 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_invalid_text_to_int_cast_at_runtime() {
+		let error = evaluate_snippet("int('abc')").unwrap_err();
+
+		assert_eq!(
+			error.to_string(),
+			"Runtime error: Built-in function `int` could not parse `abc` as an `int`.\nStack trace:\n  at <source>:1:4"
+		);
+	}
+
+	#[test]
 	fn rejects_len_with_non_array_argument_source_text() {
 		let error = evaluate_snippet("len(1)").unwrap_err();
 
@@ -1766,6 +1776,13 @@ mod tests {
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn runs_int_cast_from_text_source_text() {
+		let result = evaluate_snippet("int('42')").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(42)));
 	}
 
 	#[test]

@@ -1240,8 +1240,25 @@ impl VirtualMachine {
 					format!("Built-in function `year` expects 1 argument(s), found {}.", arguments.len()),
 				)),
 			},
-			BuiltInFunction::IntCast
-			| BuiltInFunction::TextCast
+			BuiltInFunction::IntCast => match arguments.as_slice() {
+				[Value::Enum(value)] => Ok(Some((*value.backing_value).clone())),
+				[Value::Text(value)] => {
+					let parsed = value.parse::<i64>().map_err(|_| vm_error(
+						instruction_index,
+						format!("Built-in function `int` could not parse `{value}` as an `int`."),
+					))?;
+					Ok(Some(Value::Integer(parsed)))
+				}
+				[value] => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `int` does not accept a `{}` value.", type_name(value)),
+				)),
+				_ => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `int` expects 1 argument(s), found {}.", arguments.len()),
+				)),
+			},
+			BuiltInFunction::TextCast
 			| BuiltInFunction::DecCast
 			| BuiltInFunction::BoolCast
 			| BuiltInFunction::DateCast => match arguments.as_slice() {
