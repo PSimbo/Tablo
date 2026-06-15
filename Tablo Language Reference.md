@@ -1593,6 +1593,14 @@ Returns the `float` obtained by casting `v`. If `v` cannot be converted then the
 
 Returns the `float` obtained by parsing `v`. If `v` cannot be parsed as a `float` then the function fails.
 
+### `format(v: dec, pattern: text): text`
+
+Returns the string representation of `v` formatted according to `pattern`. See the "Numeric Format Strings" section.
+
+### `format(v: int, pattern: text): text`
+
+Returns the string representation of `v` formatted according to `pattern`. See the "Numeric Format Strings" section.
+
 ### `hour(t: time): int`
 
 Returns the hours component of `t`.
@@ -1798,6 +1806,86 @@ Returns the years component of `d`.
 ### `year(t: timestamp): int`
 
 Returns the years component of `t`.
+
+Numeric Format Strings
+----------------------
+
+The `format(...)` built-in functions use a compact format-string syntax for numeric values.
+
+The first implementation supports:
+
+- `int`
+- `dec`
+
+Date/time formatting is specified separately and is not part of this numeric format-string syntax.
+
+The current format-string grammar is:
+
+~~~
+decimalFormat = [ signFlag ] padding decimalPattern fractionalPart padding
+fractionalPart = decimalPoint fractionalDigits
+integerFormat = [ signFlag ] padding ( decimalPattern | hexLowerPattern | hexUpperPattern | octalPattern )
+signFlag = "+"
+padding = { "_" }
+decimalPattern = [ [ decimalDigits ] groupSeparator ] decimalDigits
+hexLowerPattern = [ [ hexLowerDigits ] groupSeparator ] hexLowerDigits
+hexUpperPattern = [ [ hexUpperDigits ] groupSeparator ] hexUpperDigits
+octalPattern = [ [ octalDigits ] groupSeparator ] octalDigits
+decimalDigits = "1" { "1" }
+hexLowerDigits = "x" { "x" }
+hexUpperDigits = "X" { "X" }
+octalDigits = "o" { "o" }
+fractionalDigits = { "0" }
+decimalPoint = "." | ","
+groupSeparator = "," | "." | " " | "-"
+~~~
+
+The grammar should be read as follows:
+
+- `+` requests an explicit sign for non-negative values
+- `_` represents a space-padding position
+- `1` represents a mandatory decimal whole digit
+- `x`, `X`, and `o` represent mandatory hexadecimal or octal whole digits
+- `0` represents a mandatory fractional decimal digit
+- if the decimal point is the final character in the format string then the number of fractional digits is automatic
+
+The following semantic rules apply:
+
+- the width implied by a format string is a minimum width, not a maximum width
+- if the formatted value exceeds the minimum width, the full value is still emitted
+- if `+` is omitted, negative values show `-` and non-negative values show no sign
+- if `+` is present, negative values show `-` and non-negative values show `+`
+- the sign appears immediately to the left of the most-significant whole digit
+- no padding may appear between the sign and the most-significant whole digit
+- integer whole digits are zero-padded up to the number of whole-digit markers in the format string
+- separators in the whole-part pattern are repeated from right to left
+- decimal formats must use `1` for the whole-digit markers
+- hexadecimal and octal whole-digit markers are invalid in decimal formats
+- when fixed fractional digits are specified, normal rounding rules apply and trailing zeroes are added if necessary
+- when fractional digits are automatic, the decimal point is omitted if there are no fractional digits to display
+
+Examples:
+
+~~~
+format(12, '1111')       // '0012'
+format(12, '__11')       // '  12'
+format(1234567, '1,111') // '1,234,567'
+format(12, '+__11')      // '  +12'
+format(12.3456, '1.00')  // '12.35'
+format(12, '1.')         // '12'
+format(12.5, '1.')       // '12.5'
+~~~
+
+Invalid literal format strings should be rejected at compile time where possible. At minimum, the following are invalid:
+
+- empty format strings
+- use of more than one thousands separator in the same numeric format
+- use of a decimal point character and a thousands separator character that are the same
+- decimal formats whose whole-digit marker is not `1`
+- integer formats that contain fractional digit markers
+- decimal formats that contain thousands separators in the fractional part
+
+The `format(...)` built-ins must not be used in query expressions.
 
 Grammar
 -------
