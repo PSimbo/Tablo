@@ -20,6 +20,7 @@ use crate::ast::ForRecordStatement;
 use crate::ast::ForStatement;
 use crate::ast::FunctionDeclaration;
 use crate::ast::FunctionParameter;
+use crate::ast::FunctionParameterType;
 use crate::ast::IdentifierExpr;
 use crate::ast::IfCondition;
 use crate::ast::IfStatement;
@@ -529,13 +530,9 @@ impl SemanticAnalyzer {
 		let mut parameters = Vec::with_capacity(function.parameters.len());
 
 		for parameter in &function.parameters {
-			self.validate_non_void_data_type(
-				&parameter.data_type,
-				parameter.position,
-				format!("Parameter `{}` cannot have type `{}`.", parameter.name, parameter.data_type.name()),
-			)?;
+			let parameter_type = self.resolve_function_parameter_type(parameter)?;
 			parameters.push(FunctionParameterSignature {
-				data_type: parameter.data_type.clone(),
+				data_type: parameter_type,
 				is_by_ref: parameter.is_by_ref,
 				name: parameter.name.clone(),
 			});
@@ -997,6 +994,13 @@ impl SemanticAnalyzer {
 										))?
 										.data_type
 										.clone();
+								}
+								DataType::RecordPointer(ref record_pointer) => {
+									current_type = self.infer_record_pointer_field_access_type(
+										record_pointer,
+										field.position,
+										&field.name,
+									)?;
 								}
 								ref other => {
 									return Err(self.compile_error(
@@ -2388,6 +2392,27 @@ impl SemanticAnalyzer {
 		Ok(variants)
 	}
 
+	fn resolve_function_parameter_type(&mut self, parameter: &FunctionParameter) -> Result<DataType, CompileError> {
+		match &parameter.data_type {
+			FunctionParameterType::RecordPointer(table) => {
+				let resolved_table = self.resolve_table_reference(table)?;
+				Ok(DataType::RecordPointer(RecordPointerType {
+					database_name: resolved_table.database().name().to_string(),
+					schema_name: resolved_table.schema().name().to_string(),
+					table_name: resolved_table.table().name().to_string(),
+				}))
+			}
+			FunctionParameterType::Value(data_type) => {
+				self.validate_non_void_data_type(
+					data_type,
+					parameter.position,
+					format!("Parameter `{}` cannot have type `{}`.", parameter.name, parameter.data_type.name()),
+				)?;
+				Ok(data_type.clone())
+			}
+		}
+	}
+
 	fn resolve_table_reference(
 		&mut self,
 		table: &TableReference,
@@ -2582,11 +2607,7 @@ impl SemanticAnalyzer {
 	}
 
 	fn validate_function_parameter(&mut self, parameter: &FunctionParameter) -> Result<(), CompileError> {
-		self.validate_non_void_data_type(
-			&parameter.data_type,
-			parameter.position,
-			format!("Parameter `{}` cannot have type `{}`.", parameter.name, parameter.data_type.name()),
-		)?;
+		let parameter_type = self.resolve_function_parameter_type(parameter)?;
 
 		if self.current_scope_contains(&parameter.name) {
 			return Err(self.compile_error(
@@ -2598,9 +2619,9 @@ impl SemanticAnalyzer {
 		let slot = self.next_local_slot;
 		self.next_local_slot += 1;
 		self.semantic_program.declaration_slots.insert(parameter.position, slot);
-		self.semantic_program.declaration_types.insert(parameter.position, parameter.data_type.clone());
+		self.semantic_program.declaration_types.insert(parameter.position, parameter_type.clone());
 		self.declare_local(parameter.name.clone(), LocalBinding {
-			data_type: parameter.data_type.clone(),
+			data_type: parameter_type,
 			is_const: false,
 			slot,
 		});
@@ -2657,7 +2678,7 @@ impl SemanticAnalyzer {
 		if main_function.parameters.len() != 1
 			|| main_function.parameters[0].name != "args"
 			|| main_function.parameters[0].is_by_ref
-			|| main_function.parameters[0].data_type != DataType::Array(Box::new(DataType::Text))
+			|| main_function.parameters[0].data_type != FunctionParameterType::Value(DataType::Array(Box::new(DataType::Text)))
 			|| main_function.return_type != DataType::Int
 		{
 			return Err(self.compile_error(

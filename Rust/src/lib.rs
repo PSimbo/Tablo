@@ -1621,6 +1621,38 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_function_calls_with_record_pointer_parameters() {
+		let database_path = create_sqlite_test_database(
+			"runs_function_calls_with_record_pointer_parameters",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO Customers (Id, Name) VALUES (1, 'Ada');
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn ReadName(cust: rec Customers) text { return cust.Name; }\nfn Rename(cust: &rec Customers) void { cust.Name = 'Ada Ltd'; }\nfn Main(args: [text]) int { rec mut cust = find first Customers where Id == 1; if cust { if ReadName(cust) == 'Ada' { Rename(&cust); if cust.Name == 'Ada Ltd' { return 1; } } } return 0; }",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
 	fn runs_function_object_file() {
 		let output_path = unique_test_output_path("runs_function_object_file");
 		compile("fn Main(args: [text]) int { return add(1, 2); }\nfn add(a: int, b: int) int { return a + b; }", &output_path).unwrap();

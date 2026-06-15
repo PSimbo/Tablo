@@ -25,6 +25,7 @@ use crate::ast::ForRecordStatement;
 use crate::ast::ForStatement;
 use crate::ast::FunctionDeclaration;
 use crate::ast::FunctionParameter;
+use crate::ast::FunctionParameterType;
 use crate::ast::IdentifierExpr;
 use crate::ast::IfCondition;
 use crate::ast::IfStatement;
@@ -782,7 +783,13 @@ impl Parser {
 		else {
 			false
 		};
-		let data_type = self.parse_data_type()?;
+		let data_type = if self.current().is_some_and(|token| token.kind == TokenKind::RecKeyword) {
+			self.next();
+			FunctionParameterType::RecordPointer(self.parse_table_reference()?)
+		}
+		else {
+			FunctionParameterType::Value(self.parse_data_type()?)
+		};
 
 		Ok(FunctionParameter {
 			data_type,
@@ -2109,6 +2116,7 @@ mod tests {
 	use crate::ast::ForStatement;
 	use crate::ast::FunctionDeclaration;
 	use crate::ast::FunctionParameter;
+	use crate::ast::FunctionParameterType;
 	use crate::ast::IdentifierExpr;
 	use crate::ast::IfCondition;
 	use crate::ast::IfStatement;
@@ -2369,7 +2377,12 @@ mod tests {
 
 	fn normalize_function_parameter(parameter: FunctionParameter) -> FunctionParameter {
 		FunctionParameter {
-			data_type: parameter.data_type,
+			data_type: match parameter.data_type {
+				FunctionParameterType::RecordPointer(table) => {
+					FunctionParameterType::RecordPointer(normalize_table_reference(table))
+				}
+				FunctionParameterType::Value(data_type) => FunctionParameterType::Value(data_type),
+			},
 			is_by_ref: parameter.is_by_ref,
 			name: parameter.name,
 			position: 0,
@@ -2756,7 +2769,7 @@ mod tests {
 						name: String::from("Main"),
 						parameters: vec![
 							FunctionParameter {
-								data_type: DataType::Array(Box::new(DataType::Text)),
+								data_type: FunctionParameterType::Value(DataType::Array(Box::new(DataType::Text))),
 								is_by_ref: false,
 								name: String::from("args"),
 								position: 0,
@@ -3008,7 +3021,7 @@ mod tests {
 						name: String::from("bump"),
 						parameters: vec![
 							FunctionParameter {
-								data_type: DataType::Int,
+								data_type: FunctionParameterType::Value(DataType::Int),
 								is_by_ref: true,
 								name: String::from("value"),
 								position: 0,
@@ -3624,13 +3637,13 @@ mod tests {
 						name: String::from("add"),
 						parameters: vec![
 							FunctionParameter {
-								data_type: DataType::Int,
+								data_type: FunctionParameterType::Value(DataType::Int),
 								is_by_ref: false,
 								name: String::from("a"),
 								position: 0,
 							},
 							FunctionParameter {
-								data_type: DataType::Int,
+								data_type: FunctionParameterType::Value(DataType::Int),
 								is_by_ref: false,
 								name: String::from("b"),
 								position: 0,
@@ -4309,7 +4322,7 @@ mod tests {
 									name: String::from("inner"),
 									parameters: vec![
 										FunctionParameter {
-											data_type: DataType::Int,
+											data_type: FunctionParameterType::Value(DataType::Int),
 											is_by_ref: true,
 											name: String::from("value"),
 											position: 0,
@@ -4396,7 +4409,7 @@ mod tests {
 						name: String::from("Main"),
 						parameters: vec![
 							FunctionParameter {
-								data_type: DataType::Array(Box::new(DataType::Text)),
+								data_type: FunctionParameterType::Value(DataType::Array(Box::new(DataType::Text))),
 								is_by_ref: false,
 								name: String::from("args"),
 								position: 0,
@@ -4620,7 +4633,7 @@ mod tests {
 					name: String::from("Main"),
 					parameters: vec![
 						FunctionParameter {
-							data_type: DataType::Array(Box::new(DataType::Text)),
+							data_type: FunctionParameterType::Value(DataType::Array(Box::new(DataType::Text))),
 							is_by_ref: false,
 							name: String::from("args"),
 							position: 0,
@@ -4730,6 +4743,68 @@ mod tests {
 			],
 			with_declarations: vec![],
 		});
+	}
+
+	#[test]
+	fn parses_record_pointer_function_parameters() {
+		assert_eq!(
+			parse_program("fn touch(cust: rec customers, target: &rec ExampleDb.Main.Customers) void {}"),
+			Program {
+				functions: vec![
+					FunctionDeclaration {
+						body: BlockStatement {
+							position: 0,
+							statements: vec![],
+						},
+						name: String::from("touch"),
+						parameters: vec![
+							FunctionParameter {
+								data_type: FunctionParameterType::RecordPointer(TableReference {
+									components: vec![
+										IdentifierExpr {
+											name: String::from("customers"),
+											position: 0,
+										},
+									],
+									position: 0,
+								}),
+								is_by_ref: false,
+								name: String::from("cust"),
+								position: 0,
+							},
+							FunctionParameter {
+								data_type: FunctionParameterType::RecordPointer(TableReference {
+									components: vec![
+										IdentifierExpr {
+											name: String::from("ExampleDb"),
+											position: 0,
+										},
+										IdentifierExpr {
+											name: String::from("Main"),
+											position: 0,
+										},
+										IdentifierExpr {
+											name: String::from("Customers"),
+											position: 0,
+										},
+									],
+									position: 0,
+								}),
+								is_by_ref: true,
+								name: String::from("target"),
+								position: 0,
+							},
+						],
+						position: 0,
+						return_type: DataType::Void,
+					},
+				],
+				objects: vec![],
+				result: None,
+				statements: vec![],
+				with_declarations: vec![],
+			}
+		);
 	}
 
 	#[test]
@@ -5122,7 +5197,7 @@ mod tests {
 						name: String::from("Main"),
 						parameters: vec![
 							FunctionParameter {
-								data_type: DataType::Array(Box::new(DataType::Text)),
+								data_type: FunctionParameterType::Value(DataType::Array(Box::new(DataType::Text))),
 								is_by_ref: false,
 								name: String::from("args"),
 								position: 0,
@@ -5264,7 +5339,7 @@ mod tests {
 						name: String::from("Main"),
 						parameters: vec![
 							FunctionParameter {
-								data_type: DataType::Array(Box::new(DataType::Text)),
+								data_type: FunctionParameterType::Value(DataType::Array(Box::new(DataType::Text))),
 								is_by_ref: false,
 								name: String::from("args"),
 								position: 0,

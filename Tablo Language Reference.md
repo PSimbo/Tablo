@@ -989,6 +989,8 @@ If no `limit` clause is specified then Tablo does not impose a limit on the numb
 
 A record pointer is a variable that provides the user with the ability to get and set the field values for a database table record. Unlike other variables, a record pointer is declared with the `rec` keyword instead of `var`. They are also immutable unless the user opts into mutability by specifying the `mut` keyword.
 
+Record pointers may also appear in function parameter lists using `rec <table>` for pass-by-value parameters and `&rec <table>` for pass-by-reference parameters. In both cases, `<table>` identifies the single base table to which the record pointer must belong.
+
 There are two valid ways to construct a record pointer. The first is with a database query of some kind. The second is as a mutable record pointer for the creation of a new record.
 
 ~~~
@@ -1220,13 +1222,31 @@ pub fn FindPosts(id: int, madeBy: int, since: date, until: date) [ForumPost] {
 }
 ~~~
 
-The parameter list is enclosed between `(` and `)` characters, which are required even if the parameter list is empty. Each parameter is declared using the syntax `<name>: <type>`. Parameters are separated by commas.
+The parameter list is enclosed between `(` and `)` characters, which are required even if the parameter list is empty. Parameters are separated by commas.
+
+For ordinary values, each parameter is declared using the syntax `<name>: <type>`.
+
+Record-pointer parameters use the syntax `<name>: rec <table>` where `<table>` is the base table to which the record pointer must belong.
 
 Ordinary parameters are passed by value. To declare that a parameter is passed by reference, prefix the parameter type with `&`:
 
 ~~~
 fn Increment(value: &int) void {
   value += 1;
+}
+~~~
+
+The same rule applies to record-pointer parameters:
+
+~~~
+fn TouchCustomer(cust: rec tblCustomers, refCust: &rec tblCustomers) void {
+  if cust {
+    ...
+  }
+
+  if refCust {
+    ...
+  }
 }
 ~~~
 
@@ -1238,13 +1258,15 @@ Reference parameters must be bound explicitly at the call site using `&` before 
 Increment(&counter);
 ~~~
 
-For the time being, only plain identifiers may be passed by reference. It is therefore invalid to pass literals, arbitrary expressions, or indexed array elements by reference.
+For the time being, only plain identifiers may be passed by reference. It is therefore invalid to pass literals, arbitrary expressions, indexed array elements, or query expressions by reference.
 
 Assigning to a by-reference parameter modifies the caller's variable behind the reference. This remains true even when the assigned value is read from another by-reference parameter.
 
 Tablo references are not nullable and cannot be created independently of a function call. A by-reference parameter exists only for the duration of the corresponding call and must not outlive it.
 
-The return type follows immediately after the parameter list. Any valid Tablo type may be used as the return type, including arrays, objects, and nullable or non-nullable types.
+For the time being, record-pointer parameter types are limited to single-table record pointers. Joined query row-shapes do not yet have a parameter type syntax.
+
+The return type follows immediately after the parameter list. Any valid Tablo type may be used as the return type, including arrays, objects, and nullable or non-nullable types. Record pointers are not yet valid as function return types.
 
 The function body is enclosed between `{` and `}` characters and contains zero or more statements. Function parameters are referenced by name within the body of the function.
 
@@ -1306,6 +1328,7 @@ Any function may be called with a mix of positional arguments, named arguments, 
 * No named argument is provided more than once.
 * Any omitted parameter must either be nullable or have a default value.
 * Any argument corresponding to a by-reference parameter must use the explicit `&identifier` syntax.
+* An argument corresponding to a `rec <table>` or `&rec <table>` parameter must be a record pointer for that same table.
 
 ~~~
 fn Name(<Positional Args>, <Named Args>, <Varargs>) void {}

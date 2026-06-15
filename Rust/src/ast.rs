@@ -141,6 +141,24 @@ pub enum FindKind {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FunctionParameterType {
+	RecordPointer(TableReference),
+	Value(DataType),
+}
+
+impl FunctionParameterType {
+	pub fn name(&self) -> String {
+		match self {
+			Self::RecordPointer(table) => format!(
+				"rec {}",
+				table.components.iter().map(|component| component.name.as_str()).collect::<Vec<_>>().join(".")
+			),
+			Self::Value(data_type) => data_type.name(),
+		}
+	}
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum IfCondition {
 	Expression(Expr),
 	RecordPointerBinding(RecordPointerDeclaration),
@@ -326,7 +344,7 @@ pub struct FunctionDeclaration {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FunctionParameter {
-	pub data_type: DataType,
+	pub data_type: FunctionParameterType,
 	pub is_by_ref: bool,
 	pub name: String,
 	pub position: usize,

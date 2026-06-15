@@ -225,11 +225,15 @@ impl Compiler {
 				parameter.position,
 				format!("Missing slot for parameter `{}`.", parameter.name),
 			))?;
+			let data_type = semantic_program.declaration_type(parameter.position).ok_or(self.compile_error(
+				parameter.position,
+				format!("Missing type for parameter `{}`.", parameter.name),
+			))?;
 			self.record_local_debug(
 				&mut emission,
 				parameter.name.clone(),
 				slot,
-				parameter.data_type.name(),
+				data_type.name(),
 				false,
 				0,
 			);

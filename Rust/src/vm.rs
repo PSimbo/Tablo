@@ -2206,13 +2206,96 @@ fn store_field_path_into_object(
 	Ok(Value::Object(fields))
 }
 
+fn store_field_path_into_record_pointer(
+	record: RecordPointerValue,
+	field_path: &[String],
+	value: Value,
+	instruction_index: usize,
+) -> Result<Value, VmError> {
+	if !record.exists {
+		return Err(vm_error(
+			instruction_index,
+			String::from("Cannot assign fields on a record pointer that does not reference a record."),
+		));
+	}
+
+	if record.locked {
+		return Err(vm_error(
+			instruction_index,
+			String::from("Cannot assign fields on a locked record pointer."),
+		));
+	}
+
+	let exists = record.exists;
+	let locked = record.locked;
+
+	let Some((field_name, remaining_path)) = field_path.split_first() else {
+		return Err(vm_error(
+			instruction_index,
+			String::from("Field assignment requires at least one field name."),
+		));
+	};
+
+	let normalized_field_name = normalize_record_field_name(field_name);
+	let mut fields = record.fields;
+
+	if remaining_path.is_empty() {
+		if !fields.contains_key(&normalized_field_name) {
+			return Err(vm_error(
+				instruction_index,
+				format!("Record pointer does not contain a field named `{field_name}`."),
+			));
+		}
+
+		fields.insert(normalized_field_name, RecordFieldValue::Materialized(value));
+		return Ok(Value::RecordPointer(RecordPointerValue {
+			exists,
+			fields,
+			locked,
+		}));
+	}
+
+	let child = fields.get(&normalized_field_name).ok_or(vm_error(
+		instruction_index,
+		format!("Record pointer does not contain a field named `{field_name}`."),
+	))?;
+	let updated_child = store_field_path_into_value(
+		resolve_record_field_value(child, instruction_index)?,
+		remaining_path,
+		value,
+		instruction_index,
+	)?;
+	fields.insert(normalized_field_name, RecordFieldValue::Materialized(updated_child));
+	Ok(Value::RecordPointer(RecordPointerValue {
+		exists,
+		fields,
+		locked,
+	}))
+}
+
+fn store_field_path_into_value(
+	object: Value,
+	field_path: &[String],
+	value: Value,
+	instruction_index: usize,
+) -> Result<Value, VmError> {
+	match object {
+		Value::Object(_) => store_field_path_into_object(object, field_path, value, instruction_index),
+		Value::RecordPointer(record) => store_field_path_into_record_pointer(record, field_path, value, instruction_index),
+		_ => Err(vm_error(
+			instruction_index,
+			String::from("Field assignment requires an object operand."),
+		)),
+	}
+}
+
 fn store_field_path_value(
 	object: Value,
 	field_path: &[String],
 	value: Value,
 	instruction_index: usize,
 ) -> Result<(Value, Value), VmError> {
-	let updated_object = store_field_path_into_object(object, field_path, value.clone(), instruction_index)?;
+	let updated_object = store_field_path_into_value(object, field_path, value.clone(), instruction_index)?;
 	Ok((value, updated_object))
 }
 
