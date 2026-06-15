@@ -88,6 +88,7 @@ const BUILT_IN_ITEMS = [
 	builtIn("disp", "Write text to stdout."),
 	builtIn("displn", "Write text plus a trailing newline to stdout."),
 	builtIn("exists", "Check whether a record pointer references a row."),
+	builtIn("format", "Format an `int` or `dec` value as `text` according to a numeric format string."),
 	builtIn("int", "Cast an enum to its `int` backing value."),
 	builtIn("len", "Return the length of an array."),
 	builtIn("locked", "Check whether a record pointer is locked."),

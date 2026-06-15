@@ -11,6 +11,7 @@ pub enum BuiltInFunction {
 	Disp,
 	Displn,
 	Exists,
+	Format,
 	Hour,
 	IndexOf,
 	IntCast,
@@ -49,6 +50,7 @@ impl BuiltInFunction {
 			19 => Some(Self::Hour),
 			20 => Some(Self::Minute),
 			21 => Some(Self::Second),
+			22 => Some(Self::Format),
 			_ => None,
 		}
 	}
@@ -64,6 +66,7 @@ impl BuiltInFunction {
 			"disp" => Some(Self::Disp),
 			"displn" => Some(Self::Displn),
 			"exists" => Some(Self::Exists),
+			"format" => Some(Self::Format),
 			"hour" => Some(Self::Hour),
 			"indexof" => Some(Self::IndexOf),
 			"int" => Some(Self::IntCast),
@@ -103,6 +106,7 @@ impl BuiltInFunction {
 			Self::Hour => 19,
 			Self::Minute => 20,
 			Self::Second => 21,
+			Self::Format => 22,
 		}
 	}
 
@@ -117,6 +121,7 @@ impl BuiltInFunction {
 			Self::Disp => "disp",
 			Self::Displn => "displn",
 			Self::Exists => "exists",
+			Self::Format => "format",
 			Self::Hour => "hour",
 			Self::IndexOf => "indexof",
 			Self::IntCast => "int",
@@ -177,6 +182,14 @@ impl BuiltInFunction {
 			Self::Exists | Self::Locked => match argument_types {
 				[arg] if matches!(arg.without_nullability(), DataType::RecordPointer(_)) => {
 					Some(DataType::Bool)
+				}
+				_ => None,
+			},
+			Self::Format => match argument_types {
+				[left, right]
+					if matches!(left.without_nullability(), DataType::Dec | DataType::Int)
+						&& matches!(right.without_nullability(), DataType::Text) => {
+					Some(DataType::Text)
 				}
 				_ => None,
 			},
@@ -242,6 +255,7 @@ impl BuiltInFunction {
 		match self {
 			Self::Contains
 			| Self::CountOf
+			| Self::Format
 			| Self::IndexOf
 			| Self::Split => argument_count == 2,
 			Self::BoolCast
@@ -273,6 +287,7 @@ impl BuiltInFunction {
 			| Self::Day
 			| Self::DecCast
 			| Self::Exists
+			| Self::Format
 			| Self::Hour
 			| Self::IndexOf
 			| Self::IntCast

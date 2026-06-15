@@ -42,6 +42,8 @@ use crate::ast::WithDeclaration;
 use crate::builtins::BuiltInFunction;
 use crate::bytecode::Constant;
 use crate::compiler::CompileError;
+use crate::format_string::NumericFormatPattern;
+use crate::format_string::NumericFormatTarget;
 use crate::query::LoweredBackendQuery;
 use crate::query::QueryBinaryExpr;
 use crate::query::QueryBinaryOperator;
@@ -763,6 +765,10 @@ impl SemanticAnalyzer {
 				argument_types.first().unwrap().name(),
 			),
 		))?;
+
+		if built_in == BuiltInFunction::Format {
+			self.validate_numeric_format_built_in(arguments, &argument_types)?;
+		}
 
 		self.semantic_program.built_in_call_targets.insert(position, built_in);
 		self.semantic_program.call_return_types.insert(position, return_type.clone());
@@ -2685,6 +2691,31 @@ impl SemanticAnalyzer {
 			DataType::RecordPointer(_) => Err(self.compile_error(position, message)),
 			_ => Ok(()),
 		}
+	}
+
+	fn validate_numeric_format_built_in(
+		&self,
+		arguments: &[CallArgument],
+		argument_types: &[DataType],
+	) -> Result<(), CompileError> {
+		let [value_type, _pattern_type] = argument_types else {
+			return Ok(());
+		};
+		let Some(Expr::Text(pattern)) = arguments.get(1).map(|argument| &argument.value) else {
+			return Ok(());
+		};
+
+		let target = match value_type.without_nullability() {
+			DataType::Int => NumericFormatTarget::Integer,
+			DataType::Dec => NumericFormatTarget::Decimal,
+			_ => return Ok(()),
+		};
+
+		NumericFormatPattern::parse(&pattern.value, target).map_err(|error| self.compile_error(
+			pattern.position + error.position,
+			format!("Invalid numeric format string: {}", error.message),
+		))?;
+		Ok(())
 	}
 
 	fn validate_object_declaration(&mut self, object: &ObjectDeclaration) -> Result<(), CompileError> {

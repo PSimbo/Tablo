@@ -6,6 +6,7 @@ pub mod builtins;
 pub mod bytecode;
 pub mod compiler;
 pub mod debugger;
+pub mod format_string;
 pub mod object_file;
 pub mod query;
 pub mod runtime_config;
@@ -700,6 +701,16 @@ mod tests {
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Built-in function `indexof` does not accept an argument of type `int`."),
 			position: 8,
+		}));
+	}
+
+	#[test]
+	fn rejects_invalid_literal_numeric_format_string_at_compile_time() {
+		let error = evaluate_snippet("format(12.0, 'x.00')").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Invalid numeric format string: Decimal numeric format strings must use `1` as the whole-digit marker."),
+			position: 13,
 		}));
 	}
 
@@ -1556,6 +1567,30 @@ mod tests {
 		)).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(4)));
+	}
+
+	#[test]
+	fn runs_format_on_decimal_with_automatic_fraction_source_text() {
+		let result = evaluate_snippet("[format(12.0, '1.'), format(12.5, '1.')]").unwrap();
+
+		assert_eq!(result, Some(Value::Array(vec![
+			Value::Text(String::from("12")),
+			Value::Text(String::from("12.5")),
+		])));
+	}
+
+	#[test]
+	fn runs_format_on_decimal_with_fixed_fraction_source_text() {
+		let result = evaluate_snippet("format(12.3456, '1.00')").unwrap();
+
+		assert_eq!(result, Some(Value::Text(String::from("12.35"))));
+	}
+
+	#[test]
+	fn runs_format_on_integer_source_text() {
+		let result = evaluate_snippet("format(1234567, '1,111')").unwrap();
+
+		assert_eq!(result, Some(Value::Text(String::from("1,234,567"))));
 	}
 
 	#[test]

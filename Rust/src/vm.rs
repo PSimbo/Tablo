@@ -11,6 +11,8 @@ use crate::bytecode::CodeBody;
 use crate::bytecode::Instruction;
 use crate::bytecode::Program;
 use crate::bytecode::SourceLocation;
+use crate::format_string::NumericFormatPattern;
+use crate::format_string::NumericFormatTarget;
 use crate::query::LoweredBackendQuery;
 use crate::query::QueryResultColumn;
 use crate::query::SqlDialect;
@@ -1057,6 +1059,31 @@ impl VirtualMachine {
 				_ => Err(vm_error(
 					instruction_index,
 					format!("Built-in function `exists` expects 1 argument(s), found {}.", arguments.len()),
+				)),
+			},
+			BuiltInFunction::Format => match arguments.as_slice() {
+				[Value::Decimal(value), Value::Text(pattern)] => {
+					let pattern = NumericFormatPattern::parse(pattern, NumericFormatTarget::Decimal)
+						.map_err(|error| vm_error(instruction_index, format!("Invalid numeric format string: {}", error.message)))?;
+					Ok(Some(Value::Text(pattern.format_decimal(value)
+						.map_err(|error| vm_error(instruction_index, format!("Invalid numeric format string: {}", error.message)))?)))
+				}
+				[Value::Integer(value), Value::Text(pattern)] => {
+					let pattern = NumericFormatPattern::parse(pattern, NumericFormatTarget::Integer)
+						.map_err(|error| vm_error(instruction_index, format!("Invalid numeric format string: {}", error.message)))?;
+					Ok(Some(Value::Text(pattern.format_integer(*value))))
+				}
+				[left, right] => Err(vm_error(
+					instruction_index,
+					format!(
+						"Built-in function `format` does not accept `{}` and `{}` values.",
+						type_name(left),
+						type_name(right),
+					),
+				)),
+				_ => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `format` expects 2 argument(s), found {}.", arguments.len()),
 				)),
 			},
 			BuiltInFunction::Hour => match arguments.as_slice() {
