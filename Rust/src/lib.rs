@@ -626,6 +626,16 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_decimal_range_text_slice_source_text() {
+		let error = evaluate_snippet("var s: text = 'hello';\ns[1.0:2.0]").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Text slicing requires a range of `int`, found `range<dec>`."),
+			position: 28,
+		}));
+	}
+
+	#[test]
 	fn rejects_disp_with_non_text_argument_source_text() {
 		let error = evaluate_snippet("disp(1)").unwrap_err();
 
@@ -2537,6 +2547,13 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_text_index_source_text() {
+		let result = evaluate_snippet("var s: text = 'hello';\ns[2]").unwrap();
+
+		assert_eq!(result, Some(Value::Text(String::from("e"))));
+	}
+
+	#[test]
 	fn runs_text_length_source_text() {
 		let result = evaluate_snippet("len('hello')").unwrap();
 
@@ -2548,6 +2565,13 @@ mod tests {
 		let result = evaluate_snippet("'apple' < 'banana'").unwrap();
 
 		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
+	fn runs_text_slice_source_text() {
+		let result = evaluate_snippet("var s: text = 'hello';\ns[2:4]").unwrap();
+
+		assert_eq!(result, Some(Value::Text(String::from("ell"))));
 	}
 
 	#[test]

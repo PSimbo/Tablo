@@ -621,6 +621,8 @@ Arrays may also be sliced by providing an integer range as the index. For exampl
 
 When slicing an array, each index yielded by the range must be within the valid bounds of the array or a runtime error is raised. If the range yields no indices then the result is the empty array. Negative values have no special meaning for array indexing or slicing; they are treated as ordinary integer values and therefore usually result in an out-of-bounds runtime error when evaluated.
 
+The same indexing and slicing syntax may also be used with `text` values. In this case, a `text` value is treated as an array of characters and indexing is by character rather than by byte. For example, `s[2]` yields a `text` value containing the second character of `s`, and `s[2:4]` yields a `text` value containing the second through fourth characters. The same one-based indexing rules apply, and out-of-bounds indices raise a runtime error.
+
 Array elements may be assigned using ordinary assignment and compound assignment operators:
 
 ~~~

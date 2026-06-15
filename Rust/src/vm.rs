@@ -1727,6 +1727,30 @@ fn iterator_next_value(iterator: Value, instruction_index: usize) -> Result<(Val
 	}
 }
 
+fn load_array_index_value(values: Vec<Value>, index: Value, instruction_index: usize) -> Result<Value, VmError> {
+	match index {
+		Value::Integer(index) => {
+			if index < 1 || index as usize > values.len() {
+				return Err(vm_error(
+					instruction_index,
+					format!("Array index {} is out of bounds for length {}.", index, values.len()),
+				));
+			}
+
+			Ok(values[index as usize - 1].clone())
+		}
+		Value::IntegerRange(range) => load_range_slice_value(values, range, instruction_index),
+		Value::DecimalRange(_) => Err(vm_error(
+			instruction_index,
+			String::from("Array slicing requires a range of `int`."),
+		)),
+		other => Err(vm_error(
+			instruction_index,
+			format!("Array index must be an `int`, found `{}`.", type_name(&other)),
+		)),
+	}
+}
+
 fn load_field_path_value(object: Value, field_path: &[String], instruction_index: usize) -> Result<Value, VmError> {
 	let mut value = object;
 
@@ -1772,36 +1796,15 @@ fn load_field_value(object: Value, field_name: &str, instruction_index: usize) -
 }
 
 fn load_index_value(array: Value, index: Value, instruction_index: usize) -> Result<Value, VmError> {
-	let values = match array {
-		Value::Array(values) => values,
+	match array {
+		Value::Array(values) => load_array_index_value(values, index, instruction_index),
+		Value::Text(value) => load_text_index_value(value, index, instruction_index),
 		other => {
-			return Err(vm_error(
+			Err(vm_error(
 				instruction_index,
 				format!("Cannot index a `{}` value.", type_name(&other)),
-			));
+			))
 		}
-	};
-
-	match index {
-		Value::Integer(index) => {
-			if index < 1 || index as usize > values.len() {
-				return Err(vm_error(
-					instruction_index,
-					format!("Array index {} is out of bounds for length {}.", index, values.len()),
-				));
-			}
-
-			Ok(values[index as usize - 1].clone())
-		}
-		Value::IntegerRange(range) => load_range_slice_value(values, range, instruction_index),
-		Value::DecimalRange(_) => Err(vm_error(
-			instruction_index,
-			String::from("Array slicing requires a range of `int`."),
-		)),
-		other => Err(vm_error(
-			instruction_index,
-			format!("Array index must be an `int`, found `{}`.", type_name(&other)),
-		)),
 	}
 }
 
@@ -1864,6 +1867,68 @@ fn load_sqlite_record_fields(
 	}
 
 	Ok(fields)
+}
+
+fn load_text_index_value(value: String, index: Value, instruction_index: usize) -> Result<Value, VmError> {
+	let characters: Vec<char> = value.chars().collect();
+
+	match index {
+		Value::Integer(index) => {
+			if index < 1 || index as usize > characters.len() {
+				return Err(vm_error(
+					instruction_index,
+					format!("Text index {} is out of bounds for length {}.", index, characters.len()),
+				));
+			}
+
+			Ok(Value::Text(characters[index as usize - 1].to_string()))
+		}
+		Value::IntegerRange(range) => load_text_range_slice_value(characters, range, instruction_index),
+		Value::DecimalRange(_) => Err(vm_error(
+			instruction_index,
+			String::from("Text slicing requires a range of `int`."),
+		)),
+		other => Err(vm_error(
+			instruction_index,
+			format!("Text index must be an `int`, found `{}`.", type_name(&other)),
+		)),
+	}
+}
+
+fn load_text_range_slice_value(characters: Vec<char>, range: IntegerRange, instruction_index: usize) -> Result<Value, VmError> {
+	let step = range.step.unwrap_or(1);
+
+	if step == 0 {
+		return Err(vm_error(instruction_index, String::from("Range step cannot be zero.")));
+	}
+
+	let mut result = String::new();
+	let mut current = Some(range.start);
+
+	while let Some(index) = current {
+		let in_bounds = if step > 0 {
+			index <= range.end
+		}
+		else {
+			index >= range.end
+		};
+
+		if !in_bounds {
+			break;
+		}
+
+		if index < 1 || index as usize > characters.len() {
+			return Err(vm_error(
+				instruction_index,
+				format!("Text index {} is out of bounds for length {}.", index, characters.len()),
+			));
+		}
+
+		result.push(characters[index as usize - 1]);
+		current = index.checked_add(step);
+	}
+
+	Ok(Value::Text(result))
 }
 
 fn make_iterator_value(iterable: Value, instruction_index: usize) -> Result<Value, VmError> {

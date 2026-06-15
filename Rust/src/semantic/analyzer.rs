@@ -1185,6 +1185,23 @@ impl SemanticAnalyzer {
 							format!("Array index must be of type `int`, found `{}`.", other.name()),
 						)),
 					},
+					DataType::Text => match index_type {
+						DataType::Int => Ok(DataType::Text),
+						DataType::Range(index_element_type) if index_element_type.without_nullability() == &DataType::Int => {
+							Ok(DataType::Text)
+						}
+						DataType::Range(index_element_type) => Err(self.compile_error(
+							index.position(),
+							format!(
+								"Text slicing requires a range of `int`, found `range<{}>`.",
+								index_element_type.name(),
+							),
+						)),
+						other => Err(self.compile_error(
+							index.position(),
+							format!("Text index must be of type `int`, found `{}`.", other.name()),
+						)),
+					},
 					DataType::EmptyArray => Err(self.compile_error(
 						array.position(),
 						String::from("Cannot index an empty array literal without a known element type."),
