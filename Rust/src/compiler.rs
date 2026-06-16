@@ -35,6 +35,7 @@ use crate::ast::TimeTzLiteral;
 use crate::ast::TimestampLiteral;
 use crate::ast::TimestampTzLiteral;
 use crate::ast::UnaryExpr;
+use crate::ast::UseDeclaration;
 use crate::ast::VariableDeclaration;
 use crate::ast::WhileStatement;
 use crate::bytecode::CodeBody;
@@ -857,6 +858,7 @@ impl Compiler {
 
 				Ok(())
 			}
+			Statement::Use(UseDeclaration { .. }) => Ok(()),
 			Statement::VariableDeclaration(VariableDeclaration { data_type, initial_value, is_const, name, position }) => {
 				let slot = semantic_program.declaration_slot(*position).ok_or(self.compile_error(
 					*position,
@@ -1111,7 +1113,7 @@ fn collect_functions_from_statement<'a>(statement: &'a Statement, functions: &mu
 			}
 		}
 		Statement::While(statement) => collect_functions_from_statements(statement.body.statements.as_slice(), functions),
-		Statement::Break(_) | Statement::Continue(_) | Statement::Create(_) | Statement::Expression(_) | Statement::RecordPointerDeclaration(_) | Statement::Return(_) | Statement::VariableDeclaration(_) => {}
+		Statement::Break(_) | Statement::Continue(_) | Statement::Create(_) | Statement::Expression(_) | Statement::RecordPointerDeclaration(_) | Statement::Return(_) | Statement::Use(_) | Statement::VariableDeclaration(_) => {}
 	}
 }
 
@@ -1142,6 +1144,7 @@ fn statement_position(statement: &Statement) -> usize {
 		Statement::If(statement) => statement.position,
 		Statement::RecordPointerDeclaration(statement) => statement.position,
 		Statement::Return(statement) => statement.position,
+		Statement::Use(statement) => statement.position,
 		Statement::VariableDeclaration(statement) => statement.position,
 		Statement::While(statement) => statement.position,
 	}

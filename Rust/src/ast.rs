@@ -191,6 +191,7 @@ pub enum Statement {
 	If(IfStatement),
 	RecordPointerDeclaration(RecordPointerDeclaration),
 	Return(ReturnStatement),
+	Use(UseDeclaration),
 	VariableDeclaration(VariableDeclaration),
 	While(WhileStatement),
 }
@@ -548,6 +549,13 @@ pub struct TimestampTzLiteral {
 pub struct UnaryExpr {
 	pub operand: Box<Expr>,
 	pub operator: UnaryOperator,
+	pub position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UseDeclaration {
+	pub imported_names: Option<Vec<IdentifierExpr>>,
+	pub module_path: String,
 	pub position: usize,
 }
 

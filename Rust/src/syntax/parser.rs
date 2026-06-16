@@ -56,6 +56,7 @@ use crate::ast::TimestampLiteral;
 use crate::ast::TimestampTzLiteral;
 use crate::ast::UnaryExpr;
 use crate::ast::UnaryOperator;
+use crate::ast::UseDeclaration;
 use crate::ast::VariableDeclaration;
 use crate::ast::Visibility;
 use crate::ast::WhileStatement;
@@ -127,7 +128,7 @@ impl Parser {
 				Some(token) if token.kind == TokenKind::WithKeyword => {
 					with_declarations.push(self.parse_with_declaration()?);
 				}
-				Some(token) if matches!(token.kind, TokenKind::BreakKeyword | TokenKind::ConstKeyword | TokenKind::ContinueKeyword | TokenKind::CreateKeyword | TokenKind::EnumKeyword | TokenKind::ForKeyword | TokenKind::IfKeyword | TokenKind::LeftBrace | TokenKind::RecKeyword | TokenKind::ReturnKeyword | TokenKind::VarKeyword | TokenKind::WhileKeyword) => {
+				Some(token) if matches!(token.kind, TokenKind::BreakKeyword | TokenKind::ConstKeyword | TokenKind::ContinueKeyword | TokenKind::CreateKeyword | TokenKind::EnumKeyword | TokenKind::ForKeyword | TokenKind::IfKeyword | TokenKind::LeftBrace | TokenKind::RecKeyword | TokenKind::ReturnKeyword | TokenKind::UseKeyword | TokenKind::VarKeyword | TokenKind::WhileKeyword) => {
 					statements.push(self.parse_statement()?);
 				}
 				Some(_) => {
@@ -1850,6 +1851,9 @@ impl Parser {
 			Some(token) if token.kind == TokenKind::LeftBrace => self.parse_block_statement(),
 			Some(token) if token.kind == TokenKind::RecKeyword => self.parse_record_pointer_declaration_statement(),
 			Some(token) if token.kind == TokenKind::ReturnKeyword => self.parse_return_statement(),
+			Some(token) if token.kind == TokenKind::UseKeyword => {
+				Ok(Statement::Use(self.parse_use_declaration()?))
+			}
 			Some(token) if token.kind == TokenKind::WhileKeyword => self.parse_while_statement(),
 			Some(token) if matches!(token.kind, TokenKind::ConstKeyword | TokenKind::VarKeyword) => {
 				self.parse_variable_declaration_statement()
@@ -1999,6 +2003,60 @@ impl Parser {
 		Expr::Text(TextLiteral {
 			position: token.start,
 			value: token.lexeme,
+		})
+	}
+
+	fn parse_use_declaration(&mut self) -> Result<UseDeclaration, ParseError> {
+		let use_keyword = self.expect_token(TokenKind::UseKeyword, "Expected `use` to start use declaration.")?;
+		let mut imported_names = None;
+		let module_path = match self.current() {
+			Some(token) if token.kind == TokenKind::StringLiteral => {
+				let path = token.lexeme.clone();
+				self.next();
+				path
+			}
+			Some(token) if token.kind == TokenKind::Identifier => {
+				let mut names = Vec::new();
+
+				loop {
+					let name = self.expect_token(TokenKind::Identifier, "Expected imported function name.")?;
+					names.push(IdentifierExpr {
+						name: name.lexeme,
+						position: name.start,
+					});
+
+					if self.current().is_some_and(|token| token.kind == TokenKind::Comma) {
+						self.next();
+						continue;
+					}
+
+					break;
+				}
+
+				imported_names = Some(names);
+				self.expect_token(TokenKind::FromKeyword, "Expected `from` after imported function names.")?;
+				let path = self.expect_token(TokenKind::StringLiteral, "Expected module path string literal after `from`.")?;
+				path.lexeme
+			}
+			Some(token) => {
+				return Err(ParseError {
+					message: format!("Expected module path string literal or imported function name after `use`, found `{}`.", token.lexeme),
+					position: token.start,
+				});
+			}
+			None => {
+				return Err(ParseError {
+					message: String::from("Expected module path string literal or imported function name after `use`."),
+					position: use_keyword.start,
+				});
+			}
+		};
+		self.expect_token(TokenKind::Semicolon, "Expected `;` after use declaration.")?;
+
+		Ok(UseDeclaration {
+			imported_names,
+			module_path,
+			position: use_keyword.start,
 		})
 	}
 
@@ -2193,6 +2251,7 @@ mod tests {
 	use crate::ast::TimestampTzLiteral;
 	use crate::ast::UnaryExpr;
 	use crate::ast::UnaryOperator;
+	use crate::ast::UseDeclaration;
 	use crate::ast::VariableDeclaration;
 	use crate::ast::Visibility;
 	use crate::ast::WhileStatement;
@@ -2560,6 +2619,7 @@ mod tests {
 				Statement::RecordPointerDeclaration(normalize_record_pointer_declaration(declaration))
 			}
 			Statement::Return(return_statement) => Statement::Return(normalize_return_statement(return_statement)),
+			Statement::Use(use_declaration) => Statement::Use(normalize_use_declaration(use_declaration)),
 			Statement::VariableDeclaration(declaration) => {
 				Statement::VariableDeclaration(normalize_variable_declaration(declaration))
 			}
@@ -2570,6 +2630,15 @@ mod tests {
 	fn normalize_table_reference(table: TableReference) -> TableReference {
 		TableReference {
 			components: table.components.into_iter().map(normalize_identifier).collect(),
+			position: 0,
+		}
+	}
+
+	fn normalize_use_declaration(use_declaration: UseDeclaration) -> UseDeclaration {
+		UseDeclaration {
+			imported_names: use_declaration.imported_names
+				.map(|names| names.into_iter().map(normalize_identifier).collect()),
+			module_path: use_declaration.module_path,
 			position: 0,
 		}
 	}
@@ -4374,6 +4443,35 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_named_use_declaration_at_file_scope() {
+		assert_eq!(
+			parse_program("use NewV4, NewV7 from '../Common/UuidUtils';"),
+			Program {
+				functions: vec![],
+				objects: vec![],
+				result: None,
+				statements: vec![
+					Statement::Use(UseDeclaration {
+						imported_names: Some(vec![
+							IdentifierExpr {
+								name: String::from("NewV4"),
+								position: 0,
+							},
+							IdentifierExpr {
+								name: String::from("NewV7"),
+								position: 0,
+							},
+						]),
+						module_path: String::from("../Common/UuidUtils"),
+						position: 0,
+					}),
+				],
+				with_declarations: vec![],
+			}
+		);
+	}
+
+	#[test]
 	fn parses_nested_function_declaration() {
 		assert_eq!(
 			parse_program("fn outer() void { fn inner(value: &int) void { value += 1; } }"),
@@ -5356,6 +5454,72 @@ mod tests {
 									})),
 									is_const: false,
 									name: String::from("values"),
+									position: 0,
+								}),
+								Statement::Return(ReturnStatement {
+									position: 0,
+									value: Some(Expr::Integer(IntegerLiteral {
+										position: 0,
+										value: 0,
+									})),
+								}),
+							],
+						},
+						name: String::from("Main"),
+						parameters: vec![
+							FunctionParameter {
+								data_type: FunctionParameterType::Value(DataType::Array(Box::new(DataType::Text))),
+								is_by_ref: false,
+								name: String::from("args"),
+								position: 0,
+							},
+						],
+						position: 0,
+						return_type: DataType::Int,
+						visibility: Visibility::Private,
+					},
+				],
+				objects: vec![],
+				result: None,
+				statements: vec![],
+				with_declarations: vec![],
+			}
+		);
+	}
+
+	#[test]
+	fn parses_use_declaration_at_file_scope() {
+		assert_eq!(
+			parse_program("use '../Common/DateUtils';"),
+			Program {
+				functions: vec![],
+				objects: vec![],
+				result: None,
+				statements: vec![
+					Statement::Use(UseDeclaration {
+						imported_names: None,
+						module_path: String::from("../Common/DateUtils"),
+						position: 0,
+					}),
+				],
+				with_declarations: vec![],
+			}
+		);
+	}
+
+	#[test]
+	fn parses_use_declaration_inside_function_scope() {
+		assert_eq!(
+			parse_program("fn Main(args: [text]) int { use '../Common/DateUtils'; return 0; }"),
+			Program {
+				functions: vec![
+					FunctionDeclaration {
+						body: BlockStatement {
+							position: 0,
+							statements: vec![
+								Statement::Use(UseDeclaration {
+									imported_names: None,
+									module_path: String::from("../Common/DateUtils"),
 									position: 0,
 								}),
 								Statement::Return(ReturnStatement {

@@ -40,6 +40,7 @@ use crate::ast::TableReference;
 use crate::ast::TernaryExpr;
 use crate::ast::UnaryExpr;
 use crate::ast::UnaryOperator;
+use crate::ast::UseDeclaration;
 use crate::ast::VariableDeclaration;
 use crate::ast::Visibility;
 use crate::ast::WhileStatement;
@@ -2648,7 +2649,7 @@ impl SemanticAnalyzer {
 			}
 			Statement::RecordPointerDeclaration(_) => false,
 			Statement::Return(_) => true,
-			Statement::Expression(_) | Statement::For(_) | Statement::ForRecord(_) | Statement::VariableDeclaration(_) | Statement::While(_) => false,
+			Statement::Expression(_) | Statement::For(_) | Statement::ForRecord(_) | Statement::Use(_) | Statement::VariableDeclaration(_) | Statement::While(_) => false,
 		}
 	}
 
@@ -2808,7 +2809,7 @@ impl SemanticAnalyzer {
 	}
 
 	fn validate_main_entry_point(&self, program: &Program, main_function: &FunctionDeclaration) -> Result<(), CompileError> {
-		if let Some(statement) = program.statements.iter().find(|statement| !matches!(statement, Statement::EnumDeclaration(_))) {
+		if let Some(statement) = program.statements.iter().find(|statement| !matches!(statement, Statement::EnumDeclaration(_) | Statement::Use(_))) {
 			return Err(self.compile_error(
 				statement_position(statement),
 				String::from("Top-level executable statements are not permitted when `Main` is defined."),
@@ -3281,6 +3282,7 @@ impl SemanticAnalyzer {
 					)),
 				}
 			}
+			Statement::Use(UseDeclaration { .. }) => Ok(()),
 			Statement::VariableDeclaration(VariableDeclaration { data_type, initial_value, is_const, name, position }) => {
 				self.validate_non_void_data_type(
 					data_type,
@@ -3444,6 +3446,7 @@ fn statement_position(statement: &Statement) -> usize {
 		Statement::If(statement) => statement.position,
 		Statement::RecordPointerDeclaration(statement) => statement.position,
 		Statement::Return(statement) => statement.position,
+		Statement::Use(statement) => statement.position,
 		Statement::VariableDeclaration(statement) => statement.position,
 		Statement::While(statement) => statement.position,
 	}
