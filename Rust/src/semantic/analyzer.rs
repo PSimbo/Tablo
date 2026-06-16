@@ -41,6 +41,7 @@ use crate::ast::TernaryExpr;
 use crate::ast::UnaryExpr;
 use crate::ast::UnaryOperator;
 use crate::ast::VariableDeclaration;
+use crate::ast::Visibility;
 use crate::ast::WhileStatement;
 use crate::ast::WithDeclaration;
 use crate::builtins::BuiltInFunction;
@@ -98,6 +99,7 @@ pub struct SemanticAnalyzer {
 	current_return_type: Option<DataType>,
 	current_schema_catalog: Option<SchemaCatalog>,
 	enums: ScopeStack<EnumBinding>,
+	function_depth: usize,
 	functions: ScopeStack<FunctionSignature>,
 	locals: ScopeStack<LocalBinding>,
 	loop_depth: usize,
@@ -300,6 +302,7 @@ impl SemanticAnalyzer {
 			current_return_type: None,
 			current_schema_catalog: None,
 			enums: ScopeStack::default(),
+			function_depth: 0,
 			functions: ScopeStack::default(),
 			locals: ScopeStack::default(),
 			loop_depth: 0,
@@ -322,6 +325,7 @@ impl SemanticAnalyzer {
 		self.functions = ScopeStack::default();
 		self.enums = ScopeStack::default();
 		self.locals = ScopeStack::default();
+		self.function_depth = 0;
 		self.loop_depth = 0;
 		self.next_function_index = 0;
 		self.next_local_slot = 0;
@@ -2693,11 +2697,20 @@ impl SemanticAnalyzer {
 
 	fn validate_function_declaration(&mut self, function: &FunctionDeclaration) -> Result<(), CompileError> {
 		let saved_locals = std::mem::take(&mut self.locals);
+		let saved_function_depth = self.function_depth;
 		let saved_loop_depth = self.loop_depth;
 		let saved_next_local_slot = self.next_local_slot;
 		let saved_return_type = self.current_return_type.clone();
 
+		if function.visibility == Visibility::Public && self.function_depth > 0 {
+			return Err(self.compile_error(
+				function.position,
+				format!("Function `{}` cannot be declared `pub` inside another function.", function.name),
+			));
+		}
+
 		self.locals = ScopeStack::default();
+		self.function_depth += 1;
 		self.loop_depth = 0;
 		self.next_local_slot = 0;
 		self.current_return_type = Some(function.return_type.clone());
@@ -2722,6 +2735,7 @@ impl SemanticAnalyzer {
 
 		self.exit_scope();
 		self.locals = saved_locals;
+		self.function_depth = saved_function_depth;
 		self.loop_depth = saved_loop_depth;
 		self.next_local_slot = saved_next_local_slot;
 		self.current_return_type = saved_return_type;
@@ -3914,5 +3928,16 @@ mod tests {
 		let error = analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap_err();
 
 		assert_eq!(error.message, "`create` requires a record pointer declared from a `new` expression.");
+	}
+
+	#[test]
+	fn rejects_public_nested_function_declaration() {
+		let program = parse_program(
+			"fn Outer() void { pub fn Inner() void {} }"
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+		let error = analyzer.analyze_program(&program).unwrap_err();
+
+		assert_eq!(error.message, "Function `Inner` cannot be declared `pub` inside another function.");
 	}
 }

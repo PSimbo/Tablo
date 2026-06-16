@@ -201,6 +201,12 @@ pub enum UnaryOperator {
 	Not,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Visibility {
+	Private,
+	Public,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ArrayIndexAssignmentTarget {
 	pub array: IdentifierExpr,
@@ -348,6 +354,7 @@ pub struct FunctionDeclaration {
 	pub parameters: Vec<FunctionParameter>,
 	pub position: usize,
 	pub return_type: DataType,
+	pub visibility: Visibility,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

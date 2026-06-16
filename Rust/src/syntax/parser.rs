@@ -57,6 +57,7 @@ use crate::ast::TimestampTzLiteral;
 use crate::ast::UnaryExpr;
 use crate::ast::UnaryOperator;
 use crate::ast::VariableDeclaration;
+use crate::ast::Visibility;
 use crate::ast::WhileStatement;
 use crate::ast::WithDeclaration;
 use crate::value::Decimal;
@@ -117,7 +118,7 @@ impl Parser {
 		loop {
 			match self.current() {
 				Some(token) if token.kind == TokenKind::EndOfFile => break,
-				Some(token) if token.kind == TokenKind::FnKeyword => {
+				Some(_) if self.current_starts_function_declaration() => {
 					functions.push(self.parse_function_declaration()?);
 				}
 				Some(token) if token.kind == TokenKind::ObjKeyword => {
@@ -158,6 +159,16 @@ impl Parser {
 
 	fn current(&self) -> Option<&Token> {
 		self.tokens.get(self.position)
+	}
+
+	fn current_starts_function_declaration(&self) -> bool {
+		match self.current() {
+			Some(token) if token.kind == TokenKind::FnKeyword => true,
+			Some(token) if token.kind == TokenKind::PubKeyword => {
+				self.tokens.get(self.position + 1).is_some_and(|next| next.kind == TokenKind::FnKeyword)
+			}
+			_ => false,
+		}
 	}
 
 	fn expect_end_of_file(&self) -> Result<(), ParseError> {
@@ -754,6 +765,13 @@ impl Parser {
 	}
 
 	fn parse_function_declaration(&mut self) -> Result<FunctionDeclaration, ParseError> {
+		let visibility = if self.current().is_some_and(|token| token.kind == TokenKind::PubKeyword) {
+			self.next();
+			Visibility::Public
+		}
+		else {
+			Visibility::Private
+		};
 		let function_keyword = self.expect_token(TokenKind::FnKeyword, "Expected `fn` to start function declaration.")?;
 		let name = self.expect_token(TokenKind::Identifier, "Expected function name.")?;
 		self.expect_token(TokenKind::LeftParenthesis, "Expected `(` after function name.")?;
@@ -786,6 +804,7 @@ impl Parser {
 			parameters,
 			position: function_keyword.start,
 			return_type,
+			visibility,
 		})
 	}
 
@@ -1824,7 +1843,7 @@ impl Parser {
 				Ok(Statement::EnumDeclaration(self.parse_enum_declaration()?))
 			}
 			Some(token) if token.kind == TokenKind::ForKeyword => self.parse_for_statement(),
-			Some(token) if token.kind == TokenKind::FnKeyword => {
+			Some(_) if self.current_starts_function_declaration() => {
 				Ok(Statement::FunctionDeclaration(self.parse_function_declaration()?))
 			}
 			Some(token) if token.kind == TokenKind::IfKeyword => self.parse_if_statement(),
@@ -2175,6 +2194,7 @@ mod tests {
 	use crate::ast::UnaryExpr;
 	use crate::ast::UnaryOperator;
 	use crate::ast::VariableDeclaration;
+	use crate::ast::Visibility;
 	use crate::ast::WhileStatement;
 	use crate::ast::WithDeclaration;
 	use crate::source::SourceText;
@@ -2405,6 +2425,7 @@ mod tests {
 			parameters: function.parameters.into_iter().map(normalize_function_parameter).collect(),
 			position: 0,
 			return_type: function.return_type,
+			visibility: function.visibility,
 		}
 	}
 
@@ -2814,6 +2835,7 @@ mod tests {
 						],
 						position: 0,
 						return_type: DataType::Int,
+						visibility: Visibility::Private,
 					},
 				],
 				objects: vec![],
@@ -3066,6 +3088,7 @@ mod tests {
 						],
 						position: 0,
 						return_type: DataType::Void,
+						visibility: Visibility::Private,
 					},
 				],
 				objects: vec![],
@@ -3709,6 +3732,7 @@ mod tests {
 						],
 						position: 0,
 						return_type: DataType::Int,
+						visibility: Visibility::Private,
 					},
 				],
 				objects: vec![],
@@ -4388,6 +4412,7 @@ mod tests {
 									],
 									position: 0,
 									return_type: DataType::Void,
+									visibility: Visibility::Private,
 								}),
 							],
 						},
@@ -4395,6 +4420,7 @@ mod tests {
 						parameters: vec![],
 						position: 0,
 						return_type: DataType::Void,
+						visibility: Visibility::Private,
 					},
 				],
 				objects: vec![],
@@ -4475,6 +4501,7 @@ mod tests {
 						],
 						position: 0,
 						return_type: DataType::Int,
+						visibility: Visibility::Private,
 					},
 				],
 				objects: vec![],
@@ -4627,6 +4654,61 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_public_function_declaration() {
+		assert_eq!(
+			parse_program("pub fn add(a: int, b: int) int { return a + b; }"),
+			Program {
+				functions: vec![
+					FunctionDeclaration {
+						body: BlockStatement {
+							position: 0,
+							statements: vec![
+								Statement::Return(ReturnStatement {
+									position: 0,
+									value: Some(Expr::Binary(BinaryExpr {
+										left: Box::new(Expr::Identifier(IdentifierExpr {
+											name: String::from("a"),
+											position: 0,
+										})),
+										operator: BinaryOperator::Add,
+										position: 0,
+										right: Box::new(Expr::Identifier(IdentifierExpr {
+											name: String::from("b"),
+											position: 0,
+										})),
+									})),
+								}),
+							],
+						},
+						name: String::from("add"),
+						parameters: vec![
+							FunctionParameter {
+								data_type: FunctionParameterType::Value(DataType::Int),
+								is_by_ref: false,
+								name: String::from("a"),
+								position: 0,
+							},
+							FunctionParameter {
+								data_type: FunctionParameterType::Value(DataType::Int),
+								is_by_ref: false,
+								name: String::from("b"),
+								position: 0,
+							},
+						],
+						position: 0,
+						return_type: DataType::Int,
+						visibility: Visibility::Public,
+					},
+				],
+				objects: vec![],
+				result: None,
+				statements: vec![],
+				with_declarations: vec![],
+			}
+		);
+	}
+
+	#[test]
 	fn parses_qualified_object_construction_target() {
 		let program = parse_program("Outer.Inner { value: 1 };");
 
@@ -4699,6 +4781,7 @@ mod tests {
 					],
 					position: 0,
 					return_type: DataType::Object(String::from("Outer.Inner")),
+					visibility: Visibility::Private,
 				},
 			],
 			objects: vec![],
@@ -4886,6 +4969,7 @@ mod tests {
 						],
 						position: 0,
 						return_type: DataType::Void,
+						visibility: Visibility::Private,
 					},
 				],
 				objects: vec![],
@@ -5294,6 +5378,7 @@ mod tests {
 						],
 						position: 0,
 						return_type: DataType::Int,
+						visibility: Visibility::Private,
 					},
 				],
 				objects: vec![],
@@ -5436,6 +5521,7 @@ mod tests {
 						],
 						position: 0,
 						return_type: DataType::Int,
+						visibility: Visibility::Private,
 					},
 				],
 				objects: vec![

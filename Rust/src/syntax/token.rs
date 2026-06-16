@@ -63,6 +63,7 @@ pub enum TokenKind {
 	Pipe,
 	Plus,
 	PlusEqual,
+	PubKeyword,
 	Question,
 	RecKeyword,
 	ReturnKeyword,
