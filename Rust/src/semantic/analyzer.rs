@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use crate::ast::AssignmentExpr;
 use crate::ast::AssignmentOperator;
@@ -11,6 +12,7 @@ use crate::ast::CallArgument;
 use crate::ast::CallExpr;
 use crate::ast::ContinueStatement;
 use crate::ast::CountExpr;
+use crate::ast::CreateStatement;
 use crate::ast::DataType;
 use crate::ast::EnumDeclaration;
 use crate::ast::Expr;
@@ -25,6 +27,7 @@ use crate::ast::IdentifierExpr;
 use crate::ast::IfCondition;
 use crate::ast::IfStatement;
 use crate::ast::IndexExpr;
+use crate::ast::NewExpr;
 use crate::ast::ObjectConstructionExpr;
 use crate::ast::ObjectDeclaration;
 use crate::ast::Program;
@@ -73,6 +76,20 @@ pub enum EnumValue {
 	Constant(Constant),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecordPointerInitialization {
+	Existing,
+	New,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecordPointerOrigin {
+	ForLoop,
+	IfBinding,
+	Parameter,
+	VariableDeclaration,
+}
+
 // This pass is responsible for name resolution and type checking. It does not
 // emit bytecode directly, but it resolves locals and function targets so code
 // generation can remain simple.
@@ -111,9 +128,19 @@ struct FunctionSignature {
 
 #[derive(Clone)]
 struct LocalBinding {
+	declaration_position: usize,
 	data_type: DataType,
 	is_const: bool,
 	slot: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordPointerBindingInfo {
+	pub assigned_fields: BTreeSet<String>,
+	pub data_type: RecordPointerType,
+	pub initialization: RecordPointerInitialization,
+	pub is_mutable: bool,
+	pub origin: RecordPointerOrigin,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -147,6 +174,7 @@ pub struct SemanticProgram {
 	lowered_find_queries: BTreeMap<usize, QueryFindPlan>,
 	lowered_for_record_queries: BTreeMap<usize, QueryForPlan>,
 	object_declarations: BTreeMap<String, ObjectDeclaration>,
+	record_pointer_bindings: BTreeMap<usize, RecordPointerBindingInfo>,
 	resolved_tables: BTreeMap<usize, ResolvedTableReference>,
 }
 
@@ -237,6 +265,10 @@ impl SemanticProgram {
 
 	pub fn object_declaration(&self, name: &str) -> Option<&ObjectDeclaration> {
 		self.object_declarations.get(name)
+	}
+
+	pub fn record_pointer_binding(&self, position: usize) -> Option<&RecordPointerBindingInfo> {
+		self.record_pointer_bindings.get(&position)
 	}
 
 	pub fn resolved_table(&self, position: usize) -> Option<&ResolvedTableReference> {
@@ -1011,6 +1043,10 @@ impl SemanticAnalyzer {
 							}
 						}
 
+						if matches!(local.data_type.without_nullability(), DataType::RecordPointer(_)) {
+							self.record_record_pointer_assignment(local.declaration_position, &target.fields);
+						}
+
 						let value_type = self.infer_expression_type(value)?;
 						self.assignment_result_type(*operator, &current_type, &value_type, expression.position())
 					}
@@ -1217,6 +1253,7 @@ impl SemanticAnalyzer {
 				}
 			}
 			Expr::Integer(_) => Ok(DataType::Int),
+			Expr::New(new_expression) => self.infer_new_expression_type(new_expression),
 			Expr::Null(_) => Ok(DataType::Null),
 			Expr::ObjectConstruction(ObjectConstructionExpr {
 				fields,
@@ -1404,6 +1441,16 @@ impl SemanticAnalyzer {
 		Ok(DataType::RecordPointer(record_pointer))
 	}
 
+	fn infer_new_expression_type(&mut self, new_expression: &NewExpr) -> Result<DataType, CompileError> {
+		let resolved_table = self.resolve_table_reference(&new_expression.table)?;
+
+		Ok(DataType::RecordPointer(RecordPointerType {
+			database_name: resolved_table.database().name().to_string(),
+			schema_name: resolved_table.schema().name().to_string(),
+			table_name: resolved_table.table().name().to_string(),
+		}))
+	}
+
 	fn infer_query_expression_type(
 		&mut self,
 		expression: &Expr,
@@ -1497,7 +1544,7 @@ impl SemanticAnalyzer {
 				let _ = table_name;
 				self.data_type_from_schema_type(&column_type)
 			}
-			Expr::Index(_) | Expr::ObjectConstruction(_) | Expr::Range(_) | Expr::Ternary(_) => Err(self.compile_error(
+			Expr::Index(_) | Expr::New(_) | Expr::ObjectConstruction(_) | Expr::Range(_) | Expr::Ternary(_) => Err(self.compile_error(
 				expression.position(),
 				String::from("This expression form is not yet supported in `where` clauses."),
 			)),
@@ -2207,6 +2254,32 @@ impl SemanticAnalyzer {
 		}
 	}
 
+	fn record_record_pointer_assignment(&mut self, position: usize, field_path: &[crate::ast::IdentifierExpr]) {
+		let Some(binding) = self.semantic_program.record_pointer_bindings.get_mut(&position) else {
+			return;
+		};
+
+		let path = field_path.iter().map(|field| field.name.as_str()).collect::<Vec<_>>().join(".");
+		binding.assigned_fields.insert(path);
+	}
+
+	fn register_record_pointer_binding(
+		&mut self,
+		position: usize,
+		record_pointer: RecordPointerType,
+		initialization: RecordPointerInitialization,
+		is_mutable: bool,
+		origin: RecordPointerOrigin,
+	) {
+		self.semantic_program.record_pointer_bindings.insert(position, RecordPointerBindingInfo {
+			assigned_fields: BTreeSet::new(),
+			data_type: record_pointer,
+			initialization,
+			is_mutable,
+			origin,
+		});
+	}
+
 	fn require_boolean_operands(&self, operator: BinaryOperator, lhs: &DataType, rhs: &DataType, position: usize) -> Result<(), CompileError> {
 		if lhs.without_nullability() == &DataType::Bool && rhs.without_nullability() == &DataType::Bool {
 			return Ok(());
@@ -2513,6 +2586,7 @@ impl SemanticAnalyzer {
 		match statement {
 			Statement::Block(block) => self.block_guarantees_return(block),
 			Statement::Break(_) | Statement::Continue(_) => false,
+			Statement::Create(_) => false,
 			Statement::EnumDeclaration(_) => false,
 			Statement::FunctionDeclaration(_) => false,
 			Statement::If(if_statement) => {
@@ -2620,7 +2694,17 @@ impl SemanticAnalyzer {
 		self.next_local_slot += 1;
 		self.semantic_program.declaration_slots.insert(parameter.position, slot);
 		self.semantic_program.declaration_types.insert(parameter.position, parameter_type.clone());
+		if let DataType::RecordPointer(record_pointer) = &parameter_type {
+			self.register_record_pointer_binding(
+				parameter.position,
+				record_pointer.clone(),
+				RecordPointerInitialization::Existing,
+				true,
+				RecordPointerOrigin::Parameter,
+			);
+		}
 		self.declare_local(parameter.name.clone(), LocalBinding {
+			declaration_position: parameter.position,
 			data_type: parameter_type,
 			is_const: false,
 			slot,
@@ -2817,6 +2901,40 @@ impl SemanticAnalyzer {
 
 				Ok(())
 			}
+			Statement::Create(CreateStatement { position, target }) => {
+				let local = self.lookup_local(&target.name).ok_or(self.compile_error(
+					target.position,
+					format!("Variable `{}` is not declared in this scope.", target.name),
+				))?;
+
+				let DataType::RecordPointer(_) = local.data_type.without_nullability() else {
+					return Err(self.compile_error(
+						target.position,
+						format!("`create` requires a record pointer operand, found `{}`.", local.data_type.name()),
+					));
+				};
+
+				if local.is_const {
+					return Err(self.compile_error(
+						target.position,
+						format!("`create` requires a mutable record pointer, but `{}` is immutable.", target.name),
+					));
+				}
+
+				let binding = self.semantic_program.record_pointer_binding(local.declaration_position).ok_or(self.compile_error(
+					*position,
+					String::from("Internal error: missing record pointer binding metadata for `create` statement."),
+				))?;
+
+				if binding.initialization != RecordPointerInitialization::New {
+					return Err(self.compile_error(
+						target.position,
+						String::from("`create` requires a record pointer declared from a `new` expression."),
+					));
+				}
+
+				Ok(())
+			}
 			Statement::EnumDeclaration(enum_declaration) => self.validate_enum_declaration(enum_declaration),
 			Statement::Expression(expression) => {
 				self.infer_expression_type(expression)?;
@@ -2858,6 +2976,7 @@ impl SemanticAnalyzer {
 				self.semantic_program.declaration_slots.insert(variable.position, loop_variable_slot);
 				self.semantic_program.declaration_types.insert(variable.position, variable_type.clone());
 				self.declare_local(variable.name.clone(), LocalBinding {
+					declaration_position: variable.position,
 					data_type: variable_type,
 					is_const: false,
 					slot: loop_variable_slot,
@@ -2946,7 +3065,15 @@ impl SemanticAnalyzer {
 					variable.position,
 					DataType::RecordPointer(record_pointer.clone()),
 				);
+				self.register_record_pointer_binding(
+					variable.position,
+					record_pointer.clone(),
+					RecordPointerInitialization::Existing,
+					*is_mut,
+					RecordPointerOrigin::ForLoop,
+				);
 				self.declare_local(variable.name.clone(), LocalBinding {
+					declaration_position: variable.position,
 					data_type: DataType::RecordPointer(record_pointer),
 					is_const: !*is_mut,
 					slot: loop_variable_slot,
@@ -2993,7 +3120,18 @@ impl SemanticAnalyzer {
 						self.next_local_slot += 1;
 						self.semantic_program.declaration_slots.insert(*position, slot);
 						self.semantic_program.declaration_types.insert(*position, initial_type.clone());
+						let DataType::RecordPointer(record_pointer) = initial_type.without_nullability().clone() else {
+							unreachable!("checked above");
+						};
+						self.register_record_pointer_binding(
+							*position,
+							record_pointer,
+							RecordPointerInitialization::Existing,
+							false,
+							RecordPointerOrigin::IfBinding,
+						);
 						self.declare_local(name.clone(), LocalBinding {
+							declaration_position: *position,
 							data_type: initial_type,
 							is_const: true,
 							slot,
@@ -3033,7 +3171,23 @@ impl SemanticAnalyzer {
 				self.next_local_slot += 1;
 				self.semantic_program.declaration_slots.insert(*position, slot);
 				self.semantic_program.declaration_types.insert(*position, initial_type.clone());
+				let DataType::RecordPointer(record_pointer) = initial_type.without_nullability().clone() else {
+					unreachable!("checked above");
+				};
+				self.register_record_pointer_binding(
+					*position,
+					record_pointer,
+					if matches!(initial_value, Expr::New(_)) {
+						RecordPointerInitialization::New
+					}
+					else {
+						RecordPointerInitialization::Existing
+					},
+					*is_mut,
+					RecordPointerOrigin::VariableDeclaration,
+				);
 				self.declare_local(name.clone(), LocalBinding {
+					declaration_position: *position,
 					data_type: initial_type,
 					is_const: !*is_mut,
 					slot,
@@ -3097,6 +3251,7 @@ impl SemanticAnalyzer {
 				self.semantic_program.declaration_slots.insert(*position, slot);
 				self.semantic_program.declaration_types.insert(*position, data_type.clone());
 				self.declare_local(name.clone(), LocalBinding {
+					declaration_position: *position,
 					data_type: data_type.clone(),
 					is_const: *is_const,
 					slot,
@@ -3216,6 +3371,7 @@ fn statement_position(statement: &Statement) -> usize {
 		Statement::Block(block) => block.position,
 		Statement::Break(statement) => statement.position,
 		Statement::Continue(statement) => statement.position,
+		Statement::Create(statement) => statement.position,
 		Statement::EnumDeclaration(statement) => statement.position,
 		Statement::Expression(expression) => expression.position(),
 		Statement::For(statement) => statement.position,
@@ -3231,6 +3387,8 @@ fn statement_position(statement: &Statement) -> usize {
 
 #[cfg(test)]
 mod tests {
+	use std::collections::BTreeSet;
+
 	use crate::ast::BlockStatement;
 	use crate::ast::Expr;
 	use crate::ast::IdentifierExpr;
@@ -3254,6 +3412,7 @@ mod tests {
 
 	use super::DataType;
 	use super::LocalBinding;
+	use super::RecordPointerOrigin;
 	use super::SemanticAnalyzer;
 
 	fn parse_count_expression(source: &str) -> crate::ast::CountExpr {
@@ -3278,10 +3437,37 @@ mod tests {
 		}
 	}
 
+	fn parse_program(source: &str) -> crate::ast::Program {
+		let mut lexer = Lexer::new(SourceText::new(source));
+		let tokens = lexer.tokenize().unwrap();
+		let mut parser = Parser::new(tokens);
+		parser.parse_program().unwrap()
+	}
+
 	fn sqlite_test_schema(source: &str, database_name: &str) -> crate::schema::SchemaCatalog {
 		let mut schema = read_schema_catalog_from_str(source).unwrap();
 		schema.database_mut(database_name).unwrap().set_backend(DatabaseBackend::Sqlite);
 		schema
+	}
+
+	#[test]
+	fn accepts_create_statement_for_new_mutable_record_pointer() {
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null
+				);
+			"#,
+			"ExampleDb",
+		);
+		let program = parse_program(
+			"with exampledb;\nfn Main(args: [text]) int { rec mut cust = new Customers; create cust; return 0; }"
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap();
 	}
 
 	#[test]
@@ -3303,6 +3489,7 @@ mod tests {
 		analyzer.declare_local(
 			String::from("cust"),
 			LocalBinding {
+				declaration_position: 3,
 				data_type: DataType::RecordPointer(RecordPointerType {
 					database_name: String::from("ExampleDb"),
 					schema_name: String::from("Main"),
@@ -3324,6 +3511,7 @@ mod tests {
 		analyzer.declare_local(
 			String::from("cust"),
 			LocalBinding {
+				declaration_position: 0,
 				data_type: DataType::RecordPointer(RecordPointerType {
 					database_name: String::from("ExampleDb"),
 					schema_name: String::from("Main"),
@@ -3359,6 +3547,7 @@ mod tests {
 		analyzer.declare_local(
 			String::from("cust"),
 			LocalBinding {
+				declaration_position: 0,
 				data_type: DataType::RecordPointer(RecordPointerType {
 					database_name: String::from("ExampleDb"),
 					schema_name: String::from("Main"),
@@ -3494,6 +3683,7 @@ mod tests {
 		analyzer.declare_local(
 			String::from("targetId"),
 			LocalBinding {
+				declaration_position: 7,
 				data_type: DataType::Int,
 				is_const: false,
 				slot: 7,
@@ -3559,6 +3749,7 @@ mod tests {
 		analyzer.declare_local(
 			String::from("outer"),
 			LocalBinding {
+				declaration_position: 4,
 				data_type: DataType::RecordPointer(RecordPointerType {
 					database_name: String::from("ExampleDb"),
 					schema_name: String::from("Main"),
@@ -3591,5 +3782,87 @@ mod tests {
 			schema_name: String::from("Main"),
 			table_name: String::from("InnerTable"),
 		});
+	}
+
+	#[test]
+	fn records_record_pointer_assignment_metadata_for_local_declaration() {
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			"ExampleDb",
+		);
+		let program = parse_program(
+			"with exampledb;\nfn Main(args: [text]) int { rec mut cust = find first Customers where Id == 1; cust.Name = 'Ada'; return 0; }"
+		);
+		let declaration_position = match &program.functions[0].body.statements[0] {
+			Statement::RecordPointerDeclaration(statement) => statement.position,
+			other => panic!("Expected record pointer declaration, found {other:?}."),
+		};
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap();
+		let binding = semantic_program.record_pointer_binding(declaration_position).unwrap();
+
+		assert_eq!(binding.origin, RecordPointerOrigin::VariableDeclaration);
+		assert!(binding.is_mutable);
+		assert_eq!(binding.assigned_fields, BTreeSet::from([String::from("Name")]));
+	}
+
+	#[test]
+	fn records_record_pointer_parameter_metadata() {
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null
+				);
+			"#,
+			"ExampleDb",
+		);
+		let program = parse_program(
+			"with exampledb;\nfn Visit(cust: rec Customers, other: &rec Customers) void {}"
+		);
+		let first_parameter = &program.functions[0].parameters[0];
+		let second_parameter = &program.functions[0].parameters[1];
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_program_with_schema(&program, Some(&schema)).unwrap();
+		let first_binding = semantic_program.record_pointer_binding(first_parameter.position).unwrap();
+		let second_binding = semantic_program.record_pointer_binding(second_parameter.position).unwrap();
+
+		assert_eq!(first_binding.origin, RecordPointerOrigin::Parameter);
+		assert_eq!(second_binding.origin, RecordPointerOrigin::Parameter);
+		assert!(first_binding.is_mutable);
+		assert!(second_binding.is_mutable);
+		assert!(first_binding.assigned_fields.is_empty());
+		assert!(second_binding.assigned_fields.is_empty());
+	}
+
+	#[test]
+	fn rejects_create_statement_for_non_new_record_pointer() {
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null
+				);
+			"#,
+			"ExampleDb",
+		);
+		let program = parse_program(
+			"with exampledb;\nfn Main(args: [text]) int { rec mut cust = find first Customers where Id == 1; create cust; return 0; }"
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+		let error = analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap_err();
+
+		assert_eq!(error.message, "`create` requires a record pointer declared from a `new` expression.");
 	}
 }

@@ -121,6 +121,7 @@ pub enum Expr {
 	Identifier(IdentifierExpr),
 	Index(IndexExpr),
 	Integer(IntegerLiteral),
+	New(NewExpr),
 	Null(NullLiteral),
 	ObjectConstruction(ObjectConstructionExpr),
 	Range(RangeExpr),
@@ -181,6 +182,7 @@ pub enum Statement {
 	Block(BlockStatement),
 	Break(BreakStatement),
 	Continue(ContinueStatement),
+	Create(CreateStatement),
 	EnumDeclaration(EnumDeclaration),
 	Expression(Expr),
 	For(ForStatement),
@@ -269,6 +271,12 @@ pub struct CountExpr {
 	pub position: usize,
 	pub table: TableReference,
 	pub where_clause: Option<Box<Expr>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateStatement {
+	pub position: usize,
+	pub target: IdentifierExpr,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -375,6 +383,12 @@ pub struct IndexExpr {
 pub struct IntegerLiteral {
 	pub position: usize,
 	pub value: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewExpr {
+	pub position: usize,
+	pub table: TableReference,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -568,6 +582,7 @@ impl Expr {
 			Expr::Identifier(expression) => expression.position,
 			Expr::Index(expression) => expression.position,
 			Expr::Integer(expression) => expression.position,
+			Expr::New(expression) => expression.position,
 			Expr::Null(expression) => expression.position,
 			Expr::ObjectConstruction(expression) => expression.position,
 			Expr::Range(expression) => expression.position,

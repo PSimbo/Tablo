@@ -11,6 +11,7 @@ use crate::ast::BooleanLiteral;
 use crate::ast::BreakStatement;
 use crate::ast::CallExpr;
 use crate::ast::ContinueStatement;
+use crate::ast::CreateStatement;
 use crate::ast::DecimalLiteral;
 use crate::ast::Expr;
 use crate::ast::FieldAccessExpr;
@@ -389,6 +390,9 @@ impl Compiler {
 			Expr::Integer(integer) => {
 				self.emit(emission, Instruction::PushInteger(integer.value), expression.position());
 			}
+			Expr::New(_) => {
+				panic!("`new` expressions should be rejected during statement compilation before bytecode emission.");
+			}
 			Expr::Null(_) => {
 				self.emit(emission, Instruction::PushNull, expression.position());
 			}
@@ -570,6 +574,10 @@ impl Compiler {
 				self.emit(emission, Instruction::Jump(0), *position);
 				Ok(())
 			}
+			Statement::Create(CreateStatement { position, .. }) => Err(self.compile_error(
+				*position,
+				String::from("`create` statements are not implemented yet."),
+			)),
 			Statement::Continue(ContinueStatement { position }) => {
 				let Some(loop_context) = self.loop_stack.last_mut() else {
 					return Err(self.compile_error(
@@ -583,6 +591,13 @@ impl Compiler {
 			}
 			Statement::EnumDeclaration(_) => Ok(()),
 			Statement::Expression(expression) => {
+				if matches!(expression, Expr::New(_)) {
+					return Err(self.compile_error(
+						expression.position(),
+						String::from("`new` expressions are not implemented yet."),
+					));
+				}
+
 				self.compile_into(expression, semantic_program, emission);
 
 				if expression_produces_runtime_value(expression, semantic_program) {
@@ -800,6 +815,13 @@ impl Compiler {
 				Ok(())
 			}
 			Statement::RecordPointerDeclaration(RecordPointerDeclaration { initial_value, is_mut, name, position }) => {
+				if matches!(initial_value, Expr::New(_)) {
+					return Err(self.compile_error(
+						initial_value.position(),
+						String::from("`new` expressions are not implemented yet."),
+					));
+				}
+
 				let slot = semantic_program.declaration_slot(*position).ok_or(self.compile_error(
 					*position,
 					format!("Missing slot for record pointer declaration `{name}`."),
@@ -1086,7 +1108,7 @@ fn collect_functions_from_statement<'a>(statement: &'a Statement, functions: &mu
 			}
 		}
 		Statement::While(statement) => collect_functions_from_statements(statement.body.statements.as_slice(), functions),
-		Statement::Break(_) | Statement::Continue(_) | Statement::Expression(_) | Statement::RecordPointerDeclaration(_) | Statement::Return(_) | Statement::VariableDeclaration(_) => {}
+		Statement::Break(_) | Statement::Continue(_) | Statement::Create(_) | Statement::Expression(_) | Statement::RecordPointerDeclaration(_) | Statement::Return(_) | Statement::VariableDeclaration(_) => {}
 	}
 }
 
@@ -1108,6 +1130,7 @@ fn statement_position(statement: &Statement) -> usize {
 		Statement::Block(block) => block.position,
 		Statement::Break(statement) => statement.position,
 		Statement::Continue(statement) => statement.position,
+		Statement::Create(statement) => statement.position,
 		Statement::EnumDeclaration(statement) => statement.position,
 		Statement::Expression(expression) => expression.position(),
 		Statement::For(statement) => statement.position,

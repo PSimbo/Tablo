@@ -12,6 +12,7 @@ use crate::ast::CallArgument;
 use crate::ast::CallExpr;
 use crate::ast::ContinueStatement;
 use crate::ast::CountExpr;
+use crate::ast::CreateStatement;
 use crate::ast::DataType;
 use crate::ast::DateLiteral;
 use crate::ast::DecimalLiteral;
@@ -31,6 +32,7 @@ use crate::ast::IfCondition;
 use crate::ast::IfStatement;
 use crate::ast::IndexExpr;
 use crate::ast::IntegerLiteral;
+use crate::ast::NewExpr;
 use crate::ast::NullLiteral;
 use crate::ast::ObjectConstructionExpr;
 use crate::ast::ObjectConstructionField;
@@ -124,7 +126,7 @@ impl Parser {
 				Some(token) if token.kind == TokenKind::WithKeyword => {
 					with_declarations.push(self.parse_with_declaration()?);
 				}
-				Some(token) if matches!(token.kind, TokenKind::BreakKeyword | TokenKind::ConstKeyword | TokenKind::ContinueKeyword | TokenKind::EnumKeyword | TokenKind::ForKeyword | TokenKind::IfKeyword | TokenKind::LeftBrace | TokenKind::RecKeyword | TokenKind::ReturnKeyword | TokenKind::VarKeyword | TokenKind::WhileKeyword) => {
+				Some(token) if matches!(token.kind, TokenKind::BreakKeyword | TokenKind::ConstKeyword | TokenKind::ContinueKeyword | TokenKind::CreateKeyword | TokenKind::EnumKeyword | TokenKind::ForKeyword | TokenKind::IfKeyword | TokenKind::LeftBrace | TokenKind::RecKeyword | TokenKind::ReturnKeyword | TokenKind::VarKeyword | TokenKind::WhileKeyword) => {
 					statements.push(self.parse_statement()?);
 				}
 				Some(_) => {
@@ -478,6 +480,20 @@ impl Parser {
 			position: start,
 			table,
 			where_clause,
+		}))
+	}
+
+	fn parse_create_statement(&mut self) -> Result<Statement, ParseError> {
+		let create_keyword = self.expect_token(TokenKind::CreateKeyword, "Expected `create` to start create statement.")?;
+		let target = self.expect_token(TokenKind::Identifier, "Expected record pointer name after `create`.")?;
+		self.expect_token(TokenKind::Semicolon, "Expected `;` after create statement.")?;
+
+		Ok(Statement::Create(CreateStatement {
+			position: create_keyword.start,
+			target: IdentifierExpr {
+				name: target.lexeme,
+				position: target.start,
+			},
 		}))
 	}
 
@@ -1134,6 +1150,15 @@ impl Parser {
 		}))
 	}
 
+	fn parse_new_expression(&mut self, start: usize) -> Result<Expr, ParseError> {
+		let table = self.parse_table_reference()?;
+
+		Ok(Expr::New(NewExpr {
+			position: start,
+			table,
+		}))
+	}
+
 	fn parse_not_expression(&mut self, position: usize) -> Result<Expr, ParseError> {
 		let operand = self.parse_expression_with_binding_power(BindingPower::Unary, false)?;
 
@@ -1417,6 +1442,7 @@ impl Parser {
 			TokenKind::InterpolatedStringStart => self.parse_interpolated_string(token),
 			TokenKind::LeftBracket => self.parse_array_literal(token.start),
 			TokenKind::LeftParenthesis => self.parse_group_expression(token.start),
+			TokenKind::NewKeyword => self.parse_new_expression(token.start),
 			TokenKind::NotKeyword => self.parse_not_expression(token.start),
 			TokenKind::NullKeyword => Ok(Expr::Null(NullLiteral {
 				position: token.start,
@@ -1793,6 +1819,7 @@ impl Parser {
 		match self.current() {
 			Some(token) if token.kind == TokenKind::BreakKeyword => self.parse_break_statement(),
 			Some(token) if token.kind == TokenKind::ContinueKeyword => self.parse_continue_statement(),
+			Some(token) if token.kind == TokenKind::CreateKeyword => self.parse_create_statement(),
 			Some(token) if token.kind == TokenKind::EnumKeyword => {
 				Ok(Statement::EnumDeclaration(self.parse_enum_declaration()?))
 			}
@@ -2103,6 +2130,7 @@ mod tests {
 	use crate::ast::CallExpr;
 	use crate::ast::ContinueStatement;
 	use crate::ast::CountExpr;
+	use crate::ast::CreateStatement;
 	use crate::ast::DataType;
 	use crate::ast::DateLiteral;
 	use crate::ast::DecimalLiteral;
@@ -2122,6 +2150,7 @@ mod tests {
 	use crate::ast::IfStatement;
 	use crate::ast::IndexExpr;
 	use crate::ast::IntegerLiteral;
+	use crate::ast::NewExpr;
 	use crate::ast::NullLiteral;
 	use crate::ast::ObjectConstructionExpr;
 	use crate::ast::ObjectConstructionField;
@@ -2277,6 +2306,10 @@ mod tests {
 			Expr::Integer(IntegerLiteral { value, .. }) => Expr::Integer(IntegerLiteral {
 				position: 0,
 				value,
+			}),
+			Expr::New(NewExpr { table, .. }) => Expr::New(NewExpr {
+				position: 0,
+				table: normalize_table_reference(table),
 			}),
 			Expr::Null(_) => Expr::Null(NullLiteral {
 				position: 0,
@@ -2487,6 +2520,10 @@ mod tests {
 			}),
 			Statement::Continue(_) => Statement::Continue(ContinueStatement {
 				position: 0,
+			}),
+			Statement::Create(create_statement) => Statement::Create(CreateStatement {
+				position: 0,
+				target: normalize_identifier(create_statement.target),
 			}),
 			Statement::EnumDeclaration(declaration) => {
 				Statement::EnumDeclaration(normalize_enum_declaration(declaration))
@@ -3219,6 +3256,27 @@ mod tests {
 				}))),
 			})),
 			statements: vec![],
+			with_declarations: vec![],
+		});
+	}
+
+	#[test]
+	fn parses_create_statement() {
+		let program = parse_program("create cust;");
+
+		assert_eq!(normalize_program(program), Program {
+			functions: vec![],
+			objects: vec![],
+			result: None,
+			statements: vec![
+				Statement::Create(CreateStatement {
+					position: 0,
+					target: IdentifierExpr {
+						name: String::from("cust"),
+						position: 0,
+					},
+				}),
+			],
 			with_declarations: vec![],
 		});
 	}
@@ -4735,6 +4793,37 @@ mod tests {
 								value: true,
 							})),
 						}))),
+					}),
+					is_mut: true,
+					name: String::from("cust"),
+					position: 0,
+				}),
+			],
+			with_declarations: vec![],
+		});
+	}
+
+	#[test]
+	fn parses_record_pointer_declaration_with_new_expression() {
+		let program = parse_program("rec mut cust = new customers;");
+
+		assert_eq!(normalize_program(program), Program {
+			functions: vec![],
+			objects: vec![],
+			result: None,
+			statements: vec![
+				Statement::RecordPointerDeclaration(RecordPointerDeclaration {
+					initial_value: Expr::New(NewExpr {
+						position: 0,
+						table: TableReference {
+							components: vec![
+								IdentifierExpr {
+									name: String::from("customers"),
+									position: 0,
+								},
+							],
+							position: 0,
+						},
 					}),
 					is_mut: true,
 					name: String::from("cust"),
