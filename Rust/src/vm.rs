@@ -1258,10 +1258,28 @@ impl VirtualMachine {
 					format!("Built-in function `int` expects 1 argument(s), found {}.", arguments.len()),
 				)),
 			},
+			BuiltInFunction::DateCast => match arguments.as_slice() {
+				[Value::Enum(value)] => Ok(Some((*value.backing_value).clone())),
+				[Value::Text(value)] => {
+					let parsed = crate::value::Date::from_sqlite_text(value).map_err(|_| vm_error(
+						instruction_index,
+						format!("Built-in function `date` could not parse `{value}` as an ISO-8601 date."),
+					))?;
+					Ok(Some(Value::Date(parsed)))
+				}
+				[value] => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `date` does not accept a `{}` value.", type_name(value)),
+				)),
+				_ => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `date` expects 1 argument(s), found {}.", arguments.len()),
+				)),
+			},
 			BuiltInFunction::TextCast
 			| BuiltInFunction::DecCast
 			| BuiltInFunction::BoolCast
-			| BuiltInFunction::DateCast => match arguments.as_slice() {
+			=> match arguments.as_slice() {
 				[Value::Enum(value)] => Ok(Some((*value.backing_value).clone())),
 				[value] => Err(vm_error(
 					instruction_index,

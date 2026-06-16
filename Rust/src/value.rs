@@ -166,7 +166,7 @@ impl Date {
 		Ok(Self { day, month, year })
 	}
 
-	fn from_sqlite_text(value: &str) -> Result<Self, String> {
+	pub fn from_sqlite_text(value: &str) -> Result<Self, String> {
 		let mut parts = value.split('-');
 		let year = parts.next().ok_or_else(|| format!("Invalid SQLite date value `{value}`."))?;
 		let month = parts.next().ok_or_else(|| format!("Invalid SQLite date value `{value}`."))?;

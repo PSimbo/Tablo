@@ -247,11 +247,15 @@ impl BuiltInFunction {
 				[arg] if matches!(arg.without_nullability(), DataType::Date | DataType::Timestamp | DataType::TimestampTz) => Some(DataType::Int),
 				_ => None,
 			},
+			Self::DateCast => match argument_types {
+				[arg] if matches!(arg.without_nullability(), DataType::Text) => Some(DataType::Date),
+				_ => None,
+			},
 			Self::IntCast => match argument_types {
 				[arg] if matches!(arg.without_nullability(), DataType::Text) => Some(DataType::Int),
 				_ => None,
 			},
-			Self::TextCast | Self::DecCast | Self::BoolCast | Self::DateCast => None,
+			Self::TextCast | Self::DecCast | Self::BoolCast => None,
 		}
 	}
 

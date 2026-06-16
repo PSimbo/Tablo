@@ -735,6 +735,16 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_invalid_text_to_date_cast_at_runtime() {
+		let error = evaluate_snippet("date('2026-02-30')").unwrap_err();
+
+		assert_eq!(
+			error.to_string(),
+			"Runtime error: Built-in function `date` could not parse `2026-02-30` as an ISO-8601 date.\nStack trace:\n  at <source>:1:5"
+		);
+	}
+
+	#[test]
 	fn rejects_invalid_text_to_int_cast_at_runtime() {
 		let error = evaluate_snippet("int('abc')").unwrap_err();
 
@@ -1236,6 +1246,13 @@ mod tests {
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn runs_date_cast_from_text_source_text() {
+		let result = evaluate_snippet("date('2026-06-16')").unwrap();
+
+		assert_eq!(result, Some(Value::Date(crate::value::Date::from_parts(2026, 6, 16).unwrap())));
 	}
 
 	#[test]
