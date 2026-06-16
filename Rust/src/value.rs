@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::Display;
 
 use crate::ast::DataType;
+use crate::ast::RecordPointerType;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DeferredSqliteValue {
@@ -461,9 +462,13 @@ pub struct LocalReference {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordPointerValue {
+	pub column_names: Vec<String>,
 	pub exists: bool,
 	pub fields: BTreeMap<String, RecordFieldValue>,
 	pub locked: bool,
+	pub persisted: bool,
+	pub record_type: RecordPointerType,
+	pub schema_is_implicit: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]

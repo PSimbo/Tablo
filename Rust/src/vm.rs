@@ -311,6 +311,87 @@ impl VirtualMachine {
 		}
 	}
 
+	fn create_record(
+		&self,
+		record: RecordPointerValue,
+		instruction_index: usize,
+	) -> Result<Value, VmError> {
+		if !record.exists {
+			return Err(vm_error(
+				instruction_index,
+				String::from("Cannot create a record from a record pointer that does not reference a record."),
+			));
+		}
+
+		if record.locked {
+			return Err(vm_error(
+				instruction_index,
+				String::from("Cannot create a record from a locked record pointer."),
+			));
+		}
+
+		if record.persisted {
+			return Err(vm_error(
+				instruction_index,
+				String::from("Cannot create a record that has already been created."),
+			));
+		}
+
+		match self.database_config.sqlite_database_path(&record.record_type.database_name) {
+			Some(database_path) => self.create_sqlite_record(database_path, record, instruction_index),
+			None => Err(vm_error(
+				instruction_index,
+				format!("Database `{}` is not configured at runtime.", record.record_type.database_name),
+			)),
+		}
+	}
+
+	fn create_sqlite_record(
+		&self,
+		database_path: &Path,
+		record: RecordPointerValue,
+		instruction_index: usize,
+	) -> Result<Value, VmError> {
+		let connection = Connection::open(database_path).map_err(|error| vm_error(
+			instruction_index,
+			format!("Failed to open SQLite database `{}`: {error}", database_path.display()),
+		))?;
+		let table_source = sqlite_table_source(
+			&record.record_type.schema_name,
+			&record.record_type.table_name,
+			record.schema_is_implicit,
+		);
+		let column_list = record.column_names.iter()
+			.map(|name| quote_identifier(name))
+			.collect::<Vec<_>>()
+			.join(", ");
+		let placeholders = std::iter::repeat("?")
+			.take(record.column_names.len())
+			.collect::<Vec<_>>()
+			.join(", ");
+		let statement = format!("INSERT INTO {table_source} ({column_list}) VALUES ({placeholders})");
+		let parameter_values = record.column_names.iter()
+			.map(|column_name| {
+				let field = record.fields.get(&normalize_record_field_name(column_name)).ok_or(vm_error(
+					instruction_index,
+					format!("Record pointer does not contain a field named `{column_name}`."),
+				))?;
+				let value = resolve_record_field_value(field, instruction_index)?;
+				sqlite_value_from_runtime_value(value, instruction_index)
+			})
+			.collect::<Result<Vec<_>, _>>()?;
+
+		connection.execute(&statement, params_from_iter(parameter_values)).map_err(|error| vm_error(
+			instruction_index,
+			format!("Failed to execute SQLite create statement: {error}"),
+		))?;
+
+		Ok(Value::RecordPointer(RecordPointerValue {
+			persisted: true,
+			..record
+		}))
+	}
+
 	fn current_code_body<'a>(&self, program: &'a Program, frame: &CallFrame) -> &'a CodeBody {
 		match frame.function_index {
 			Some(function_index) => program.functions()[function_index].body(),
@@ -359,6 +440,17 @@ impl VirtualMachine {
 				if let Some(result) = result {
 					self.stack.push(result);
 				}
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::CreateRecord => {
+				let record = self.pop_value(instruction_index)?;
+				let Value::RecordPointer(record) = record else {
+					return Err(vm_error(
+						instruction_index,
+						String::from("`create` requires a record pointer operand."),
+					));
+				};
+				self.stack.push(self.create_record(record, instruction_index)?);
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::Dup2 => {
@@ -522,6 +614,38 @@ impl VirtualMachine {
 				let end = self.pop_value(instruction_index)?;
 				let start = self.pop_value(instruction_index)?;
 				self.stack.push(make_range_value(start, None, end, instruction_index)?);
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::MakeRecordPointer {
+				field_names,
+				record_type,
+				schema_is_implicit,
+			} => {
+				let mut values = Vec::with_capacity(field_names.len());
+
+				for _ in 0..field_names.len() {
+					values.push(self.pop_value(instruction_index)?);
+				}
+
+				values.reverse();
+				let mut fields = BTreeMap::new();
+
+				for (field_name, value) in field_names.iter().zip(values) {
+					fields.insert(
+						normalize_record_field_name(field_name),
+						RecordFieldValue::Materialized(value),
+					);
+				}
+
+				self.stack.push(Value::RecordPointer(RecordPointerValue {
+					column_names: field_names.clone(),
+					exists: true,
+					fields,
+					locked: false,
+					persisted: false,
+					record_type: record_type.clone(),
+					schema_is_implicit: *schema_is_implicit,
+				}));
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::MakeSteppedRange => {
@@ -754,16 +878,32 @@ impl VirtualMachine {
 					format!("Failed to read SQLite query result: {error}"),
 				))? else {
 					return Ok(Value::RecordPointer(RecordPointerValue {
+						column_names: columns.iter().map(|column| column.column_name.clone()).collect(),
 						exists: false,
 						fields: BTreeMap::new(),
 						locked: false,
+						persisted: false,
+						record_type: crate::ast::RecordPointerType {
+							database_name: query.database_name.clone(),
+							schema_name: query.schema_name.clone(),
+							table_name: query.table_name.clone(),
+						},
+						schema_is_implicit: query.schema_is_implicit,
 					}));
 				};
 				let fields = load_sqlite_record_fields(row, columns, instruction_index)?;
 				Ok(Value::RecordPointer(RecordPointerValue {
+					column_names: columns.iter().map(|column| column.column_name.clone()).collect(),
 					exists: true,
 					fields,
 					locked: false,
+					persisted: true,
+					record_type: crate::ast::RecordPointerType {
+						database_name: query.database_name.clone(),
+						schema_name: query.schema_name.clone(),
+						table_name: query.table_name.clone(),
+					},
+					schema_is_implicit: query.schema_is_implicit,
 				}))
 			}
 			SqlQueryResultShape::RecordPointerArray(columns) => {
@@ -779,9 +919,17 @@ impl VirtualMachine {
 				))? {
 					let fields = load_sqlite_record_fields(row, columns, instruction_index)?;
 					records.push(Value::RecordPointer(RecordPointerValue {
+						column_names: columns.iter().map(|column| column.column_name.clone()).collect(),
 						exists: true,
 						fields,
 						locked: false,
+						persisted: true,
+						record_type: crate::ast::RecordPointerType {
+							database_name: query.database_name.clone(),
+							schema_name: query.schema_name.clone(),
+							table_name: query.table_name.clone(),
+						},
+						schema_is_implicit: query.schema_is_implicit,
 					}));
 				}
 
@@ -1312,22 +1460,7 @@ impl VirtualMachine {
 			load_field_path_value(value, field_path, instruction_index)?
 		};
 
-		match value {
-			Value::Boolean(value) => Ok(SqlValue::Integer(if value { 1 } else { 0 })),
-			Value::Date(value) => Ok(SqlValue::Text(value.to_string())),
-			Value::Decimal(value) => Ok(SqlValue::Text(value.to_string())),
-			Value::Integer(value) => Ok(SqlValue::Integer(value)),
-			Value::Null => Ok(SqlValue::Null),
-			Value::Text(value) => Ok(SqlValue::Text(value)),
-			Value::Time(value) => Ok(SqlValue::Text(value.to_string())),
-			Value::TimeTz(value) => Ok(SqlValue::Text(value.to_string())),
-			Value::Timestamp(value) => Ok(SqlValue::Text(value.to_string())),
-			Value::TimestampTz(value) => Ok(SqlValue::Text(value.to_string())),
-			other => Err(vm_error(
-				instruction_index,
-				format!("Cannot bind a `{}` value into a SQLite query parameter.", type_name(&other)),
-			)),
-		}
+		sqlite_value_from_runtime_value(value, instruction_index)
 	}
 
 	fn store_reference_value(&mut self, reference: LocalReference, value: Value, instruction_index: usize) -> Result<(), VmError> {
@@ -2140,6 +2273,10 @@ fn pow10_i128(exponent: u32) -> Result<i128, String> {
 	Ok(value)
 }
 
+fn quote_identifier(name: &str) -> String {
+	format!("\"{}\"", name.replace('"', "\"\""))
+}
+
 fn runtime_value_from_constant(constant: &crate::bytecode::Constant) -> Value {
 	match constant {
 		crate::bytecode::Constant::Boolean(value) => Value::Boolean(*value),
@@ -2181,6 +2318,34 @@ fn sqlite_path_from_connection_string(database_name: &str, value: &str) -> Resul
 	};
 
 	Ok(PathBuf::from(normalized))
+}
+
+fn sqlite_table_source(schema_name: &str, table_name: &str, schema_is_implicit: bool) -> String {
+	if schema_is_implicit {
+		quote_identifier(table_name)
+	}
+	else {
+		format!("{}.{}", quote_identifier(schema_name), quote_identifier(table_name))
+	}
+}
+
+fn sqlite_value_from_runtime_value(value: Value, instruction_index: usize) -> Result<SqlValue, VmError> {
+	match value {
+		Value::Boolean(value) => Ok(SqlValue::Integer(if value { 1 } else { 0 })),
+		Value::Date(value) => Ok(SqlValue::Text(value.to_string())),
+		Value::Decimal(value) => Ok(SqlValue::Text(value.to_string())),
+		Value::Integer(value) => Ok(SqlValue::Integer(value)),
+		Value::Null => Ok(SqlValue::Null),
+		Value::Text(value) => Ok(SqlValue::Text(value)),
+		Value::Time(value) => Ok(SqlValue::Text(value.to_string())),
+		Value::TimeTz(value) => Ok(SqlValue::Text(value.to_string())),
+		Value::Timestamp(value) => Ok(SqlValue::Text(value.to_string())),
+		Value::TimestampTz(value) => Ok(SqlValue::Text(value.to_string())),
+		other => Err(vm_error(
+			instruction_index,
+			format!("Cannot bind a `{}` value into a SQLite query parameter.", type_name(&other)),
+		)),
+	}
 }
 
 fn store_field_path_into_object(
@@ -2245,7 +2410,11 @@ fn store_field_path_into_record_pointer(
 	}
 
 	let exists = record.exists;
+	let column_names = record.column_names;
 	let locked = record.locked;
+	let persisted = record.persisted;
+	let record_type = record.record_type;
+	let schema_is_implicit = record.schema_is_implicit;
 
 	let Some((field_name, remaining_path)) = field_path.split_first() else {
 		return Err(vm_error(
@@ -2267,9 +2436,13 @@ fn store_field_path_into_record_pointer(
 
 		fields.insert(normalized_field_name, RecordFieldValue::Materialized(value));
 		return Ok(Value::RecordPointer(RecordPointerValue {
+			column_names,
 			exists,
 			fields,
 			locked,
+			persisted,
+			record_type,
+			schema_is_implicit,
 		}));
 	}
 
@@ -2285,9 +2458,13 @@ fn store_field_path_into_record_pointer(
 	)?;
 	fields.insert(normalized_field_name, RecordFieldValue::Materialized(updated_child));
 	Ok(Value::RecordPointer(RecordPointerValue {
+		column_names,
 		exists,
 		fields,
 		locked,
+		persisted,
+		record_type,
+		schema_is_implicit,
 	}))
 }
 

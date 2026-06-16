@@ -31,6 +31,7 @@ const OPCODE_ADD: u8 = 1;
 const OPCODE_AND: u8 = 2;
 const OPCODE_CALL: u8 = 30;
 const OPCODE_CALL_BUILT_IN: u8 = 36;
+const OPCODE_CREATE_RECORD: u8 = 57;
 const OPCODE_DIVIDE: u8 = 3;
 const OPCODE_DUP2: u8 = 37;
 const OPCODE_EQUAL: u8 = 4;
@@ -51,6 +52,7 @@ const OPCODE_LOAD_LOCAL: u8 = 14;
 const OPCODE_LOAD_REFERENCE: u8 = 15;
 const OPCODE_MAKE_ARRAY: u8 = 33;
 const OPCODE_MAKE_OBJECT: u8 = 40;
+const OPCODE_MAKE_RECORD_POINTER: u8 = 58;
 const OPCODE_MAKE_RANGE: u8 = 38;
 const OPCODE_MAKE_STEPPED_RANGE: u8 = 39;
 const OPCODE_MODULO: u8 = 16;
@@ -410,6 +412,7 @@ impl<'a> ObjectFileReader<'a> {
 				})?;
 				Ok(Instruction::CallBuiltIn(built_in, argument_count))
 			}
+			OPCODE_CREATE_RECORD => Ok(Instruction::CreateRecord),
 			OPCODE_DIVIDE => Ok(Instruction::Divide),
 			OPCODE_DUP2 => Ok(Instruction::Dup2),
 			OPCODE_EQUAL => Ok(Instruction::Equal),
@@ -439,6 +442,15 @@ impl<'a> ObjectFileReader<'a> {
 
 				Ok(Instruction::MakeObject(field_names))
 			}
+			OPCODE_MAKE_RECORD_POINTER => Ok(Instruction::MakeRecordPointer {
+				field_names: self.read_string_vec()?,
+				record_type: crate::ast::RecordPointerType {
+					database_name: self.read_string()?,
+					schema_name: self.read_string()?,
+					table_name: self.read_string()?,
+				},
+				schema_is_implicit: self.read_bool()?,
+			}),
 			OPCODE_MAKE_RANGE => Ok(Instruction::MakeRange),
 			OPCODE_MAKE_STEPPED_RANGE => Ok(Instruction::MakeSteppedRange),
 			OPCODE_MODULO => Ok(Instruction::Modulo),
@@ -622,7 +634,10 @@ impl<'a> ObjectFileReader<'a> {
 			dialect,
 			parameters,
 			result_shape,
+			schema_is_implicit: self.read_bool()?,
+			schema_name: self.read_string()?,
 			statement,
+			table_name: self.read_string()?,
 		})
 	}
 
@@ -735,6 +750,7 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.push(built_in.id());
 			bytes.extend_from_slice(&argument_count.to_le_bytes());
 		}
+		Instruction::CreateRecord => bytes.push(OPCODE_CREATE_RECORD),
 		Instruction::Divide => bytes.push(OPCODE_DIVIDE),
 		Instruction::Dup2 => bytes.push(OPCODE_DUP2),
 		Instruction::Equal => bytes.push(OPCODE_EQUAL),
@@ -794,6 +810,27 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			}
 		}
 		Instruction::MakeRange => bytes.push(OPCODE_MAKE_RANGE),
+		Instruction::MakeRecordPointer {
+			field_names,
+			record_type,
+			schema_is_implicit,
+		} => {
+			bytes.push(OPCODE_MAKE_RECORD_POINTER);
+			bytes.extend_from_slice(&(field_names.len() as u32).to_le_bytes());
+
+			for field_name in field_names {
+				bytes.extend_from_slice(&(field_name.len() as u32).to_le_bytes());
+				bytes.extend_from_slice(field_name.as_bytes());
+			}
+
+			bytes.extend_from_slice(&(record_type.database_name.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(record_type.database_name.as_bytes());
+			bytes.extend_from_slice(&(record_type.schema_name.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(record_type.schema_name.as_bytes());
+			bytes.extend_from_slice(&(record_type.table_name.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(record_type.table_name.as_bytes());
+			bytes.push(u8::from(*schema_is_implicit));
+		}
 		Instruction::MakeSteppedRange => bytes.push(OPCODE_MAKE_STEPPED_RANGE),
 		Instruction::Modulo => bytes.push(OPCODE_MODULO),
 		Instruction::Multiply => bytes.push(OPCODE_MULTIPLY),
@@ -974,6 +1011,11 @@ fn write_sql_query(bytes: &mut Vec<u8>, query: &SqlQuery) {
 		bytes.extend_from_slice(&parameter.index.to_le_bytes());
 		bytes.extend_from_slice(&parameter.slot.to_le_bytes());
 	}
+	bytes.push(u8::from(query.schema_is_implicit));
+	bytes.extend_from_slice(&(query.schema_name.len() as u32).to_le_bytes());
+	bytes.extend_from_slice(query.schema_name.as_bytes());
+	bytes.extend_from_slice(&(query.table_name.len() as u32).to_le_bytes());
+	bytes.extend_from_slice(query.table_name.as_bytes());
 }
 
 impl ObjectFileLayout {

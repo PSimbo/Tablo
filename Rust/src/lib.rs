@@ -359,6 +359,75 @@ mod tests {
 	}
 
 	#[test]
+	fn creates_sqlite_record_from_new_record_pointer() {
+		let database_path = create_sqlite_test_database(
+			"creates_sqlite_record_from_new_record_pointer",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int {\n    rec mut cust = new Customers;\n    cust.Id = 7;\n    cust.Name = 'Ada';\n    create cust;\n    return count Customers where Id == 7 and Name == 'Ada';\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn creates_sqlite_record_with_nullable_column_defaulting_to_null() {
+		let database_path = create_sqlite_test_database(
+			"creates_sqlite_record_with_nullable_column_defaulting_to_null",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Name TEXT NULL
+				);
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int {\n    rec mut cust = new Customers;\n    cust.Id = 5;\n    create cust;\n    return count Customers where Id == 5;\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let connection = Connection::open(&database_path).unwrap();
+		let inserted_name: Option<String> = connection.query_row(
+			"SELECT Name FROM Customers WHERE Id = 5",
+			[],
+			|row| row.get(0),
+		).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(1)));
+		assert_eq!(inserted_name, None);
+	}
+
+	#[test]
 	fn defaults_omitted_nullable_date_field_to_null() {
 		let result = evaluate_snippet(
 			"obj Example { when: date?, };\nvar example: Example = Example { };\nexample.when"

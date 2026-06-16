@@ -142,7 +142,10 @@ impl QueryCountPlan {
 			dialect: SqlDialect::Sqlite,
 			parameters,
 			result_shape: SqlQueryResultShape::IntegerScalar,
+			schema_is_implicit: self.schema_is_implicit,
+			schema_name: self.schema_name.clone(),
 			statement,
+			table_name: self.table_name.clone(),
 		}
 	}
 }
@@ -213,7 +216,10 @@ impl QueryFindPlan {
 			dialect: SqlDialect::Sqlite,
 			parameters,
 			result_shape: SqlQueryResultShape::RecordPointer(self.record_columns.clone()),
+			schema_is_implicit: self.schema_is_implicit,
+			schema_name: self.schema_name.clone(),
 			statement,
+			table_name: self.table_name.clone(),
 		}
 	}
 }
@@ -281,7 +287,10 @@ impl QueryForPlan {
 			dialect: SqlDialect::Sqlite,
 			parameters,
 			result_shape: SqlQueryResultShape::RecordPointerArray(self.record_columns.clone()),
+			schema_is_implicit: self.schema_is_implicit,
+			schema_name: self.schema_name.clone(),
 			statement,
+			table_name: self.table_name.clone(),
 		}
 	}
 }
@@ -326,7 +335,10 @@ pub struct SqlQuery {
 	pub dialect: SqlDialect,
 	pub parameters: Vec<SqlParameter>,
 	pub result_shape: SqlQueryResultShape,
+	pub schema_is_implicit: bool,
+	pub schema_name: String,
 	pub statement: String,
+	pub table_name: String,
 }
 
 fn effective_find_order_direction(kind: FindKind, direction: OrderByDirection) -> OrderByDirection {
@@ -530,9 +542,12 @@ mod tests {
 			dialect: SqlDialect::Sqlite,
 			parameters: vec![],
 			result_shape: SqlQueryResultShape::IntegerScalar,
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
 			statement: String::from(
 				"SELECT COUNT(*) FROM \"Customers\" WHERE (INSTR(TRIM(\"Customers\".\"Name\"), 'Ada') > 0)"
 			),
+			table_name: String::from("Customers"),
 		}));
 	}
 
@@ -565,9 +580,12 @@ mod tests {
 			dialect: SqlDialect::Sqlite,
 			parameters: vec![],
 			result_shape: SqlQueryResultShape::IntegerScalar,
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
 			statement: String::from(
 				"SELECT COUNT(*) FROM \"Tbl\" WHERE (\"Tbl\".\"Code\" IN ('ALPHA', 'BRAVO'))"
 			),
+			table_name: String::from("Tbl"),
 		}));
 	}
 
@@ -611,9 +629,12 @@ mod tests {
 			dialect: SqlDialect::Sqlite,
 			parameters: vec![],
 			result_shape: SqlQueryResultShape::IntegerScalar,
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
 			statement: String::from(
 				"SELECT COUNT(*) FROM \"Customers\" WHERE (CASE WHEN LENGTH('Ada') = 0 THEN 0 ELSE ((LENGTH(\"Customers\".\"Name\") - LENGTH(REPLACE(\"Customers\".\"Name\", 'Ada', ''))) / LENGTH('Ada')) END > NULLIF(INSTR(\"Customers\".\"Name\", 'A'), 0))"
 			),
+			table_name: String::from("Customers"),
 		}));
 	}
 
@@ -667,9 +688,12 @@ mod tests {
 				},
 			],
 			result_shape: SqlQueryResultShape::IntegerScalar,
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
 			statement: String::from(
 				"SELECT COUNT(*) FROM \"Customers\" WHERE ((\"Customers\".\"Id\" = ?1) AND (NOT (\"Customers\".\"Active\" = 0)))"
 			),
+			table_name: String::from("Customers"),
 		}));
 	}
 
@@ -695,9 +719,12 @@ mod tests {
 			dialect: SqlDialect::Sqlite,
 			parameters: vec![],
 			result_shape: SqlQueryResultShape::IntegerScalar,
+			schema_is_implicit: false,
+			schema_name: String::from("Reporting"),
 			statement: String::from(
 				"SELECT COUNT(*) FROM \"Reporting\".\"Metrics\" WHERE (12.50 = 'hi ''there''')"
 			),
+			table_name: String::from("Metrics"),
 		}));
 	}
 
@@ -759,9 +786,12 @@ mod tests {
 					is_nullable: false,
 				},
 			]),
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
 			statement: String::from(
 				"SELECT \"Customers\".\"Id\", \"Customers\".\"Name\" FROM \"Customers\" WHERE (\"Customers\".\"Active\" = 1) ORDER BY \"Customers\".\"Name\" DESC LIMIT 1"
 			),
+			table_name: String::from("Customers"),
 		}));
 	}
 
@@ -822,9 +852,12 @@ mod tests {
 					is_nullable: false,
 				},
 			]),
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
 			statement: String::from(
 				"SELECT \"Customers\".\"Id\", \"Customers\".\"Name\" FROM \"Customers\" WHERE (\"Customers\".\"Active\" = 1) ORDER BY \"Customers\".\"Name\" DESC"
 			),
+			table_name: String::from("Customers"),
 		}));
 	}
 }

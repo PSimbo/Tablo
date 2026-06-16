@@ -1114,6 +1114,7 @@ mod tests {
 
 	use serde_json::Value as JsonValue;
 	use tablo::ast::DataType;
+	use tablo::ast::RecordPointerType;
 	use tablo::value::DeferredSqliteValue;
 	use tablo::value::RecordFieldValue;
 	use tablo::value::RecordPointerValue;
@@ -1138,9 +1139,17 @@ mod tests {
 		);
 
 		let value = Value::RecordPointer(RecordPointerValue {
+			column_names: vec![String::from("Address1"), String::from("Id")],
 			exists: true,
 			fields,
 			locked: false,
+			persisted: true,
+			record_type: RecordPointerType {
+				database_name: String::from("ExampleDb"),
+				schema_name: String::from("Main"),
+				table_name: String::from("Customers"),
+			},
+			schema_is_implicit: true,
 		});
 		let mut server = DapServer::new();
 		let variables = server.child_variables_for_value(&value).unwrap();

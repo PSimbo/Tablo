@@ -3,6 +3,7 @@
 // grow into a richer structure once functions, sections, and debug metadata
 // are introduced.
 
+use crate::ast::RecordPointerType;
 use crate::builtins::BuiltInFunction;
 use crate::query::LoweredBackendQuery;
 use crate::source::SourceText;
@@ -23,6 +24,7 @@ pub enum Instruction {
 	And,
 	Call(u32, u32),
 	CallBuiltIn(BuiltInFunction, u32),
+	CreateRecord,
 	Divide,
 	Dup2,
 	Equal,
@@ -44,6 +46,11 @@ pub enum Instruction {
 	MakeArray(u32),
 	MakeObject(Vec<String>),
 	MakeRange,
+	MakeRecordPointer {
+		field_names: Vec<String>,
+		record_type: RecordPointerType,
+		schema_is_implicit: bool,
+	},
 	MakeSteppedRange,
 	Modulo,
 	Multiply,

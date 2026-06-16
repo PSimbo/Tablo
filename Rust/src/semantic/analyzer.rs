@@ -135,6 +135,19 @@ struct LocalBinding {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewRecordColumn {
+	pub data_type: DataType,
+	pub name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewRecordLayout {
+	pub columns: Vec<NewRecordColumn>,
+	pub record_type: RecordPointerType,
+	pub schema_is_implicit: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordPointerBindingInfo {
 	pub assigned_fields: BTreeSet<String>,
 	pub data_type: RecordPointerType,
@@ -173,6 +186,7 @@ pub struct SemanticProgram {
 	lowered_count_queries: BTreeMap<usize, QueryCountPlan>,
 	lowered_find_queries: BTreeMap<usize, QueryFindPlan>,
 	lowered_for_record_queries: BTreeMap<usize, QueryForPlan>,
+	new_record_layouts: BTreeMap<usize, NewRecordLayout>,
 	object_declarations: BTreeMap<String, ObjectDeclaration>,
 	record_pointer_bindings: BTreeMap<usize, RecordPointerBindingInfo>,
 	resolved_tables: BTreeMap<usize, ResolvedTableReference>,
@@ -261,6 +275,10 @@ impl SemanticProgram {
 
 	pub fn lowered_for_record_query(&self, position: usize) -> Option<&QueryForPlan> {
 		self.lowered_for_record_queries.get(&position)
+	}
+
+	pub fn new_record_layout(&self, position: usize) -> Option<&NewRecordLayout> {
+		self.new_record_layouts.get(&position)
 	}
 
 	pub fn object_declaration(&self, name: &str) -> Option<&ObjectDeclaration> {
@@ -1442,13 +1460,44 @@ impl SemanticAnalyzer {
 	}
 
 	fn infer_new_expression_type(&mut self, new_expression: &NewExpr) -> Result<DataType, CompileError> {
-		let resolved_table = self.resolve_table_reference(&new_expression.table)?;
+		let (record_type, schema_is_implicit, table_columns) = {
+			let resolved_table = self.resolve_table_reference(&new_expression.table)?;
+			let table_columns = resolved_table.table().columns()
+				.map(|column| (column.name().to_string(), column.data_type().clone(), column.is_nullable()))
+				.collect::<Vec<_>>();
 
-		Ok(DataType::RecordPointer(RecordPointerType {
-			database_name: resolved_table.database().name().to_string(),
-			schema_name: resolved_table.schema().name().to_string(),
-			table_name: resolved_table.table().name().to_string(),
-		}))
+			(
+				RecordPointerType {
+					database_name: resolved_table.database().name().to_string(),
+					schema_name: resolved_table.schema().name().to_string(),
+					table_name: resolved_table.table().name().to_string(),
+				},
+				resolved_table.schema().is_implicit(),
+				table_columns,
+			)
+		};
+		let mut columns = Vec::new();
+
+		for (column_name, schema_data_type, is_nullable) in table_columns {
+			let mut data_type = self.data_type_from_schema_type(&schema_data_type)?;
+
+			if is_nullable {
+				data_type = data_type.into_nullable();
+			}
+
+			columns.push(NewRecordColumn {
+				data_type,
+				name: column_name,
+			});
+		}
+
+		self.semantic_program.new_record_layouts.insert(new_expression.position, NewRecordLayout {
+			columns,
+			record_type: record_type.clone(),
+			schema_is_implicit,
+		});
+
+		Ok(DataType::RecordPointer(record_type))
 	}
 
 	fn infer_query_expression_type(
@@ -2906,6 +2955,7 @@ impl SemanticAnalyzer {
 					target.position,
 					format!("Variable `{}` is not declared in this scope.", target.name),
 				))?;
+				self.semantic_program.identifier_slots.insert(target.position, local.slot);
 
 				let DataType::RecordPointer(_) = local.data_type.without_nullability() else {
 					return Err(self.compile_error(

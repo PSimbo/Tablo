@@ -390,8 +390,19 @@ impl Compiler {
 			Expr::Integer(integer) => {
 				self.emit(emission, Instruction::PushInteger(integer.value), expression.position());
 			}
-			Expr::New(_) => {
-				panic!("`new` expressions should be rejected during statement compilation before bytecode emission.");
+			Expr::New(new_expression) => {
+				let layout = semantic_program.new_record_layout(expression.position())
+					.unwrap_or_else(|| panic!("Missing resolved record layout for `new` expression."));
+
+				for column in &layout.columns {
+					self.emit_default_value(&column.data_type, semantic_program, emission, expression.position());
+				}
+
+				self.emit(emission, Instruction::MakeRecordPointer {
+					field_names: layout.columns.iter().map(|column| column.name.clone()).collect(),
+					record_type: layout.record_type.clone(),
+					schema_is_implicit: layout.schema_is_implicit,
+				}, new_expression.position);
 			}
 			Expr::Null(_) => {
 				self.emit(emission, Instruction::PushNull, expression.position());
@@ -574,10 +585,16 @@ impl Compiler {
 				self.emit(emission, Instruction::Jump(0), *position);
 				Ok(())
 			}
-			Statement::Create(CreateStatement { position, .. }) => Err(self.compile_error(
-				*position,
-				String::from("`create` statements are not implemented yet."),
-			)),
+			Statement::Create(CreateStatement { position, target }) => {
+				let slot = semantic_program.identifier_slot(target.position).ok_or(self.compile_error(
+					target.position,
+					format!("Missing slot for record pointer `{}` in `create` statement.", target.name),
+				))?;
+				self.emit(emission, Instruction::LoadLocal(slot), *position);
+				self.emit(emission, Instruction::CreateRecord, *position);
+				self.emit(emission, Instruction::StoreLocal(slot), *position);
+				Ok(())
+			}
 			Statement::Continue(ContinueStatement { position }) => {
 				let Some(loop_context) = self.loop_stack.last_mut() else {
 					return Err(self.compile_error(
@@ -591,13 +608,6 @@ impl Compiler {
 			}
 			Statement::EnumDeclaration(_) => Ok(()),
 			Statement::Expression(expression) => {
-				if matches!(expression, Expr::New(_)) {
-					return Err(self.compile_error(
-						expression.position(),
-						String::from("`new` expressions are not implemented yet."),
-					));
-				}
-
 				self.compile_into(expression, semantic_program, emission);
 
 				if expression_produces_runtime_value(expression, semantic_program) {
@@ -815,13 +825,6 @@ impl Compiler {
 				Ok(())
 			}
 			Statement::RecordPointerDeclaration(RecordPointerDeclaration { initial_value, is_mut, name, position }) => {
-				if matches!(initial_value, Expr::New(_)) {
-					return Err(self.compile_error(
-						initial_value.position(),
-						String::from("`new` expressions are not implemented yet."),
-					));
-				}
-
 				let slot = semantic_program.declaration_slot(*position).ok_or(self.compile_error(
 					*position,
 					format!("Missing slot for record pointer declaration `{name}`."),
