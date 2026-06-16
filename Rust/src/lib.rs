@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt::Display;
 use std::path::Path;
@@ -81,6 +82,133 @@ impl Display for TabloError {
 				Ok(())
 			}
 		}
+	}
+}
+
+#[derive(Clone)]
+struct LinkedModule {
+	exported_functions: BTreeMap<String, String>,
+	functions: Vec<ast::FunctionDeclaration>,
+	with_declarations: Vec<ast::WithDeclaration>,
+}
+
+#[derive(Default)]
+struct ModuleLinker {
+	loaded_modules: BTreeMap<PathBuf, LinkedModule>,
+	next_module_id: u32,
+}
+
+impl ModuleLinker {
+	fn collect_import_bindings(
+		&mut self,
+		program: &ast::Program,
+		base_directory: &Path,
+	) -> Result<BTreeMap<String, String>, CompileError> {
+		let mut import_bindings = BTreeMap::new();
+
+		for statement in &program.statements {
+			let ast::Statement::Use(use_declaration) = statement else {
+				continue;
+			};
+			let module_path = resolve_module_path(base_directory, &use_declaration.module_path);
+			let linked_module = self.load_module(&module_path, use_declaration)?;
+
+			if let Some(imported_names) = &use_declaration.imported_names {
+				for imported_name in imported_names {
+					let Some(target_name) = linked_module.exported_functions.get(&imported_name.name) else {
+						return Err(CompileError {
+							message: format!(
+								"Function `{}` is not exported by module `{}`.",
+								imported_name.name,
+								use_declaration.module_path,
+							),
+							position: imported_name.position,
+						});
+					};
+
+					import_bindings.insert(imported_name.name.clone(), target_name.clone());
+				}
+			}
+			else {
+				for (name, target_name) in &linked_module.exported_functions {
+					import_bindings.insert(name.clone(), target_name.clone());
+				}
+			}
+		}
+
+		Ok(import_bindings)
+	}
+
+	fn linked_functions(&self) -> Vec<ast::FunctionDeclaration> {
+		self.loaded_modules.values()
+			.flat_map(|module| module.functions.iter().cloned())
+			.collect()
+	}
+
+	fn linked_with_declarations(&self) -> Vec<ast::WithDeclaration> {
+		self.loaded_modules.values()
+			.flat_map(|module| module.with_declarations.iter().cloned())
+			.collect()
+	}
+
+	fn load_module(
+		&mut self,
+		module_path: &Path,
+		use_declaration: &ast::UseDeclaration,
+	) -> Result<LinkedModule, CompileError> {
+		let module_key = canonical_module_key(module_path);
+
+		if let Some(linked_module) = self.loaded_modules.get(&module_key) {
+			return Ok(linked_module.clone());
+		}
+
+		let source = std::fs::read_to_string(module_path).map_err(|error| CompileError {
+			message: format!(
+				"Failed to read imported module `{}` from `{}`: {}",
+				use_declaration.module_path,
+				module_path.display(),
+				error,
+			),
+			position: use_declaration.position,
+		})?;
+		let mut program = parse_source_text(&SourceText::new(source)).map_err(|error| CompileError {
+			message: format!(
+				"Failed to parse imported module `{}` from `{}`: {}",
+				use_declaration.module_path,
+				module_path.display(),
+				error,
+			),
+			position: use_declaration.position,
+		})?;
+		let base_directory = module_path.parent().unwrap_or_else(|| Path::new("."));
+		let import_bindings = self.collect_import_bindings(&program, base_directory)?;
+		let module_id = self.next_module_id;
+		self.next_module_id += 1;
+		let top_level_renames = build_top_level_function_renames(&program, module_id);
+
+		for function in &mut program.functions {
+			if let Some(renamed) = top_level_renames.get(&function.name) {
+				function.name = renamed.clone();
+			}
+
+			rewrite_function_declaration_calls(function, &top_level_renames, &import_bindings);
+		}
+
+		let exported_functions = program.functions.iter()
+			.filter(|function| function.visibility == ast::Visibility::Public)
+			.map(|function| {
+				let original_name = unmangled_export_name(&function.name, &top_level_renames)
+					.unwrap_or_else(|| function.name.clone());
+				(original_name, function.name.clone())
+			})
+			.collect();
+		let linked_module = LinkedModule {
+			exported_functions,
+			functions: program.functions,
+			with_declarations: program.with_declarations,
+		};
+		self.loaded_modules.insert(module_key, linked_module.clone());
+		Ok(linked_module)
 	}
 }
 
@@ -202,8 +330,28 @@ fn attach_source_debug_info(program: &mut Program, source: &SourceText, source_n
 	program.debug_info_mut().attach_source_file(source_file);
 }
 
+fn build_top_level_function_renames(program: &ast::Program, module_id: u32) -> BTreeMap<String, String> {
+	program.functions.iter()
+		.map(|function| {
+			(
+				function.name.clone(),
+				format!("__tablo_module_{module_id}_{}", function.name),
+			)
+		})
+		.collect()
+}
+
 fn canonical_module_key(module_path: &Path) -> PathBuf {
 	std::fs::canonicalize(module_path).unwrap_or_else(|_| module_path.to_path_buf())
+}
+
+fn collect_local_function_names(statements: &[ast::Statement]) -> Vec<String> {
+	statements.iter()
+		.filter_map(|statement| match statement {
+			ast::Statement::FunctionDeclaration(function) => Some(function.name.clone()),
+			_ => None,
+		})
+		.collect()
 }
 
 fn compile_ast_program_with_schema(
@@ -228,7 +376,8 @@ fn compile_source_to_program_with_name_and_schema(
 	let source = SourceText::new(source);
 	let program = parse_source_text(&source)?;
 	validate_module_graph(&program, source_name).map_err(TabloError::Compile)?;
-	let mut program = compile_ast_program_with_schema(&program, target, schema_catalog)?;
+	let linked_program = link_program_modules(&program, source_name).map_err(TabloError::Compile)?;
+	let mut program = compile_ast_program_with_schema(&linked_program, target, schema_catalog)?;
 	attach_source_debug_info(&mut program, &source, source_name);
 	Ok(program)
 }
@@ -324,6 +473,73 @@ fn first_use_statement(program: &ast::Program) -> Option<&ast::UseDeclaration> {
 	None
 }
 
+fn link_program_modules(program: &ast::Program, source_name: Option<&str>) -> Result<ast::Program, CompileError> {
+	let Some(source_name) = source_name else {
+		return Ok(program.clone());
+	};
+
+	if first_use_statement(program).is_none() {
+		return Ok(program.clone());
+	}
+
+	let root_path = Path::new(source_name);
+	let root_directory = root_path.parent().unwrap_or_else(|| Path::new("."));
+	let mut linker = ModuleLinker::default();
+	let import_bindings = linker.collect_import_bindings(program, root_directory)?;
+	let mut linked_program = program.clone();
+
+	for function in &mut linked_program.functions {
+		rewrite_function_declaration_calls(function, &BTreeMap::new(), &import_bindings);
+	}
+
+	for statement in &mut linked_program.statements {
+		rewrite_statement_calls(statement, &BTreeMap::new(), &import_bindings, &[]);
+	}
+
+	if let Some(result) = &mut linked_program.result {
+		rewrite_expression_calls(result, &BTreeMap::new(), &import_bindings, &[]);
+	}
+
+	linked_program.functions = linker.linked_functions()
+		.into_iter()
+		.chain(linked_program.functions)
+		.collect();
+	linked_program.statements.retain(|statement| !matches!(statement, ast::Statement::Use(_)));
+	linked_program.with_declarations = merge_with_declarations(
+		&linked_program.with_declarations,
+		&linker.linked_with_declarations(),
+	);
+	Ok(linked_program)
+}
+
+fn merge_with_declarations(
+	base_declarations: &[ast::WithDeclaration],
+	imported_declarations: &[ast::WithDeclaration],
+) -> Vec<ast::WithDeclaration> {
+	let mut seen = BTreeSet::new();
+	let mut merged = Vec::new();
+
+	for declaration in base_declarations.iter().chain(imported_declarations.iter()) {
+		let mut databases = Vec::new();
+
+		for database in &declaration.databases {
+			let key = database.name.to_ascii_lowercase();
+			if seen.insert(key) {
+				databases.push(database.clone());
+			}
+		}
+
+		if !databases.is_empty() {
+			merged.push(ast::WithDeclaration {
+				databases,
+				position: declaration.position,
+			});
+		}
+	}
+
+	merged
+}
+
 fn parse_source_text(source: &SourceText) -> Result<ast::Program, TabloError> {
 	let mut lexer = Lexer::new(source.clone());
 	let tokens = lexer.tokenize().map_err(TabloError::Lex)?;
@@ -339,6 +555,190 @@ fn resolve_module_path(base_directory: &Path, module_path: &str) -> PathBuf {
 	}
 
 	resolved
+}
+
+fn rewrite_expression_calls(
+	expression: &mut ast::Expr,
+	top_level_renames: &BTreeMap<String, String>,
+	import_bindings: &BTreeMap<String, String>,
+	shadowed_function_names: &[String],
+) {
+	match expression {
+		ast::Expr::Array(array) => {
+			for element in &mut array.elements {
+				rewrite_expression_calls(element, top_level_renames, import_bindings, shadowed_function_names);
+			}
+		}
+		ast::Expr::Assignment(assignment) => {
+			match &mut assignment.target {
+				ast::AssignmentTarget::Field(target) => {
+					let _ = target;
+				}
+				ast::AssignmentTarget::Identifier(_) => {}
+				ast::AssignmentTarget::Index(target) => {
+					rewrite_expression_calls(&mut target.index, top_level_renames, import_bindings, shadowed_function_names);
+				}
+			}
+
+			rewrite_expression_calls(&mut assignment.value, top_level_renames, import_bindings, shadowed_function_names);
+		}
+		ast::Expr::Binary(binary) => {
+			rewrite_expression_calls(&mut binary.left, top_level_renames, import_bindings, shadowed_function_names);
+			rewrite_expression_calls(&mut binary.right, top_level_renames, import_bindings, shadowed_function_names);
+		}
+		ast::Expr::Boolean(_) | ast::Expr::Date(_) | ast::Expr::Decimal(_) | ast::Expr::Integer(_) | ast::Expr::Null(_) | ast::Expr::Text(_) | ast::Expr::Time(_) | ast::Expr::TimeTz(_) | ast::Expr::Timestamp(_) | ast::Expr::TimestampTz(_) => {}
+		ast::Expr::Call(call) => {
+			for argument in &mut call.arguments {
+				rewrite_expression_calls(&mut argument.value, top_level_renames, import_bindings, shadowed_function_names);
+			}
+
+			if !shadowed_function_names.iter().any(|name| name == &call.callee.name) {
+				if let Some(renamed) = top_level_renames.get(&call.callee.name) {
+					call.callee.name = renamed.clone();
+				}
+				else if let Some(renamed) = import_bindings.get(&call.callee.name) {
+					call.callee.name = renamed.clone();
+				}
+			}
+		}
+		ast::Expr::Count(count) => {
+			if let Some(where_clause) = &mut count.where_clause {
+				rewrite_expression_calls(where_clause, top_level_renames, import_bindings, shadowed_function_names);
+			}
+		}
+		ast::Expr::FieldAccess(field_access) => {
+			rewrite_expression_calls(&mut field_access.object, top_level_renames, import_bindings, shadowed_function_names);
+		}
+		ast::Expr::Find(find) => {
+			if let Some(where_clause) = &mut find.where_clause {
+				rewrite_expression_calls(where_clause, top_level_renames, import_bindings, shadowed_function_names);
+			}
+
+			for order_by in &mut find.order_by {
+				rewrite_expression_calls(&mut order_by.expression, top_level_renames, import_bindings, shadowed_function_names);
+			}
+		}
+		ast::Expr::Identifier(_) | ast::Expr::New(_) => {}
+		ast::Expr::Index(index) => {
+			rewrite_expression_calls(&mut index.array, top_level_renames, import_bindings, shadowed_function_names);
+			rewrite_expression_calls(&mut index.index, top_level_renames, import_bindings, shadowed_function_names);
+		}
+		ast::Expr::ObjectConstruction(object_construction) => {
+			for field in &mut object_construction.fields {
+				rewrite_expression_calls(&mut field.value, top_level_renames, import_bindings, shadowed_function_names);
+			}
+		}
+		ast::Expr::Range(range) => {
+			rewrite_expression_calls(&mut range.start, top_level_renames, import_bindings, shadowed_function_names);
+			rewrite_expression_calls(&mut range.end, top_level_renames, import_bindings, shadowed_function_names);
+			if let Some(step) = &mut range.step {
+				rewrite_expression_calls(step, top_level_renames, import_bindings, shadowed_function_names);
+			}
+		}
+		ast::Expr::Ternary(ternary) => {
+			rewrite_expression_calls(&mut ternary.condition, top_level_renames, import_bindings, shadowed_function_names);
+			rewrite_expression_calls(&mut ternary.true_branch, top_level_renames, import_bindings, shadowed_function_names);
+			rewrite_expression_calls(&mut ternary.false_branch, top_level_renames, import_bindings, shadowed_function_names);
+		}
+		ast::Expr::Unary(unary) => {
+			rewrite_expression_calls(&mut unary.operand, top_level_renames, import_bindings, shadowed_function_names);
+		}
+	}
+}
+
+fn rewrite_function_declaration_calls(
+	function: &mut ast::FunctionDeclaration,
+	top_level_renames: &BTreeMap<String, String>,
+	import_bindings: &BTreeMap<String, String>,
+) {
+	rewrite_statements_calls(&mut function.body.statements, top_level_renames, import_bindings, &[]);
+}
+
+fn rewrite_statement_calls(
+	statement: &mut ast::Statement,
+	top_level_renames: &BTreeMap<String, String>,
+	import_bindings: &BTreeMap<String, String>,
+	shadowed_function_names: &[String],
+) {
+	match statement {
+		ast::Statement::Block(block) => {
+			rewrite_statements_calls(&mut block.statements, top_level_renames, import_bindings, shadowed_function_names);
+		}
+		ast::Statement::Create(_) | ast::Statement::Break(_) | ast::Statement::Continue(_) | ast::Statement::EnumDeclaration(_) | ast::Statement::Use(_) => {}
+		ast::Statement::Expression(expression) => {
+			rewrite_expression_calls(expression, top_level_renames, import_bindings, shadowed_function_names);
+		}
+		ast::Statement::For(for_statement) => {
+			rewrite_expression_calls(&mut for_statement.iterable, top_level_renames, import_bindings, shadowed_function_names);
+			rewrite_statements_calls(&mut for_statement.body.statements, top_level_renames, import_bindings, shadowed_function_names);
+		}
+		ast::Statement::ForRecord(for_statement) => {
+			if let Some(where_clause) = &mut for_statement.where_clause {
+				rewrite_expression_calls(where_clause, top_level_renames, import_bindings, shadowed_function_names);
+			}
+
+			for order_by in &mut for_statement.order_by {
+				rewrite_expression_calls(&mut order_by.expression, top_level_renames, import_bindings, shadowed_function_names);
+			}
+
+			rewrite_statements_calls(&mut for_statement.body.statements, top_level_renames, import_bindings, shadowed_function_names);
+		}
+		ast::Statement::FunctionDeclaration(function) => {
+			rewrite_function_declaration_calls(function, top_level_renames, import_bindings);
+		}
+		ast::Statement::If(if_statement) => {
+			match &mut if_statement.condition {
+				ast::IfCondition::Expression(expression) => {
+					rewrite_expression_calls(expression, top_level_renames, import_bindings, shadowed_function_names);
+				}
+				ast::IfCondition::RecordPointerBinding(binding) => {
+					rewrite_expression_calls(&mut binding.initial_value, top_level_renames, import_bindings, shadowed_function_names);
+				}
+			}
+
+			rewrite_statements_calls(&mut if_statement.then_branch.statements, top_level_renames, import_bindings, shadowed_function_names);
+			if let Some(else_branch) = &mut if_statement.else_branch {
+				rewrite_statement_calls(else_branch, top_level_renames, import_bindings, shadowed_function_names);
+			}
+		}
+		ast::Statement::RecordPointerDeclaration(record_pointer) => {
+			rewrite_expression_calls(&mut record_pointer.initial_value, top_level_renames, import_bindings, shadowed_function_names);
+		}
+		ast::Statement::Return(return_statement) => {
+			if let Some(value) = &mut return_statement.value {
+				rewrite_expression_calls(value, top_level_renames, import_bindings, shadowed_function_names);
+			}
+		}
+		ast::Statement::VariableDeclaration(variable) => {
+			if let Some(initial_value) = &mut variable.initial_value {
+				rewrite_expression_calls(initial_value, top_level_renames, import_bindings, shadowed_function_names);
+			}
+		}
+		ast::Statement::While(while_statement) => {
+			rewrite_expression_calls(&mut while_statement.condition, top_level_renames, import_bindings, shadowed_function_names);
+			rewrite_statements_calls(&mut while_statement.body.statements, top_level_renames, import_bindings, shadowed_function_names);
+		}
+	}
+}
+
+fn rewrite_statements_calls(
+	statements: &mut [ast::Statement],
+	top_level_renames: &BTreeMap<String, String>,
+	import_bindings: &BTreeMap<String, String>,
+	shadowed_function_names: &[String],
+) {
+	let local_function_names = collect_local_function_names(statements);
+	let mut visible_shadowed_names = shadowed_function_names.to_vec();
+	visible_shadowed_names.extend(local_function_names);
+
+	for statement in statements {
+		rewrite_statement_calls(statement, top_level_renames, import_bindings, &visible_shadowed_names);
+	}
+}
+
+fn unmangled_export_name(name: &str, top_level_renames: &BTreeMap<String, String>) -> Option<String> {
+	top_level_renames.iter()
+		.find_map(|(original, renamed)| if renamed == name { Some(original.clone()) } else { None })
 }
 
 fn validate_module_graph(program: &ast::Program, source_name: Option<&str>) -> Result<(), CompileError> {
@@ -866,6 +1266,36 @@ mod tests {
 			message: String::from("Built-in function `len` does not accept by-reference arguments."),
 			position: 25,
 		}));
+	}
+
+	#[test]
+	fn rejects_call_to_private_helper_from_imported_module() {
+		let root_path = write_test_source_file(
+			"rejects_call_to_private_helper_from_imported_module_root",
+			"main.tablo",
+			"use AddTwo from './Helpers';\nfn Main(args: [text]) int { return AddOne(5); }",
+		);
+		let helper_path = root_path.parent().unwrap().join("Helpers.tablo");
+		fs::write(
+			&helper_path,
+			"pub fn AddTwo(value: int) int { return AddOne(value) + 1; }\nfn AddOne(value: int) int { return value + 1; }",
+		).unwrap();
+
+		let error = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Function `AddOne` is not declared in this scope."),
+			position: 64,
+		}));
+
+		let _ = fs::remove_file(helper_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
 	}
 
 	#[test]
@@ -2159,6 +2589,34 @@ mod tests {
 		let result = run(standalone_body("var x: int = 1;\nif true { x = 2; }\nreturn x;")).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(2)));
+	}
+
+	#[test]
+	fn runs_imported_public_function_that_calls_private_helper() {
+		let root_path = write_test_source_file(
+			"runs_imported_public_function_that_calls_private_helper_root",
+			"main.tablo",
+			"use AddTwo from './Helpers';\nfn Main(args: [text]) int { return AddTwo(5); }",
+		);
+		let helper_path = root_path.parent().unwrap().join("Helpers.tablo");
+		fs::write(
+			&helper_path,
+			"pub fn AddTwo(value: int) int { return AddOne(value) + 1; }\nfn AddOne(value: int) int { return value + 1; }",
+		).unwrap();
+
+		let program = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap();
+		let result = run_program(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(7)));
+
+		let _ = fs::remove_file(helper_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
 	}
 
 	#[test]
