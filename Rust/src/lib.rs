@@ -1,5 +1,7 @@
+use std::collections::BTreeSet;
 use std::fmt::Display;
 use std::path::Path;
+use std::path::PathBuf;
 
 pub mod ast;
 pub mod builtins;
@@ -200,6 +202,10 @@ fn attach_source_debug_info(program: &mut Program, source: &SourceText, source_n
 	program.debug_info_mut().attach_source_file(source_file);
 }
 
+fn canonical_module_key(module_path: &Path) -> PathBuf {
+	std::fs::canonicalize(module_path).unwrap_or_else(|_| module_path.to_path_buf())
+}
+
 fn compile_ast_program_with_schema(
 	program: &ast::Program,
 	target: CompilationTarget,
@@ -221,9 +227,101 @@ fn compile_source_to_program_with_name_and_schema(
 ) -> Result<Program, TabloError> {
 	let source = SourceText::new(source);
 	let program = parse_source_text(&source)?;
+	validate_module_graph(&program, source_name).map_err(TabloError::Compile)?;
 	let mut program = compile_ast_program_with_schema(&program, target, schema_catalog)?;
 	attach_source_debug_info(&mut program, &source, source_name);
 	Ok(program)
+}
+
+fn first_nested_use_position(program: &ast::Program) -> Option<usize> {
+	for function in &program.functions {
+		if let Some(position) = first_use_in_statements(&function.body.statements) {
+			return Some(position);
+		}
+	}
+
+	first_use_in_non_top_level_blocks(&program.statements)
+}
+
+fn first_use_in_non_top_level_blocks(statements: &[ast::Statement]) -> Option<usize> {
+	for statement in statements {
+		match statement {
+			ast::Statement::Block(block) => {
+				if let Some(position) = first_use_in_statements(&block.statements) {
+					return Some(position);
+				}
+			}
+			ast::Statement::For(for_statement) => {
+				if let Some(position) = first_use_in_statements(&for_statement.body.statements) {
+					return Some(position);
+				}
+			}
+			ast::Statement::ForRecord(for_statement) => {
+				if let Some(position) = first_use_in_statements(&for_statement.body.statements) {
+					return Some(position);
+				}
+			}
+			ast::Statement::FunctionDeclaration(function) => {
+				if let Some(position) = first_use_in_statements(&function.body.statements) {
+					return Some(position);
+				}
+			}
+			ast::Statement::If(if_statement) => {
+				if let Some(position) = first_use_in_statements(&if_statement.then_branch.statements) {
+					return Some(position);
+				}
+
+				if let Some(else_branch) = &if_statement.else_branch
+					&& let Some(position) = first_use_in_statement(else_branch) {
+					return Some(position);
+				}
+			}
+			ast::Statement::While(while_statement) => {
+				if let Some(position) = first_use_in_statements(&while_statement.body.statements) {
+					return Some(position);
+				}
+			}
+			_ => {}
+		}
+	}
+
+	None
+}
+
+fn first_use_in_statement(statement: &ast::Statement) -> Option<usize> {
+	match statement {
+		ast::Statement::Use(use_declaration) => Some(use_declaration.position),
+		ast::Statement::Block(block) => first_use_in_statements(&block.statements),
+		ast::Statement::For(for_statement) => first_use_in_statements(&for_statement.body.statements),
+		ast::Statement::ForRecord(for_statement) => first_use_in_statements(&for_statement.body.statements),
+		ast::Statement::FunctionDeclaration(function) => first_use_in_statements(&function.body.statements),
+		ast::Statement::If(if_statement) => {
+			first_use_in_statements(&if_statement.then_branch.statements)
+				.or_else(|| if_statement.else_branch.as_ref().and_then(|else_branch| first_use_in_statement(else_branch)))
+		}
+		ast::Statement::While(while_statement) => first_use_in_statements(&while_statement.body.statements),
+		_ => None,
+	}
+}
+
+fn first_use_in_statements(statements: &[ast::Statement]) -> Option<usize> {
+	for statement in statements {
+		if let Some(position) = first_use_in_statement(statement) {
+			return Some(position);
+		}
+	}
+
+	None
+}
+
+fn first_use_statement(program: &ast::Program) -> Option<&ast::UseDeclaration> {
+	for statement in &program.statements {
+		if let ast::Statement::Use(use_declaration) = statement {
+			return Some(use_declaration);
+		}
+	}
+
+	None
 }
 
 fn parse_source_text(source: &SourceText) -> Result<ast::Program, TabloError> {
@@ -233,8 +331,106 @@ fn parse_source_text(source: &SourceText) -> Result<ast::Program, TabloError> {
 	parser.parse_program().map_err(TabloError::Parse)
 }
 
+fn resolve_module_path(base_directory: &Path, module_path: &str) -> PathBuf {
+	let mut resolved = base_directory.join(module_path);
+
+	if resolved.extension().is_none() {
+		resolved.set_extension("tablo");
+	}
+
+	resolved
+}
+
+fn validate_module_graph(program: &ast::Program, source_name: Option<&str>) -> Result<(), CompileError> {
+	if let Some(position) = first_nested_use_position(program) {
+		return Err(CompileError {
+			message: String::from("Nested `use` declarations are not yet supported during module resolution."),
+			position,
+		});
+	}
+
+	let first_use = first_use_statement(program);
+	let Some(first_use) = first_use else {
+		return Ok(());
+	};
+	let Some(source_name) = source_name else {
+		return Err(CompileError {
+			message: String::from("Module imports require a source file path so relative `use` statements can be resolved."),
+			position: first_use.position,
+		});
+	};
+
+	let root_path = Path::new(source_name);
+	let root_directory = root_path.parent().unwrap_or_else(|| Path::new("."));
+	let mut visited = BTreeSet::new();
+	validate_module_imports_in_program(program, root_directory, &mut visited)
+}
+
+fn validate_module_imports_in_program(
+	program: &ast::Program,
+	base_directory: &Path,
+	visited: &mut BTreeSet<PathBuf>,
+) -> Result<(), CompileError> {
+	for statement in &program.statements {
+		let ast::Statement::Use(use_declaration) = statement else {
+			continue;
+		};
+		let module_path = resolve_module_path(base_directory, &use_declaration.module_path);
+		let module_key = canonical_module_key(&module_path);
+
+		if visited.contains(&module_key) {
+			continue;
+		}
+
+		let source = std::fs::read_to_string(&module_path).map_err(|error| CompileError {
+			message: format!(
+				"Failed to read imported module `{}` from `{}`: {}",
+				use_declaration.module_path,
+				module_path.display(),
+				error,
+			),
+			position: use_declaration.position,
+		})?;
+		let imported_program = parse_source_text(&SourceText::new(source)).map_err(|error| CompileError {
+			message: format!(
+				"Failed to parse imported module `{}` from `{}`: {}",
+				use_declaration.module_path,
+				module_path.display(),
+				error,
+			),
+			position: use_declaration.position,
+		})?;
+		let exported_functions = imported_program.functions.iter()
+			.filter(|function| function.visibility == ast::Visibility::Public)
+			.map(|function| function.name.as_str())
+			.collect::<BTreeSet<_>>();
+
+		if let Some(imported_names) = &use_declaration.imported_names {
+			for imported_name in imported_names {
+				if !exported_functions.contains(imported_name.name.as_str()) {
+					return Err(CompileError {
+						message: format!(
+							"Function `{}` is not exported by module `{}`.",
+							imported_name.name,
+							use_declaration.module_path,
+						),
+						position: imported_name.position,
+					});
+				}
+			}
+		}
+
+		visited.insert(module_key);
+		let next_base_directory = module_path.parent().unwrap_or_else(|| Path::new("."));
+		validate_module_imports_in_program(&imported_program, next_base_directory, visited)?;
+	}
+
+	Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+	use std::fs;
 	use std::path::PathBuf;
 
 	use rusqlite::Connection;
@@ -257,19 +453,6 @@ mod tests {
 	use super::run_file;
 	use super::run_program;
 	use super::run_program_with_database_config;
-
-	fn standalone_expression(expression: &str) -> String {
-		format!("fn Main(args: [text]) int {{ return {expression}; }}")
-	}
-
-	fn standalone_body(body: &str) -> String {
-		format!("fn Main(args: [text]) int {{\n{body}\n}}")
-	}
-
-	fn evaluate_snippet(source: &str) -> Result<Option<Value>, TabloError> {
-		let program = compile_source_to_program_with_name_and_schema(source, None, CompilationTarget::Snippet, None)?;
-		run_program(&program)
-	}
 
 	fn compile_snippet_to_object_file(source: &str, output_path: &std::path::Path) -> Result<(), TabloError> {
 		let program = compile_source_to_program_with_name_and_schema(source, None, CompilationTarget::Snippet, None)?;
@@ -300,6 +483,18 @@ mod tests {
 		Ok((program, schema))
 	}
 
+	fn create_sqlite_test_database(name: &str, setup_sql: &str) -> PathBuf {
+		let path = unique_test_output_path(name).with_extension("sqlite");
+		let connection = Connection::open(&path).unwrap();
+		connection.execute_batch(setup_sql).unwrap();
+		path
+	}
+
+	fn evaluate_snippet(source: &str) -> Result<Option<Value>, TabloError> {
+		let program = compile_source_to_program_with_name_and_schema(source, None, CompilationTarget::Snippet, None)?;
+		run_program(&program)
+	}
+
 	fn schema_catalog_from_fixture_with_backends(
 		schema_fixture: &str,
 		backends: &[(&str, DatabaseBackend)],
@@ -324,10 +519,39 @@ mod tests {
 		Ok(schema)
 	}
 
-	fn create_sqlite_test_database(name: &str, setup_sql: &str) -> PathBuf {
-		let path = unique_test_output_path(name).with_extension("sqlite");
-		let connection = Connection::open(&path).unwrap();
-		connection.execute_batch(setup_sql).unwrap();
+	fn standalone_body(body: &str) -> String {
+		format!("fn Main(args: [text]) int {{\n{body}\n}}")
+	}
+
+	fn standalone_expression(expression: &str) -> String {
+		format!("fn Main(args: [text]) int {{ return {expression}; }}")
+	}
+
+	fn unique_test_output_path(test_name: &str) -> PathBuf {
+		let mut path = std::env::temp_dir();
+		let process_id = std::process::id();
+		let nanos = std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.unwrap()
+			.as_nanos();
+
+		path.push(format!("tablo_{test_name}_{process_id}_{nanos}.tbo"));
+		path
+	}
+
+	fn write_test_source_file(test_name: &str, file_name: &str, source: &str) -> PathBuf {
+		let mut directory = std::env::temp_dir();
+		let process_id = std::process::id();
+		let nanos = std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.unwrap()
+			.as_nanos();
+
+		directory.push(format!("tablo_{test_name}_{process_id}_{nanos}"));
+		fs::create_dir_all(&directory).unwrap();
+
+		let path = directory.join(file_name);
+		fs::write(&path, source).unwrap();
 		path
 	}
 
@@ -846,6 +1070,33 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_missing_imported_module_file() {
+		let root_path = write_test_source_file(
+			"rejects_missing_imported_module_file_root",
+			"main.tablo",
+			"use './Missing';\nfn Main(args: [text]) int { return 0; }",
+		);
+
+		let error = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap_err();
+
+		match error {
+			TabloError::Compile(compile_error) => {
+				assert_eq!(compile_error.position, 0);
+				assert!(compile_error.message.starts_with("Failed to read imported module `./Missing` from `"));
+			}
+			other => panic!("expected compile error, found {other:?}"),
+		}
+
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
+	}
+
+	#[test]
 	fn rejects_missing_main_in_standalone_source_text() {
 		let error = run("var x: int = 1;").unwrap_err();
 
@@ -853,6 +1104,57 @@ mod tests {
 			message: String::from("Standalone Tablo programs must define `fn Main(args: [text]) int`."),
 			position: 0,
 		}));
+	}
+
+	#[test]
+	fn rejects_named_use_of_non_public_function() {
+		let root_path = write_test_source_file(
+			"rejects_named_use_of_non_public_function_root",
+			"main.tablo",
+			"use UsefulHelper from './Helpers';\nfn Main(args: [text]) int { return 0; }",
+		);
+		let helper_path = root_path.parent().unwrap().join("Helpers.tablo");
+		fs::write(&helper_path, "fn UsefulHelper() int { return 1; }").unwrap();
+
+		let error = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Function `UsefulHelper` is not exported by module `./Helpers`."),
+			position: 4,
+		}));
+
+		let _ = fs::remove_file(helper_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
+	}
+
+	#[test]
+	fn rejects_nested_use_during_module_resolution() {
+		let root_path = write_test_source_file(
+			"rejects_nested_use_during_module_resolution_root",
+			"main.tablo",
+			"fn Main(args: [text]) int {\n\tuse './Helpers';\n\treturn 0;\n}",
+		);
+
+		let error = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Nested `use` declarations are not yet supported during module resolution."),
+			position: 29,
+		}));
+
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
 	}
 
 	#[test]
@@ -997,6 +1299,21 @@ mod tests {
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Table `missing` is not present in the active databases."),
 			position: 22,
+		}));
+	}
+
+	#[test]
+	fn rejects_use_without_source_file_path() {
+		let error = compile_source_to_program_with_name_and_schema(
+			"use './Helpers';\nfn Main(args: [text]) int { return 0; }",
+			None,
+			CompilationTarget::Standalone,
+			None,
+		).unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Module imports require a source file path so relative `use` statements can be resolved."),
+			position: 0,
 		}));
 	}
 
@@ -2997,15 +3314,30 @@ mod tests {
 		assert_eq!(result, Some(Value::Integer(1)));
 	}
 
-	fn unique_test_output_path(test_name: &str) -> PathBuf {
-		let mut path = std::env::temp_dir();
-		let process_id = std::process::id();
-		let nanos = std::time::SystemTime::now()
-			.duration_since(std::time::UNIX_EPOCH)
-			.unwrap()
-			.as_nanos();
+	#[test]
+	fn validates_named_use_against_public_functions_in_imported_module() {
+		let root_path = write_test_source_file(
+			"validates_named_use_against_public_functions_in_imported_module_root",
+			"main.tablo",
+			"use UsefulHelper from './Helpers';\nfn Main(args: [text]) int { return 0; }",
+		);
+		let helper_path = root_path.parent().unwrap().join("Helpers.tablo");
+		fs::write(
+			&helper_path,
+			"pub fn UsefulHelper() int { return 1; }\nfn HiddenHelper() int { return 2; }",
+		).unwrap();
 
-		path.push(format!("tablo_{test_name}_{process_id}_{nanos}.tbo"));
-		path
+		let result = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		);
+
+		assert!(result.is_ok());
+
+		let _ = fs::remove_file(helper_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
 	}
 }
