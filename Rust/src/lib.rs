@@ -278,6 +278,32 @@ impl TabloError {
 	}
 }
 
+pub fn check(source: impl Into<String>) -> Result<(), TabloError> {
+	compile_to_program_with_name(source, None).map(|_| ())
+}
+
+pub fn check_with_source_name(
+	source: impl Into<String>,
+	source_name: impl Into<String>,
+) -> Result<(), TabloError> {
+	let source_name = source_name.into();
+	compile_to_program_with_name(source, Some(source_name.as_str())).map(|_| ())
+}
+
+pub fn check_with_source_name_and_schema(
+	source: impl Into<String>,
+	source_name: impl Into<String>,
+	schema_catalog: &SchemaCatalog,
+) -> Result<(), TabloError> {
+	let source_name = source_name.into();
+	compile_source_to_program_with_name_and_schema(
+		source,
+		Some(source_name.as_str()),
+		CompilationTarget::Standalone,
+		Some(schema_catalog),
+	).map(|_| ())
+}
+
 pub fn compile(source: impl Into<String>, output_path: impl AsRef<Path>) -> Result<(), TabloError> {
 	let program = compile_to_program_with_name(source, None)?;
 	write_program_to_path(output_path, &program).map_err(TabloError::ObjectFile)

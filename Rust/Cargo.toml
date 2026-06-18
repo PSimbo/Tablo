@@ -19,6 +19,10 @@ path = "src/bin/tablo.rs"
 name = "tablodbg"
 path = "src/bin/tablodbg.rs"
 
+[[bin]]
+name = "tablolsp"
+path = "src/bin/tablolsp.rs"
+
 [dependencies]
 clap = { version = "4.5.60", features = ["derive"] }
 colored = "3"

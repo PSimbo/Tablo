@@ -113,6 +113,16 @@
           "type": "string",
           "default": ".tablo/debug",
           "description": "Workspace-relative directory used for generated debug-time `.tbo` files."
+        },
+        "tablo.language.enableLsp": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable the experimental `tablolsp`-backed language features. When enabled, the built-in extension-side completion provider is disabled."
+        },
+        "tablo.language.tablolspPath": {
+          "type": "string",
+          "default": "tablolsp",
+          "description": "Path to the `tablolsp` executable used for experimental LSP-based language features such as diagnostics."
         }
       }
     }

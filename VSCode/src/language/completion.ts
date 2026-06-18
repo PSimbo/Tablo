@@ -122,8 +122,8 @@ const SNIPPET_ITEMS = [
 	),
 ];
 
-export function registerCompletionProvider(context: vscode.ExtensionContext): void {
-	const provider = vscode.languages.registerCompletionItemProvider(
+export function registerCompletionProvider(): vscode.Disposable {
+	return vscode.languages.registerCompletionItemProvider(
 		{ language: "tablo", scheme: "file" },
 		{
 			provideCompletionItems(document, position) {
@@ -146,8 +146,6 @@ export function registerCompletionProvider(context: vscode.ExtensionContext): vo
 		".",
 		"_",
 	);
-
-	context.subscriptions.push(provider);
 }
 
 function analyzeDocument(document: vscode.TextDocument): CompletionContextData {
