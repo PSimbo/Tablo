@@ -89,7 +89,15 @@ impl Display for TabloError {
 struct LinkedModule {
 	exported_functions: BTreeMap<String, String>,
 	functions: Vec<ast::FunctionDeclaration>,
+	source_file: SourceFileDebugInfo,
 	with_declarations: Vec<ast::WithDeclaration>,
+}
+
+struct LinkedProgram {
+	function_source_files: Vec<SourceFileDebugInfo>,
+	function_source_indices: Vec<u32>,
+	program: ast::Program,
+	root_source_file: SourceFileDebugInfo,
 }
 
 #[derive(Default)]
@@ -139,9 +147,28 @@ impl ModuleLinker {
 		Ok(import_bindings)
 	}
 
+	fn linked_function_count(&self) -> usize {
+		self.loaded_modules.values()
+			.map(|module| module.functions.len())
+			.sum()
+	}
+
+	fn linked_function_groups(&self) -> Vec<(u32, &[ast::FunctionDeclaration])> {
+		self.loaded_modules.values()
+			.enumerate()
+			.map(|(index, module)| (index as u32 + 1, module.functions.as_slice()))
+			.collect()
+	}
+
 	fn linked_functions(&self) -> Vec<ast::FunctionDeclaration> {
 		self.loaded_modules.values()
 			.flat_map(|module| module.functions.iter().cloned())
+			.collect()
+	}
+
+	fn linked_source_files(&self) -> Vec<SourceFileDebugInfo> {
+		self.loaded_modules.values()
+			.map(|module| module.source_file.clone())
 			.collect()
 	}
 
@@ -171,7 +198,8 @@ impl ModuleLinker {
 			),
 			position: use_declaration.position,
 		})?;
-		let mut program = parse_source_text(&SourceText::new(source)).map_err(|error| CompileError {
+		let source_text = SourceText::new(source);
+		let mut program = parse_source_text(&source_text).map_err(|error| CompileError {
 			message: format!(
 				"Failed to parse imported module `{}` from `{}`: {}",
 				use_declaration.module_path,
@@ -185,6 +213,7 @@ impl ModuleLinker {
 		let module_id = self.next_module_id;
 		self.next_module_id += 1;
 		let top_level_renames = build_top_level_function_renames(&program, module_id);
+		let source_file = SourceFileDebugInfo::from_source(module_key.display().to_string(), &source_text);
 
 		for function in &mut program.functions {
 			if let Some(renamed) = top_level_renames.get(&function.name) {
@@ -205,6 +234,7 @@ impl ModuleLinker {
 		let linked_module = LinkedModule {
 			exported_functions,
 			functions: program.functions,
+			source_file,
 			with_declarations: program.with_declarations,
 		};
 		self.loaded_modules.insert(module_key, linked_module.clone());
@@ -322,12 +352,29 @@ pub(crate) fn compile_to_program_with_name(source: impl Into<String>, source_nam
 	compile_source_to_program_with_name_and_schema(source, source_name, CompilationTarget::Standalone, None)
 }
 
-fn attach_source_debug_info(program: &mut Program, source: &SourceText, source_name: Option<&str>) {
-	let source_file = SourceFileDebugInfo::from_source(
-		source_name.unwrap_or("<source>"),
-		source,
-	);
-	program.debug_info_mut().attach_source_file(source_file);
+fn attach_source_debug_info(program: &mut Program, linked_program: &LinkedProgram) {
+	let debug_info = program.debug_info_mut();
+	let root_source_file_index = debug_info.add_source_file(linked_program.root_source_file.clone());
+	let mut imported_source_file_indices = Vec::with_capacity(linked_program.function_source_files.len());
+	let code_body_count = debug_info.code_bodies().len();
+
+	for source_file in &linked_program.function_source_files {
+		imported_source_file_indices.push(debug_info.add_source_file(source_file.clone()));
+	}
+
+	for (body_index, source_file_index) in linked_program.function_source_indices.iter().enumerate() {
+		let resolved_index = if *source_file_index == 0 {
+			root_source_file_index
+		}
+		else {
+			imported_source_file_indices[(*source_file_index - 1) as usize]
+		};
+		debug_info.set_code_body_source_file(body_index, resolved_index);
+	}
+
+	for body_index in linked_program.function_source_indices.len()..code_body_count {
+		debug_info.set_code_body_source_file(body_index, root_source_file_index);
+	}
 }
 
 fn build_top_level_function_renames(program: &ast::Program, module_id: u32) -> BTreeMap<String, String> {
@@ -343,6 +390,16 @@ fn build_top_level_function_renames(program: &ast::Program, module_id: u32) -> B
 
 fn canonical_module_key(module_path: &Path) -> PathBuf {
 	std::fs::canonicalize(module_path).unwrap_or_else(|_| module_path.to_path_buf())
+}
+
+fn collect_function_source_indices(program: &ast::Program, source_file_index: u32) -> Vec<u32> {
+	let mut source_indices = Vec::new();
+
+	for function in &program.functions {
+		extend_function_source_indices(function, source_file_index, &mut source_indices);
+	}
+
+	source_indices
 }
 
 fn collect_local_function_names(statements: &[ast::Statement]) -> Vec<String> {
@@ -376,10 +433,72 @@ fn compile_source_to_program_with_name_and_schema(
 	let source = SourceText::new(source);
 	let program = parse_source_text(&source)?;
 	validate_module_graph(&program, source_name).map_err(TabloError::Compile)?;
-	let linked_program = link_program_modules(&program, source_name).map_err(TabloError::Compile)?;
-	let mut program = compile_ast_program_with_schema(&linked_program, target, schema_catalog)?;
-	attach_source_debug_info(&mut program, &source, source_name);
+	let linked_program = link_program_modules(&program, &source, source_name).map_err(TabloError::Compile)?;
+	let mut program = compile_ast_program_with_schema(&linked_program.program, target, schema_catalog)?;
+	attach_source_debug_info(&mut program, &linked_program);
 	Ok(program)
+}
+
+fn extend_function_source_indices(
+	function: &ast::FunctionDeclaration,
+	source_file_index: u32,
+	source_indices: &mut Vec<u32>,
+) {
+	source_indices.push(source_file_index);
+
+	for statement in &function.body.statements {
+		extend_function_source_indices_from_statement(statement, source_file_index, source_indices);
+	}
+}
+
+fn extend_function_source_indices_from_statement(
+	statement: &ast::Statement,
+	source_file_index: u32,
+	source_indices: &mut Vec<u32>,
+) {
+	match statement {
+		ast::Statement::Block(block) => {
+			for statement in &block.statements {
+				extend_function_source_indices_from_statement(statement, source_file_index, source_indices);
+			}
+		}
+		ast::Statement::For(for_statement) => {
+			for statement in &for_statement.body.statements {
+				extend_function_source_indices_from_statement(statement, source_file_index, source_indices);
+			}
+		}
+		ast::Statement::ForRecord(for_statement) => {
+			for statement in &for_statement.body.statements {
+				extend_function_source_indices_from_statement(statement, source_file_index, source_indices);
+			}
+		}
+		ast::Statement::FunctionDeclaration(function) => {
+			extend_function_source_indices(function, source_file_index, source_indices);
+		}
+		ast::Statement::If(if_statement) => {
+			for statement in &if_statement.then_branch.statements {
+				extend_function_source_indices_from_statement(statement, source_file_index, source_indices);
+			}
+
+			if let Some(else_branch) = &if_statement.else_branch {
+				extend_function_source_indices_from_statement(else_branch, source_file_index, source_indices);
+			}
+		}
+		ast::Statement::While(while_statement) => {
+			for statement in &while_statement.body.statements {
+				extend_function_source_indices_from_statement(statement, source_file_index, source_indices);
+			}
+		}
+		ast::Statement::Break(_)
+		| ast::Statement::Continue(_)
+		| ast::Statement::Create(_)
+		| ast::Statement::EnumDeclaration(_)
+		| ast::Statement::Expression(_)
+		| ast::Statement::RecordPointerDeclaration(_)
+		| ast::Statement::Return(_)
+		| ast::Statement::Use(_)
+		| ast::Statement::VariableDeclaration(_) => {}
+	}
 }
 
 fn first_nested_use_position(program: &ast::Program) -> Option<usize> {
@@ -473,13 +592,29 @@ fn first_use_statement(program: &ast::Program) -> Option<&ast::UseDeclaration> {
 	None
 }
 
-fn link_program_modules(program: &ast::Program, source_name: Option<&str>) -> Result<ast::Program, CompileError> {
+fn link_program_modules(
+	program: &ast::Program,
+	source: &SourceText,
+	source_name: Option<&str>,
+) -> Result<LinkedProgram, CompileError> {
+	let root_source_file = SourceFileDebugInfo::from_source(source_name.unwrap_or("<source>"), source);
+
 	let Some(source_name) = source_name else {
-		return Ok(program.clone());
+		return Ok(LinkedProgram {
+			function_source_files: Vec::new(),
+			function_source_indices: collect_function_source_indices(program, 0),
+			program: program.clone(),
+			root_source_file,
+		});
 	};
 
 	if first_use_statement(program).is_none() {
-		return Ok(program.clone());
+		return Ok(LinkedProgram {
+			function_source_files: Vec::new(),
+			function_source_indices: collect_function_source_indices(program, 0),
+			program: program.clone(),
+			root_source_file,
+		});
 	}
 
 	let root_path = Path::new(source_name);
@@ -509,7 +644,25 @@ fn link_program_modules(program: &ast::Program, source_name: Option<&str>) -> Re
 		&linked_program.with_declarations,
 		&linker.linked_with_declarations(),
 	);
-	Ok(linked_program)
+	let imported_source_files = linker.linked_source_files();
+	let mut function_source_indices = Vec::new();
+
+	for (source_file_index, functions) in linker.linked_function_groups() {
+		for function in functions {
+			extend_function_source_indices(function, source_file_index, &mut function_source_indices);
+		}
+	}
+
+	for function in &linked_program.functions[linker.linked_function_count()..] {
+		extend_function_source_indices(function, 0, &mut function_source_indices);
+	}
+
+	Ok(LinkedProgram {
+		function_source_files: imported_source_files,
+		function_source_indices,
+		program: linked_program,
+		root_source_file,
+	})
 }
 
 fn merge_with_declarations(
@@ -953,6 +1106,45 @@ mod tests {
 		let path = directory.join(file_name);
 		fs::write(&path, source).unwrap();
 		path
+	}
+
+	#[test]
+	fn assigns_imported_functions_to_their_own_source_file_in_debug_metadata() {
+		let root_path = write_test_source_file(
+			"assigns_imported_functions_to_their_own_source_file_in_debug_metadata_root",
+			"main.tablo",
+			"use Helper from './Helpers';\nfn Main(args: [text]) int { return Helper(); }",
+		);
+		let helper_path = root_path.parent().unwrap().join("Helpers.tablo");
+		fs::write(
+			&helper_path,
+			"pub fn Helper() int { return PrivateHelper(); }\nfn PrivateHelper() int { return 1; }",
+		).unwrap();
+
+		let program = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap();
+
+		let helper_body_index = program.functions().iter()
+			.position(|function| function.name() == Some("__tablo_module_0_Helper"))
+			.unwrap();
+		let private_helper_body_index = program.functions().iter()
+			.position(|function| function.name() == Some("__tablo_module_0_PrivateHelper"))
+			.unwrap();
+		let main_body_index = program.functions().iter()
+			.position(|function| function.name() == Some("Main"))
+			.unwrap();
+
+		assert_eq!(program.debug_location(helper_body_index, 0).unwrap().display_name(), Some(helper_path.to_str().unwrap()));
+		assert_eq!(program.debug_location(private_helper_body_index, 0).unwrap().display_name(), Some(helper_path.to_str().unwrap()));
+		assert_eq!(program.debug_location(main_body_index, 0).unwrap().display_name(), Some(root_path.to_str().unwrap()));
+
+		let _ = fs::remove_file(helper_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
 	}
 
 	#[test]

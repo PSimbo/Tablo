@@ -116,10 +116,34 @@ impl<'a> DebuggerSession<'a> {
 	pub fn step_in(&mut self) -> Result<DebuggerStop, VmError> {
 		self.ensure_started();
 		self.skip_breakpoint_once = None;
+		let start_depth = self.vm.current_stack_depth();
+		let start_location = self.current_source_location();
 
 		match self.vm.step(self.program)? {
-			VmExecutionState::Completed(result) => Ok(DebuggerStop::Completed(result)),
-			VmExecutionState::Running => Ok(DebuggerStop::Paused(self.paused_state(PauseReason::StepIn))),
+			VmExecutionState::Completed(result) => return Ok(DebuggerStop::Completed(result)),
+			VmExecutionState::Running => {}
+		}
+
+		if let Some(stop) = self.stop_at_breakpoint_if_present() {
+			return Ok(stop);
+		}
+
+		loop {
+			let current_depth = self.vm.current_stack_depth();
+			let current_location = self.current_source_location();
+
+			if current_depth != start_depth || !same_user_location(current_location.as_ref(), start_location.as_ref()) {
+				return Ok(DebuggerStop::Paused(self.paused_state(PauseReason::StepIn)));
+			}
+
+			match self.vm.step(self.program)? {
+				VmExecutionState::Completed(result) => return Ok(DebuggerStop::Completed(result)),
+				VmExecutionState::Running => {}
+			}
+
+			if let Some(stop) = self.stop_at_breakpoint_if_present() {
+				return Ok(stop);
+			}
 		}
 	}
 
@@ -354,6 +378,34 @@ mod tests {
 	}
 
 	#[test]
+	fn steps_into_callee_without_pausing_on_argument_evaluation() {
+		let source = "\
+obj Inner { Value: int };\n\
+obj Outer { Inner: Inner };\n\
+fn helper(value: int) int {\n\
+  return value;\n\
+}\n\
+var outer: Outer = Outer {};\n\
+helper(outer.Inner.Value)\n";
+		let program = compile_debug_program(source, "example.tablo");
+		let mut session = DebuggerSession::new(&program);
+		let breakpoints = session.resolve_source_breakpoints("example.tablo", &[7]);
+		session.set_breakpoints(breakpoints);
+
+		let stop = session.resume().unwrap();
+		let paused = stop.paused_state().unwrap();
+		assert_eq!(paused.reason(), PauseReason::Breakpoint);
+		assert_eq!(paused.current_frame().unwrap().source_location().unwrap().line(), 7);
+
+		let stop = session.step_in().unwrap();
+		let paused = stop.paused_state().unwrap();
+
+		assert_eq!(paused.reason(), PauseReason::StepIn);
+		assert_eq!(paused.current_frame().unwrap().source_location().unwrap().line(), 4);
+		assert_eq!(paused.current_frame().unwrap().source_location().unwrap().body_name(), Some("helper"));
+	}
+
+	#[test]
 	fn steps_one_instruction_after_starting() {
 		let source = "var x: int = 1;\nx";
 		let program = compile_debug_program(source, "example.tablo");
@@ -362,7 +414,7 @@ mod tests {
 		let stop = session.step_in().unwrap();
 		let paused = stop.paused_state().unwrap();
 		assert_eq!(paused.reason(), PauseReason::StepIn);
-		assert_eq!(paused.current_frame().unwrap().source_location().unwrap().line(), 1);
+		assert_eq!(paused.current_frame().unwrap().source_location().unwrap().line(), 2);
 	}
 
 	#[test]

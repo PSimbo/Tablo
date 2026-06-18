@@ -209,9 +209,14 @@ impl ConstantPool {
 }
 
 impl DebugInfo {
-	pub fn attach_source_file(&mut self, source_file: SourceFileDebugInfo) {
+	pub fn add_source_file(&mut self, source_file: SourceFileDebugInfo) -> u32 {
 		let source_file_index = self.source_files.len() as u32;
 		self.source_files.push(source_file);
+		source_file_index
+	}
+
+	pub fn attach_source_file(&mut self, source_file: SourceFileDebugInfo) {
+		let source_file_index = self.add_source_file(source_file);
 
 		for code_body in &mut self.code_bodies {
 			if code_body.source_file_index.is_none() {
@@ -226,6 +231,12 @@ impl DebugInfo {
 
 	pub fn is_empty(&self) -> bool {
 		self.code_bodies.is_empty() && self.source_files.is_empty()
+	}
+
+	pub fn set_code_body_source_file(&mut self, body_index: usize, source_file_index: u32) {
+		if let Some(code_body) = self.code_bodies.get_mut(body_index) {
+			code_body.source_file_index = Some(source_file_index);
+		}
 	}
 
 	pub fn source_files(&self) -> &[SourceFileDebugInfo] {
