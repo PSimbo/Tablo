@@ -381,12 +381,15 @@ mod tests {
 	fn steps_into_callee_without_pausing_on_argument_evaluation() {
 		let source = "\
 obj Inner { Value: int };\n\
-obj Outer { Inner: Inner };\n\
-fn helper(value: int) int {\n\
-  return value;\n\
+obj Outer { Inner: Inner, Other: int };\n\
+fn helper(value: int, other: int) int {\n\
+  return value + other;\n\
 }\n\
 var outer: Outer = Outer {};\n\
-helper(outer.Inner.Value)\n";
+helper(\n\
+  outer.Inner.Value,\n\
+  outer.Other\n\
+)\n";
 		let program = compile_debug_program(source, "example.tablo");
 		let mut session = DebuggerSession::new(&program);
 		let breakpoints = session.resolve_source_breakpoints("example.tablo", &[7]);

@@ -280,15 +280,26 @@ impl Compiler {
 	}
 
 	fn compile_into(&mut self, expression: &Expr, semantic_program: &SemanticProgram, emission: &mut EmissionState) {
+		self.compile_into_with_debug_position(expression, semantic_program, emission, None);
+	}
+
+	fn compile_into_with_debug_position(
+		&mut self,
+		expression: &Expr,
+		semantic_program: &SemanticProgram,
+		emission: &mut EmissionState,
+		debug_position: Option<usize>,
+	) {
 		let _ = self;
+		let expression_position = debug_position.unwrap_or(expression.position());
 
 		match expression {
 			Expr::Array(ArrayLiteral { elements, .. }) => {
 				for element in elements {
-					self.compile_into(element, semantic_program, emission);
+					self.compile_into_with_debug_position(element, semantic_program, emission, debug_position);
 				}
 
-				self.emit(emission, Instruction::MakeArray(elements.len() as u32), expression.position());
+				self.emit(emission, Instruction::MakeArray(elements.len() as u32), expression_position);
 			}
 			Expr::Assignment(AssignmentExpr { operator, target, value, .. }) => {
 				match target {
@@ -310,32 +321,32 @@ impl Compiler {
 				}
 			}
 			Expr::Binary(binary) => {
-				self.compile_into(&binary.left, semantic_program, emission);
-				self.compile_into(&binary.right, semantic_program, emission);
-				self.emit(emission, binary.operator.instruction(), binary.position);
+				self.compile_into_with_debug_position(&binary.left, semantic_program, emission, debug_position);
+				self.compile_into_with_debug_position(&binary.right, semantic_program, emission, debug_position);
+				self.emit(emission, binary.operator.instruction(), debug_position.unwrap_or(binary.position));
 			}
 			Expr::Boolean(BooleanLiteral { value, .. }) => {
-				self.emit(emission, Instruction::PushBoolean(*value), expression.position());
+				self.emit(emission, Instruction::PushBoolean(*value), expression_position);
 			}
 			Expr::Call(CallExpr { arguments, .. }) => {
 				let reference_slots = semantic_program.call_argument_reference_slots(expression.position());
 
 				for (index, argument) in arguments.iter().enumerate() {
 					if let Some(Some(slot)) = reference_slots.and_then(|slots| slots.get(index)) {
-						self.emit(emission, Instruction::LoadReference(*slot), argument.position);
+						self.emit(emission, Instruction::LoadReference(*slot), expression_position);
 					}
 					else {
-						self.compile_into(&argument.value, semantic_program, emission);
+						self.compile_into_with_debug_position(&argument.value, semantic_program, emission, Some(expression_position));
 					}
 				}
 
 				if let Some(built_in) = semantic_program.built_in_call_target(expression.position()) {
-					self.emit(emission, Instruction::CallBuiltIn(built_in, arguments.len() as u32), expression.position());
+					self.emit(emission, Instruction::CallBuiltIn(built_in, arguments.len() as u32), expression_position);
 				}
 				else {
 					let function_index = semantic_program.call_target(expression.position())
 						.unwrap_or_else(|| panic!("Missing function target for call expression."));
-					self.emit(emission, Instruction::Call(function_index, arguments.len() as u32), expression.position());
+					self.emit(emission, Instruction::Call(function_index, arguments.len() as u32), expression_position);
 				}
 			}
 			Expr::Count(_) => {
@@ -344,13 +355,13 @@ impl Compiler {
 					.clone();
 				let query_index = self.compiled_queries.len() as u32;
 				self.compiled_queries.push(query);
-				self.emit(emission, Instruction::ExecuteQuery(query_index), expression.position());
+				self.emit(emission, Instruction::ExecuteQuery(query_index), expression_position);
 			}
 			Expr::Date(date) => {
-				self.emit(emission, Instruction::PushDate(date.value), expression.position());
+				self.emit(emission, Instruction::PushDate(date.value), expression_position);
 			}
 			Expr::Decimal(DecimalLiteral { value, .. }) => {
-				self.emit(emission, Instruction::PushDecimal(value.clone()), expression.position());
+				self.emit(emission, Instruction::PushDecimal(value.clone()), expression_position);
 			}
 			Expr::FieldAccess(FieldAccessExpr { field, object, .. }) => {
 				if let Some(enum_value) = semantic_program.enum_variant_value(expression.position()) {
@@ -363,11 +374,11 @@ impl Compiler {
 						backing_value: backing_value.clone(),
 						enum_name,
 						variant_name: field.name.clone(),
-					}, expression.position());
+					}, expression_position);
 				}
 				else {
-					self.compile_into(object, semantic_program, emission);
-					self.emit(emission, Instruction::LoadField(field.name.clone()), expression.position());
+					self.compile_into_with_debug_position(object, semantic_program, emission, debug_position);
+					self.emit(emission, Instruction::LoadField(field.name.clone()), expression_position);
 				}
 			}
 			Expr::Find(_) => {
@@ -376,37 +387,37 @@ impl Compiler {
 					.clone();
 				let query_index = self.compiled_queries.len() as u32;
 				self.compiled_queries.push(query);
-				self.emit(emission, Instruction::ExecuteQuery(query_index), expression.position());
+				self.emit(emission, Instruction::ExecuteQuery(query_index), expression_position);
 			}
 			Expr::Identifier(IdentifierExpr { name, .. }) => {
 				let slot = semantic_program.identifier_slot(expression.position())
 					.unwrap_or_else(|| panic!("Missing slot for identifier `{name}`."));
-				self.emit(emission, Instruction::LoadLocal(slot), expression.position());
+				self.emit(emission, Instruction::LoadLocal(slot), expression_position);
 			}
 			Expr::Index(IndexExpr { array, index, .. }) => {
-				self.compile_into(array, semantic_program, emission);
-				self.compile_into(index, semantic_program, emission);
-				self.emit(emission, Instruction::LoadIndex, expression.position());
+				self.compile_into_with_debug_position(array, semantic_program, emission, debug_position);
+				self.compile_into_with_debug_position(index, semantic_program, emission, debug_position);
+				self.emit(emission, Instruction::LoadIndex, expression_position);
 			}
 			Expr::Integer(integer) => {
-				self.emit(emission, Instruction::PushInteger(integer.value), expression.position());
+				self.emit(emission, Instruction::PushInteger(integer.value), expression_position);
 			}
 			Expr::New(new_expression) => {
 				let layout = semantic_program.new_record_layout(expression.position())
 					.unwrap_or_else(|| panic!("Missing resolved record layout for `new` expression."));
 
 				for column in &layout.columns {
-					self.emit_default_value(&column.data_type, semantic_program, emission, expression.position());
+					self.emit_default_value(&column.data_type, semantic_program, emission, expression_position);
 				}
 
 				self.emit(emission, Instruction::MakeRecordPointer {
 					field_names: layout.columns.iter().map(|column| column.name.clone()).collect(),
 					record_type: layout.record_type.clone(),
 					schema_is_implicit: layout.schema_is_implicit,
-				}, new_expression.position);
+				}, debug_position.unwrap_or(new_expression.position));
 			}
 			Expr::Null(_) => {
-				self.emit(emission, Instruction::PushNull, expression.position());
+				self.emit(emission, Instruction::PushNull, expression_position);
 			}
 			Expr::ObjectConstruction(ObjectConstructionExpr { fields, object_type_name, .. }) => {
 				let object_declaration = semantic_program.object_declaration(object_type_name);
@@ -417,45 +428,45 @@ impl Compiler {
 
 					for field in object_fields {
 						if let Some(provided_field) = fields.iter().find(|provided_field| provided_field.name == field.name) {
-							self.compile_into(&provided_field.value, semantic_program, emission);
+							self.compile_into_with_debug_position(&provided_field.value, semantic_program, emission, debug_position);
 						}
 						else if let Some(default_value) = &field.default_value {
-							self.compile_into(default_value, semantic_program, emission);
+							self.compile_into_with_debug_position(default_value, semantic_program, emission, debug_position);
 						}
 						else {
-							self.emit_default_value(&field.data_type, semantic_program, emission, expression.position());
+							self.emit_default_value(&field.data_type, semantic_program, emission, expression_position);
 						}
 					}
 
 					self.emit(
 						emission,
 						Instruction::MakeObject(object_fields.iter().map(|field| field.name.clone()).collect()),
-						expression.position(),
+						expression_position,
 					);
 				}
 				else {
 					for field in fields {
-						self.compile_into(&field.value, semantic_program, emission);
+						self.compile_into_with_debug_position(&field.value, semantic_program, emission, debug_position);
 					}
 
 					self.emit(
 						emission,
 						Instruction::MakeObject(fields.iter().map(|field| field.name.clone()).collect()),
-						expression.position(),
+						expression_position,
 					);
 				}
 			}
 			Expr::Range(RangeExpr { start, step, end, .. }) => {
-				self.compile_into(start, semantic_program, emission);
+				self.compile_into_with_debug_position(start, semantic_program, emission, debug_position);
 
 				if let Some(step) = step {
-					self.compile_into(step, semantic_program, emission);
-					self.compile_into(end, semantic_program, emission);
-					self.emit(emission, Instruction::MakeSteppedRange, expression.position());
+					self.compile_into_with_debug_position(step, semantic_program, emission, debug_position);
+					self.compile_into_with_debug_position(end, semantic_program, emission, debug_position);
+					self.emit(emission, Instruction::MakeSteppedRange, expression_position);
 				}
 				else {
-					self.compile_into(end, semantic_program, emission);
-					self.emit(emission, Instruction::MakeRange, expression.position());
+					self.compile_into_with_debug_position(end, semantic_program, emission, debug_position);
+					self.emit(emission, Instruction::MakeRange, expression_position);
 				}
 			}
 			Expr::Ternary(TernaryExpr {
@@ -464,36 +475,36 @@ impl Compiler {
 				true_branch,
 				..
 			}) => {
-				self.compile_into(condition, semantic_program, emission);
+				self.compile_into_with_debug_position(condition, semantic_program, emission, debug_position);
 				let jump_to_false_index = emission.instructions.len();
-				self.emit(emission, Instruction::JumpIfFalse(0), condition.position());
-				self.compile_into(true_branch, semantic_program, emission);
+				self.emit(emission, Instruction::JumpIfFalse(0), debug_position.unwrap_or(condition.position()));
+				self.compile_into_with_debug_position(true_branch, semantic_program, emission, debug_position);
 				let jump_to_end_index = emission.instructions.len();
-				self.emit(emission, Instruction::Jump(0), expression.position());
+				self.emit(emission, Instruction::Jump(0), expression_position);
 				let false_target = emission.instructions.len() as u32;
 				emission.instructions[jump_to_false_index] = Instruction::JumpIfFalse(false_target);
-				self.compile_into(false_branch, semantic_program, emission);
+				self.compile_into_with_debug_position(false_branch, semantic_program, emission, debug_position);
 				let end_target = emission.instructions.len() as u32;
 				emission.instructions[jump_to_end_index] = Instruction::Jump(end_target);
 			}
 			Expr::Text(TextLiteral { value, .. }) => {
-				self.emit(emission, Instruction::PushText(value.clone()), expression.position());
+				self.emit(emission, Instruction::PushText(value.clone()), expression_position);
 			}
 			Expr::Time(TimeLiteral { value, .. }) => {
-				self.emit(emission, Instruction::PushTime(*value), expression.position());
+				self.emit(emission, Instruction::PushTime(*value), expression_position);
 			}
 			Expr::TimeTz(TimeTzLiteral { value, .. }) => {
-				self.emit(emission, Instruction::PushTimeTz(*value), expression.position());
+				self.emit(emission, Instruction::PushTimeTz(*value), expression_position);
 			}
 			Expr::Timestamp(TimestampLiteral { value, .. }) => {
-				self.emit(emission, Instruction::PushTimestamp(*value), expression.position());
+				self.emit(emission, Instruction::PushTimestamp(*value), expression_position);
 			}
 			Expr::TimestampTz(TimestampTzLiteral { value, .. }) => {
-				self.emit(emission, Instruction::PushTimestampTz(*value), expression.position());
+				self.emit(emission, Instruction::PushTimestampTz(*value), expression_position);
 			}
 			Expr::Unary(UnaryExpr { operand, operator, .. }) => {
-				self.compile_into(operand, semantic_program, emission);
-				self.emit(emission, operator.instruction(), expression.position());
+				self.compile_into_with_debug_position(operand, semantic_program, emission, debug_position);
+				self.emit(emission, operator.instruction(), expression_position);
 			}
 		}
 	}
