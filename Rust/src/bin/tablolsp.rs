@@ -88,21 +88,24 @@ impl LspServer {
 			return Ok(Vec::new());
 		};
 		let file_name = file_path.display().to_string();
+		let mut diagnostics = trailing_whitespace_diagnostics(source);
 
 		let validation_result = if let Some(config_path) = discover_project_config_path(&file_path) {
 			match read_schema_catalog_from_runtime_config_path(&config_path) {
 				Ok(schema_catalog) => check_with_source_name_and_schema(source, file_name, &schema_catalog),
 				Err(error) => {
-					return Ok(vec![diagnostic_json(
+					diagnostics.push(diagnostic_json(
 						uri,
 						&SourceText::new(source),
 						0,
+						1,
 						&format!(
 							"Failed to load schema configuration from `{}`: {}",
 							config_path.display(),
 							error.message,
 						),
-					)]);
+					));
+					return Ok(diagnostics);
 				}
 			}
 		}
@@ -111,8 +114,11 @@ impl LspServer {
 		};
 
 		match validation_result {
-			Ok(()) => Ok(Vec::new()),
-			Err(error) => Ok(vec![tablo_error_to_diagnostic(uri, source, error)]),
+			Ok(()) => Ok(diagnostics),
+			Err(error) => {
+				diagnostics.push(tablo_error_to_diagnostic(uri, source, error));
+				Ok(diagnostics)
+			}
 		}
 	}
 
@@ -284,7 +290,7 @@ impl LspServer {
 	}
 }
 
-fn diagnostic_json(uri: &str, source: &SourceText, position: usize, message: &str) -> JsonValue {
+fn diagnostic_json(uri: &str, source: &SourceText, position: usize, severity: u32, message: &str) -> JsonValue {
 	let (line, column) = source.line_and_column(position);
 	let line_index = line.saturating_sub(1) as u32;
 	let column_index = column.saturating_sub(1) as u32;
@@ -292,13 +298,37 @@ fn diagnostic_json(uri: &str, source: &SourceText, position: usize, message: &st
 	let _ = uri;
 
 	json!({
-		"severity": 1,
+		"severity": severity,
 		"source": "tablolsp",
 		"message": message,
 		"range": {
 			"start": {
 				"line": line_index,
 				"character": column_index,
+			},
+			"end": {
+				"line": line_index,
+				"character": end_column,
+			}
+		}
+	})
+}
+
+fn diagnostic_json_for_range(
+	line_index: u32,
+	start_column: u32,
+	end_column: u32,
+	severity: u32,
+	message: &str,
+) -> JsonValue {
+	json!({
+		"severity": severity,
+		"source": "tablolsp",
+		"message": message,
+		"range": {
+			"start": {
+				"line": line_index,
+				"character": start_column,
 			},
 			"end": {
 				"line": line_index,
@@ -421,7 +451,32 @@ fn tablo_error_to_diagnostic(uri: &str, source: &str, error: TabloError) -> Json
 	};
 
 	let _ = uri;
-	diagnostic_json(uri, &source, position, &message)
+	diagnostic_json(uri, &source, position, 1, &message)
+}
+
+fn trailing_whitespace_diagnostics(source: &str) -> Vec<JsonValue> {
+	let mut diagnostics = Vec::new();
+
+	for (line_index, line) in source.split('\n').enumerate() {
+		let visible_line = line.strip_suffix('\r').unwrap_or(line);
+		let trimmed = visible_line.trim_end_matches([' ', '\t']);
+
+		if trimmed.len() == visible_line.len() {
+			continue;
+		}
+
+		let start_column = trimmed.chars().count() as u32;
+		let end_column = visible_line.chars().count() as u32;
+		diagnostics.push(diagnostic_json_for_range(
+			line_index as u32,
+			start_column,
+			end_column,
+			2,
+			"Line has trailing whitespace.",
+		));
+	}
+
+	diagnostics
 }
 
 fn write_lsp_message<W: Write>(writer: &mut W, message: JsonValue) -> Result<(), String> {
@@ -514,6 +569,49 @@ mod tests {
 		let output = String::from_utf8(output).unwrap();
 		assert!(output.contains("textDocument/publishDiagnostics"));
 		assert!(output.contains("\"diagnostics\":[{"));
+	}
+
+	#[test]
+	fn publishes_lint_and_compile_diagnostic_together() {
+		let mut server = LspServer::new();
+		let mut output = Vec::new();
+
+		server.handle_did_open(
+			&mut output,
+			json!({
+				"textDocument": {
+					"uri": "file:///tmp/example.tablo",
+					"version": 1,
+					"text": "fn Main(args: [text]) int { return ; }  \n"
+				}
+			}),
+		).unwrap();
+
+		let output = String::from_utf8(output).unwrap();
+		assert!(output.contains("Line has trailing whitespace."));
+		assert!(output.contains("\"severity\":2"));
+		assert!(output.contains("\"severity\":1"));
+	}
+
+	#[test]
+	fn publishes_trailing_whitespace_lint() {
+		let mut server = LspServer::new();
+		let mut output = Vec::new();
+
+		server.handle_did_open(
+			&mut output,
+			json!({
+				"textDocument": {
+					"uri": "file:///tmp/example.tablo",
+					"version": 1,
+					"text": "fn Main(args: [text]) int { return 0; }  \n"
+				}
+			}),
+		).unwrap();
+
+		let output = String::from_utf8(output).unwrap();
+		assert!(output.contains("Line has trailing whitespace."));
+		assert!(output.contains("\"severity\":2"));
 	}
 
 	#[test]
