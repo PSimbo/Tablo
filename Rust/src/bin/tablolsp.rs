@@ -11,9 +11,11 @@ use serde_json::Value as JsonValue;
 use serde_json::json;
 
 use tablo::TabloError;
-use tablo::check_with_source_name;
-use tablo::check_with_source_name_and_schema;
+use tablo::local_usage_with_source_name;
+use tablo::local_usage_with_source_name_and_schema;
 use tablo::runtime_config::read_schema_catalog_from_runtime_config_path;
+use tablo::semantic::ssa::LocalDeclarationKind;
+use tablo::semantic::ssa::ProgramLocalUsage;
 use tablo::source::SourceText;
 
 fn main() {
@@ -92,7 +94,7 @@ impl LspServer {
 
 		let validation_result = if let Some(config_path) = discover_project_config_path(&file_path) {
 			match read_schema_catalog_from_runtime_config_path(&config_path) {
-				Ok(schema_catalog) => check_with_source_name_and_schema(source, file_name, &schema_catalog),
+				Ok(schema_catalog) => local_usage_with_source_name_and_schema(source, file_name, &schema_catalog),
 				Err(error) => {
 					diagnostics.push(diagnostic_json(
 						uri,
@@ -110,11 +112,14 @@ impl LspServer {
 			}
 		}
 		else {
-			check_with_source_name(source, file_name)
+			local_usage_with_source_name(source, file_name)
 		};
 
 		match validation_result {
-			Ok(()) => Ok(diagnostics),
+			Ok(local_usage) => {
+				diagnostics.extend(unused_variable_diagnostics(uri, source, &local_usage));
+				Ok(diagnostics)
+			}
 			Err(error) => {
 				diagnostics.push(tablo_error_to_diagnostic(uri, source, error));
 				Ok(diagnostics)
@@ -314,6 +319,33 @@ fn diagnostic_json(uri: &str, source: &SourceText, position: usize, severity: u3
 	})
 }
 
+fn diagnostic_json_for_byte_span(
+	source: &SourceText,
+	start: usize,
+	end: usize,
+	severity: u32,
+	message: &str,
+) -> JsonValue {
+	let (start_line, start_column) = source.line_and_column(start);
+	let (end_line, end_column) = source.line_and_column(end);
+
+	json!({
+		"severity": severity,
+		"source": "tablolsp",
+		"message": message,
+		"range": {
+			"start": {
+				"line": start_line.saturating_sub(1) as u32,
+				"character": start_column.saturating_sub(1) as u32,
+			},
+			"end": {
+				"line": end_line.saturating_sub(1) as u32,
+				"character": end_column.saturating_sub(1) as u32,
+			}
+		}
+	})
+}
+
 fn diagnostic_json_for_range(
 	line_index: u32,
 	start_column: u32,
@@ -360,6 +392,49 @@ fn file_path_from_document_uri(uri: &str) -> Option<PathBuf> {
 	else {
 		Some(PathBuf::from(path))
 	}
+}
+
+fn is_identifier_char(ch: char) -> bool {
+	ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn local_name_span(source: &SourceText, declaration_position: usize, name: &str) -> Option<(usize, usize)> {
+	let text = source.as_str();
+	let declaration_position = declaration_position.min(text.len());
+	let line_end = text[declaration_position..]
+		.find('\n')
+		.map_or(text.len(), |offset| declaration_position + offset);
+	let line_text = &text[declaration_position..line_end];
+	let mut search_start = 0;
+
+	while search_start <= line_text.len() {
+		let Some(found_offset) = line_text[search_start..].find(name) else {
+			return None;
+		};
+		let mut start = declaration_position + search_start + found_offset;
+		let mut end = start + name.len();
+		let quoted_start = start.checked_sub(1);
+		let quoted_end = text.get(end..).and_then(|suffix| suffix.chars().next());
+
+		if quoted_start.and_then(|index| text.get(index..start)) == Some("\"")
+			&& quoted_end == Some('"') {
+			start -= 1;
+			end += 1;
+		}
+
+		let previous = text[..start].chars().next_back();
+		let next = text[end..].chars().next();
+		let is_identifier_match = !previous.is_some_and(is_identifier_char)
+			&& !next.is_some_and(is_identifier_char);
+
+		if is_identifier_match {
+			return Some((start, end));
+		}
+
+		search_start += found_offset + name.len();
+	}
+
+	None
 }
 
 fn parse_content_length(header_line: &str) -> Result<Option<usize>, String> {
@@ -479,6 +554,53 @@ fn trailing_whitespace_diagnostics(source: &str) -> Vec<JsonValue> {
 	diagnostics
 }
 
+fn unused_variable_diagnostics(uri: &str, source: &str, local_usage: &ProgramLocalUsage) -> Vec<JsonValue> {
+	let mut diagnostics = Vec::new();
+	let source = SourceText::new(source);
+
+	for function in &local_usage.functions {
+		for local in &function.locals {
+			let is_plain_local = matches!(
+				local.declaration.kind,
+				LocalDeclarationKind::Variable | LocalDeclarationKind::RecordPointerVariable
+			);
+
+			if !is_plain_local || !local.is_never_read() {
+				continue;
+			}
+
+			let message = if local.has_writes_after_declaration() {
+				format!("Local variable `{}` is assigned to but never read.", local.declaration.name)
+			}
+			else {
+				format!("Local variable `{}` is never read.", local.declaration.name)
+			};
+			let _ = uri;
+
+			if let Some((start, end)) = local_name_span(&source, local.declaration.position, &local.declaration.name) {
+				diagnostics.push(diagnostic_json_for_byte_span(
+					&source,
+					start,
+					end,
+					2,
+					&message,
+				));
+			}
+			else {
+				diagnostics.push(diagnostic_json(
+					uri,
+					&source,
+					local.declaration.position,
+					2,
+					&message,
+				));
+			}
+		}
+	}
+
+	diagnostics
+}
+
 fn write_lsp_message<W: Write>(writer: &mut W, message: JsonValue) -> Result<(), String> {
 	let body = serde_json::to_vec(&message)
 		.map_err(|error| format!("Failed to serialize LSP message: {error}"))?;
@@ -503,8 +625,10 @@ mod tests {
 	use super::LspServer;
 	use super::discover_project_config_path;
 	use super::file_path_from_document_uri;
+	use super::local_name_span;
 	use super::parse_content_length;
 	use super::position_from_line_and_column;
+	use tablo::source::SourceText;
 
 	fn unique_temp_directory(name: &str) -> PathBuf {
 		let nanos = SystemTime::now()
@@ -538,6 +662,20 @@ mod tests {
 	}
 
 	#[test]
+	fn locates_quoted_unused_variable_name_span() {
+		let source = SourceText::new("fn Main(args: [text]) int { var \"userid#\": int = 1; return 0; }");
+
+		assert_eq!(local_name_span(&source, 28, "userid#"), Some((32, 41)));
+	}
+
+	#[test]
+	fn locates_unused_variable_name_span() {
+		let source = SourceText::new("fn Main(args: [text]) int { var x: int = 1; return 0; }");
+
+		assert_eq!(local_name_span(&source, 28, "x"), Some((32, 33)));
+	}
+
+	#[test]
 	fn parses_content_length_header() {
 		assert_eq!(parse_content_length("Content-Length: 123").unwrap(), Some(123));
 	}
@@ -548,6 +686,27 @@ mod tests {
 			file_path_from_document_uri("file:///tmp/example.tablo"),
 			Some(PathBuf::from("/tmp/example.tablo")),
 		);
+	}
+
+	#[test]
+	fn publishes_assigned_but_never_read_variable_lint() {
+		let mut server = LspServer::new();
+		let mut output = Vec::new();
+
+		server.handle_did_open(
+			&mut output,
+			json!({
+				"textDocument": {
+					"uri": "file:///tmp/example.tablo",
+					"version": 1,
+					"text": "fn Main(args: [text]) int { var x: int = 1; x = 2; return 0; }"
+				}
+			}),
+		).unwrap();
+
+		let output = String::from_utf8(output).unwrap();
+		assert!(output.contains("Local variable `x` is assigned to but never read."));
+		assert!(output.contains("\"severity\":2"));
 	}
 
 	#[test]
@@ -612,6 +771,29 @@ mod tests {
 		let output = String::from_utf8(output).unwrap();
 		assert!(output.contains("Line has trailing whitespace."));
 		assert!(output.contains("\"severity\":2"));
+	}
+
+	#[test]
+	fn publishes_unused_variable_lint() {
+		let mut server = LspServer::new();
+		let mut output = Vec::new();
+
+		server.handle_did_open(
+			&mut output,
+			json!({
+				"textDocument": {
+					"uri": "file:///tmp/example.tablo",
+					"version": 1,
+					"text": "fn Main(args: [text]) int { var x: int = 1; return 0; }"
+				}
+			}),
+		).unwrap();
+
+		let output = String::from_utf8(output).unwrap();
+		assert!(output.contains("Local variable `x` is never read."));
+		assert!(output.contains("\"severity\":2"));
+		assert!(output.contains("\"character\":32"));
+		assert!(output.contains("\"character\":33"));
 	}
 
 	#[test]

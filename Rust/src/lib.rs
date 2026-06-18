@@ -29,6 +29,10 @@ use object_file::ObjectFileError;
 use object_file::read_program_from_path;
 use object_file::write_program_to_path;
 use schema::SchemaCatalog;
+use semantic::analyzer::SemanticAnalyzer;
+use semantic::ssa::FunctionLocalUsage;
+use semantic::ssa::ProgramLocalUsage;
+use semantic::ssa::analyze_program_local_usage;
 use source::SourceText;
 use syntax::lexer::LexError;
 use syntax::lexer::Lexer;
@@ -335,6 +339,23 @@ pub fn compile_with_source_name_and_schema(
 	write_program_to_path(output_path, &program).map_err(TabloError::ObjectFile)
 }
 
+pub fn local_usage_with_source_name(
+	source: impl Into<String>,
+	source_name: impl Into<String>,
+) -> Result<ProgramLocalUsage, TabloError> {
+	let source_name = source_name.into();
+	analyze_source_local_usage_with_name_and_schema(source, Some(source_name.as_str()), None)
+}
+
+pub fn local_usage_with_source_name_and_schema(
+	source: impl Into<String>,
+	source_name: impl Into<String>,
+	schema_catalog: &SchemaCatalog,
+) -> Result<ProgramLocalUsage, TabloError> {
+	let source_name = source_name.into();
+	analyze_source_local_usage_with_name_and_schema(source, Some(source_name.as_str()), Some(schema_catalog))
+}
+
 pub fn run(source: impl Into<String>) -> Result<Option<Value>, TabloError> {
 	let program = compile_to_program_with_name(source, None)?;
 	run_program(&program)
@@ -376,6 +397,23 @@ pub fn run_with_database_config(
 
 pub(crate) fn compile_to_program_with_name(source: impl Into<String>, source_name: Option<&str>) -> Result<Program, TabloError> {
 	compile_source_to_program_with_name_and_schema(source, source_name, CompilationTarget::Standalone, None)
+}
+
+fn analyze_source_local_usage_with_name_and_schema(
+	source: impl Into<String>,
+	source_name: Option<&str>,
+	schema_catalog: Option<&SchemaCatalog>,
+) -> Result<ProgramLocalUsage, TabloError> {
+	let source = SourceText::new(source);
+	let program = parse_source_text(&source)?;
+	validate_module_graph(&program, source_name).map_err(TabloError::Compile)?;
+	let linked_program = link_program_modules(&program, &source, source_name).map_err(TabloError::Compile)?;
+	let mut analyzer = SemanticAnalyzer::new();
+	let semantic_program = analyzer.analyze_standalone_program_with_schema(&linked_program.program, schema_catalog)
+		.map_err(TabloError::Compile)?;
+	let local_usage = analyze_program_local_usage(&linked_program.program, &semantic_program);
+
+	Ok(filter_root_source_local_usage(local_usage, &linked_program))
 }
 
 fn attach_source_debug_info(program: &mut Program, linked_program: &LinkedProgram) {
@@ -524,6 +562,24 @@ fn extend_function_source_indices_from_statement(
 		| ast::Statement::Return(_)
 		| ast::Statement::Use(_)
 		| ast::Statement::VariableDeclaration(_) => {}
+	}
+}
+
+fn filter_root_source_local_usage(local_usage: ProgramLocalUsage, linked_program: &LinkedProgram) -> ProgramLocalUsage {
+	let functions = local_usage.functions.into_iter()
+		.zip(linked_program.function_source_indices.iter().copied())
+		.filter_map(|(function_usage, source_index)| {
+			if source_index == 0 {
+				Some(function_usage)
+			}
+			else {
+				None
+			}
+		})
+		.collect::<Vec<FunctionLocalUsage>>();
+
+	ProgramLocalUsage {
+		functions,
 	}
 }
 
