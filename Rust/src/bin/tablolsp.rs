@@ -657,6 +657,27 @@ mod tests {
 	}
 
 	#[test]
+	fn does_not_require_main_for_module_file_diagnostics() {
+		let mut server = LspServer::new();
+		let mut output = Vec::new();
+
+		server.handle_did_open(
+			&mut output,
+			json!({
+				"textDocument": {
+					"uri": "file:///tmp/example.tablo",
+					"version": 1,
+					"text": "fn Helper() int { return 1; }"
+				}
+			}),
+		).unwrap();
+
+		let output = String::from_utf8(output).unwrap();
+		assert!(!output.contains("Standalone Tablo programs must define `fn Main(args: [text]) int`."));
+		assert!(output.contains("\"diagnostics\":[]"));
+	}
+
+	#[test]
 	fn ignores_non_content_length_header() {
 		assert_eq!(parse_content_length("Content-Type: application/vscode-jsonrpc; charset=utf-8").unwrap(), None);
 	}

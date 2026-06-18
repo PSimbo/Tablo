@@ -409,7 +409,7 @@ fn analyze_source_local_usage_with_name_and_schema(
 	validate_module_graph(&program, source_name).map_err(TabloError::Compile)?;
 	let linked_program = link_program_modules(&program, &source, source_name).map_err(TabloError::Compile)?;
 	let mut analyzer = SemanticAnalyzer::new();
-	let semantic_program = analyzer.analyze_standalone_program_with_schema(&linked_program.program, schema_catalog)
+	let semantic_program = analyzer.analyze_program_with_schema(&linked_program.program, schema_catalog)
 		.map_err(TabloError::Compile)?;
 	let local_usage = analyze_program_local_usage(&linked_program.program, &semantic_program);
 
