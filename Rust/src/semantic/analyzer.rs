@@ -1405,8 +1405,8 @@ impl SemanticAnalyzer {
 					));
 				}
 
-				let true_type = self.infer_expression_type(true_branch)?;
-				let false_type = self.infer_expression_type(false_branch)?;
+				let true_type = self.infer_expression_type_with_branch_refinements(true_branch, condition, true)?;
+				let false_type = self.infer_expression_type_with_branch_refinements(false_branch, condition, false)?;
 				self.infer_ternary_result_type(&true_type, &false_type, *position)
 			}
 			Expr::Text(_) => Ok(DataType::Text),
@@ -1444,6 +1444,23 @@ impl SemanticAnalyzer {
 				}
 			}
 		}
+	}
+
+	fn infer_expression_type_with_branch_refinements(
+		&mut self,
+		expression: &Expr,
+		condition: &Expr,
+		branch_taken_when_condition_is_truthy: bool,
+	) -> Result<DataType, CompileError> {
+		let Some((name, refined_local)) = self.refined_local_for_branch(condition, branch_taken_when_condition_is_truthy) else {
+			return self.infer_expression_type(expression);
+		};
+
+		self.enter_scope();
+		self.declare_local(name, refined_local);
+		let result = self.infer_expression_type(expression);
+		self.exit_scope();
+		result
 	}
 
 	fn infer_find_expression_type(&mut self, find: &FindExpr) -> Result<DataType, CompileError> {
@@ -2350,6 +2367,50 @@ impl SemanticAnalyzer {
 
 		let path = field_path.iter().map(|field| field.name.as_str()).collect::<Vec<_>>().join(".");
 		binding.assigned_fields.insert(path);
+	}
+
+	fn refined_local_for_branch(
+		&self,
+		condition: &Expr,
+		branch_taken_when_condition_is_truthy: bool,
+	) -> Option<(String, LocalBinding)> {
+		let Expr::Binary(BinaryExpr {
+			left,
+			operator,
+			right,
+			..
+		}) = condition else {
+			return None;
+		};
+
+		let refines_non_null = match operator {
+			BinaryOperator::NotEqual => branch_taken_when_condition_is_truthy,
+			BinaryOperator::Equal => !branch_taken_when_condition_is_truthy,
+			_ => return None,
+		};
+
+		if !refines_non_null {
+			return None;
+		}
+
+		let identifier = match (left.as_ref(), right.as_ref()) {
+			(Expr::Identifier(identifier), Expr::Null(_)) => identifier,
+			(Expr::Null(_), Expr::Identifier(identifier)) => identifier,
+			_ => return None,
+		};
+
+		let local = self.lookup_local(&identifier.name)?;
+		let DataType::Nullable(inner) = local.data_type else {
+			return None;
+		};
+
+		Some((
+			identifier.name.clone(),
+			LocalBinding {
+				data_type: *inner,
+				..local
+			},
+		))
 	}
 
 	fn register_record_pointer_binding(
@@ -4156,6 +4217,55 @@ mod tests {
 		assert!(second_binding.is_mutable);
 		assert!(first_binding.assigned_fields.is_empty());
 		assert!(second_binding.assigned_fields.is_empty());
+	}
+
+	#[test]
+	fn refines_nullable_identifier_across_nested_ternary_expression() {
+		let expression = parse_expression("val1 != '' ? val1 : val2 != null ? val2 : ''");
+		let mut analyzer = SemanticAnalyzer::new();
+		analyzer.enter_scope();
+		analyzer.declare_local(
+			String::from("val1"),
+			LocalBinding {
+				declaration_position: 0,
+				data_type: DataType::Text,
+				is_const: false,
+				slot: 1,
+			},
+		);
+		analyzer.declare_local(
+			String::from("val2"),
+			LocalBinding {
+				declaration_position: 0,
+				data_type: DataType::Nullable(Box::new(DataType::Text)),
+				is_const: false,
+				slot: 2,
+			},
+		);
+
+		let data_type = analyzer.infer_expression_type(&expression).unwrap();
+
+		assert_eq!(data_type, DataType::Text);
+	}
+
+	#[test]
+	fn refines_nullable_identifier_to_non_null_in_ternary_true_branch() {
+		let expression = parse_expression("value != null ? value : ''");
+		let mut analyzer = SemanticAnalyzer::new();
+		analyzer.enter_scope();
+		analyzer.declare_local(
+			String::from("value"),
+			LocalBinding {
+				declaration_position: 0,
+				data_type: DataType::Nullable(Box::new(DataType::Text)),
+				is_const: false,
+				slot: 1,
+			},
+		);
+
+		let data_type = analyzer.infer_expression_type(&expression).unwrap();
+
+		assert_eq!(data_type, DataType::Text);
 	}
 
 	#[test]

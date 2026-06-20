@@ -3265,6 +3265,15 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_nested_ternary_with_nullable_text_guarded_by_null_check() {
+		let result = run(
+			"fn Main(args: [text]) int { var acquired: text = ''; var supplier: text? = 'Supplier'; var target: text = acquired != '' ? acquired : supplier != null ? supplier : ''; if target == 'Supplier' { return 1; } return 0; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
 	fn runs_not_on_record_pointer() {
 		let database_path = create_sqlite_test_database(
 			"runs_not_on_record_pointer",
