@@ -271,12 +271,16 @@ fn format_source_location(location: &bytecode::SourceLocation, include_body_name
 
 impl TabloError {
 	pub fn format_with_source(&self, source: &str) -> String {
+		self.format_with_source_name(source, None)
+	}
+
+	pub fn format_with_source_name(&self, source: &str, source_name: Option<&str>) -> String {
 		let source = SourceText::new(source);
 
 		match self {
-			TabloError::Compile(error) => source.format_diagnostic("Compile error", error.position, &error.message),
-			TabloError::Lex(error) => source.format_diagnostic("Lex error", error.position, &error.message),
-			TabloError::Parse(error) => source.format_diagnostic("Parse error", error.position, &error.message),
+			TabloError::Compile(error) => source.format_diagnostic_with_source_name("Compile error", error.position, &error.message, source_name),
+			TabloError::Lex(error) => source.format_diagnostic_with_source_name("Lex error", error.position, &error.message, source_name),
+			TabloError::Parse(error) => source.format_diagnostic_with_source_name("Parse error", error.position, &error.message, source_name),
 			_ => self.to_string(),
 		}
 	}
@@ -1341,7 +1345,7 @@ mod tests {
 
 		assert_eq!(
 			error.format_with_source(&source),
-			"Compile error at line 3, column 11: Array index must be of type `int`, found `text`.\n  |\n3 | return xs['1'];\n  |           ^"
+			"Compile error in <source>:3:11: Array index must be of type `int`, found `text`."
 		);
 	}
 
@@ -1352,7 +1356,7 @@ mod tests {
 
 		assert_eq!(
 			error.format_with_source(source),
-			"Compile error at line 1, column 1: `break` may only be used inside a `while` or `for` loop.\n  |\n1 | break;\n  | ^"
+			"Compile error in <source>:1:1: `break` may only be used inside a `while` or `for` loop."
 		);
 	}
 
@@ -1363,7 +1367,7 @@ mod tests {
 
 		assert_eq!(
 			error.format_with_source(&source),
-			"Compile error at line 2, column 14: Cannot assign a value of type `bool` to a variable of type `int`.\n  |\n2 | var x: int = true;\n  |              ^"
+			"Compile error in <source>:2:14: Cannot assign a value of type `bool` to a variable of type `int`."
 		);
 	}
 
@@ -1374,7 +1378,7 @@ mod tests {
 
 		assert_eq!(
 			error.format_with_source(&source),
-			"Compile error at line 2, column 4: `if` condition must be of type `bool` or `record pointer`, found `int`.\n  |\n2 | if 1 {\n  |    ^"
+			"Compile error in <source>:2:4: `if` condition must be of type `bool` or `record pointer`, found `int`."
 		);
 	}
 
@@ -1385,7 +1389,7 @@ mod tests {
 
 		assert_eq!(
 			error.format_with_source(source),
-			"Compile error at line 2, column 1: Function `add` must return a value of type `int` on all paths.\n  |\n2 | fn add(a: int, b: int) int {\n  | ^"
+			"Compile error in <source>:2:1: Function `add` must return a value of type `int` on all paths."
 		);
 	}
 
@@ -1407,7 +1411,7 @@ mod tests {
 
 		assert_eq!(
 			error.format_with_source(source),
-			"Parse error at line 2, column 1: Expected `:` after ternary true branch.\n  |\n2 | ?\n  | ^"
+			"Parse error in <source>:2:1: Expected `:` after ternary true branch."
 		);
 	}
 
@@ -1418,7 +1422,7 @@ mod tests {
 
 		assert_eq!(
 			error.format_with_source(&source),
-			"Compile error at line 2, column 7: `while` condition must be of type `bool`, found `int`.\n  |\n2 | while 1 {\n  |       ^"
+			"Compile error in <source>:2:7: `while` condition must be of type `bool`, found `int`."
 		);
 	}
 
@@ -1683,7 +1687,7 @@ mod tests {
 
 		assert_eq!(
 			error.format_with_source("with exampledb;\nfn Main(args: [text]) int { if rec user = find first Customers where Id == 1 and user.Id == 1 { return user.Id; } return -1; }"),
-			"Compile error at line 2, column 82: Qualified field reference must use the target table name `Customers`.\n  |\n2 | fn Main(args: [text]) int { if rec user = find first Customers where Id == 1 and user.Id == 1 { return user.Id; } return -1; }\n  |                                                                                  ^"
+			"Compile error in <source>:2:82: Qualified field reference must use the target table name `Customers`."
 		);
 	}
 

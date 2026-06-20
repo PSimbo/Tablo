@@ -1,3 +1,5 @@
+use std::path::Path;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceText {
 	text: String,
@@ -9,15 +11,20 @@ impl SourceText {
 	}
 
 	pub fn format_diagnostic(&self, category: &str, position: usize, message: &str) -> String {
-		let (line, column) = self.line_and_column(position);
-		let line_text = self.line_text(position);
-		let gutter_width = line.to_string().len().max(1);
-		let gutter_padding = " ".repeat(gutter_width);
-		let caret_padding = " ".repeat(column.saturating_sub(1));
+		self.format_diagnostic_with_source_name(category, position, message, None)
+	}
 
-		format!(
-			"{category} at line {line}, column {column}: {message}\n{gutter_padding} |\n{line:>gutter_width$} | {line_text}\n{gutter_padding} | {caret_padding}^"
-		)
+	pub fn format_diagnostic_with_source_name(
+		&self,
+		category: &str,
+		position: usize,
+		message: &str,
+		source_name: Option<&str>,
+	) -> String {
+		let (line, column) = self.line_and_column(position);
+		let source_name = source_name.map(short_display_name).unwrap_or_else(|| String::from("<source>"));
+
+		format!("{category} in {source_name}:{line}:{column}: {message}")
 	}
 
 	pub fn line_and_column(&self, position: usize) -> (usize, usize) {
@@ -70,6 +77,21 @@ impl SourceText {
 
 }
 
+fn short_display_name(source_name: &str) -> String {
+	let path = Path::new(source_name);
+
+	if let Ok(current_dir) = std::env::current_dir()
+		&& let Ok(relative_path) = path.strip_prefix(&current_dir) {
+		let display = relative_path.display().to_string();
+
+		if !display.is_empty() {
+			return display;
+		}
+	}
+
+	source_name.to_string()
+}
+
 #[cfg(test)]
 mod tests {
 	use super::SourceText;
@@ -81,7 +103,23 @@ mod tests {
 
 		assert_eq!(
 			diagnostic,
-			"Parse error at line 2, column 1: Example message.\n  |\n2 | bar\n  | ^"
+			"Parse error in <source>:2:1: Example message."
+		);
+	}
+
+	#[test]
+	fn formats_diagnostic_with_source_name() {
+		let source = SourceText::new("foo\nbar\nbaz");
+		let diagnostic = source.format_diagnostic_with_source_name(
+			"Compile error",
+			4,
+			"Example message.",
+			Some("Examples/basic.tablo"),
+		);
+
+		assert_eq!(
+			diagnostic,
+			"Compile error in Examples/basic.tablo:2:1: Example message."
 		);
 	}
 }

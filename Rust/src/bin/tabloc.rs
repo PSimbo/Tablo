@@ -88,7 +88,7 @@ fn main() {
 	};
 
 	if let Err(error) = compile_result {
-		eprintln!("{}", error.format_with_source(&source));
+		eprintln!("{}", error.format_with_source_name(&source, Some(args.input_path.to_string_lossy().as_ref())));
 		std::process::exit(1);
 	}
 }

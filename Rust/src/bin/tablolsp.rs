@@ -398,6 +398,14 @@ fn is_identifier_char(ch: char) -> bool {
 	ch.is_ascii_alphanumeric() || ch == '_'
 }
 
+fn is_numeric_literal_char(ch: char) -> bool {
+	ch.is_ascii_digit() || ch == '.'
+}
+
+fn is_temporal_literal_char(ch: char) -> bool {
+	ch.is_ascii_alphanumeric() || matches!(ch, ':' | '-' | '+' | '.' | 'T' | 'Z')
+}
+
 fn local_name_span(source: &SourceText, declaration_position: usize, name: &str) -> Option<(usize, usize)> {
 	let text = source.as_str();
 	let declaration_position = declaration_position.min(text.len());
@@ -507,6 +515,88 @@ fn read_lsp_message<R: BufRead>(reader: &mut R) -> Result<Option<JsonValue>, Str
 	Ok(Some(message))
 }
 
+fn source_token_span_at_position(source: &SourceText, position: usize) -> Option<(usize, usize)> {
+	let text = source.as_str();
+	let position = position.min(text.len());
+	let current = text.get(position..)?.chars().next()?;
+	let line_end = text[position..]
+		.find('\n')
+		.map_or(text.len(), |offset| position + offset);
+
+	if current == '"' {
+		let closing_quote_offset = text[position + 1..line_end].find('"')?;
+		let end = position + 1 + closing_quote_offset + 1;
+		return Some((position, end));
+	}
+
+	if current == '\'' {
+		let closing_quote_offset = text[position + 1..line_end].find('\'')?;
+		let end = position + 1 + closing_quote_offset + 1;
+		return Some((position, end));
+	}
+
+	if current == '@' {
+		let token_start = position + current.len_utf8();
+		let mut end = token_start;
+
+		for (offset, ch) in text[token_start..line_end].char_indices() {
+			if !is_temporal_literal_char(ch) {
+				break;
+			}
+
+			end = token_start + offset + ch.len_utf8();
+		}
+
+		return Some((position, end));
+	}
+
+	if current == '-'
+		&& text[position + current.len_utf8()..].chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+		let token_start = position + current.len_utf8();
+		let mut end = token_start;
+
+		for (offset, ch) in text[token_start..line_end].char_indices() {
+			if !is_numeric_literal_char(ch) {
+				break;
+			}
+
+			end = token_start + offset + ch.len_utf8();
+		}
+
+		return Some((position, end));
+	}
+
+	if is_numeric_literal_char(current) {
+		let mut end = position;
+
+		for (offset, ch) in text[position..line_end].char_indices() {
+			if !is_numeric_literal_char(ch) {
+				break;
+			}
+
+			end = position + offset + ch.len_utf8();
+		}
+
+		return Some((position, end));
+	}
+
+	if is_identifier_char(current) {
+		let mut end = position;
+
+		for (offset, ch) in text[position..line_end].char_indices() {
+			if !is_identifier_char(ch) {
+				break;
+			}
+
+			end = position + offset + ch.len_utf8();
+		}
+
+		return Some((position, end));
+	}
+
+	None
+}
+
 fn tablo_error_to_diagnostic(uri: &str, source: &str, error: TabloError) -> JsonValue {
 	let source = SourceText::new(source);
 	let (position, message) = match error {
@@ -526,7 +616,13 @@ fn tablo_error_to_diagnostic(uri: &str, source: &str, error: TabloError) -> Json
 	};
 
 	let _ = uri;
-	diagnostic_json(uri, &source, position, 1, &message)
+
+	if let Some((start, end)) = source_token_span_at_position(&source, position) {
+		diagnostic_json_for_byte_span(&source, start, end, 1, &message)
+	}
+	else {
+		diagnostic_json(uri, &source, position, 1, &message)
+	}
 }
 
 fn trailing_whitespace_diagnostics(source: &str) -> Vec<JsonValue> {
@@ -628,7 +724,11 @@ mod tests {
 	use super::local_name_span;
 	use super::parse_content_length;
 	use super::position_from_line_and_column;
+	use super::source_token_span_at_position;
+	use super::tablo_error_to_diagnostic;
+	use tablo::compiler::CompileError;
 	use tablo::source::SourceText;
+	use tablo::TabloError;
 
 	fn unique_temp_directory(name: &str) -> PathBuf {
 		let nanos = SystemTime::now()
@@ -678,8 +778,65 @@ mod tests {
 	}
 
 	#[test]
+	fn highlights_full_span_for_assignment_type_error_on_string_literal() {
+		let source = "fn Main(args: [text]) int { var x: int = 'abc'; return 0; }";
+		let diagnostic = tablo_error_to_diagnostic(
+			"file:///tmp/example.tablo",
+			source,
+			TabloError::Compile(CompileError {
+				message: String::from("Cannot assign a value of type `text` to a variable of type `int`."),
+				position: 41,
+			}),
+		);
+		let diagnostic = diagnostic.to_string();
+
+		assert!(diagnostic.contains("Cannot assign a value of type `text` to a variable of type `int`."));
+		assert!(diagnostic.contains("\"character\":41"));
+		assert!(diagnostic.contains("\"character\":46"));
+	}
+
+	#[test]
+	fn highlights_full_span_for_unknown_table_field_diagnostic() {
+		let source = "with ExampleDb;\nfn Main(args: [text]) int { count Customers where MissingField == 1; return 0; }";
+		let diagnostic = tablo_error_to_diagnostic(
+			"file:///tmp/example.tablo",
+			source,
+			TabloError::Compile(CompileError {
+				message: String::from("Field `MissingField` does not exist on table `Customers`."),
+				position: 66,
+			}),
+		);
+		let diagnostic = diagnostic.to_string();
+
+		assert!(diagnostic.contains("Field `MissingField` does not exist on table `Customers`."));
+		assert!(diagnostic.contains("\"character\":50"));
+		assert!(diagnostic.contains("\"character\":62"));
+	}
+
+	#[test]
 	fn ignores_non_content_length_header() {
 		assert_eq!(parse_content_length("Content-Type: application/vscode-jsonrpc; charset=utf-8").unwrap(), None);
+	}
+
+	#[test]
+	fn locates_identifier_token_span_at_position() {
+		let source = SourceText::new("fn Main(args: [text]) int { fooBar; }");
+
+		assert_eq!(source_token_span_at_position(&source, 28), Some((28, 34)));
+	}
+
+	#[test]
+	fn locates_numeric_literal_token_span_at_position() {
+		let source = SourceText::new("fn Main(args: [text]) int { 12.34; }");
+
+		assert_eq!(source_token_span_at_position(&source, 28), Some((28, 33)));
+	}
+
+	#[test]
+	fn locates_quoted_identifier_token_span_at_position() {
+		let source = SourceText::new("fn Main(args: [text]) int { \"userid#\"; }");
+
+		assert_eq!(source_token_span_at_position(&source, 28), Some((28, 37)));
 	}
 
 	#[test]
@@ -687,6 +844,13 @@ mod tests {
 		let source = SourceText::new("fn Main(args: [text]) int { var \"userid#\": int = 1; return 0; }");
 
 		assert_eq!(local_name_span(&source, 28, "userid#"), Some((32, 41)));
+	}
+
+	#[test]
+	fn locates_string_literal_token_span_at_position() {
+		let source = SourceText::new("fn Main(args: [text]) int { 'abc'; }");
+
+		assert_eq!(source_token_span_at_position(&source, 28), Some((28, 33)));
 	}
 
 	#[test]
