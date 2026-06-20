@@ -27,6 +27,33 @@ pub enum BuiltInFunction {
 }
 
 impl BuiltInFunction {
+	pub fn all() -> &'static [Self] {
+		&[
+			Self::BoolCast,
+			Self::Contains,
+			Self::CountOf,
+			Self::DateCast,
+			Self::Day,
+			Self::DecCast,
+			Self::Disp,
+			Self::Displn,
+			Self::Exists,
+			Self::Format,
+			Self::Hour,
+			Self::IndexOf,
+			Self::IntCast,
+			Self::Len,
+			Self::Locked,
+			Self::Minute,
+			Self::Month,
+			Self::Second,
+			Self::Split,
+			Self::TextCast,
+			Self::Trim,
+			Self::Year,
+		]
+	}
+
 	pub fn from_id(id: u8) -> Option<Self> {
 		match id {
 			1 => Some(Self::Len),

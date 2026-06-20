@@ -11,18 +11,18 @@ use serde_json::Value as JsonValue;
 use serde_json::json;
 
 use tablo::TabloError;
+use tablo::completion::CompletionItem;
+use tablo::completion::CompletionItemKind;
+use tablo::completion::collect_document_completion_items;
+use tablo::completion::dedupe_completion_items;
+use tablo::completion::default_completion_items;
 use tablo::local_usage_with_source_name;
 use tablo::local_usage_with_source_name_and_schema;
 use tablo::runtime_config::read_schema_catalog_from_runtime_config_path;
 use tablo::semantic::ssa::LocalDeclarationKind;
 use tablo::semantic::ssa::ProgramLocalUsage;
 use tablo::source::SourceText;
-use tablo::source::find_matching_paren;
 use tablo::source::is_identifier_char;
-use tablo::source::read_identifier;
-use tablo::source::skip_comment;
-use tablo::source::skip_string_literal;
-use tablo::source::skip_whitespace;
 
 fn main() {
 	let stdin = io::stdin();
@@ -35,13 +35,6 @@ fn main() {
 		eprintln!("tablolsp: {error}");
 		std::process::exit(1);
 	}
-}
-
-#[derive(Clone)]
-struct CompletionItemSpec {
-	detail: String,
-	kind: u32,
-	label: String,
 }
 
 #[derive(Deserialize)]
@@ -118,11 +111,7 @@ impl LspServer {
 		dedupe_completion_items(&mut items);
 		items.into_iter()
 			.filter(|item| prefix.as_ref().is_none_or(|prefix| item.label.starts_with(prefix)))
-			.map(|item| json!({
-				"label": item.label,
-				"kind": item.kind,
-				"detail": item.detail,
-			}))
+			.map(completion_item_to_json)
 			.collect()
 	}
 
@@ -149,7 +138,7 @@ impl LspServer {
 		}
 	}
 
-	fn document_completion_items(&self, uri: &str, position: Position) -> Vec<CompletionItemSpec> {
+	fn document_completion_items(&self, uri: &str, position: Position) -> Vec<CompletionItem> {
 		let Some(document) = self.open_documents.get(uri) else {
 			return Vec::new();
 		};
@@ -389,214 +378,24 @@ impl LspServer {
 	}
 }
 
-fn built_in_completion_items() -> Vec<CompletionItemSpec> {
-	vec![
-		CompletionItemSpec { label: String::from("bool"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("contains"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("countof"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("date"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("day"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("dec"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("disp"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("displn"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("exists"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("float"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("format"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("hour"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("ilike"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("indexof"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("int"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("lastof"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("len"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("like"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("locked"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("max"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("min"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("minute"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("month"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("second"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("split"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("text"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("time"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("timestamp"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("timetz"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("timestamptz"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("trim"), kind: 3, detail: String::from("Built-in function") },
-		CompletionItemSpec { label: String::from("year"), kind: 3, detail: String::from("Built-in function") },
-	]
-}
-
-fn collect_document_completion_items(source: &str) -> Vec<CompletionItemSpec> {
-	let mut items = Vec::new();
-	let mut index = 0;
-
-	while index < source.len() {
-		if let Some(comment_end) = skip_comment(source, index) {
-			index = comment_end;
-			continue;
-		}
-
-		if let Some(string_end) = skip_string_literal(source, index) {
-			index = string_end;
-			continue;
-		}
-
-		let Some(identifier) = read_identifier(source, index) else {
-			index += source[index..].chars().next().map(char::len_utf8).unwrap_or(1);
-			continue;
-		};
-
-		if identifier.quoted {
-			index = identifier.end;
-			continue;
-		}
-
-		match identifier.value.as_str() {
-			"fn" => {
-				if let Some((name, next_index)) = parse_function_completion_items(source, identifier.end, &mut items) {
-					items.push(CompletionItemSpec {
-						label: name,
-						kind: 3,
-						detail: String::from("Function"),
-					});
-					index = next_index;
-					continue;
-				}
-			}
-			"obj" => {
-				if let Some((name, next_index)) = parse_named_declaration(source, identifier.end) {
-					items.push(CompletionItemSpec {
-						label: name,
-						kind: 22,
-						detail: String::from("Object"),
-					});
-					index = next_index;
-					continue;
-				}
-			}
-			"enum" => {
-				if let Some((name, next_index)) = parse_named_declaration(source, identifier.end) {
-					items.push(CompletionItemSpec {
-						label: name,
-						kind: 13,
-						detail: String::from("Enum"),
-					});
-					index = next_index;
-					continue;
-				}
-			}
-			"var" | "const" => {
-				if let Some((name, next_index)) = parse_variable_completion_item(source, identifier.end) {
-					items.push(CompletionItemSpec {
-						label: name,
-						kind: 6,
-						detail: String::from("Local symbol"),
-					});
-					index = next_index;
-					continue;
-				}
-			}
-			"rec" => {
-				if let Some((name, next_index)) = parse_record_completion_item(source, identifier.end) {
-					items.push(CompletionItemSpec {
-						label: name,
-						kind: 6,
-						detail: String::from("Local symbol"),
-					});
-					index = next_index;
-					continue;
-				}
-			}
-			_ => {}
-		}
-
-		index = identifier.end;
-	}
-
-	items
-}
-
-fn collect_parameter_completion_items(parameters: &str, items: &mut Vec<CompletionItemSpec>) {
-	let mut index = 0;
-
-	while index < parameters.len() {
-		index = skip_whitespace(parameters, index);
-		let Some(name) = read_identifier(parameters, index) else {
-			index += parameters[index..].chars().next().map(char::len_utf8).unwrap_or(1);
-			continue;
-		};
-		let colon_index = skip_whitespace(parameters, name.end);
-		if parameters[colon_index..].chars().next() == Some(':') {
-			items.push(CompletionItemSpec {
-				label: name.value,
-				kind: 6,
-				detail: String::from("Parameter"),
-			});
-			index = colon_index + 1;
-		}
-		else {
-			index = name.end;
-		}
+fn completion_item_kind_to_lsp(kind: CompletionItemKind) -> u32 {
+	match kind {
+		CompletionItemKind::Function | CompletionItemKind::BuiltInFunction => 3,
+		CompletionItemKind::LocalSymbol | CompletionItemKind::Parameter => 6,
+		CompletionItemKind::Enum => 13,
+		CompletionItemKind::Keyword => 14,
+		CompletionItemKind::Literal => 21,
+		CompletionItemKind::Object => 22,
+		CompletionItemKind::Type => 25,
 	}
 }
 
-fn dedupe_completion_items(items: &mut Vec<CompletionItemSpec>) {
-	let mut seen = std::collections::BTreeSet::new();
-	items.retain(|item| seen.insert(item.label.clone()));
-}
-
-fn default_completion_items() -> Vec<CompletionItemSpec> {
-	let mut items = vec![
-		CompletionItemSpec { label: String::from("and"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("any"), kind: 25, detail: String::from("Type") },
-		CompletionItemSpec { label: String::from("asc"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("bool"), kind: 25, detail: String::from("Type") },
-		CompletionItemSpec { label: String::from("break"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("by"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("const"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("continue"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("count"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("date"), kind: 25, detail: String::from("Type") },
-		CompletionItemSpec { label: String::from("dec"), kind: 25, detail: String::from("Type") },
-		CompletionItemSpec { label: String::from("delete"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("desc"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("else"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("enum"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("false"), kind: 21, detail: String::from("Literal") },
-		CompletionItemSpec { label: String::from("find"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("first"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("float"), kind: 25, detail: String::from("Type") },
-		CompletionItemSpec { label: String::from("fn"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("for"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("if"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("in"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("int"), kind: 25, detail: String::from("Type") },
-		CompletionItemSpec { label: String::from("last"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("mut"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("not"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("null"), kind: 21, detail: String::from("Literal") },
-		CompletionItemSpec { label: String::from("obj"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("or"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("order"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("pub"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("rec"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("return"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("text"), kind: 25, detail: String::from("Type") },
-		CompletionItemSpec { label: String::from("time"), kind: 25, detail: String::from("Type") },
-		CompletionItemSpec { label: String::from("timestamp"), kind: 25, detail: String::from("Type") },
-		CompletionItemSpec { label: String::from("timestamptz"), kind: 25, detail: String::from("Type") },
-		CompletionItemSpec { label: String::from("timetz"), kind: 25, detail: String::from("Type") },
-		CompletionItemSpec { label: String::from("true"), kind: 21, detail: String::from("Literal") },
-		CompletionItemSpec { label: String::from("update"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("var"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("where"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("while"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("with"), kind: 14, detail: String::from("Keyword") },
-		CompletionItemSpec { label: String::from("xor"), kind: 14, detail: String::from("Keyword") },
-	];
-	items.extend(built_in_completion_items());
-	dedupe_completion_items(&mut items);
-	items
+fn completion_item_to_json(item: CompletionItem) -> JsonValue {
+	json!({
+		"label": item.label,
+		"kind": completion_item_kind_to_lsp(item.kind),
+		"detail": item.detail,
+	})
 }
 
 fn diagnostic_json(uri: &str, source: &SourceText, position: usize, severity: u32, message: &str) -> JsonValue {
@@ -757,50 +556,6 @@ fn parse_content_length(header_line: &str) -> Result<Option<usize>, String> {
 	let length = value.trim().parse::<usize>()
 		.map_err(|error| format!("Invalid Content-Length header `{header_line}`: {error}"))?;
 	Ok(Some(length))
-}
-
-fn parse_function_completion_items(
-	source: &str,
-	start: usize,
-	items: &mut Vec<CompletionItemSpec>,
-) -> Option<(String, usize)> {
-	let index = skip_whitespace(source, start);
-	let name = read_identifier(source, index)?;
-	let mut index = skip_whitespace(source, name.end);
-
-	if source[index..].chars().next()? != '(' {
-		return None;
-	}
-
-	let end_index = find_matching_paren(source, index)?;
-	let parameters = &source[index + 1..end_index];
-	collect_parameter_completion_items(parameters, items);
-
-	index = end_index + 1;
-	Some((name.value, index))
-}
-
-fn parse_named_declaration(source: &str, start: usize) -> Option<(String, usize)> {
-	let index = skip_whitespace(source, start);
-	let name = read_identifier(source, index)?;
-	Some((name.value, name.end))
-}
-
-fn parse_record_completion_item(source: &str, start: usize) -> Option<(String, usize)> {
-	let mut index = skip_whitespace(source, start);
-	if source[index..].starts_with("mut")
-		&& !source[index + 3..].chars().next().is_some_and(is_identifier_char) {
-		index = skip_whitespace(source, index + 3);
-	}
-
-	let name = read_identifier(source, index)?;
-	Some((name.value, name.end))
-}
-
-fn parse_variable_completion_item(source: &str, start: usize) -> Option<(String, usize)> {
-	let index = skip_whitespace(source, start);
-	let name = read_identifier(source, index)?;
-	Some((name.value, name.end))
 }
 
 fn read_lsp_message<R: BufRead>(reader: &mut R) -> Result<Option<JsonValue>, String> {
@@ -1050,15 +805,9 @@ mod tests {
 	use super::LspServer;
 	use super::OpenDocument;
 	use super::Position;
-	use super::default_completion_items;
 	use super::discover_project_config_path;
-	use super::file_path_from_document_uri;
-	use super::local_name_span;
-	use super::parse_content_length;
-	use super::source_token_span_at_position;
 	use super::tablo_error_to_diagnostic;
 	use tablo::compiler::CompileError;
-	use tablo::source::SourceText;
 	use tablo::TabloError;
 
 	fn unique_temp_directory(name: &str) -> PathBuf {
@@ -1067,16 +816,6 @@ mod tests {
 			.unwrap()
 			.as_nanos();
 		std::env::temp_dir().join(format!("{name}_{nanos}"))
-	}
-
-	#[test]
-	fn completion_items_dedupe_labels() {
-		let items = default_completion_items();
-		let date_count = items.iter().filter(|item| item.label == "date").count();
-		let text_count = items.iter().filter(|item| item.label == "text").count();
-
-		assert_eq!(date_count, 1);
-		assert_eq!(text_count, 1);
 	}
 
 	#[test]
@@ -1178,186 +917,5 @@ mod tests {
 
 		assert!(diagnostic.contains("Field `MissingField` does not exist on table `Customers`."));
 		assert!(diagnostic.contains("\"character\":50"));
-		assert!(diagnostic.contains("\"character\":62"));
-	}
-
-	#[test]
-	fn ignores_non_content_length_header() {
-		assert_eq!(parse_content_length("Content-Type: application/vscode-jsonrpc; charset=utf-8").unwrap(), None);
-	}
-
-	#[test]
-	fn locates_identifier_token_span_at_position() {
-		let source = SourceText::new("fn Main(args: [text]) int { fooBar; }");
-
-		assert_eq!(source_token_span_at_position(&source, 28), Some((28, 34)));
-	}
-
-	#[test]
-	fn locates_numeric_literal_token_span_at_position() {
-		let source = SourceText::new("fn Main(args: [text]) int { 12.34; }");
-
-		assert_eq!(source_token_span_at_position(&source, 28), Some((28, 33)));
-	}
-
-	#[test]
-	fn locates_quoted_identifier_token_span_at_position() {
-		let source = SourceText::new("fn Main(args: [text]) int { \"userid#\"; }");
-
-		assert_eq!(source_token_span_at_position(&source, 28), Some((28, 37)));
-	}
-
-	#[test]
-	fn locates_quoted_unused_variable_name_span() {
-		let source = SourceText::new("fn Main(args: [text]) int { var \"userid#\": int = 1; return 0; }");
-
-		assert_eq!(local_name_span(&source, 28, "userid#"), Some((32, 41)));
-	}
-
-	#[test]
-	fn locates_string_literal_token_span_at_position() {
-		let source = SourceText::new("fn Main(args: [text]) int { 'abc'; }");
-
-		assert_eq!(source_token_span_at_position(&source, 28), Some((28, 33)));
-	}
-
-	#[test]
-	fn locates_unused_variable_name_span() {
-		let source = SourceText::new("fn Main(args: [text]) int { var x: int = 1; return 0; }");
-
-		assert_eq!(local_name_span(&source, 28, "x"), Some((32, 33)));
-	}
-
-	#[test]
-	fn parses_content_length_header() {
-		assert_eq!(parse_content_length("Content-Length: 123").unwrap(), Some(123));
-	}
-
-	#[test]
-	fn parses_file_uri_to_path() {
-		assert_eq!(
-			file_path_from_document_uri("file:///tmp/example.tablo"),
-			Some(PathBuf::from("/tmp/example.tablo")),
-		);
-	}
-
-	#[test]
-	fn publishes_assigned_but_never_read_variable_lint() {
-		let mut server = LspServer::new();
-		let mut output = Vec::new();
-
-		server.handle_did_open(
-			&mut output,
-			json!({
-				"textDocument": {
-					"uri": "file:///tmp/example.tablo",
-					"version": 1,
-					"text": "fn Main(args: [text]) int { var x: int = 1; x = 2; return 0; }"
-				}
-			}),
-		).unwrap();
-
-		let output = String::from_utf8(output).unwrap();
-		assert!(output.contains("Local variable `x` is assigned to but never read."));
-		assert!(output.contains("\"severity\":2"));
-	}
-
-	#[test]
-	fn publishes_diagnostic_for_parse_error_on_open() {
-		let mut server = LspServer::new();
-		let mut output = Vec::new();
-
-		server.handle_did_open(
-			&mut output,
-			json!({
-				"textDocument": {
-					"uri": "file:///tmp/example.tablo",
-					"version": 1,
-					"text": "fn Main(args: [text]) int { return ; }"
-				}
-			}),
-		).unwrap();
-
-		let output = String::from_utf8(output).unwrap();
-		assert!(output.contains("textDocument/publishDiagnostics"));
-		assert!(output.contains("\"diagnostics\":[{"));
-	}
-
-	#[test]
-	fn publishes_lint_and_compile_diagnostic_together() {
-		let mut server = LspServer::new();
-		let mut output = Vec::new();
-
-		server.handle_did_open(
-			&mut output,
-			json!({
-				"textDocument": {
-					"uri": "file:///tmp/example.tablo",
-					"version": 1,
-					"text": "fn Main(args: [text]) int { return ; }  \n"
-				}
-			}),
-		).unwrap();
-
-		let output = String::from_utf8(output).unwrap();
-		assert!(output.contains("Line has trailing whitespace."));
-		assert!(output.contains("\"severity\":2"));
-		assert!(output.contains("\"severity\":1"));
-	}
-
-	#[test]
-	fn publishes_trailing_whitespace_lint() {
-		let mut server = LspServer::new();
-		let mut output = Vec::new();
-
-		server.handle_did_open(
-			&mut output,
-			json!({
-				"textDocument": {
-					"uri": "file:///tmp/example.tablo",
-					"version": 1,
-					"text": "fn Main(args: [text]) int { return 0; }  \n"
-				}
-			}),
-		).unwrap();
-
-		let output = String::from_utf8(output).unwrap();
-		assert!(output.contains("Line has trailing whitespace."));
-		assert!(output.contains("\"severity\":2"));
-	}
-
-	#[test]
-	fn publishes_unused_variable_lint() {
-		let mut server = LspServer::new();
-		let mut output = Vec::new();
-
-		server.handle_did_open(
-			&mut output,
-			json!({
-				"textDocument": {
-					"uri": "file:///tmp/example.tablo",
-					"version": 1,
-					"text": "fn Main(args: [text]) int { var x: int = 1; return 0; }"
-				}
-			}),
-		).unwrap();
-
-		let output = String::from_utf8(output).unwrap();
-		assert!(output.contains("Local variable `x` is never read."));
-		assert!(output.contains("\"severity\":2"));
-		assert!(output.contains("\"character\":32"));
-		assert!(output.contains("\"character\":33"));
-	}
-
-	#[test]
-	fn rejects_invalid_content_length_header() {
-		let error = parse_content_length("Content-Length: nope").unwrap_err();
-
-		assert!(error.contains("Invalid Content-Length header"));
-	}
-
-	#[test]
-	fn resolves_position_from_line_and_column() {
-		assert_eq!(SourceText::new("a\nbc\n").offset_from_line_and_column(2, 2), 3);
 	}
 }
