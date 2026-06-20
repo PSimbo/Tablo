@@ -140,6 +140,14 @@ impl Compiler {
 		self.compile_program_with_schema(program, None)
 	}
 
+		pub fn compile_program_with_existing_semantics(
+		&mut self,
+		program: &AstProgram,
+		semantic_program: &SemanticProgram,
+	) -> Result<Program, CompileError> {
+		self.compile_program_with_semantics(program, semantic_program)
+	}
+
 	pub fn compile_program_with_schema(
 		&mut self,
 		program: &AstProgram,

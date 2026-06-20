@@ -43,6 +43,8 @@ use vm::RuntimeDatabaseConfig;
 use vm::VirtualMachine;
 use vm::VmError;
 
+const EXTERNAL_SOURCE_DIAGNOSTIC_PREFIX: &str = "__tablo_external_diagnostic__";
+
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CompilationTarget {
@@ -59,10 +61,45 @@ pub enum TabloError {
 	Runtime(VmError),
 }
 
+impl TabloError {
+	pub fn format_with_source(&self, source: &str) -> String {
+		self.format_with_source_name(source, None)
+	}
+
+	pub fn format_with_source_name(&self, source: &str, source_name: Option<&str>) -> String {
+		let source = SourceText::new(source);
+
+		match self {
+			TabloError::Compile(error) => {
+				if let Some((category, diagnostic_source_name, position, message)) = decode_external_source_diagnostic(&error.message) {
+					if let Ok(external_source) = std::fs::read_to_string(&diagnostic_source_name) {
+						return SourceText::new(external_source)
+							.format_diagnostic_with_source_name(category, position, &message, Some(&diagnostic_source_name));
+					}
+
+					return format!("{category} in {}:{}: {}", diagnostic_source_name, position, message);
+				}
+
+				source.format_diagnostic_with_source_name("Compile error", error.position, &error.message, source_name)
+			}
+			TabloError::Lex(error) => source.format_diagnostic_with_source_name("Lex error", error.position, &error.message, source_name),
+			TabloError::Parse(error) => source.format_diagnostic_with_source_name("Parse error", error.position, &error.message, source_name),
+			_ => self.to_string(),
+		}
+	}
+}
+
 impl Display for TabloError {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
-			TabloError::Compile(error) => write!(f, "Compile error: {}", error.message),
+			TabloError::Compile(error) => {
+				if let Some((category, _, _, message)) = decode_external_source_diagnostic(&error.message) {
+					write!(f, "{category}: {message}")
+				}
+				else {
+					write!(f, "Compile error: {}", error.message)
+				}
+			}
 			TabloError::Lex(error) => write!(f, "Lex error at byte {}: {}", error.position, error.message),
 			TabloError::ObjectFile(error) => write!(f, "Object file error at byte {}: {}", error.offset, error.message),
 			TabloError::Parse(error) => write!(f, "Parse error at byte {}: {}", error.position, error.message),
@@ -102,6 +139,7 @@ struct LinkedProgram {
 	function_source_indices: Vec<u32>,
 	program: ast::Program,
 	root_source_file: SourceFileDebugInfo,
+	top_level_function_source_names: Vec<String>,
 }
 
 #[derive(Default)]
@@ -203,14 +241,34 @@ impl ModuleLinker {
 			position: use_declaration.position,
 		})?;
 		let source_text = SourceText::new(source);
-		let mut program = parse_source_text(&source_text).map_err(|error| CompileError {
-			message: format!(
-				"Failed to parse imported module `{}` from `{}`: {}",
-				use_declaration.module_path,
-				module_path.display(),
-				error,
-			),
-			position: use_declaration.position,
+		let mut program = parse_source_text(&source_text).map_err(|error| match error {
+			TabloError::Lex(error) => CompileError {
+				message: encode_external_source_diagnostic(
+					"Lex error",
+					&module_key.display().to_string(),
+					error.position,
+					&error.message,
+				),
+				position: error.position,
+			},
+			TabloError::Parse(error) => CompileError {
+				message: encode_external_source_diagnostic(
+					"Parse error",
+					&module_key.display().to_string(),
+					error.position,
+					&error.message,
+				),
+				position: error.position,
+			},
+			other => CompileError {
+				message: format!(
+					"Failed to parse imported module `{}` from `{}`: {}",
+					use_declaration.module_path,
+					module_path.display(),
+					other,
+				),
+				position: use_declaration.position,
+			},
 		})?;
 		let base_directory = module_path.parent().unwrap_or_else(|| Path::new("."));
 		let import_bindings = self.collect_import_bindings(&program, base_directory)?;
@@ -243,46 +301,6 @@ impl ModuleLinker {
 		};
 		self.loaded_modules.insert(module_key, linked_module.clone());
 		Ok(linked_module)
-	}
-}
-
-fn format_stack_frame(frame: &vm::VmStackFrame) -> String {
-	match &frame.source_location {
-		Some(location) => format_source_location(location, true),
-		None => format!("instruction {}", frame.instruction_index),
-	}
-}
-
-fn format_source_location(location: &bytecode::SourceLocation, include_body_name: bool) -> String {
-	let position = if let Some(display_name) = location.display_name() {
-		format!("{display_name}:{}:{}", location.line(), location.column())
-	}
-	else {
-		format!("line {}, column {}", location.line(), location.column())
-	};
-
-	if include_body_name
-		&& let Some(body_name) = location.body_name() {
-		return format!("{body_name} ({position})");
-	}
-
-	position
-}
-
-impl TabloError {
-	pub fn format_with_source(&self, source: &str) -> String {
-		self.format_with_source_name(source, None)
-	}
-
-	pub fn format_with_source_name(&self, source: &str, source_name: Option<&str>) -> String {
-		let source = SourceText::new(source);
-
-		match self {
-			TabloError::Compile(error) => source.format_diagnostic_with_source_name("Compile error", error.position, &error.message, source_name),
-			TabloError::Lex(error) => source.format_diagnostic_with_source_name("Lex error", error.position, &error.message, source_name),
-			TabloError::Parse(error) => source.format_diagnostic_with_source_name("Parse error", error.position, &error.message, source_name),
-			_ => self.to_string(),
-		}
 	}
 }
 
@@ -341,6 +359,17 @@ pub fn compile_with_source_name_and_schema(
 		Some(schema_catalog),
 	)?;
 	write_program_to_path(output_path, &program).map_err(TabloError::ObjectFile)
+}
+
+pub(crate) fn encode_external_source_diagnostic(
+	category: &str,
+	source_name: &str,
+	position: usize,
+	message: &str,
+) -> String {
+	format!(
+		"{EXTERNAL_SOURCE_DIAGNOSTIC_PREFIX}\u{1f}{category}\u{1f}{source_name}\u{1f}{position}\u{1f}{message}"
+	)
 }
 
 pub fn local_usage_with_source_name(
@@ -413,6 +442,8 @@ fn analyze_source_local_usage_with_name_and_schema(
 	validate_module_graph(&program, source_name).map_err(TabloError::Compile)?;
 	let linked_program = link_program_modules(&program, &source, source_name).map_err(TabloError::Compile)?;
 	let mut analyzer = SemanticAnalyzer::new();
+	analyzer.set_root_source_name(Some(linked_program.root_source_file.display_name().to_string()));
+	analyzer.set_top_level_function_source_names(linked_program.top_level_function_source_names.clone());
 	let semantic_program = analyzer.analyze_program_with_schema(&linked_program.program, schema_catalog)
 		.map_err(TabloError::Compile)?;
 	let local_usage = analyze_program_local_usage(&linked_program.program, &semantic_program);
@@ -479,17 +510,20 @@ fn collect_local_function_names(statements: &[ast::Statement]) -> Vec<String> {
 		.collect()
 }
 
-fn compile_ast_program_with_schema(
+fn compile_ast_program_with_schema_and_analyzer(
 	program: &ast::Program,
 	target: CompilationTarget,
 	schema_catalog: Option<&SchemaCatalog>,
+	mut analyzer: SemanticAnalyzer,
 ) -> Result<Program, TabloError> {
-	let mut compiler = Compiler::new();
+	let semantic_program = match target {
+		CompilationTarget::Snippet => analyzer.analyze_program_with_schema(program, schema_catalog),
+		CompilationTarget::Standalone => analyzer.analyze_standalone_program_with_schema(program, schema_catalog),
+	}.map_err(TabloError::Compile)?;
 
-	match target {
-		CompilationTarget::Snippet => compiler.compile_program_with_schema(program, schema_catalog).map_err(TabloError::Compile),
-		CompilationTarget::Standalone => compiler.compile_standalone_program_with_schema(program, schema_catalog).map_err(TabloError::Compile),
-	}
+	let mut compiler = Compiler::new();
+	compiler.compile_program_with_existing_semantics(program, &semantic_program)
+		.map_err(TabloError::Compile)
 }
 
 fn compile_source_to_program_with_name_and_schema(
@@ -502,9 +536,23 @@ fn compile_source_to_program_with_name_and_schema(
 	let program = parse_source_text(&source)?;
 	validate_module_graph(&program, source_name).map_err(TabloError::Compile)?;
 	let linked_program = link_program_modules(&program, &source, source_name).map_err(TabloError::Compile)?;
-	let mut program = compile_ast_program_with_schema(&linked_program.program, target, schema_catalog)?;
+	let mut analyzer = SemanticAnalyzer::new();
+	analyzer.set_root_source_name(Some(linked_program.root_source_file.display_name().to_string()));
+	analyzer.set_top_level_function_source_names(linked_program.top_level_function_source_names.clone());
+	let mut program = compile_ast_program_with_schema_and_analyzer(&linked_program.program, target, schema_catalog, analyzer)?;
 	attach_source_debug_info(&mut program, &linked_program);
 	Ok(program)
+}
+
+fn decode_external_source_diagnostic(message: &str) -> Option<(&str, String, usize, String)> {
+	let payload = message.strip_prefix(EXTERNAL_SOURCE_DIAGNOSTIC_PREFIX)?
+		.strip_prefix('\u{1f}')?;
+	let mut parts = payload.splitn(4, '\u{1f}');
+	let category = parts.next()?;
+	let source_name = parts.next()?.to_string();
+	let position = parts.next()?.parse::<usize>().ok()?;
+	let diagnostic_message = parts.next()?.to_string();
+	Some((category, source_name, position, diagnostic_message))
 }
 
 fn extend_function_source_indices(
@@ -678,12 +726,36 @@ fn first_use_statement(program: &ast::Program) -> Option<&ast::UseDeclaration> {
 	None
 }
 
+fn format_stack_frame(frame: &vm::VmStackFrame) -> String {
+	match &frame.source_location {
+		Some(location) => format_source_location(location, true),
+		None => format!("instruction {}", frame.instruction_index),
+	}
+}
+
+fn format_source_location(location: &bytecode::SourceLocation, include_body_name: bool) -> String {
+	let position = if let Some(display_name) = location.display_name() {
+		format!("{display_name}:{}:{}", location.line(), location.column())
+	}
+	else {
+		format!("line {}, column {}", location.line(), location.column())
+	};
+
+	if include_body_name
+		&& let Some(body_name) = location.body_name() {
+		return format!("{body_name} ({position})");
+	}
+
+	position
+}
+
 fn link_program_modules(
 	program: &ast::Program,
 	source: &SourceText,
 	source_name: Option<&str>,
 ) -> Result<LinkedProgram, CompileError> {
 	let root_source_file = SourceFileDebugInfo::from_source(source_name.unwrap_or("<source>"), source);
+	let root_display_name = root_source_file.display_name().to_string();
 
 	let Some(source_name) = source_name else {
 		return Ok(LinkedProgram {
@@ -691,6 +763,9 @@ fn link_program_modules(
 			function_source_indices: collect_function_source_indices(program, 0),
 			program: program.clone(),
 			root_source_file,
+			top_level_function_source_names: program.functions.iter()
+				.map(|_| root_display_name.clone())
+				.collect(),
 		});
 	};
 
@@ -700,6 +775,9 @@ fn link_program_modules(
 			function_source_indices: collect_function_source_indices(program, 0),
 			program: program.clone(),
 			root_source_file,
+			top_level_function_source_names: program.functions.iter()
+				.map(|_| root_display_name.clone())
+				.collect(),
 		});
 	}
 
@@ -731,13 +809,22 @@ fn link_program_modules(
 		&linker.linked_with_declarations(),
 	);
 	let imported_source_files = linker.linked_source_files();
+	let mut top_level_function_source_names = Vec::new();
 	let mut function_source_indices = Vec::new();
 
 	for (source_file_index, functions) in linker.linked_function_groups() {
+		let display_name = imported_source_files[(source_file_index - 1) as usize].display_name().to_string();
+		top_level_function_source_names.extend(functions.iter().map(|_| display_name.clone()));
+
 		for function in functions {
 			extend_function_source_indices(function, source_file_index, &mut function_source_indices);
 		}
 	}
+
+	top_level_function_source_names.extend(
+		linked_program.functions[linker.linked_function_count()..].iter()
+			.map(|_| root_display_name.clone()),
+	);
 
 	for function in &linked_program.functions[linker.linked_function_count()..] {
 		extend_function_source_indices(function, 0, &mut function_source_indices);
@@ -748,6 +835,7 @@ fn link_program_modules(
 		function_source_indices,
 		program: linked_program,
 		root_source_file,
+		top_level_function_source_names,
 	})
 }
 
@@ -1030,14 +1118,35 @@ fn validate_module_imports_in_program(
 			),
 			position: use_declaration.position,
 		})?;
-		let imported_program = parse_source_text(&SourceText::new(source)).map_err(|error| CompileError {
-			message: format!(
-				"Failed to parse imported module `{}` from `{}`: {}",
-				use_declaration.module_path,
-				module_path.display(),
-				error,
-			),
-			position: use_declaration.position,
+		let canonical_path = module_key.display().to_string();
+		let imported_program = parse_source_text(&SourceText::new(source)).map_err(|error| match error {
+			TabloError::Lex(error) => CompileError {
+				message: encode_external_source_diagnostic(
+					"Lex error",
+					&canonical_path,
+					error.position,
+					&error.message,
+				),
+				position: error.position,
+			},
+			TabloError::Parse(error) => CompileError {
+				message: encode_external_source_diagnostic(
+					"Parse error",
+					&canonical_path,
+					error.position,
+					&error.message,
+				),
+				position: error.position,
+			},
+			other => CompileError {
+				message: format!(
+					"Failed to parse imported module `{}` from `{}`: {}",
+					use_declaration.module_path,
+					module_path.display(),
+					other,
+				),
+				position: use_declaration.position,
+			},
 		})?;
 		let exported_functions = imported_program.functions.iter()
 			.filter(|function| function.visibility == ast::Visibility::Public)
@@ -1380,6 +1489,62 @@ mod tests {
 			error.format_with_source(&source),
 			"Compile error in <source>:2:4: `if` condition must be of type `bool` or `record pointer`, found `int`."
 		);
+	}
+
+	#[test]
+	fn formats_imported_module_compile_errors_against_imported_file() {
+		let root_path = write_test_source_file(
+			"formats_imported_module_compile_errors_against_imported_file_root",
+			"main.tablo",
+			"use './Helpers';\nfn Main(args: [text]) int { return Helper(); }",
+		);
+		let helper_path = root_path.parent().unwrap().join("Helpers.tablo");
+		fs::write(&helper_path, "pub fn Helper() int {\n\tvar value: int = 'oops';\n\treturn value;\n}").unwrap();
+		let root_source = fs::read_to_string(&root_path).unwrap();
+
+		let error = compile_source_to_program_with_name_and_schema(
+			root_source.clone(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap_err();
+		let formatted = error.format_with_source_name(&root_source, Some(root_path.to_str().unwrap()));
+
+		assert!(formatted.contains(&helper_path.display().to_string()));
+		assert!(formatted.contains("Compile error"));
+		assert!(formatted.contains("Cannot assign a value of type `text` to a variable of type `int`."));
+
+		let _ = fs::remove_file(helper_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
+	}
+
+	#[test]
+	fn formats_imported_module_parse_errors_against_imported_file() {
+		let root_path = write_test_source_file(
+			"formats_imported_module_parse_errors_against_imported_file_root",
+			"main.tablo",
+			"use './Helpers';\nfn Main(args: [text]) int { return Helper(); }",
+		);
+		let helper_path = root_path.parent().unwrap().join("Helpers.tablo");
+		fs::write(&helper_path, "pub fn Helper() int {\n\treturn 1\n").unwrap();
+		let root_source = fs::read_to_string(&root_path).unwrap();
+
+		let error = compile_source_to_program_with_name_and_schema(
+			root_source.clone(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap_err();
+		let formatted = error.format_with_source_name(&root_source, Some(root_path.to_str().unwrap()));
+
+		assert!(formatted.contains(&helper_path.display().to_string()));
+		assert!(formatted.contains("Parse error"));
+		assert!(formatted.contains("Expected `;` after return statement."));
+
+		let _ = fs::remove_file(helper_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
 	}
 
 	#[test]

@@ -99,6 +99,7 @@ pub enum RecordPointerOrigin {
 pub struct SemanticAnalyzer {
 	current_return_type: Option<DataType>,
 	current_schema_catalog: Option<SchemaCatalog>,
+	current_source_name: Option<String>,
 	enums: ScopeStack<EnumBinding>,
 	function_depth: usize,
 	functions: ScopeStack<FunctionSignature>,
@@ -106,7 +107,9 @@ pub struct SemanticAnalyzer {
 	loop_depth: usize,
 	next_function_index: u32,
 	next_local_slot: u32,
+	root_source_name: Option<String>,
 	semantic_program: SemanticProgram,
+	top_level_function_source_names: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -302,6 +305,7 @@ impl SemanticAnalyzer {
 		Self {
 			current_return_type: None,
 			current_schema_catalog: None,
+			current_source_name: None,
 			enums: ScopeStack::default(),
 			function_depth: 0,
 			functions: ScopeStack::default(),
@@ -309,7 +313,9 @@ impl SemanticAnalyzer {
 			loop_depth: 0,
 			next_function_index: 0,
 			next_local_slot: 0,
+			root_source_name: None,
 			semantic_program: SemanticProgram::default(),
+			top_level_function_source_names: Vec::new(),
 		}
 	}
 
@@ -330,6 +336,7 @@ impl SemanticAnalyzer {
 		self.loop_depth = 0;
 		self.next_function_index = 0;
 		self.next_local_slot = 0;
+		self.current_source_name = self.root_source_name.clone();
 		self.current_schema_catalog = schema_catalog.cloned();
 		self.semantic_program = SemanticProgram::default();
 
@@ -344,9 +351,14 @@ impl SemanticAnalyzer {
 			self.validate_object_declaration(object)?;
 		}
 
-		for function in &program.functions {
+		for (index, function) in program.functions.iter().enumerate() {
+			self.current_source_name = self.top_level_function_source_names.get(index)
+				.cloned()
+				.or_else(|| self.root_source_name.clone());
 			self.validate_function_declaration(function)?;
 		}
+
+		self.current_source_name = self.root_source_name.clone();
 
 		self.enter_scope();
 
@@ -388,6 +400,14 @@ impl SemanticAnalyzer {
 		semantic_program.entry_point_function_index = semantic_program.function_declaration_target(main_function.position);
 		semantic_program.entry_point_position = Some(main_function.position);
 		Ok(semantic_program)
+	}
+
+	pub fn set_root_source_name(&mut self, source_name: Option<String>) {
+		self.root_source_name = source_name;
+	}
+
+	pub fn set_top_level_function_source_names(&mut self, source_names: Vec<String>) {
+		self.top_level_function_source_names = source_names;
 	}
 
 	pub fn validate_program(&mut self, program: &Program) -> Result<(), CompileError> {
@@ -617,8 +637,13 @@ impl SemanticAnalyzer {
 	}
 
 	fn compile_error(&self, position: usize, message: impl Into<String>) -> CompileError {
+		let message = message.into();
+
 		CompileError {
-			message: message.into(),
+			message: self.current_source_name.as_ref()
+				.filter(|source_name| Some(source_name.as_str()) != self.root_source_name.as_deref())
+				.map(|source_name| crate::encode_external_source_diagnostic("Compile error", source_name, position, &message))
+				.unwrap_or(message),
 			position,
 		}
 	}
@@ -2753,6 +2778,7 @@ impl SemanticAnalyzer {
 		let saved_loop_depth = self.loop_depth;
 		let saved_next_local_slot = self.next_local_slot;
 		let saved_return_type = self.current_return_type.clone();
+		let saved_source_name = self.current_source_name.clone();
 
 		if function.visibility == Visibility::Public && self.function_depth > 0 {
 			return Err(self.compile_error(
@@ -2791,6 +2817,7 @@ impl SemanticAnalyzer {
 		self.loop_depth = saved_loop_depth;
 		self.next_local_slot = saved_next_local_slot;
 		self.current_return_type = saved_return_type;
+		self.current_source_name = saved_source_name;
 
 		Ok(())
 	}
