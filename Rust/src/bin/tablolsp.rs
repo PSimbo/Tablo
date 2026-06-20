@@ -17,6 +17,12 @@ use tablo::runtime_config::read_schema_catalog_from_runtime_config_path;
 use tablo::semantic::ssa::LocalDeclarationKind;
 use tablo::semantic::ssa::ProgramLocalUsage;
 use tablo::source::SourceText;
+use tablo::source::find_matching_paren;
+use tablo::source::is_identifier_char;
+use tablo::source::read_identifier;
+use tablo::source::skip_comment;
+use tablo::source::skip_string_literal;
+use tablo::source::skip_whitespace;
 
 fn main() {
 	let stdin = io::stdin();
@@ -73,12 +79,6 @@ struct LspServer {
 struct OpenDocument {
 	text: String,
 	version: i64,
-}
-
-struct ParsedIdentifier {
-	end: usize,
-	quoted: bool,
-	value: String,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -698,42 +698,6 @@ fn file_path_from_document_uri(uri: &str) -> Option<PathBuf> {
 	}
 }
 
-fn find_matching_paren(text: &str, open_paren_index: usize) -> Option<usize> {
-	let mut depth = 0;
-	let mut index = open_paren_index;
-
-	while index < text.len() {
-		if let Some(comment_end) = skip_comment(text, index) {
-			index = comment_end;
-			continue;
-		}
-
-		if let Some(string_end) = skip_string_literal(text, index) {
-			index = string_end;
-			continue;
-		}
-
-		let ch = text[index..].chars().next()?;
-		if ch == '(' {
-			depth += 1;
-		}
-		else if ch == ')' {
-			depth -= 1;
-			if depth == 0 {
-				return Some(index);
-			}
-		}
-
-		index += ch.len_utf8();
-	}
-
-	None
-}
-
-fn is_identifier_char(ch: char) -> bool {
-	ch.is_ascii_alphanumeric() || ch == '_'
-}
-
 fn is_numeric_literal_char(ch: char) -> bool {
 	ch.is_ascii_digit() || ch == '.'
 }
@@ -839,82 +803,6 @@ fn parse_variable_completion_item(source: &str, start: usize) -> Option<(String,
 	Some((name.value, name.end))
 }
 
-fn position_from_line_and_column(source: &str, line: usize, column: usize) -> usize {
-	let mut current_line = 1;
-	let mut current_column = 1;
-
-	for (index, ch) in source.char_indices() {
-		if current_line == line && current_column == column {
-			return index;
-		}
-
-		if ch == '\n' {
-			current_line += 1;
-			current_column = 1;
-		}
-		else {
-			current_column += 1;
-		}
-	}
-
-	source.len()
-}
-
-fn read_identifier(text: &str, start: usize) -> Option<ParsedIdentifier> {
-	let ch = text[start..].chars().next()?;
-	if ch == '"' {
-		let mut value = String::new();
-		let mut index = start + 1;
-
-		while index < text.len() {
-			let current = text[index..].chars().next()?;
-			if current == '"' {
-				let next_index = index + 1;
-				if text[next_index..].starts_with('"') {
-					value.push('"');
-					index = next_index + 1;
-					continue;
-				}
-
-				return Some(ParsedIdentifier {
-					end: next_index,
-					quoted: true,
-					value,
-				});
-			}
-
-			value.push(current);
-			index += current.len_utf8();
-		}
-
-		return None;
-	}
-
-	if !(ch.is_ascii_alphabetic() || ch == '_') {
-		return None;
-	}
-
-	let mut value = String::new();
-	value.push(ch);
-	let mut index = start + ch.len_utf8();
-
-	while index < text.len() {
-		let current = text[index..].chars().next()?;
-		if !(current.is_ascii_alphanumeric() || current == '_') {
-			break;
-		}
-
-		value.push(current);
-		index += current.len_utf8();
-	}
-
-	Some(ParsedIdentifier {
-		end: index,
-		quoted: false,
-		value,
-	})
-}
-
 fn read_lsp_message<R: BufRead>(reader: &mut R) -> Result<Option<JsonValue>, String> {
 	let mut content_length: Option<usize> = None;
 
@@ -950,68 +838,9 @@ fn read_lsp_message<R: BufRead>(reader: &mut R) -> Result<Option<JsonValue>, Str
 	Ok(Some(message))
 }
 
-fn skip_comment(text: &str, start: usize) -> Option<usize> {
-	if text[start..].starts_with("//") {
-		let end = text[start..].find('\n').map(|offset| start + offset + 1).unwrap_or(text.len());
-		return Some(end);
-	}
-
-	if text[start..].starts_with("/*") {
-		let end = text[start + 2..].find("*/").map(|offset| start + 2 + offset + 2).unwrap_or(text.len());
-		return Some(end);
-	}
-
-	None
-}
-
-fn skip_string_literal(text: &str, start: usize) -> Option<usize> {
-	if !text[start..].starts_with('\'') {
-		return None;
-	}
-
-	let mut index = start + 1;
-	while index < text.len() {
-		let ch = text[index..].chars().next()?;
-		index += ch.len_utf8();
-		if ch == '\'' {
-			return Some(index);
-		}
-	}
-
-	Some(text.len())
-}
-
-fn skip_whitespace(text: &str, start: usize) -> usize {
-	let mut index = start;
-	while index < text.len() {
-		let Some(ch) = text[index..].chars().next() else {
-			break;
-		};
-		if !ch.is_whitespace() {
-			break;
-		}
-		index += ch.len_utf8();
-	}
-	index
-}
-
 fn source_offset_for_position(text: &str, position: Position) -> Option<usize> {
 	let source = SourceText::new(text);
-	let line_starts = source.line_starts();
-	let line_start = *line_starts.get(position.line as usize)?;
-	let line_text = source.line_text(line_start);
-	let mut offset = line_start;
-	let mut remaining = position.character as usize;
-
-	for ch in line_text.chars() {
-		if remaining == 0 {
-			break;
-		}
-		offset += ch.len_utf8();
-		remaining -= 1;
-	}
-
-	Some(offset)
+	source.offset_from_lsp_position(position.line, position.character)
 }
 
 fn source_token_span_at_position(source: &SourceText, position: usize) -> Option<(usize, usize)> {
@@ -1107,7 +936,7 @@ fn tablo_error_to_diagnostic(uri: &str, source: &str, error: TabloError) -> Json
 			error.source_location
 				.map(|location| {
 					let (line, column) = (location.line() as usize, location.column() as usize);
-					position_from_line_and_column(source.as_str(), line, column)
+					source.offset_from_line_and_column(line, column)
 				})
 				.unwrap_or(0),
 			error.message,
@@ -1226,7 +1055,6 @@ mod tests {
 	use super::file_path_from_document_uri;
 	use super::local_name_span;
 	use super::parse_content_length;
-	use super::position_from_line_and_column;
 	use super::source_token_span_at_position;
 	use super::tablo_error_to_diagnostic;
 	use tablo::compiler::CompileError;
@@ -1530,6 +1358,6 @@ mod tests {
 
 	#[test]
 	fn resolves_position_from_line_and_column() {
-		assert_eq!(position_from_line_and_column("a\nbc\n", 2, 2), 3);
+		assert_eq!(SourceText::new("a\nbc\n").offset_from_line_and_column(2, 2), 3);
 	}
 }
