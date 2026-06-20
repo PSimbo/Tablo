@@ -119,7 +119,6 @@ fn resolve_runtime_config_path(config_path: Option<&PathBuf>) -> Result<Option<P
 #[cfg(test)]
 mod tests {
 	use std::path::Path;
-	use std::path::PathBuf;
 
 	use super::build_database_config;
 	use super::default_runtime_config_path;

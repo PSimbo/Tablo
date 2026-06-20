@@ -13,6 +13,7 @@ use tablo::completion::CompletionItemKind;
 use tablo::completion::collect_document_completion_items;
 use tablo::completion::dedupe_completion_items;
 use tablo::completion::default_completion_items;
+use tablo::completion::member_completion_items;
 use tablo::diagnostics::Diagnostic;
 use tablo::diagnostics::diagnostic_at_start;
 use tablo::diagnostics::diagnostic_for_tablo_error;
@@ -108,8 +109,11 @@ struct VersionedTextDocumentItem {
 impl LspServer {
 	fn completion_items(&self, uri: &str, position: Position) -> Vec<JsonValue> {
 		let prefix = self.completion_prefix(uri, position);
-		let mut items = default_completion_items();
-		items.extend(self.document_completion_items(uri, position));
+		let mut items = self.member_completion_items(uri, position).unwrap_or_else(|| {
+			let mut items = default_completion_items();
+			items.extend(self.document_completion_items(uri, position));
+			items
+		});
 		dedupe_completion_items(&mut items);
 		items.into_iter()
 			.filter(|item| prefix.as_ref().is_none_or(|prefix| item.label.starts_with(prefix)))
@@ -329,6 +333,15 @@ impl LspServer {
 		}
 	}
 
+	fn member_completion_items(&self, uri: &str, position: Position) -> Option<Vec<CompletionItem>> {
+		let document = self.open_documents.get(uri)?;
+		let cursor_offset = source_offset_for_position(&document.text, position.line, position.character)?;
+		let file_path = file_path_from_document_uri(uri)?;
+		let config_path = discover_project_config_path(&file_path)?;
+		let schema_catalog = read_schema_catalog_from_runtime_config_path(&config_path).ok()?;
+		member_completion_items(&document.text, cursor_offset, Some(&schema_catalog))
+	}
+
 	fn new() -> Self {
 		Self {
 			open_documents: BTreeMap::new(),
@@ -383,11 +396,12 @@ impl LspServer {
 
 fn completion_item_kind_to_lsp(kind: CompletionItemKind) -> u32 {
 	match kind {
-		CompletionItemKind::Function | CompletionItemKind::BuiltInFunction => 3,
-		CompletionItemKind::LocalSymbol | CompletionItemKind::Parameter => 6,
 		CompletionItemKind::Enum => 13,
+		CompletionItemKind::Field => 5,
+		CompletionItemKind::BuiltInFunction | CompletionItemKind::Function => 3,
 		CompletionItemKind::Keyword => 14,
 		CompletionItemKind::Literal => 21,
+		CompletionItemKind::LocalSymbol | CompletionItemKind::Parameter => 6,
 		CompletionItemKind::Object => 22,
 		CompletionItemKind::Type => 25,
 	}

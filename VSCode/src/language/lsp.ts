@@ -457,6 +457,8 @@ function toVsCodeCompletionItemKind(kind: number | undefined): vscode.Completion
 	switch (kind) {
 		case 3:
 			return vscode.CompletionItemKind.Function;
+		case 5:
+			return vscode.CompletionItemKind.Field;
 		case 14:
 			return vscode.CompletionItemKind.Keyword;
 		case 21:
