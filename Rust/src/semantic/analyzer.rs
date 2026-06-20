@@ -97,6 +97,7 @@ pub enum RecordPointerOrigin {
 // generation can remain simple.
 #[derive(Default)]
 pub struct SemanticAnalyzer {
+	current_non_null_assumptions: Vec<Expr>,
 	current_return_type: Option<DataType>,
 	current_schema_catalog: Option<SchemaCatalog>,
 	current_source_name: Option<String>,
@@ -303,6 +304,7 @@ impl SemanticProgram {
 impl SemanticAnalyzer {
 	pub fn new() -> Self {
 		Self {
+			current_non_null_assumptions: Vec::new(),
 			current_return_type: None,
 			current_schema_catalog: None,
 			current_source_name: None,
@@ -328,6 +330,7 @@ impl SemanticAnalyzer {
 		program: &Program,
 		schema_catalog: Option<&SchemaCatalog>,
 	) -> Result<SemanticProgram, CompileError> {
+		self.current_non_null_assumptions.clear();
 		self.current_return_type = None;
 		self.functions = ScopeStack::default();
 		self.enums = ScopeStack::default();
@@ -785,6 +788,17 @@ impl SemanticAnalyzer {
 		self.locals.exit_scope();
 	}
 
+	fn expressions_match_for_non_null_refinement(&self, lhs: &Expr, rhs: &Expr) -> bool {
+		match (lhs, rhs) {
+			(Expr::Identifier(lhs), Expr::Identifier(rhs)) => lhs.name == rhs.name,
+			(Expr::FieldAccess(lhs), Expr::FieldAccess(rhs)) => {
+				lhs.field.name == rhs.field.name
+					&& self.expressions_match_for_non_null_refinement(lhs.object.as_ref(), rhs.object.as_ref())
+			}
+			_ => false,
+		}
+	}
+
 	fn infer_array_literal_type(&mut self, elements: &[Expr], position: usize) -> Result<DataType, CompileError> {
 		let mut element_type: Option<DataType> = None;
 
@@ -964,7 +978,7 @@ impl SemanticAnalyzer {
 	}
 
 	fn infer_expression_type(&mut self, expression: &Expr) -> Result<DataType, CompileError> {
-		match expression {
+		let data_type = match expression {
 			Expr::Array(array) => self.infer_array_literal_type(array.elements.as_slice(), array.position),
 			Expr::Assignment(AssignmentExpr { operator, target, value, .. }) => {
 				match target {
@@ -1443,7 +1457,9 @@ impl SemanticAnalyzer {
 					}
 				}
 			}
-		}
+		}?;
+
+		Ok(self.refine_expression_type_from_assumptions(expression, data_type))
 	}
 
 	fn infer_expression_type_with_branch_refinements(
@@ -1452,14 +1468,13 @@ impl SemanticAnalyzer {
 		condition: &Expr,
 		branch_taken_when_condition_is_truthy: bool,
 	) -> Result<DataType, CompileError> {
-		let Some((name, refined_local)) = self.refined_local_for_branch(condition, branch_taken_when_condition_is_truthy) else {
+		let Some(refined_expression) = self.refined_expression_for_branch(condition, branch_taken_when_condition_is_truthy) else {
 			return self.infer_expression_type(expression);
 		};
 
-		self.enter_scope();
-		self.declare_local(name, refined_local);
+		self.current_non_null_assumptions.push(refined_expression);
 		let result = self.infer_expression_type(expression);
-		self.exit_scope();
+		self.current_non_null_assumptions.pop();
 		result
 	}
 
@@ -2369,11 +2384,20 @@ impl SemanticAnalyzer {
 		binding.assigned_fields.insert(path);
 	}
 
-	fn refined_local_for_branch(
+	fn refine_expression_type_from_assumptions(&self, expression: &Expr, data_type: DataType) -> DataType {
+		if self.current_non_null_assumptions.iter().any(|assumed| self.expressions_match_for_non_null_refinement(assumed, expression))
+			&& let DataType::Nullable(inner) = data_type {
+			return *inner;
+		}
+
+		data_type
+	}
+
+	fn refined_expression_for_branch(
 		&self,
 		condition: &Expr,
 		branch_taken_when_condition_is_truthy: bool,
-	) -> Option<(String, LocalBinding)> {
+	) -> Option<Expr> {
 		let Expr::Binary(BinaryExpr {
 			left,
 			operator,
@@ -2393,24 +2417,17 @@ impl SemanticAnalyzer {
 			return None;
 		}
 
-		let identifier = match (left.as_ref(), right.as_ref()) {
-			(Expr::Identifier(identifier), Expr::Null(_)) => identifier,
-			(Expr::Null(_), Expr::Identifier(identifier)) => identifier,
+		let candidate = match (left.as_ref(), right.as_ref()) {
+			(candidate, Expr::Null(_)) => candidate,
+			(Expr::Null(_), candidate) => candidate,
 			_ => return None,
 		};
 
-		let local = self.lookup_local(&identifier.name)?;
-		let DataType::Nullable(inner) = local.data_type else {
+		if !matches!(candidate, Expr::FieldAccess(_) | Expr::Identifier(_)) {
 			return None;
-		};
+		}
 
-		Some((
-			identifier.name.clone(),
-			LocalBinding {
-				data_type: *inner,
-				..local
-			},
-		))
+		Some(candidate.clone())
 	}
 
 	fn register_record_pointer_binding(
@@ -4266,6 +4283,50 @@ mod tests {
 		let data_type = analyzer.infer_expression_type(&expression).unwrap();
 
 		assert_eq!(data_type, DataType::Text);
+	}
+
+	#[test]
+	fn refines_nullable_object_field_access_to_non_null_in_ternary_true_branch() {
+		let expression = parse_expression("config.TestDate != null ? config.TestDate : today");
+		let mut analyzer = SemanticAnalyzer::new();
+		analyzer.semantic_program.object_declarations.insert(
+			String::from("Config"),
+			crate::ast::ObjectDeclaration {
+				name: String::from("Config"),
+				position: 0,
+				shape: crate::ast::ObjectDeclarationShape::Fields(vec![
+					crate::ast::ObjectFieldDeclaration {
+						data_type: DataType::Nullable(Box::new(DataType::Date)),
+						default_value: None,
+						name: String::from("TestDate"),
+						position: 0,
+					},
+				]),
+			},
+		);
+		analyzer.enter_scope();
+		analyzer.declare_local(
+			String::from("config"),
+			LocalBinding {
+				declaration_position: 0,
+				data_type: DataType::Object(String::from("Config")),
+				is_const: false,
+				slot: 1,
+			},
+		);
+		analyzer.declare_local(
+			String::from("today"),
+			LocalBinding {
+				declaration_position: 0,
+				data_type: DataType::Date,
+				is_const: false,
+				slot: 2,
+			},
+		);
+
+		let data_type = analyzer.infer_expression_type(&expression).unwrap();
+
+		assert_eq!(data_type, DataType::Date);
 	}
 
 	#[test]

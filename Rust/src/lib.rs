@@ -3267,7 +3267,7 @@ mod tests {
 	#[test]
 	fn runs_nested_ternary_with_nullable_text_guarded_by_null_check() {
 		let result = run(
-			"fn Main(args: [text]) int { var acquired: text = ''; var supplier: text? = 'Supplier'; var target: text = acquired != '' ? acquired : supplier != null ? supplier : ''; if target == 'Supplier' { return 1; } return 0; }"
+			"fn Main(args: [text]) int { var val1: text = ''; var val2: text? = 'Foo'; var target: text = val1 != '' ? val1 : val2 != null ? val2 : ''; if target == 'Foo' { return 1; } return 0; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
@@ -3890,6 +3890,15 @@ mod tests {
 			Value::Integer(11),
 			Value::Integer(9),
 		])));
+	}
+
+	#[test]
+	fn runs_ternary_with_nullable_object_field_guarded_by_null_check() {
+		let result = run(
+			"obj Config { TestDate: date?, };\nfn Main(args: [text]) int { var config: Config = Config { TestDate: @2026-06-14 }; const today: date = @2026-06-20; const testDate: date = config.TestDate != null ? config.TestDate : today; if testDate == @2026-06-14 { return 1; } return 0; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
 	}
 
 	#[test]
