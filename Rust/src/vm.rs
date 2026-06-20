@@ -16,6 +16,8 @@ use crate::bytecode::Program;
 use crate::bytecode::SourceLocation;
 use crate::format_string::NumericFormatPattern;
 use crate::format_string::NumericFormatTarget;
+use crate::format_string::TemporalFormatPattern;
+use crate::format_string::TemporalFormatTarget;
 use crate::query::LoweredBackendQuery;
 use crate::query::QueryResultColumn;
 use crate::query::SqlDialect;
@@ -1244,6 +1246,12 @@ impl VirtualMachine {
 				)),
 			},
 			BuiltInFunction::Format => match arguments.as_slice() {
+				[Value::Date(value), Value::Text(pattern)] => {
+					let pattern = TemporalFormatPattern::parse(pattern, TemporalFormatTarget::Date)
+						.map_err(|error| vm_error(instruction_index, format!("Invalid temporal format string: {}", error.message)))?;
+					Ok(Some(Value::Text(pattern.format_date(value)
+						.map_err(|error| vm_error(instruction_index, format!("Invalid temporal format string: {}", error.message)))?)))
+				}
 				[Value::Decimal(value), Value::Text(pattern)] => {
 					let pattern = NumericFormatPattern::parse(pattern, NumericFormatTarget::Decimal)
 						.map_err(|error| vm_error(instruction_index, format!("Invalid numeric format string: {}", error.message)))?;
@@ -1254,6 +1262,18 @@ impl VirtualMachine {
 					let pattern = NumericFormatPattern::parse(pattern, NumericFormatTarget::Integer)
 						.map_err(|error| vm_error(instruction_index, format!("Invalid numeric format string: {}", error.message)))?;
 					Ok(Some(Value::Text(pattern.format_integer(*value))))
+				}
+				[Value::Time(value), Value::Text(pattern)] => {
+					let pattern = TemporalFormatPattern::parse(pattern, TemporalFormatTarget::Time)
+						.map_err(|error| vm_error(instruction_index, format!("Invalid temporal format string: {}", error.message)))?;
+					Ok(Some(Value::Text(pattern.format_time(value)
+						.map_err(|error| vm_error(instruction_index, format!("Invalid temporal format string: {}", error.message)))?)))
+				}
+				[Value::Timestamp(value), Value::Text(pattern)] => {
+					let pattern = TemporalFormatPattern::parse(pattern, TemporalFormatTarget::Timestamp)
+						.map_err(|error| vm_error(instruction_index, format!("Invalid temporal format string: {}", error.message)))?;
+					Ok(Some(Value::Text(pattern.format_timestamp(value)
+						.map_err(|error| vm_error(instruction_index, format!("Invalid temporal format string: {}", error.message)))?)))
 				}
 				[left, right] => Err(vm_error(
 					instruction_index,

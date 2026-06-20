@@ -31,6 +31,20 @@ fn main() {
 	}
 }
 
+#[derive(Clone, Copy)]
+struct CompletionItemSpec {
+	detail: &'static str,
+	kind: u32,
+	label: &'static str,
+}
+
+#[derive(Deserialize)]
+struct CompletionParams {
+	position: Position,
+	#[serde(rename = "textDocument")]
+	text_document: TextDocumentIdentifier,
+}
+
 #[derive(Deserialize)]
 struct DidChangeTextDocumentParams {
 	#[serde(rename = "contentChanges")]
@@ -62,6 +76,12 @@ struct OpenDocument {
 }
 
 #[derive(Deserialize)]
+struct Position {
+	character: u32,
+	line: u32,
+}
+
+#[derive(Deserialize)]
 struct TextDocumentContentChangeEvent {
 	text: String,
 }
@@ -85,6 +105,41 @@ struct VersionedTextDocumentItem {
 }
 
 impl LspServer {
+	fn completion_items(&self, uri: &str, position: Position) -> Vec<JsonValue> {
+		let prefix = self.completion_prefix(uri, position);
+		default_completion_items().into_iter()
+			.filter(|item| prefix.as_ref().is_none_or(|prefix| item.label.starts_with(prefix)))
+			.map(|item| json!({
+				"label": item.label,
+				"kind": item.kind,
+				"detail": item.detail,
+			}))
+			.collect()
+	}
+
+	fn completion_prefix(&self, uri: &str, position: Position) -> Option<String> {
+		let document = self.open_documents.get(uri)?;
+		let source = SourceText::new(&document.text);
+		let line_starts = source.line_starts();
+		let line_index = position.line as usize;
+		let line_start = *line_starts.get(line_index)?;
+		let line_text = source.line_text(line_start);
+		let character_index = position.character as usize;
+		let prefix_end = character_index.min(line_text.chars().count());
+		let prefix_text = line_text.chars().take(prefix_end).collect::<String>();
+		let suffix = prefix_text
+			.rsplit(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+			.next()
+			.unwrap_or("");
+
+		if suffix.is_empty() {
+			None
+		}
+		else {
+			Some(suffix.to_string())
+		}
+	}
+
 	fn document_diagnostics(&self, uri: &str, source: &str) -> Result<Vec<JsonValue>, String> {
 		let Some(file_path) = file_path_from_document_uri(uri) else {
 			return Ok(Vec::new());
@@ -182,6 +237,10 @@ impl LspServer {
 							},
 							"capabilities": {
 								"positionEncoding": "utf-16",
+								"completionProvider": {
+									"resolveProvider": false,
+									"triggerCharacters": [".", "_"]
+								},
 								"textDocumentSync": {
 									"openClose": true,
 									"change": 1,
@@ -195,6 +254,21 @@ impl LspServer {
 				Ok(false)
 			}
 			Some("initialized") => Ok(false),
+			Some("textDocument/completion") => {
+				let params: CompletionParams = serde_json::from_value(params)
+					.map_err(|error| format!("Invalid completion params: {error}"))?;
+				let items = self.completion_items(&params.text_document.uri, params.position);
+
+				if let Some(id) = id {
+					write_lsp_message(writer, json!({
+						"jsonrpc": "2.0",
+						"id": id,
+						"result": items
+					}))?;
+				}
+
+				Ok(false)
+			}
 			Some("textDocument/didOpen") => {
 				self.handle_did_open(writer, params)?;
 				Ok(false)
@@ -293,6 +367,96 @@ impl LspServer {
 			}
 		}
 	}
+}
+
+fn built_in_completion_items() -> &'static [CompletionItemSpec] {
+	&[
+		CompletionItemSpec { label: "bool", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "contains", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "countof", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "date", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "day", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "dec", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "disp", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "displn", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "exists", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "float", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "format", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "hour", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "ilike", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "indexof", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "int", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "lastof", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "len", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "like", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "locked", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "max", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "min", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "minute", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "month", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "second", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "split", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "text", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "time", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "timestamp", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "timetz", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "timestamptz", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "trim", kind: 3, detail: "Built-in function" },
+		CompletionItemSpec { label: "year", kind: 3, detail: "Built-in function" },
+	]
+}
+
+fn default_completion_items() -> Vec<CompletionItemSpec> {
+	let mut items = vec![
+		CompletionItemSpec { label: "and", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "any", kind: 25, detail: "Type" },
+		CompletionItemSpec { label: "asc", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "bool", kind: 25, detail: "Type" },
+		CompletionItemSpec { label: "break", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "by", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "const", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "continue", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "count", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "date", kind: 25, detail: "Type" },
+		CompletionItemSpec { label: "dec", kind: 25, detail: "Type" },
+		CompletionItemSpec { label: "delete", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "desc", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "else", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "enum", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "false", kind: 21, detail: "Literal" },
+		CompletionItemSpec { label: "find", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "first", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "float", kind: 25, detail: "Type" },
+		CompletionItemSpec { label: "fn", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "for", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "if", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "in", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "int", kind: 25, detail: "Type" },
+		CompletionItemSpec { label: "last", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "mut", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "not", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "null", kind: 21, detail: "Literal" },
+		CompletionItemSpec { label: "obj", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "or", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "order", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "pub", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "rec", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "return", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "text", kind: 25, detail: "Type" },
+		CompletionItemSpec { label: "time", kind: 25, detail: "Type" },
+		CompletionItemSpec { label: "timestamp", kind: 25, detail: "Type" },
+		CompletionItemSpec { label: "timestamptz", kind: 25, detail: "Type" },
+		CompletionItemSpec { label: "timetz", kind: 25, detail: "Type" },
+		CompletionItemSpec { label: "true", kind: 21, detail: "Literal" },
+		CompletionItemSpec { label: "update", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "var", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "where", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "while", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "with", kind: 14, detail: "Keyword" },
+		CompletionItemSpec { label: "xor", kind: 14, detail: "Keyword" },
+	];
+	items.extend_from_slice(built_in_completion_items());
+	items
 }
 
 fn diagnostic_json(uri: &str, source: &SourceText, position: usize, severity: u32, message: &str) -> JsonValue {

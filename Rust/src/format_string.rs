@@ -1,4 +1,7 @@
+use crate::value::Date;
 use crate::value::Decimal;
+use crate::value::Time;
+use crate::value::Timestamp;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FractionMode {
@@ -324,6 +327,25 @@ pub struct TemporalFormatPattern {
 }
 
 impl TemporalFormatPattern {
+	pub fn format_date(&self, value: &Date) -> Result<String, TemporalFormatError> {
+		self.render(value, None)
+	}
+
+	pub fn format_time(&self, value: &Time) -> Result<String, TemporalFormatError> {
+		self.render(
+			&Date {
+				day: 1,
+				month: 1,
+				year: 2000,
+			},
+			Some(*value),
+		)
+	}
+
+	pub fn format_timestamp(&self, value: &Timestamp) -> Result<String, TemporalFormatError> {
+		self.render(&value.date(), Some(value.time()))
+	}
+
 	pub fn items(&self) -> &[TemporalFormatItem] {
 		&self.items
 	}
@@ -382,6 +404,19 @@ impl TemporalFormatPattern {
 			items,
 		})
 	}
+
+	fn render(&self, date: &Date, time: Option<Time>) -> Result<String, TemporalFormatError> {
+		let mut output = String::new();
+
+		for item in &self.items {
+			match item {
+				TemporalFormatItem::Literal(literal) => output.push_str(literal),
+				TemporalFormatItem::Token(token) => output.push_str(&render_temporal_token(*token, date, time)?),
+			}
+		}
+
+		Ok(output)
+	}
 }
 
 struct WholePatternParse {
@@ -413,8 +448,58 @@ fn apply_grouping(digits: &str, separator: Option<char>, group_size: Option<usiz
 	parts.join(&separator.to_string())
 }
 
+fn date_to_time_date(date: &Date) -> Result<time::Date, TemporalFormatError> {
+	let month = time::Month::try_from(date.month).map_err(|_| TemporalFormatError {
+		message: format!("Invalid month value `{}`.", date.month),
+		position: 0,
+	})?;
+
+	time::Date::from_calendar_date(date.year, month, date.day).map_err(|_| TemporalFormatError {
+		message: format!("Invalid date value `{date}`."),
+		position: 0,
+	})
+}
+
+fn hour12_component(time: Option<Time>) -> Result<u8, TemporalFormatError> {
+	let hour = required_time(time)?.hour();
+
+	Ok(match hour % 12 {
+		0 => 12,
+		value => value,
+	})
+}
+
 fn is_group_separator(ch: char) -> bool {
 	matches!(ch, ',' | '.' | ' ' | '-')
+}
+
+fn is_post_meridiem(time: Option<Time>) -> Result<bool, TemporalFormatError> {
+	Ok(required_time(time)?.hour() >= 12)
+}
+
+fn month_name(month: u8, abbreviated: bool) -> Result<&'static str, TemporalFormatError> {
+	let name = match month {
+		1 => if abbreviated { "Jan" } else { "January" },
+		2 => if abbreviated { "Feb" } else { "February" },
+		3 => if abbreviated { "Mar" } else { "March" },
+		4 => if abbreviated { "Apr" } else { "April" },
+		5 => "May",
+		6 => if abbreviated { "Jun" } else { "June" },
+		7 => if abbreviated { "Jul" } else { "July" },
+		8 => if abbreviated { "Aug" } else { "August" },
+		9 => if abbreviated { "Sep" } else { "September" },
+		10 => if abbreviated { "Oct" } else { "October" },
+		11 => if abbreviated { "Nov" } else { "November" },
+		12 => if abbreviated { "Dec" } else { "December" },
+		_ => {
+			return Err(TemporalFormatError {
+				message: format!("Invalid month value `{month}`."),
+				position: 0,
+			});
+		}
+	};
+
+	Ok(name)
 }
 
 fn pattern_separator_count(min_digits: usize, group_size: usize) -> usize {
@@ -526,6 +611,45 @@ fn parse_whole_pattern(source: &str, pattern_start: usize) -> Result<WholePatter
 		group_separator: separator_char,
 		group_size,
 		radix,
+	})
+}
+
+fn render_temporal_token(
+	token: TemporalFormatToken,
+	date: &Date,
+	time: Option<Time>,
+) -> Result<String, TemporalFormatError> {
+	match token {
+		TemporalFormatToken::AmLower => Ok(if is_post_meridiem(time)? { String::from("pm") } else { String::from("am") }),
+		TemporalFormatToken::AmUpper => Ok(if is_post_meridiem(time)? { String::from("PM") } else { String::from("AM") }),
+		TemporalFormatToken::Day => Ok(date.day.to_string()),
+		TemporalFormatToken::DayPadded => Ok(format!("{:02}", date.day)),
+		TemporalFormatToken::Hour12 => Ok(hour12_component(time)?.to_string()),
+		TemporalFormatToken::Hour12Padded => Ok(format!("{:02}", hour12_component(time)?)),
+		TemporalFormatToken::Hour24 => Ok(required_time(time)?.hour().to_string()),
+		TemporalFormatToken::Hour24Padded => Ok(format!("{:02}", required_time(time)?.hour())),
+		TemporalFormatToken::Millisecond => Ok(format!("{:03}", required_time(time)?.nanosecond() / 1_000_000)),
+		TemporalFormatToken::Minute => Ok(required_time(time)?.minute().to_string()),
+		TemporalFormatToken::MinutePadded => Ok(format!("{:02}", required_time(time)?.minute())),
+		TemporalFormatToken::Month => Ok(date.month.to_string()),
+		TemporalFormatToken::MonthNameAbbreviated => Ok(month_name(date.month, true)?.to_string()),
+		TemporalFormatToken::MonthNameFull => Ok(month_name(date.month, false)?.to_string()),
+		TemporalFormatToken::MonthPadded => Ok(format!("{:02}", date.month)),
+		TemporalFormatToken::Second => Ok(required_time(time)?.second().to_string()),
+		TemporalFormatToken::SecondPadded => Ok(format!("{:02}", required_time(time)?.second())),
+		TemporalFormatToken::WeekNumber => Ok(date_to_time_date(date)?.iso_week().to_string()),
+		TemporalFormatToken::WeekNumberPadded => Ok(format!("{:02}", date_to_time_date(date)?.iso_week())),
+		TemporalFormatToken::WeekdayNameAbbreviated => Ok(weekday_name(date, true)?.to_string()),
+		TemporalFormatToken::WeekdayNameFull => Ok(weekday_name(date, false)?.to_string()),
+		TemporalFormatToken::YearFourDigit => Ok(format!("{:04}", date.year)),
+		TemporalFormatToken::YearTwoDigit => Ok(format!("{:02}", date.year.rem_euclid(100))),
+	}
+}
+
+fn required_time(time: Option<Time>) -> Result<Time, TemporalFormatError> {
+	time.ok_or(TemporalFormatError {
+		message: String::from("Temporal format token requires a time value."),
+		position: 0,
 	})
 }
 
@@ -680,6 +804,20 @@ fn validate_temporal_token_for_target(
 	}
 }
 
+fn weekday_name(date: &Date, abbreviated: bool) -> Result<&'static str, TemporalFormatError> {
+	let weekday = date_to_time_date(date)?.weekday();
+
+	Ok(match weekday {
+		time::Weekday::Monday => if abbreviated { "Mon" } else { "Monday" },
+		time::Weekday::Tuesday => if abbreviated { "Tue" } else { "Tuesday" },
+		time::Weekday::Wednesday => if abbreviated { "Wed" } else { "Wednesday" },
+		time::Weekday::Thursday => if abbreviated { "Thu" } else { "Thursday" },
+		time::Weekday::Friday => if abbreviated { "Fri" } else { "Friday" },
+		time::Weekday::Saturday => if abbreviated { "Sat" } else { "Saturday" },
+		time::Weekday::Sunday => if abbreviated { "Sun" } else { "Sunday" },
+	})
+}
+
 fn zero_pad_left(mut digits: String, min_digits: usize) -> String {
 	while digits.len() < min_digits {
 		digits.insert(0, '0');
@@ -695,13 +833,24 @@ mod tests {
 	use super::TemporalFormatPattern;
 	use super::TemporalFormatTarget;
 	use super::TemporalFormatToken;
+	use crate::value::Date;
 	use crate::value::Decimal;
+	use crate::value::Time;
+	use crate::value::Timestamp;
 
 	#[test]
 	fn formats_automatic_decimal_without_decimal_point_when_not_needed() {
 		let pattern = NumericFormatPattern::parse("1.", NumericFormatTarget::Decimal).unwrap();
 
 		assert_eq!(pattern.format_decimal(&Decimal::from_integer(12)).unwrap(), "12");
+	}
+
+	#[test]
+	fn formats_date_pattern() {
+		let pattern = TemporalFormatPattern::parse("YYYY-MM-DD", TemporalFormatTarget::Date).unwrap();
+		let date = Date::from_parts(2026, 6, 20).unwrap();
+
+		assert_eq!(pattern.format_date(&date).unwrap(), "2026-06-20");
 	}
 
 	#[test]
@@ -716,6 +865,25 @@ mod tests {
 		let pattern = NumericFormatPattern::parse("1,111", NumericFormatTarget::Integer).unwrap();
 
 		assert_eq!(pattern.format_integer(1234567), "1,234,567");
+	}
+
+	#[test]
+	fn formats_time_pattern() {
+		let pattern = TemporalFormatPattern::parse("hh:mm AM", TemporalFormatTarget::Time).unwrap();
+		let time = Time::from_parts(15, 4, 9, 0).unwrap();
+
+		assert_eq!(pattern.format_time(&time).unwrap(), "03:04 PM");
+	}
+
+	#[test]
+	fn formats_timestamp_pattern_with_weekday_and_month_names() {
+		let pattern = TemporalFormatPattern::parse("WWW, D MMM YYYY", TemporalFormatTarget::Timestamp).unwrap();
+		let timestamp = Timestamp::from_parts(
+			Date::from_parts(2026, 6, 20).unwrap(),
+			Time::from_parts(15, 4, 9, 0).unwrap(),
+		);
+
+		assert_eq!(pattern.format_timestamp(&timestamp).unwrap(), "Sat, 20 Jun 2026");
 	}
 
 	#[test]

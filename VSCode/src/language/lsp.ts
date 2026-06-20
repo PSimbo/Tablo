@@ -20,6 +20,12 @@ type LspDiagnostic = {
 	source?: string;
 };
 
+type LspCompletionItem = {
+	detail?: string;
+	kind?: number;
+	label: string;
+};
+
 type LspMessage = {
 	id?: number;
 	method?: string;
@@ -79,6 +85,37 @@ export class TabloLspClient implements vscode.Disposable {
 			this.process.kill();
 			this.process = undefined;
 		}
+	}
+
+	async provideCompletionItems(
+		document: vscode.TextDocument,
+		position: vscode.Position,
+	): Promise<vscode.CompletionItem[] | undefined> {
+		if (!isTabloDocument(document)) {
+			return undefined;
+		}
+
+		if (!await this.ensureStarted()) {
+			return undefined;
+		}
+
+		const result = await this.sendRequest("textDocument/completion", {
+			textDocument: {
+				uri: document.uri.toString(),
+			},
+			position: {
+				line: position.line,
+				character: position.character,
+			},
+		});
+
+		if (!Array.isArray(result)) {
+			return undefined;
+		}
+
+		return result
+			.filter(isCompletionItem)
+			.map(toVsCodeCompletionItem);
 	}
 
 	private async didChange(document: vscode.TextDocument): Promise<void> {
@@ -368,6 +405,17 @@ function isDiagnosticsParams(value: unknown): value is { uri: string; diagnostic
 	return typeof candidate.uri === "string" && Array.isArray(candidate.diagnostics);
 }
 
+function isCompletionItem(value: unknown): value is LspCompletionItem {
+	if (!value || typeof value !== "object") {
+		return false;
+	}
+
+	const candidate = value as { detail?: unknown; kind?: unknown; label?: unknown };
+	return typeof candidate.label === "string"
+		&& (candidate.detail === undefined || typeof candidate.detail === "string")
+		&& (candidate.kind === undefined || typeof candidate.kind === "number");
+}
+
 function isTabloDocument(document: vscode.TextDocument): boolean {
 	return document.languageId === "tablo" && document.uri.scheme === "file";
 }
@@ -396,5 +444,26 @@ function toVsCodeSeverity(severity: number | undefined): vscode.DiagnosticSeveri
 			return vscode.DiagnosticSeverity.Hint;
 		default:
 			return vscode.DiagnosticSeverity.Error;
+	}
+}
+
+function toVsCodeCompletionItem(item: LspCompletionItem): vscode.CompletionItem {
+	const completionItem = new vscode.CompletionItem(item.label, toVsCodeCompletionItemKind(item.kind));
+	completionItem.detail = item.detail;
+	return completionItem;
+}
+
+function toVsCodeCompletionItemKind(kind: number | undefined): vscode.CompletionItemKind {
+	switch (kind) {
+		case 3:
+			return vscode.CompletionItemKind.Function;
+		case 14:
+			return vscode.CompletionItemKind.Keyword;
+		case 21:
+			return vscode.CompletionItemKind.Constant;
+		case 25:
+			return vscode.CompletionItemKind.TypeParameter;
+		default:
+			return vscode.CompletionItemKind.Text;
 	}
 }

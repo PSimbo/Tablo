@@ -10,8 +10,17 @@ export function registerTabloLanguageFeatures(context: vscode.ExtensionContext):
 		languageDisposable?.dispose();
 
 		if (isLspEnabled()) {
-			languageDisposable = lspClient;
 			lspClient.start();
+			languageDisposable = vscode.languages.registerCompletionItemProvider(
+				{ language: "tablo", scheme: "file" },
+				{
+					provideCompletionItems(document, position) {
+						return lspClient.provideCompletionItems(document, position);
+					},
+				},
+				".",
+				"_",
+			);
 			return;
 		}
 

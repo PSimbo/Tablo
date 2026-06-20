@@ -2876,6 +2876,13 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_format_on_date_source_text() {
+		let result = evaluate_snippet("format(@2026-06-20, 'YYYY-MM-DD')").unwrap();
+
+		assert_eq!(result, Some(Value::Text(String::from("2026-06-20"))));
+	}
+
+	#[test]
 	fn runs_format_on_decimal_with_automatic_fraction_source_text() {
 		let result = evaluate_snippet("[format(12.0, '1.'), format(12.5, '1.')]").unwrap();
 
@@ -2897,6 +2904,20 @@ mod tests {
 		let result = evaluate_snippet("format(1234567, '1,111')").unwrap();
 
 		assert_eq!(result, Some(Value::Text(String::from("1,234,567"))));
+	}
+
+	#[test]
+	fn runs_format_on_time_source_text() {
+		let result = evaluate_snippet("format(@15:04:09, 'hh:mm AM')").unwrap();
+
+		assert_eq!(result, Some(Value::Text(String::from("03:04 PM"))));
+	}
+
+	#[test]
+	fn runs_format_on_timestamp_source_text() {
+		let result = evaluate_snippet("format(@2026-06-20T15:04:09, 'WWW, D MMM YYYY')").unwrap();
+
+		assert_eq!(result, Some(Value::Text(String::from("Sat, 20 Jun 2026"))));
 	}
 
 	#[test]
