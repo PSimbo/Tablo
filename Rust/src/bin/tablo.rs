@@ -4,6 +4,7 @@ use clap::Parser as ClapParser;
 use tablo::run_file;
 use tablo::run_file_with_database_config;
 use tablo::runtime_config::read_runtime_database_config_from_path;
+use tablo::utils::existing_child_path;
 use tablo::vm::RuntimeDatabaseConfig;
 
 #[derive(ClapParser, Debug)]
@@ -84,14 +85,7 @@ fn build_database_config(
 }
 
 fn default_runtime_config_path(current_dir: &std::path::Path) -> Option<PathBuf> {
-	let path = current_dir.join("tablo.toml");
-
-	if path.is_file() {
-		Some(path)
-	}
-	else {
-		None
-	}
+	existing_child_path(current_dir, "tablo.toml")
 }
 
 fn parse_database_mapping(mapping: &str) -> Result<(&str, &str), String> {
@@ -126,11 +120,12 @@ fn resolve_runtime_config_path(config_path: Option<&PathBuf>) -> Result<Option<P
 mod tests {
 	use std::path::Path;
 	use std::path::PathBuf;
-	use std::time::{SystemTime, UNIX_EPOCH};
 
 	use super::build_database_config;
 	use super::default_runtime_config_path;
 	use super::parse_database_mapping;
+	use tablo::utils::unique_temp_directory;
+	use tablo::utils::unique_temp_path;
 
 	#[test]
 	fn builds_runtime_database_config_from_cli_mappings() {
@@ -144,7 +139,7 @@ mod tests {
 
 	#[test]
 	fn command_line_database_mappings_override_config_file_entries() {
-		let config_path = unique_temp_config_path("tablo_runtime_config_override");
+		let config_path = unique_temp_path("tablo_runtime_config_override", "toml");
 		std::fs::write(
 			&config_path,
 			r#"
@@ -201,21 +196,5 @@ mod tests {
 		let error = parse_database_mapping("ExampleDb").unwrap_err();
 
 		assert_eq!(error, String::from("Database mappings must use the form `NAME=CONNECTION_STRING`."));
-	}
-
-	fn unique_temp_config_path(name: &str) -> PathBuf {
-		let nanos = SystemTime::now()
-			.duration_since(UNIX_EPOCH)
-			.unwrap()
-			.as_nanos();
-		std::env::temp_dir().join(format!("{name}_{nanos}.toml"))
-	}
-
-	fn unique_temp_directory(name: &str) -> PathBuf {
-		let nanos = SystemTime::now()
-			.duration_since(UNIX_EPOCH)
-			.unwrap()
-			.as_nanos();
-		std::env::temp_dir().join(format!("{name}_{nanos}"))
 	}
 }

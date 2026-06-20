@@ -41,6 +41,7 @@ use syntax::lexer::LexError;
 use syntax::lexer::Lexer;
 use syntax::parser::ParseError;
 use syntax::parser::Parser;
+use utils::canonicalize_or_original;
 use value::Value;
 use vm::RuntimeDatabaseConfig;
 use vm::VirtualMachine;
@@ -504,7 +505,7 @@ fn build_top_level_function_renames(program: &ast::Program, module_id: u32) -> B
 }
 
 fn canonical_module_key(module_path: &Path) -> PathBuf {
-	std::fs::canonicalize(module_path).unwrap_or_else(|_| module_path.to_path_buf())
+	canonicalize_or_original(module_path)
 }
 
 fn collect_function_source_indices(program: &ast::Program, source_file_index: u32) -> Vec<u32> {

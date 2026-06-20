@@ -179,11 +179,11 @@ fn schema_error_message(error: crate::schema::SchemaError) -> String {
 #[cfg(test)]
 mod tests {
 	use std::path::Path;
-	use std::time::{SystemTime, UNIX_EPOCH};
 
 	use super::RuntimeConfigError;
 	use super::read_runtime_database_config_from_str;
 	use super::read_schema_catalog_from_runtime_config_path;
+	use crate::utils::unique_temp_directory;
 
 	#[test]
 	fn loads_runtime_database_config_from_toml() {
@@ -347,13 +347,5 @@ mod tests {
 		let _ = std::fs::remove_file(&schema_path);
 		let _ = std::fs::remove_file(&config_path);
 		let _ = std::fs::remove_dir(&temp_dir);
-	}
-
-	fn unique_temp_directory(name: &str) -> std::path::PathBuf {
-		let nanos = SystemTime::now()
-			.duration_since(UNIX_EPOCH)
-			.unwrap()
-			.as_nanos();
-		std::env::temp_dir().join(format!("{name}_{nanos}"))
 	}
 }

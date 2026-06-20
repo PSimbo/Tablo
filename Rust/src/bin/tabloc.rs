@@ -5,6 +5,7 @@ use tablo::compile_with_source_name;
 use tablo::compile_with_source_name_and_schema;
 use tablo::runtime_config::read_schema_catalog_from_runtime_config_path;
 use tablo::schema_fixture::read_schema_catalog_from_path;
+use tablo::utils::existing_child_path;
 
 #[derive(ClapParser, Debug)]
 #[command(name = "tabloc")]
@@ -100,14 +101,7 @@ fn default_output_path(input_path: &Path) -> PathBuf {
 }
 
 fn default_project_config_path(current_dir: &std::path::Path) -> Option<PathBuf> {
-	let path = current_dir.join("tablo.toml");
-
-	if path.is_file() {
-		Some(path)
-	}
-	else {
-		None
-	}
+	existing_child_path(current_dir, "tablo.toml")
 }
 
 fn resolve_project_config_path(config_path: Option<&PathBuf>) -> Result<Option<PathBuf>, String> {
@@ -122,10 +116,8 @@ fn resolve_project_config_path(config_path: Option<&PathBuf>) -> Result<Option<P
 
 #[cfg(test)]
 mod tests {
-	use std::path::PathBuf;
-	use std::time::{SystemTime, UNIX_EPOCH};
-
 	use super::default_project_config_path;
+	use tablo::utils::unique_temp_directory;
 
 	#[test]
 	fn discovers_default_project_config_when_present() {
@@ -148,13 +140,5 @@ mod tests {
 		assert_eq!(default_project_config_path(&temp_dir), None);
 
 		let _ = std::fs::remove_dir(&temp_dir);
-	}
-
-	fn unique_temp_directory(name: &str) -> PathBuf {
-		let nanos = SystemTime::now()
-			.duration_since(UNIX_EPOCH)
-			.unwrap()
-			.as_nanos();
-		std::env::temp_dir().join(format!("{name}_{nanos}"))
 	}
 }

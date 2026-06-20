@@ -483,10 +483,6 @@ fn write_lsp_message<W: Write>(writer: &mut W, message: &JsonValue) -> Result<()
 
 #[cfg(test)]
 mod tests {
-	use std::path::PathBuf;
-	use std::time::SystemTime;
-	use std::time::UNIX_EPOCH;
-
 	use serde_json::json;
 	use serde_json::Value as JsonValue;
 
@@ -498,14 +494,7 @@ mod tests {
 	use tablo::TabloError;
 	use tablo::compiler::CompileError;
 	use tablo::diagnostics::diagnostic_for_tablo_error;
-
-	fn unique_temp_directory(name: &str) -> PathBuf {
-		let nanos = SystemTime::now()
-			.duration_since(UNIX_EPOCH)
-			.unwrap()
-			.as_nanos();
-		std::env::temp_dir().join(format!("{name}_{nanos}"))
-	}
+	use tablo::utils::unique_temp_directory;
 
 	#[test]
 	fn completion_items_include_document_symbols_before_cursor() {
