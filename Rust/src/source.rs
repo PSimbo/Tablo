@@ -159,6 +159,45 @@ pub fn is_identifier_char(ch: char) -> bool {
 	ch.is_ascii_alphanumeric() || ch == '_'
 }
 
+pub fn local_name_span(source: &SourceText, declaration_position: usize, name: &str) -> Option<(usize, usize)> {
+	let text = source.as_str();
+	let declaration_position = declaration_position.min(text.len());
+	let line_end = text[declaration_position..]
+		.find('\n')
+		.map_or(text.len(), |offset| declaration_position + offset);
+	let line_text = &text[declaration_position..line_end];
+	let mut search_start = 0;
+
+	while search_start <= line_text.len() {
+		let Some(found_offset) = line_text[search_start..].find(name) else {
+			return None;
+		};
+		let mut start = declaration_position + search_start + found_offset;
+		let mut end = start + name.len();
+		let quoted_start = start.checked_sub(1);
+		let quoted_end = text.get(end..).and_then(|suffix| suffix.chars().next());
+
+		if quoted_start.and_then(|index| text.get(index..start)) == Some("\"")
+			&& quoted_end == Some('"') {
+			start -= 1;
+			end += 1;
+		}
+
+		let previous = text[..start].chars().next_back();
+		let next = text[end..].chars().next();
+		let is_identifier_match = !previous.is_some_and(is_identifier_char)
+			&& !next.is_some_and(is_identifier_char);
+
+		if is_identifier_match {
+			return Some((start, end));
+		}
+
+		search_start += found_offset + name.len();
+	}
+
+	None
+}
+
 pub fn read_identifier(text: &str, start: usize) -> Option<ParsedIdentifier> {
 	let ch = text[start..].chars().next()?;
 	if ch == '"' {
@@ -259,6 +298,96 @@ pub fn skip_whitespace(text: &str, start: usize) -> usize {
 	index
 }
 
+pub fn token_span_at_position(source: &SourceText, position: usize) -> Option<(usize, usize)> {
+	let text = source.as_str();
+	let position = position.min(text.len());
+	let current = text.get(position..)?.chars().next()?;
+	let line_end = text[position..]
+		.find('\n')
+		.map_or(text.len(), |offset| position + offset);
+
+	if current == '"' {
+		let closing_quote_offset = text[position + 1..line_end].find('"')?;
+		let end = position + 1 + closing_quote_offset + 1;
+		return Some((position, end));
+	}
+
+	if current == '\'' {
+		let closing_quote_offset = text[position + 1..line_end].find('\'')?;
+		let end = position + 1 + closing_quote_offset + 1;
+		return Some((position, end));
+	}
+
+	if current == '@' {
+		let token_start = position + current.len_utf8();
+		let mut end = token_start;
+
+		for (offset, ch) in text[token_start..line_end].char_indices() {
+			if !is_temporal_literal_char(ch) {
+				break;
+			}
+
+			end = token_start + offset + ch.len_utf8();
+		}
+
+		return Some((position, end));
+	}
+
+	if current == '-'
+		&& text[position + current.len_utf8()..].chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+		let token_start = position + current.len_utf8();
+		let mut end = token_start;
+
+		for (offset, ch) in text[token_start..line_end].char_indices() {
+			if !is_numeric_literal_char(ch) {
+				break;
+			}
+
+			end = token_start + offset + ch.len_utf8();
+		}
+
+		return Some((position, end));
+	}
+
+	if is_numeric_literal_char(current) {
+		let mut end = position;
+
+		for (offset, ch) in text[position..line_end].char_indices() {
+			if !is_numeric_literal_char(ch) {
+				break;
+			}
+
+			end = position + offset + ch.len_utf8();
+		}
+
+		return Some((position, end));
+	}
+
+	if is_identifier_char(current) {
+		let mut end = position;
+
+		for (offset, ch) in text[position..line_end].char_indices() {
+			if !is_identifier_char(ch) {
+				break;
+			}
+
+			end = position + offset + ch.len_utf8();
+		}
+
+		return Some((position, end));
+	}
+
+	None
+}
+
+fn is_numeric_literal_char(ch: char) -> bool {
+	ch.is_ascii_digit() || ch == '.'
+}
+
+fn is_temporal_literal_char(ch: char) -> bool {
+	ch.is_ascii_alphanumeric() || matches!(ch, ':' | '-' | '+' | '.' | 'T' | 'Z')
+}
+
 fn short_display_name(source_name: &str) -> String {
 	let path = Path::new(source_name);
 
@@ -278,10 +407,12 @@ fn short_display_name(source_name: &str) -> String {
 mod tests {
 	use super::SourceText;
 	use super::find_matching_paren;
+	use super::local_name_span;
 	use super::read_identifier;
 	use super::skip_comment;
 	use super::skip_string_literal;
 	use super::skip_whitespace;
+	use super::token_span_at_position;
 
 	#[test]
 	fn formats_diagnostic_with_line_and_column() {
@@ -308,6 +439,12 @@ mod tests {
 			diagnostic,
 			"Compile error in Examples/basic.tablo:2:1: Example message."
 		);
+	}
+	
+	#[test]
+	fn finds_local_name_span_for_double_quoted_identifier() {
+		let source = SourceText::new("var \"field-name\": int = 1;");
+		assert_eq!(local_name_span(&source, 0, "field-name"), Some((4, 16)));
 	}
 
 	#[test]
@@ -365,5 +502,11 @@ mod tests {
 	#[test]
 	fn skips_whitespace_text() {
 		assert_eq!(skip_whitespace(" \t\nabc", 0), 3);
+	}
+
+	#[test]
+	fn token_span_at_position_covers_temporal_literal() {
+		let source = SourceText::new("value = @2026-06-20;");
+		assert_eq!(token_span_at_position(&source, 8), Some((8, 19)));
 	}
 }

@@ -22,7 +22,8 @@ use tablo::runtime_config::read_schema_catalog_from_runtime_config_path;
 use tablo::semantic::ssa::LocalDeclarationKind;
 use tablo::semantic::ssa::ProgramLocalUsage;
 use tablo::source::SourceText;
-use tablo::source::is_identifier_char;
+use tablo::source::local_name_span;
+use tablo::source::token_span_at_position;
 
 fn main() {
 	let stdin = io::stdin();
@@ -497,53 +498,6 @@ fn file_path_from_document_uri(uri: &str) -> Option<PathBuf> {
 	}
 }
 
-fn is_numeric_literal_char(ch: char) -> bool {
-	ch.is_ascii_digit() || ch == '.'
-}
-
-fn is_temporal_literal_char(ch: char) -> bool {
-	ch.is_ascii_alphanumeric() || matches!(ch, ':' | '-' | '+' | '.' | 'T' | 'Z')
-}
-
-fn local_name_span(source: &SourceText, declaration_position: usize, name: &str) -> Option<(usize, usize)> {
-	let text = source.as_str();
-	let declaration_position = declaration_position.min(text.len());
-	let line_end = text[declaration_position..]
-		.find('\n')
-		.map_or(text.len(), |offset| declaration_position + offset);
-	let line_text = &text[declaration_position..line_end];
-	let mut search_start = 0;
-
-	while search_start <= line_text.len() {
-		let Some(found_offset) = line_text[search_start..].find(name) else {
-			return None;
-		};
-		let mut start = declaration_position + search_start + found_offset;
-		let mut end = start + name.len();
-		let quoted_start = start.checked_sub(1);
-		let quoted_end = text.get(end..).and_then(|suffix| suffix.chars().next());
-
-		if quoted_start.and_then(|index| text.get(index..start)) == Some("\"")
-			&& quoted_end == Some('"') {
-			start -= 1;
-			end += 1;
-		}
-
-		let previous = text[..start].chars().next_back();
-		let next = text[end..].chars().next();
-		let is_identifier_match = !previous.is_some_and(is_identifier_char)
-			&& !next.is_some_and(is_identifier_char);
-
-		if is_identifier_match {
-			return Some((start, end));
-		}
-
-		search_start += found_offset + name.len();
-	}
-
-	None
-}
-
 fn parse_content_length(header_line: &str) -> Result<Option<usize>, String> {
 	let Some((name, value)) = header_line.split_once(':') else {
 		return Ok(None);
@@ -598,88 +552,6 @@ fn source_offset_for_position(text: &str, position: Position) -> Option<usize> {
 	source.offset_from_lsp_position(position.line, position.character)
 }
 
-fn source_token_span_at_position(source: &SourceText, position: usize) -> Option<(usize, usize)> {
-	let text = source.as_str();
-	let position = position.min(text.len());
-	let current = text.get(position..)?.chars().next()?;
-	let line_end = text[position..]
-		.find('\n')
-		.map_or(text.len(), |offset| position + offset);
-
-	if current == '"' {
-		let closing_quote_offset = text[position + 1..line_end].find('"')?;
-		let end = position + 1 + closing_quote_offset + 1;
-		return Some((position, end));
-	}
-
-	if current == '\'' {
-		let closing_quote_offset = text[position + 1..line_end].find('\'')?;
-		let end = position + 1 + closing_quote_offset + 1;
-		return Some((position, end));
-	}
-
-	if current == '@' {
-		let token_start = position + current.len_utf8();
-		let mut end = token_start;
-
-		for (offset, ch) in text[token_start..line_end].char_indices() {
-			if !is_temporal_literal_char(ch) {
-				break;
-			}
-
-			end = token_start + offset + ch.len_utf8();
-		}
-
-		return Some((position, end));
-	}
-
-	if current == '-'
-		&& text[position + current.len_utf8()..].chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
-		let token_start = position + current.len_utf8();
-		let mut end = token_start;
-
-		for (offset, ch) in text[token_start..line_end].char_indices() {
-			if !is_numeric_literal_char(ch) {
-				break;
-			}
-
-			end = token_start + offset + ch.len_utf8();
-		}
-
-		return Some((position, end));
-	}
-
-	if is_numeric_literal_char(current) {
-		let mut end = position;
-
-		for (offset, ch) in text[position..line_end].char_indices() {
-			if !is_numeric_literal_char(ch) {
-				break;
-			}
-
-			end = position + offset + ch.len_utf8();
-		}
-
-		return Some((position, end));
-	}
-
-	if is_identifier_char(current) {
-		let mut end = position;
-
-		for (offset, ch) in text[position..line_end].char_indices() {
-			if !is_identifier_char(ch) {
-				break;
-			}
-
-			end = position + offset + ch.len_utf8();
-		}
-
-		return Some((position, end));
-	}
-
-	None
-}
-
 fn tablo_error_to_diagnostic(uri: &str, source: &str, error: TabloError) -> JsonValue {
 	let source = SourceText::new(source);
 	let (position, message) = match error {
@@ -700,7 +572,7 @@ fn tablo_error_to_diagnostic(uri: &str, source: &str, error: TabloError) -> Json
 
 	let _ = uri;
 
-	if let Some((start, end)) = source_token_span_at_position(&source, position) {
+	if let Some((start, end)) = token_span_at_position(&source, position) {
 		diagnostic_json_for_byte_span(&source, start, end, 1, &message)
 	}
 	else {
