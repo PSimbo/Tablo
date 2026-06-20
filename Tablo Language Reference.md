@@ -1075,6 +1075,8 @@ Note that Tablo is free to implement the database query logic in whichever way i
   * In any circumstance where it is not possible to determine the field list, the field list will include all fields for the table.
 2. The runtime results shall be identical, absent any concurrent modification of the database data.
 
+Local values captured for use as database-query parameters are resolved when the query begins execution, not re-evaluated during later iterations of that same query. This means that if the body of a query-based `for` loop mutates a variable or object field that was referenced by the query expression, the active query does not observe those changes part-way through its own execution. Programmers should therefore avoid relying on such mutations to affect the remainder of the current query. This area of the language may be tightened or made more explicit in a future revision.
+
 For database backends that support record locking, the `for` loop will include locked records if the loop variable is immutable but exclude locked records if the loop variable is mutable. If required, the lock state of a record may be determined using the `locked()` function.
 
 ### Find Statements

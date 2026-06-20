@@ -2068,6 +2068,12 @@ impl SemanticAnalyzer {
 						}
 					}
 					BuiltInFunction::Trim => {}
+					BuiltInFunction::Day
+					| BuiltInFunction::Month
+					| BuiltInFunction::Year
+					| BuiltInFunction::Hour
+					| BuiltInFunction::Minute
+					| BuiltInFunction::Second => {}
 					_ => {
 						return Err(self.compile_error(
 							expression.position(),
@@ -3509,8 +3515,10 @@ mod tests {
 	use crate::ast::RecordPointerType;
 	use crate::ast::Statement;
 	use crate::ast::TernaryExpr;
+	use crate::builtins::BuiltInFunction;
 	use crate::query::QueryBinaryExpr;
 	use crate::query::QueryBinaryOperator;
+	use crate::query::QueryBuiltInCall;
 	use crate::query::QueryColumnReference;
 	use crate::query::QueryCountPlan;
 	use crate::query::QueryExpr;
@@ -4001,6 +4009,64 @@ mod tests {
 			schema_is_implicit: true,
 			schema_name: String::from("Main"),
 			table_name: String::from("InnerTable"),
+		});
+	}
+
+	#[test]
+	fn lowers_year_built_in_in_where_clause_to_query_built_in_call() {
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null
+				);
+			"#,
+			"ExampleDb",
+		);
+		let program = parse_program("obj Config { When: date, };");
+		let count = parse_count_expression("count Customers where Customers.Id == year(config.When)");
+		let mut analyzer = SemanticAnalyzer::new();
+		analyzer.current_schema_catalog = Some(schema);
+		analyzer.semantic_program.active_databases = vec![String::from("exampledb")];
+		analyzer.collect_object_declarations(&program.objects).unwrap();
+		analyzer.enter_scope();
+		analyzer.declare_local(
+			String::from("config"),
+			LocalBinding {
+				declaration_position: 5,
+				data_type: DataType::Object(String::from("Config")),
+				is_const: false,
+				slot: 5,
+			},
+		);
+
+		let query = analyzer.lower_count_query(&count).unwrap();
+
+		assert_eq!(query, QueryCountPlan {
+			backend: DatabaseBackend::Sqlite,
+			database_name: String::from("ExampleDb"),
+			filter: Some(QueryExpr::Binary(QueryBinaryExpr {
+				left: Box::new(QueryExpr::Column(QueryColumnReference {
+					column_name: String::from("Id"),
+					data_type: DataType::Int,
+					table_name: String::from("Customers"),
+				})),
+				operator: QueryBinaryOperator::Equal,
+				right: Box::new(QueryExpr::BuiltInCall(QueryBuiltInCall {
+					arguments: vec![
+						QueryExpr::Parameter(QueryParameter {
+							data_type: DataType::Date,
+							field_path: vec![String::from("When")],
+							slot: 5,
+						}),
+					],
+					built_in: BuiltInFunction::Year,
+				})),
+			})),
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
+			table_name: String::from("Customers"),
 		});
 	}
 

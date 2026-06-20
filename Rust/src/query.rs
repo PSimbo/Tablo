@@ -406,14 +406,38 @@ fn lower_query_expr_sqlite(expression: &QueryExpr, parameters: &mut Vec<SqlParam
 					"CASE WHEN LENGTH({left}) = 0 THEN 0 ELSE ((LENGTH({right}) - LENGTH(REPLACE({right}, {left}, ''))) / LENGTH({left})) END"
 				)
 			}
+			BuiltInFunction::Day => {
+				let value = lower_query_expr_sqlite(&call.arguments[0], parameters);
+				format!("CAST(STRFTIME('%d', {value}) AS INTEGER)")
+			}
+			BuiltInFunction::Hour => {
+				let value = lower_query_expr_sqlite(&call.arguments[0], parameters);
+				format!("CAST(STRFTIME('%H', {value}) AS INTEGER)")
+			}
 			BuiltInFunction::IndexOf => {
 				let left = lower_query_expr_sqlite(&call.arguments[0], parameters);
 				let right = lower_query_expr_sqlite(&call.arguments[1], parameters);
 				format!("NULLIF(INSTR({right}, {left}), 0)")
 			}
+			BuiltInFunction::Minute => {
+				let value = lower_query_expr_sqlite(&call.arguments[0], parameters);
+				format!("CAST(STRFTIME('%M', {value}) AS INTEGER)")
+			}
+			BuiltInFunction::Month => {
+				let value = lower_query_expr_sqlite(&call.arguments[0], parameters);
+				format!("CAST(STRFTIME('%m', {value}) AS INTEGER)")
+			}
+			BuiltInFunction::Second => {
+				let value = lower_query_expr_sqlite(&call.arguments[0], parameters);
+				format!("CAST(STRFTIME('%S', {value}) AS INTEGER)")
+			}
 			BuiltInFunction::Trim => {
 				let value = lower_query_expr_sqlite(&call.arguments[0], parameters);
 				format!("TRIM({value})")
+			}
+			BuiltInFunction::Year => {
+				let value = lower_query_expr_sqlite(&call.arguments[0], parameters);
+				format!("CAST(STRFTIME('%Y', {value}) AS INTEGER)")
 			}
 			other => panic!(
 				"Built-in function `{}` is not supported in lowered SQLite query expressions.",
@@ -856,6 +880,47 @@ mod tests {
 			schema_name: String::from("Main"),
 			statement: String::from(
 				"SELECT \"Customers\".\"Id\", \"Customers\".\"Name\" FROM \"Customers\" WHERE (\"Customers\".\"Active\" = 1) ORDER BY \"Customers\".\"Name\" DESC"
+			),
+			table_name: String::from("Customers"),
+		}));
+	}
+
+	#[test]
+	fn lowers_sqlite_temporal_extractor_built_in_functions() {
+		let query = QueryCountPlan {
+			backend: DatabaseBackend::Sqlite,
+			database_name: String::from("ExampleDb"),
+			filter: Some(QueryExpr::BuiltInCall(QueryBuiltInCall {
+				arguments: vec![
+					QueryExpr::Parameter(QueryParameter {
+						data_type: DataType::Date,
+						field_path: vec![String::from("When")],
+						slot: 5,
+					}),
+				],
+				built_in: BuiltInFunction::Year,
+			})),
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
+			table_name: String::from("Customers"),
+		}.lower_to_backend().unwrap();
+
+		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
+			database_name: String::from("ExampleDb"),
+			dialect: SqlDialect::Sqlite,
+			parameters: vec![
+				SqlParameter {
+					data_type: DataType::Date,
+					field_path: vec![String::from("When")],
+					index: 1,
+					slot: 5,
+				},
+			],
+			result_shape: SqlQueryResultShape::IntegerScalar,
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
+			statement: String::from(
+				"SELECT COUNT(*) FROM \"Customers\" WHERE CAST(STRFTIME('%Y', ?1) AS INTEGER)"
 			),
 			table_name: String::from("Customers"),
 		}));
