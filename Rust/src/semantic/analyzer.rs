@@ -1643,53 +1643,40 @@ impl SemanticAnalyzer {
 		field_access: &FieldAccessExpr,
 		table: &TableReference,
 	) -> Result<DataType, CompileError> {
-		if let Expr::Identifier(identifier) = field_access.object.as_ref() {
-			if let Some(local) = self.lookup_local(&identifier.name) {
-				self.semantic_program.identifier_slots.insert(identifier.position, local.slot);
+		if let Some((base_identifier, fields)) = self.query_field_access_chain(field_access) {
+			if self.lookup_local(&base_identifier.name).is_some() {
+				let (_, _, data_type) = self.resolve_query_local_field_access(base_identifier, &fields)?;
+				return Ok(data_type);
+			}
 
-				return match &local.data_type {
-					DataType::Object(name) => {
-						let field_type = self.lookup_object_field(name, &field_access.field.name)
-							.ok_or(self.compile_error(
-								field_access.field.position,
-								format!("Object `{name}` does not contain a field named `{}`.", field_access.field.name),
-							))?
-							.data_type
-							.clone();
-						Ok(field_type)
-					}
-					DataType::RecordPointer(record_pointer) => self.infer_record_pointer_field_access_type(
-						record_pointer,
-						field_access.field.position,
-						&field_access.field.name,
-					),
-					other => Err(self.compile_error(
-						identifier.position,
-						format!("Field access requires an object operand, found `{}`.", other.name()),
-					)),
-				};
+			if fields.len() > 1 {
+				return Err(self.compile_error(
+					field_access.position,
+					String::from("Only simple `table.field` access is supported for query table columns."),
+				));
 			}
 
 			let (resolved_table_name, column_type) = {
 				let resolved_table = self.resolve_table_reference(table)?;
 				let resolved_table_name = resolved_table.table().name().to_string();
 
-				if !identifier.name.eq_ignore_ascii_case(&resolved_table_name) {
+				if !base_identifier.name.eq_ignore_ascii_case(&resolved_table_name) {
 					return Err(self.compile_error(
-						identifier.position,
+						base_identifier.position,
 						format!(
 							"Qualified field reference must use the target table name `{resolved_table_name}`.",
 						),
 					));
 				}
 
-				let column_type = resolved_table.table().column(&field_access.field.name)
+				let field = fields[0];
+				let column_type = resolved_table.table().column(&field.name)
 					.map(|column| column.data_type().clone())
 					.ok_or(self.compile_error(
-						field_access.field.position,
+						field.position,
 						format!(
 							"Field `{}` does not exist on table `{resolved_table_name}`.",
-							field_access.field.name,
+							field.name,
 						),
 					))?;
 
@@ -1702,7 +1689,7 @@ impl SemanticAnalyzer {
 
 		Err(self.compile_error(
 			field_access.position,
-			String::from("Only simple `table.field` or local object field access is supported in `where` clauses."),
+			String::from("Only chained local object or record-pointer field access and simple `table.field` access are supported in `where` clauses."),
 		))
 	}
 
@@ -2171,46 +2158,41 @@ impl SemanticAnalyzer {
 	) -> Result<QueryExpr, CompileError> {
 		let _ = backend;
 
-		if let Expr::Identifier(identifier) = field_access.object.as_ref() {
-			if let Some(local) = self.lookup_local(&identifier.name) {
-				self.semantic_program.identifier_slots.insert(identifier.position, local.slot);
+		if let Some((base_identifier, fields)) = self.query_field_access_chain(field_access) {
+			if self.lookup_local(&base_identifier.name).is_some() {
+				let (slot, field_path, data_type) = self.resolve_query_local_field_access(base_identifier, &fields)?;
+				return Ok(QueryExpr::Parameter(QueryParameter {
+					data_type,
+					field_path,
+					slot,
+				}));
+			}
 
-				if matches!(local.data_type.without_nullability(), DataType::RecordPointer(_)) {
-					let data_type = self.infer_query_field_access_type(field_access, table)?;
-					return Ok(QueryExpr::Parameter(QueryParameter {
-						data_type,
-						field_path: vec![field_access.field.name.clone()],
-						slot: local.slot,
-					}));
-				}
-
+			if fields.len() > 1 {
 				return Err(self.compile_error(
 					field_access.position,
-					format!(
-						"Object field access such as `{}.{}` is not yet supported in lowered database query expressions.",
-						identifier.name,
-						field_access.field.name,
-					),
+					String::from("Only simple `table.field` access is supported for query table columns."),
 				));
 			}
 
 			let resolved_table = self.resolve_table_reference(table)?;
 			let resolved_table_name = resolved_table.table().name().to_string();
 
-			if !identifier.name.eq_ignore_ascii_case(&resolved_table_name) {
+			if !base_identifier.name.eq_ignore_ascii_case(&resolved_table_name) {
 				return Err(self.compile_error(
-					identifier.position,
+					base_identifier.position,
 					format!("Qualified field reference must use the target table name `{resolved_table_name}`."),
 				));
 			}
 
+			let field = fields[0];
 			let (column_name, column_type) = {
-				let Some(column) = resolved_table.table().column(&field_access.field.name) else {
+				let Some(column) = resolved_table.table().column(&field.name) else {
 					return Err(self.compile_error(
-						field_access.field.position,
+						field.position,
 						format!(
 							"Field `{}` does not exist on table `{resolved_table_name}`.",
-							field_access.field.name,
+							field.name,
 						),
 					));
 				};
@@ -2226,7 +2208,7 @@ impl SemanticAnalyzer {
 
 		Err(self.compile_error(
 			field_access.position,
-			String::from("Only simple `table.field` access may be lowered into a database query."),
+			String::from("Only chained local object or record-pointer field access and simple `table.field` access may be lowered into a database query."),
 		))
 	}
 
@@ -2305,6 +2287,28 @@ impl SemanticAnalyzer {
 			BinaryOperator::Or => "or",
 			BinaryOperator::Subtract => "-",
 			BinaryOperator::Xor => "xor",
+		}
+	}
+
+	fn query_field_access_chain<'a>(
+		&self,
+		field_access: &'a FieldAccessExpr,
+	) -> Option<(&'a IdentifierExpr, Vec<&'a IdentifierExpr>)> {
+		let mut fields = vec![&field_access.field];
+		let mut object = field_access.object.as_ref();
+
+		loop {
+			match object {
+				Expr::FieldAccess(field_access) => {
+					fields.push(&field_access.field);
+					object = field_access.object.as_ref();
+				}
+				Expr::Identifier(identifier) => {
+					fields.reverse();
+					return Some((identifier, fields));
+				}
+				_ => return None,
+			}
 		}
 	}
 
@@ -2538,6 +2542,47 @@ impl SemanticAnalyzer {
 				Ok(data_type.clone())
 			}
 		}
+	}
+
+	fn resolve_query_local_field_access(
+		&mut self,
+		base_identifier: &IdentifierExpr,
+		fields: &[&IdentifierExpr],
+	) -> Result<(u32, Vec<String>, DataType), CompileError> {
+		let local = self.lookup_local(&base_identifier.name).ok_or(self.compile_error(
+			base_identifier.position,
+			format!("Variable `{}` is not declared in this scope.", base_identifier.name),
+		))?;
+		self.semantic_program.identifier_slots.insert(base_identifier.position, local.slot);
+
+		let mut current_type = local.data_type.clone();
+		let mut field_path = Vec::with_capacity(fields.len());
+
+		for field in fields {
+			field_path.push(field.name.clone());
+			current_type = match current_type.without_nullability() {
+				DataType::Object(name) => self.lookup_object_field(name, &field.name)
+					.ok_or(self.compile_error(
+						field.position,
+						format!("Object `{name}` does not contain a field named `{}`.", field.name),
+					))?
+					.data_type
+					.clone(),
+				DataType::RecordPointer(record_pointer) => self.infer_record_pointer_field_access_type(
+					record_pointer,
+					field.position,
+					&field.name,
+				)?,
+				other => {
+					return Err(self.compile_error(
+						field.position,
+						format!("Field access requires an object operand, found `{}`.", other.name()),
+					));
+				}
+			};
+		}
+
+		Ok((local.slot, field_path, current_type))
 	}
 
 	fn resolve_table_reference(
@@ -3785,6 +3830,114 @@ mod tests {
 					})),
 					operator: QueryBinaryOperator::Equal,
 					right: Box::new(QueryExpr::Literal(QueryLiteral::Boolean(true))),
+				})),
+			})),
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
+			table_name: String::from("Customers"),
+		});
+	}
+
+	#[test]
+	fn lowers_nested_object_field_access_in_where_clause_to_query_parameter() {
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null
+				);
+			"#,
+			"ExampleDb",
+		);
+		let program = parse_program(
+			"obj ConfigValues { FieldA: int, };\nobj Config { Values: ConfigValues, };"
+		);
+		let count = parse_count_expression("count Customers where Customers.Id == config.Values.FieldA");
+		let mut analyzer = SemanticAnalyzer::new();
+		analyzer.current_schema_catalog = Some(schema);
+		analyzer.semantic_program.active_databases = vec![String::from("exampledb")];
+		analyzer.collect_object_declarations(&program.objects).unwrap();
+		analyzer.enter_scope();
+		analyzer.declare_local(
+			String::from("config"),
+			LocalBinding {
+				declaration_position: 6,
+				data_type: DataType::Object(String::from("Config")),
+				is_const: false,
+				slot: 6,
+			},
+		);
+
+		let query = analyzer.lower_count_query(&count).unwrap();
+
+		assert_eq!(query, QueryCountPlan {
+			backend: DatabaseBackend::Sqlite,
+			database_name: String::from("ExampleDb"),
+			filter: Some(QueryExpr::Binary(QueryBinaryExpr {
+				left: Box::new(QueryExpr::Column(QueryColumnReference {
+					column_name: String::from("Id"),
+					data_type: DataType::Int,
+					table_name: String::from("Customers"),
+				})),
+				operator: QueryBinaryOperator::Equal,
+				right: Box::new(QueryExpr::Parameter(QueryParameter {
+					data_type: DataType::Int,
+					field_path: vec![String::from("Values"), String::from("FieldA")],
+					slot: 6,
+				})),
+			})),
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
+			table_name: String::from("Customers"),
+		});
+	}
+
+	#[test]
+	fn lowers_object_field_access_in_where_clause_to_query_parameter() {
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null
+				);
+			"#,
+			"ExampleDb",
+		);
+		let program = parse_program("obj Config { FieldA: int, };");
+		let count = parse_count_expression("count Customers where Customers.Id == config.FieldA");
+		let mut analyzer = SemanticAnalyzer::new();
+		analyzer.current_schema_catalog = Some(schema);
+		analyzer.semantic_program.active_databases = vec![String::from("exampledb")];
+		analyzer.collect_object_declarations(&program.objects).unwrap();
+		analyzer.enter_scope();
+		analyzer.declare_local(
+			String::from("config"),
+			LocalBinding {
+				declaration_position: 5,
+				data_type: DataType::Object(String::from("Config")),
+				is_const: false,
+				slot: 5,
+			},
+		);
+
+		let query = analyzer.lower_count_query(&count).unwrap();
+
+		assert_eq!(query, QueryCountPlan {
+			backend: DatabaseBackend::Sqlite,
+			database_name: String::from("ExampleDb"),
+			filter: Some(QueryExpr::Binary(QueryBinaryExpr {
+				left: Box::new(QueryExpr::Column(QueryColumnReference {
+					column_name: String::from("Id"),
+					data_type: DataType::Int,
+					table_name: String::from("Customers"),
+				})),
+				operator: QueryBinaryOperator::Equal,
+				right: Box::new(QueryExpr::Parameter(QueryParameter {
+					data_type: DataType::Int,
+					field_path: vec![String::from("FieldA")],
+					slot: 5,
 				})),
 			})),
 			schema_is_implicit: true,
