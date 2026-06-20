@@ -6,6 +6,9 @@ use rusqlite::params_from_iter;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::types::ValueRef as SqlValueRef;
 
+use crate::ast::BinaryOperator;
+use crate::ast::Expr;
+use crate::ast::UnaryOperator;
 use crate::builtins::BuiltInFunction;
 use crate::bytecode::CodeBody;
 use crate::bytecode::Instruction;
@@ -18,6 +21,9 @@ use crate::query::QueryResultColumn;
 use crate::query::SqlDialect;
 use crate::query::SqlQuery;
 use crate::query::SqlQueryResultShape;
+use crate::source::SourceText;
+use crate::syntax::lexer::Lexer;
+use crate::syntax::parser::Parser;
 use crate::value::Decimal;
 use crate::value::DecimalRange;
 use crate::value::DecimalRangeIterator;
@@ -198,6 +204,34 @@ impl VmVisibleLocal {
 }
 
 impl VirtualMachine {
+	pub fn evaluate_watch_expression(
+		expression: &str,
+		frame: &VmStackFrame,
+	) -> Result<Value, VmError> {
+		let source = SourceText::new(expression);
+		let mut lexer = Lexer::new(source.clone());
+		let tokens = lexer.tokenize().map_err(|error| vm_error(
+			error.position,
+			source.format_diagnostic_with_source_name(
+				"Parse error",
+				error.position,
+				&error.message,
+				Some("<watch expression>"),
+			),
+		))?;
+		let mut parser = Parser::new(tokens);
+		let expression = parser.parse_expression().map_err(|error| vm_error(
+			error.position,
+			source.format_diagnostic_with_source_name(
+				"Parse error",
+				error.position,
+				&error.message,
+				Some("<watch expression>"),
+			),
+		))?;
+		evaluate_debug_expression(&expression, frame)
+	}
+
 	pub fn new() -> Self {
 		Self {
 			database_config: RuntimeDatabaseConfig::default(),
@@ -1530,6 +1564,16 @@ fn align_comparable_numeric_values(lhs: &Decimal, rhs: &Decimal, instruction_ind
 	Ok((lhs, rhs))
 }
 
+fn boolean_operand_value(value: Value, instruction_index: usize) -> Result<bool, VmError> {
+	match value {
+		Value::Boolean(value) => Ok(value),
+		other => Err(vm_error(
+			instruction_index,
+			format!("Expected a `bool` operand, found `{}`.", type_name(&other)),
+		)),
+	}
+}
+
 fn coerce_numeric_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<(Decimal, Decimal), VmError> {
 	match (lhs, rhs) {
 		(Value::Decimal(lhs), Value::Decimal(rhs)) => Ok((lhs, rhs)),
@@ -1676,6 +1720,21 @@ fn compare_values(lhs: Value, rhs: Value, instruction_index: usize, kind: Compar
 	Ok(Value::Boolean(value))
 }
 
+fn condition_value(value: Value, instruction_index: usize) -> Result<bool, VmError> {
+	match value {
+		Value::Boolean(value) => Ok(value),
+		Value::RecordPointer(record) => Ok(record.exists && !record.locked),
+		Value::Null => Err(vm_error(
+			instruction_index,
+			String::from("Expected a `bool` or `record pointer` condition, found `null`."),
+		)),
+		other => Err(vm_error(
+			instruction_index,
+			format!("Expected a `bool` or `record pointer` condition, found `{}`.", type_name(&other)),
+		)),
+	}
+}
+
 fn count_non_overlapping_substrings(value: &str, substring: &str) -> usize {
 	if substring.is_empty() {
 		return 0;
@@ -1818,6 +1877,173 @@ fn equals_value(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Valu
 	};
 
 	Ok(Value::Boolean(value))
+}
+
+fn evaluate_boolean_binary(
+	lhs: Value,
+	rhs: Value,
+	instruction_index: usize,
+	op: impl FnOnce(bool, bool) -> bool,
+) -> Result<Value, VmError> {
+	let lhs = boolean_operand_value(lhs, instruction_index)?;
+	let rhs = boolean_operand_value(rhs, instruction_index)?;
+	Ok(Value::Boolean(op(lhs, rhs)))
+}
+
+fn evaluate_debug_call(call: &crate::ast::CallExpr, frame: &VmStackFrame) -> Result<Value, VmError> {
+	let Some(built_in) = BuiltInFunction::from_name(&call.callee.name) else {
+		return Err(vm_error(
+			call.position,
+			format!("Function `{}` is not available in watch expressions.", call.callee.name),
+		));
+	};
+
+	if matches!(built_in, BuiltInFunction::Disp | BuiltInFunction::Displn) {
+		return Err(vm_error(
+			call.position,
+			format!("Built-in function `{}` is not allowed in watch expressions because it has side effects.", built_in.name()),
+		));
+	}
+
+	let mut arguments = Vec::with_capacity(call.arguments.len());
+
+	for argument in &call.arguments {
+		if argument.is_by_ref {
+			return Err(vm_error(
+				argument.position,
+				String::from("Watch expressions do not support by-reference arguments."),
+			));
+		}
+
+		arguments.push(evaluate_debug_expression(&argument.value, frame)?);
+	}
+
+	let mut vm = VirtualMachine::new();
+	vm.run_built_in_function(built_in, arguments, call.position)?
+		.ok_or(vm_error(
+			call.position,
+			format!("Built-in function `{}` did not produce a watchable value.", built_in.name()),
+		))
+}
+
+fn evaluate_debug_expression(expression: &Expr, frame: &VmStackFrame) -> Result<Value, VmError> {
+	match expression {
+		Expr::Array(array) => {
+			let mut values = Vec::with_capacity(array.elements.len());
+
+			for element in &array.elements {
+				values.push(evaluate_debug_expression(element, frame)?);
+			}
+
+			Ok(Value::Array(values))
+		}
+		Expr::Assignment(_) => Err(vm_error(
+			expression.position(),
+			String::from("Watch expressions do not support assignment."),
+		)),
+		Expr::Binary(binary) => {
+			let lhs = evaluate_debug_expression(&binary.left, frame)?;
+			let rhs = evaluate_debug_expression(&binary.right, frame)?;
+
+			match binary.operator {
+				BinaryOperator::Add => add_values(lhs, rhs, binary.position),
+				BinaryOperator::And => evaluate_boolean_binary(lhs, rhs, binary.position, |lhs, rhs| lhs && rhs),
+				BinaryOperator::Divide => divide_values(lhs, rhs, binary.position),
+				BinaryOperator::Equal => equals_value(lhs, rhs, binary.position),
+				BinaryOperator::GreaterThan => compare_values(lhs, rhs, binary.position, ComparisonKind::GreaterThan),
+				BinaryOperator::GreaterThanOrEqual => {
+					compare_values(lhs, rhs, binary.position, ComparisonKind::GreaterThanOrEqual)
+				}
+				BinaryOperator::LessThan => compare_values(lhs, rhs, binary.position, ComparisonKind::LessThan),
+				BinaryOperator::LessThanOrEqual => {
+					compare_values(lhs, rhs, binary.position, ComparisonKind::LessThanOrEqual)
+				}
+				BinaryOperator::Modulo => modulo_values(lhs, rhs, binary.position),
+				BinaryOperator::Multiply => multiply_values(lhs, rhs, binary.position),
+				BinaryOperator::NotEqual => not_equals_value(lhs, rhs, binary.position),
+				BinaryOperator::Or => evaluate_boolean_binary(lhs, rhs, binary.position, |lhs, rhs| lhs || rhs),
+				BinaryOperator::Subtract => subtract_values(lhs, rhs, binary.position),
+				BinaryOperator::Xor => evaluate_boolean_binary(lhs, rhs, binary.position, |lhs, rhs| lhs ^ rhs),
+			}
+		}
+		Expr::Boolean(boolean) => Ok(Value::Boolean(boolean.value)),
+		Expr::Call(call) => evaluate_debug_call(call, frame),
+		Expr::Count(_) => Err(vm_error(
+			expression.position(),
+			String::from("Watch expressions do not yet support database query execution."),
+		)),
+		Expr::Date(date) => Ok(Value::Date(date.value)),
+		Expr::Decimal(decimal) => Ok(Value::Decimal(decimal.value.clone())),
+		Expr::FieldAccess(field_access) => {
+			let object = evaluate_debug_expression(&field_access.object, frame)?;
+			load_field_value(object, &field_access.field.name, field_access.position)
+		}
+		Expr::Find(_) => Err(vm_error(
+			expression.position(),
+			String::from("Watch expressions do not yet support database query execution."),
+		)),
+		Expr::Identifier(identifier) => frame.local(&identifier.name)
+			.map(|local| local.value().clone())
+			.ok_or(vm_error(
+				identifier.position,
+				format!("Variable `{}` is not available in the current stack frame.", identifier.name),
+			)),
+		Expr::Index(index) => {
+			let value = evaluate_debug_expression(&index.array, frame)?;
+			let index_value = evaluate_debug_expression(&index.index, frame)?;
+			load_index_value(value, index_value, index.position)
+		}
+		Expr::Integer(integer) => Ok(Value::Integer(integer.value)),
+		Expr::New(_) => Err(vm_error(
+			expression.position(),
+			String::from("Watch expressions do not support `new` expressions."),
+		)),
+		Expr::Null(_) => Ok(Value::Null),
+		Expr::ObjectConstruction(_) => Err(vm_error(
+			expression.position(),
+			String::from("Watch expressions do not support object construction."),
+		)),
+		Expr::Range(range) => {
+			let start = evaluate_debug_expression(&range.start, frame)?;
+			let end = evaluate_debug_expression(&range.end, frame)?;
+			let step = range.step.as_ref()
+				.map(|step| evaluate_debug_expression(step, frame))
+				.transpose()?;
+			make_range_value(start, step, end, range.position)
+		}
+		Expr::Ternary(ternary) => {
+			let condition = evaluate_debug_expression(&ternary.condition, frame)?;
+
+			if condition_value(condition, ternary.position)? {
+				evaluate_debug_expression(&ternary.true_branch, frame)
+			}
+			else {
+				evaluate_debug_expression(&ternary.false_branch, frame)
+			}
+		}
+		Expr::Text(text) => Ok(Value::Text(text.value.clone())),
+		Expr::Time(time) => Ok(Value::Time(time.value)),
+		Expr::TimeTz(time) => Ok(Value::TimeTz(time.value)),
+		Expr::Timestamp(timestamp) => Ok(Value::Timestamp(timestamp.value)),
+		Expr::TimestampTz(timestamp) => Ok(Value::TimestampTz(timestamp.value)),
+		Expr::Unary(unary) => {
+			let value = evaluate_debug_expression(&unary.operand, frame)?;
+
+			match unary.operator {
+				UnaryOperator::Negate => {
+					if !matches!(value, Value::Decimal(_) | Value::Integer(_)) {
+						return Err(vm_error(
+							unary.position,
+							format!("Expected a numeric operand, found a {} value.", type_name(&value)),
+						));
+					}
+
+					Ok(negate_value(value))
+				}
+				UnaryOperator::Not => Ok(Value::Boolean(!condition_value(value, unary.position)?)),
+			}
+		}
+	}
 }
 
 fn iterator_has_next(iterator: &Value, instruction_index: usize) -> Result<bool, VmError> {
@@ -2645,6 +2871,9 @@ fn vm_error(instruction_index: usize, message: String) -> VmError {
 
 #[cfg(test)]
 mod tests {
+	use std::collections::BTreeMap;
+
+	use crate::ast::RecordPointerType;
 	use crate::builtins::BuiltInFunction;
 	use crate::bytecode::CodeBody;
 	use crate::bytecode::CodeBodyDebugInfo;
@@ -2655,11 +2884,15 @@ mod tests {
 	use crate::bytecode::Program;
 	use crate::value::Decimal;
 	use crate::value::DecimalRange;
+	use crate::value::RecordFieldValue;
+	use crate::value::RecordPointerValue;
 	use crate::value::Value;
 
 	use super::RuntimeDatabaseConfig;
 	use super::VirtualMachine;
 	use super::VmError;
+	use super::VmStackFrame;
+	use super::VmVisibleLocal;
 
 	#[test]
 	fn captures_visible_locals_in_runtime_stack_frame() {
@@ -2701,6 +2934,80 @@ mod tests {
 		assert_eq!(error.current_frame().unwrap().local("x").unwrap().declared_type(), "int");
 		assert_eq!(error.current_frame().unwrap().local("x").unwrap().value(), &Value::Integer(0));
 		assert!(error.current_frame().unwrap().local("missing").is_none());
+	}
+
+	#[test]
+	fn evaluates_watch_expression_against_visible_locals() {
+		let frame = VmStackFrame {
+			instruction_index: 0,
+			locals: vec![
+				VmVisibleLocal {
+					declared_type: String::from("int"),
+					is_const: false,
+					name: String::from("total"),
+					slot: 0,
+					value: Value::Integer(2),
+				},
+				VmVisibleLocal {
+					declared_type: String::from("object"),
+					is_const: false,
+					name: String::from("config"),
+					slot: 1,
+					value: Value::Object(BTreeMap::from([
+						(
+							String::from("Names"),
+							Value::Array(vec![
+								Value::Text(String::from("Ada")),
+								Value::Text(String::from("Bea")),
+							]),
+						),
+					])),
+				},
+			],
+			source_location: None,
+		};
+
+		let value = VirtualMachine::evaluate_watch_expression("len(config.Names) + total", &frame).unwrap();
+
+		assert_eq!(value, Value::Integer(4));
+	}
+
+	#[test]
+	fn evaluates_watch_expression_for_record_pointer_field_access() {
+		let frame = VmStackFrame {
+			instruction_index: 0,
+			locals: vec![
+				VmVisibleLocal {
+					declared_type: String::from("record pointer"),
+					is_const: false,
+					name: String::from("cust"),
+					slot: 0,
+					value: Value::RecordPointer(RecordPointerValue {
+						column_names: vec![String::from("Name")],
+						exists: true,
+						fields: BTreeMap::from([
+							(
+								String::from("name"),
+								RecordFieldValue::Materialized(Value::Text(String::from("Ada"))),
+							),
+						]),
+						locked: false,
+						persisted: true,
+						record_type: RecordPointerType {
+							database_name: String::from("ExampleDb"),
+							schema_name: String::from("Main"),
+							table_name: String::from("Customers"),
+						},
+						schema_is_implicit: true,
+					}),
+				},
+			],
+			source_location: None,
+		};
+
+		let value = VirtualMachine::evaluate_watch_expression("cust.Name", &frame).unwrap();
+
+		assert_eq!(value, Value::Text(String::from("Ada")));
 	}
 
 	#[test]

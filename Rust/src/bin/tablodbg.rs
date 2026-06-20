@@ -21,6 +21,7 @@ use tablo::runtime_config::read_runtime_database_config_from_path;
 use tablo::value::RecordFieldValue;
 use tablo::value::Value;
 use tablo::value::sqlite_record_field_runtime_value;
+use tablo::vm::VirtualMachine;
 use tablo::vm::VmError;
 use tablo::vm::VmStackFrame;
 
@@ -177,6 +178,7 @@ impl DapServer {
 				"initialize",
 				json!({
 					"supportsConfigurationDoneRequest": true,
+					"supportsEvaluateForHovers": true,
 					"supportsStepInTargetsRequest": false,
 					"supportsTerminateRequest": false,
 					"supportsConditionalBreakpoints": false,
@@ -335,6 +337,40 @@ impl DapServer {
 			json!({
 				"stackFrames": stack_frames,
 				"totalFrames": self.current_stack_frames().map(|frames| frames.len()).unwrap_or(0),
+			}),
+		)])
+	}
+
+	fn handle_evaluate(&mut self, request_seq: i64, arguments: Option<JsonValue>) -> Result<Vec<JsonValue>, String> {
+		let arguments = arguments.unwrap_or(JsonValue::Null);
+		let expression = arguments.get("expression")
+			.and_then(JsonValue::as_str)
+			.ok_or(String::from("Evaluate request must include an `expression`."))?;
+		let stack_frames = self.current_stack_frames().ok_or(String::from("Program is not currently paused."))?;
+		let frame_index = arguments.get("frameId")
+			.and_then(JsonValue::as_i64)
+			.map(|frame_id| {
+				if frame_id == 0 || frame_id > stack_frames.len() as i64 {
+					Err(format!("Unknown frame id {frame_id}."))
+				}
+				else {
+					Ok((frame_id - 1) as usize)
+				}
+			})
+			.transpose()?
+			.unwrap_or(0);
+		let frame = stack_frames.get(frame_index).ok_or_else(|| format!("Unknown frame id {}.", frame_index + 1))?;
+		let value = VirtualMachine::evaluate_watch_expression(expression, frame)
+			.map_err(|error| error.message)?;
+		let variables_reference = self.variables_reference_for_value(value.clone());
+
+		Ok(vec![dap_response(
+			request_seq,
+			"evaluate",
+			json!({
+				"result": value.to_string(),
+				"type": variable_type_name(&value),
+				"variablesReference": variables_reference,
 			}),
 		)])
 	}
@@ -983,6 +1019,7 @@ fn run_dap_server() -> Result<(), String> {
 			"configurationDone" => server.handle_configuration_done(request.seq),
 			"continue" => server.handle_continue(request.seq),
 			"disconnect" => Ok(server.handle_disconnect(request.seq)),
+			"evaluate" => server.handle_evaluate(request.seq, request.arguments.clone()),
 			"exceptionInfo" => server.handle_exception_info(request.seq),
 			"initialize" => Ok(server.handle_initialize(request.seq)),
 			"launch" => server.handle_launch(request.seq, request.arguments.clone()),
@@ -1119,8 +1156,59 @@ mod tests {
 	use tablo::value::RecordFieldValue;
 	use tablo::value::RecordPointerValue;
 	use tablo::value::Value;
+	use tablo::vm::VmError;
+	use tablo::vm::VmStackFrame;
+	use tablo::vm::VmVisibleLocal;
 
 	use super::DapServer;
+
+	#[test]
+	fn evaluates_watch_expression_in_dap_server() {
+		let frame = VmStackFrame {
+			instruction_index: 0,
+			locals: vec![
+				VmVisibleLocal {
+					declared_type: String::from("int"),
+					is_const: false,
+					name: String::from("total"),
+					slot: 0,
+					value: Value::Integer(2),
+				},
+				VmVisibleLocal {
+					declared_type: String::from("[text]"),
+					is_const: false,
+					name: String::from("names"),
+					slot: 1,
+					value: Value::Array(vec![
+						Value::Text(String::from("Ada")),
+						Value::Text(String::from("Bea")),
+					]),
+				},
+			],
+			source_location: None,
+		};
+		let mut server = DapServer::new();
+		server.runtime_error = Some(VmError {
+			instruction_index: 0,
+			message: String::from("paused"),
+			source_location: None,
+			stack_trace: vec![frame],
+		});
+
+		let messages = server.handle_evaluate(
+			1,
+			Some(serde_json::json!({
+				"expression": "len(names) + total",
+				"frameId": 1,
+			})),
+		).unwrap();
+
+		assert_eq!(messages.len(), 1);
+		assert_eq!(messages[0].get("success"), Some(&JsonValue::Bool(true)));
+		assert_eq!(messages[0].get("body").and_then(|body| body.get("result")), Some(&JsonValue::String(String::from("4"))));
+		assert_eq!(messages[0].get("body").and_then(|body| body.get("type")), Some(&JsonValue::String(String::from("int"))));
+		assert_eq!(messages[0].get("body").and_then(|body| body.get("variablesReference")), Some(&JsonValue::Number(0.into())));
+	}
 
 	#[test]
 	fn expands_record_pointer_fields_in_variables_view() {
