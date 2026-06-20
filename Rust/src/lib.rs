@@ -1891,6 +1891,16 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_invalid_literal_temporal_format_string_at_compile_time() {
+		let error = evaluate_snippet("format(@2026-06-20, 'YYYY-MM-DD hh:mm')").unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Invalid temporal format string: Temporal format token `hh` is not valid when formatting a `date` value."),
+			position: 31,
+		}));
+	}
+
+	#[test]
 	fn rejects_invalid_main_signature_source_text() {
 		let error = run("fn Main() int { return 0; }").unwrap_err();
 

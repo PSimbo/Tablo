@@ -21,6 +21,46 @@ enum Radix {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TemporalFormatItem {
+	Literal(String),
+	Token(TemporalFormatToken),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TemporalFormatTarget {
+	Date,
+	Time,
+	Timestamp,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TemporalFormatToken {
+	AmLower,
+	AmUpper,
+	Day,
+	DayPadded,
+	Hour12,
+	Hour12Padded,
+	Hour24,
+	Hour24Padded,
+	Millisecond,
+	Minute,
+	MinutePadded,
+	Month,
+	MonthNameAbbreviated,
+	MonthNameFull,
+	MonthPadded,
+	Second,
+	SecondPadded,
+	WeekNumber,
+	WeekNumberPadded,
+	WeekdayNameAbbreviated,
+	WeekdayNameFull,
+	YearFourDigit,
+	YearTwoDigit,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NumericFormatError {
 	pub message: String,
 	pub position: usize,
@@ -272,6 +312,78 @@ impl NumericFormatPattern {
 	}
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TemporalFormatError {
+	pub message: String,
+	pub position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TemporalFormatPattern {
+	items: Vec<TemporalFormatItem>,
+}
+
+impl TemporalFormatPattern {
+	pub fn items(&self) -> &[TemporalFormatItem] {
+		&self.items
+	}
+
+	pub fn parse(source: &str, target: TemporalFormatTarget) -> Result<Self, TemporalFormatError> {
+		if source.is_empty() {
+			return Err(TemporalFormatError {
+				message: String::from("Temporal format string must not be empty."),
+				position: 0,
+			});
+		}
+
+		let mut items = Vec::new();
+		let mut literal = String::new();
+		let mut offset = 0;
+
+		while offset < source.len() {
+			let slice = &source[offset..];
+			let mut chars = slice.chars();
+			let ch = chars.next().unwrap();
+
+			if ch == '\\' {
+				let Some(escaped) = chars.next() else {
+					return Err(TemporalFormatError {
+						message: String::from("Temporal format string must not end with an unterminated escape sequence."),
+						position: offset,
+					});
+				};
+
+				literal.push(escaped);
+				offset += ch.len_utf8() + escaped.len_utf8();
+				continue;
+			}
+
+			if let Some((token, matched_text)) = parse_temporal_token(slice) {
+				validate_temporal_token_for_target(token, target, offset)?;
+
+				if !literal.is_empty() {
+					items.push(TemporalFormatItem::Literal(std::mem::take(&mut literal)));
+				}
+
+				items.push(TemporalFormatItem::Token(token));
+				offset += matched_text.len();
+				continue;
+			}
+
+			literal.push(ch);
+			offset += ch.len_utf8();
+		}
+
+		if !literal.is_empty() {
+			items.push(TemporalFormatItem::Literal(literal));
+		}
+
+		Ok(Self {
+			items,
+		})
+	}
+}
+
 struct WholePatternParse {
 	digit_count: usize,
 	group_separator: Option<char>,
@@ -312,6 +424,37 @@ fn pattern_separator_count(min_digits: usize, group_size: usize) -> usize {
 	else {
 		(min_digits - 1) / group_size
 	}
+}
+
+fn parse_temporal_token(source: &str) -> Option<(TemporalFormatToken, &'static str)> {
+	const TOKENS: &[(TemporalFormatToken, &str)] = &[
+		(TemporalFormatToken::WeekdayNameFull, "WWWW"),
+		(TemporalFormatToken::MonthNameFull, "MMMM"),
+		(TemporalFormatToken::WeekdayNameAbbreviated, "WWW"),
+		(TemporalFormatToken::MonthNameAbbreviated, "MMM"),
+		(TemporalFormatToken::YearFourDigit, "YYYY"),
+		(TemporalFormatToken::Millisecond, "zzz"),
+		(TemporalFormatToken::DayPadded, "DD"),
+		(TemporalFormatToken::MonthPadded, "MM"),
+		(TemporalFormatToken::WeekNumberPadded, "WW"),
+		(TemporalFormatToken::YearTwoDigit, "YY"),
+		(TemporalFormatToken::AmUpper, "AM"),
+		(TemporalFormatToken::Hour12Padded, "hh"),
+		(TemporalFormatToken::Hour24Padded, "HH"),
+		(TemporalFormatToken::MinutePadded, "mm"),
+		(TemporalFormatToken::SecondPadded, "ss"),
+		(TemporalFormatToken::AmLower, "am"),
+		(TemporalFormatToken::Day, "D"),
+		(TemporalFormatToken::Month, "M"),
+		(TemporalFormatToken::WeekNumber, "W"),
+		(TemporalFormatToken::Hour12, "h"),
+		(TemporalFormatToken::Hour24, "H"),
+		(TemporalFormatToken::Minute, "m"),
+		(TemporalFormatToken::Second, "s"),
+	];
+
+	TOKENS.iter()
+		.find_map(|(token, text)| source.starts_with(text).then_some((*token, *text)))
 }
 
 fn parse_whole_pattern(source: &str, pattern_start: usize) -> Result<WholePatternParse, NumericFormatError> {
@@ -434,6 +577,34 @@ fn split_trimmed_decimal_parts(mut coefficient: u128, mut scale: usize) -> (Stri
 	split_scaled_integer(coefficient, scale)
 }
 
+fn temporal_token_text(token: TemporalFormatToken) -> &'static str {
+	match token {
+		TemporalFormatToken::AmLower => "am",
+		TemporalFormatToken::AmUpper => "AM",
+		TemporalFormatToken::Day => "D",
+		TemporalFormatToken::DayPadded => "DD",
+		TemporalFormatToken::Hour12 => "h",
+		TemporalFormatToken::Hour12Padded => "hh",
+		TemporalFormatToken::Hour24 => "H",
+		TemporalFormatToken::Hour24Padded => "HH",
+		TemporalFormatToken::Millisecond => "zzz",
+		TemporalFormatToken::Minute => "m",
+		TemporalFormatToken::MinutePadded => "mm",
+		TemporalFormatToken::Month => "M",
+		TemporalFormatToken::MonthNameAbbreviated => "MMM",
+		TemporalFormatToken::MonthNameFull => "MMMM",
+		TemporalFormatToken::MonthPadded => "MM",
+		TemporalFormatToken::Second => "s",
+		TemporalFormatToken::SecondPadded => "ss",
+		TemporalFormatToken::WeekNumber => "W",
+		TemporalFormatToken::WeekNumberPadded => "WW",
+		TemporalFormatToken::WeekdayNameAbbreviated => "WWW",
+		TemporalFormatToken::WeekdayNameFull => "WWWW",
+		TemporalFormatToken::YearFourDigit => "YYYY",
+		TemporalFormatToken::YearTwoDigit => "YY",
+	}
+}
+
 fn to_radix_string(mut value: u128, radix: u32) -> String {
 	if value == 0 {
 		return String::from("0");
@@ -450,6 +621,65 @@ fn to_radix_string(mut value: u128, radix: u32) -> String {
 	digits.into_iter().collect()
 }
 
+fn token_is_date_only(token: TemporalFormatToken) -> bool {
+	matches!(
+		token,
+		TemporalFormatToken::Day
+			| TemporalFormatToken::DayPadded
+			| TemporalFormatToken::Month
+			| TemporalFormatToken::MonthPadded
+			| TemporalFormatToken::MonthNameAbbreviated
+			| TemporalFormatToken::MonthNameFull
+			| TemporalFormatToken::WeekNumber
+			| TemporalFormatToken::WeekNumberPadded
+			| TemporalFormatToken::WeekdayNameAbbreviated
+			| TemporalFormatToken::WeekdayNameFull
+			| TemporalFormatToken::YearTwoDigit
+			| TemporalFormatToken::YearFourDigit
+	)
+}
+
+fn token_is_time_only(token: TemporalFormatToken) -> bool {
+	matches!(
+		token,
+		TemporalFormatToken::AmLower
+			| TemporalFormatToken::AmUpper
+			| TemporalFormatToken::Hour12
+			| TemporalFormatToken::Hour12Padded
+			| TemporalFormatToken::Hour24
+			| TemporalFormatToken::Hour24Padded
+			| TemporalFormatToken::Minute
+			| TemporalFormatToken::MinutePadded
+			| TemporalFormatToken::Second
+			| TemporalFormatToken::SecondPadded
+			| TemporalFormatToken::Millisecond
+	)
+}
+
+fn validate_temporal_token_for_target(
+	token: TemporalFormatToken,
+	target: TemporalFormatTarget,
+	position: usize,
+) -> Result<(), TemporalFormatError> {
+	match target {
+		TemporalFormatTarget::Date if token_is_time_only(token) => Err(TemporalFormatError {
+			message: format!(
+				"Temporal format token `{}` is not valid when formatting a `date` value.",
+				temporal_token_text(token),
+			),
+			position,
+		}),
+		TemporalFormatTarget::Time if token_is_date_only(token) => Err(TemporalFormatError {
+			message: format!(
+				"Temporal format token `{}` is not valid when formatting a `time` value.",
+				temporal_token_text(token),
+			),
+			position,
+		}),
+		_ => Ok(()),
+	}
+}
+
 fn zero_pad_left(mut digits: String, min_digits: usize) -> String {
 	while digits.len() < min_digits {
 		digits.insert(0, '0');
@@ -461,6 +691,10 @@ fn zero_pad_left(mut digits: String, min_digits: usize) -> String {
 mod tests {
 	use super::NumericFormatPattern;
 	use super::NumericFormatTarget;
+	use super::TemporalFormatItem;
+	use super::TemporalFormatPattern;
+	use super::TemporalFormatTarget;
+	use super::TemporalFormatToken;
 	use crate::value::Decimal;
 
 	#[test]
@@ -492,9 +726,64 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_temporal_pattern_using_greedy_tokens() {
+		let pattern = TemporalFormatPattern::parse("YYYY-MM-DD", TemporalFormatTarget::Date).unwrap();
+
+		assert_eq!(
+			pattern.items(),
+			&[
+				TemporalFormatItem::Token(TemporalFormatToken::YearFourDigit),
+				TemporalFormatItem::Literal(String::from("-")),
+				TemporalFormatItem::Token(TemporalFormatToken::MonthPadded),
+				TemporalFormatItem::Literal(String::from("-")),
+				TemporalFormatItem::Token(TemporalFormatToken::DayPadded),
+			],
+		);
+	}
+
+	#[test]
+	fn parses_temporal_pattern_with_escaped_literal_token_character() {
+		let pattern = TemporalFormatPattern::parse(r"\Y\Y\Y\Y-MM-DD", TemporalFormatTarget::Date).unwrap();
+
+		assert_eq!(
+			pattern.items(),
+			&[
+				TemporalFormatItem::Literal(String::from("YYYY-")),
+				TemporalFormatItem::Token(TemporalFormatToken::MonthPadded),
+				TemporalFormatItem::Literal(String::from("-")),
+				TemporalFormatItem::Token(TemporalFormatToken::DayPadded),
+			],
+		);
+	}
+
+	#[test]
+	fn rejects_date_pattern_with_time_token() {
+		let error = TemporalFormatPattern::parse("YYYY-MM-DD hh:mm", TemporalFormatTarget::Date).unwrap_err();
+
+		assert_eq!(error.message, "Temporal format token `hh` is not valid when formatting a `date` value.");
+		assert_eq!(error.position, 11);
+	}
+
+	#[test]
 	fn rejects_decimal_pattern_with_non_decimal_whole_digits() {
 		let error = NumericFormatPattern::parse("x.00", NumericFormatTarget::Decimal).unwrap_err();
 
 		assert_eq!(error.message, "Decimal numeric format strings must use `1` as the whole-digit marker.");
+	}
+
+	#[test]
+	fn rejects_temporal_pattern_with_trailing_escape() {
+		let error = TemporalFormatPattern::parse(r"YYYY\", TemporalFormatTarget::Date).unwrap_err();
+
+		assert_eq!(error.message, "Temporal format string must not end with an unterminated escape sequence.");
+		assert_eq!(error.position, 4);
+	}
+
+	#[test]
+	fn rejects_time_pattern_with_date_token() {
+		let error = TemporalFormatPattern::parse("HH:mm YYYY", TemporalFormatTarget::Time).unwrap_err();
+
+		assert_eq!(error.message, "Temporal format token `YYYY` is not valid when formatting a `time` value.");
+		assert_eq!(error.position, 6);
 	}
 }

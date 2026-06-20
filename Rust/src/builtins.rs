@@ -187,7 +187,7 @@ impl BuiltInFunction {
 			},
 			Self::Format => match argument_types {
 				[left, right]
-					if matches!(left.without_nullability(), DataType::Dec | DataType::Int)
+					if matches!(left.without_nullability(), DataType::Date | DataType::Dec | DataType::Int | DataType::Time | DataType::Timestamp)
 						&& matches!(right.without_nullability(), DataType::Text) => {
 					Some(DataType::Text)
 				}
