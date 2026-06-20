@@ -1628,6 +1628,18 @@ Returns the string representation of `v` formatted according to `pattern`. See t
 
 Returns the string representation of `v` formatted according to `pattern`. See the "Numeric Format Strings" section.
 
+### `format(v: date, pattern: text): text`
+
+Returns the string representation of `v` formatted according to `pattern`. See the "Date/Time Format Strings" section.
+
+### `format(v: time, pattern: text): text`
+
+Returns the string representation of `v` formatted according to `pattern`. See the "Date/Time Format Strings" section.
+
+### `format(v: timestamp, pattern: text): text`
+
+Returns the string representation of `v` formatted according to `pattern`. See the "Date/Time Format Strings" section.
+
 ### `hour(t: time): int`
 
 Returns the hours component of `t`.
@@ -1738,21 +1750,25 @@ Returns the string representation of `v`.
 
 Returns the string representation of `v`.
 
+### `text(v: date): text`
+
+Returns the string representation of `v` in ISO-8601 format.
+
 ### `text(v: time): text`
 
-Returns the string representation of `v`.
+Returns the string representation of `v` in ISO-8601 format.
 
 ### `text(v: timestamp): text`
 
-Returns the string representation of `v`.
+Returns the string representation of `v` in ISO-8601 format.
 
 ### `text(v: timestamptz): text`
 
-Returns the string representation of `v`.
+Returns the string representation of `v` in ISO-8601 format.
 
 ### `text(v: timetz): text`
 
-Returns the string representation of `v`.
+Returns the string representation of `v` in ISO-8601 format.
 
 ### `time(): time`
 
@@ -1913,6 +1929,76 @@ Invalid literal format strings should be rejected at compile time where possible
 - decimal formats that contain thousands separators in the fractional part
 
 The `format(...)` built-ins must not be used in query expressions.
+
+Date/Time Format Strings
+------------------------
+
+The `format(...)` built-in functions also support a compact format-string syntax for temporal values.
+
+The first implementation supports:
+
+- `date`
+- `time`
+- `timestamp`
+
+Formatting of time-zone information is not yet specified. Accordingly, this date/time format-string syntax does not currently define any time-zone-related tokens.
+
+Any character in a date/time format string that is not part of a recognized token is treated as a literal character and copied to the output unchanged.
+
+The `\` character escapes the immediately following character. This allows token characters to be emitted literally when required. For example, `\Y` emits a literal `Y`.
+
+The current date/time format tokens are:
+
+| Token  | Meaning                                              |
+|--------|------------------------------------------------------|
+| `D`    | Day of month without zero-padding                    |
+| `DD`   | Day of month, two digits with zero-padding           |
+| `M`    | Month number without zero-padding                    |
+| `MM`   | Month number, two digits with zero-padding           |
+| `MMM`  | Abbreviated month name                               |
+| `MMMM` | Full month name                                      |
+| `W`    | Week number without zero-padding                     |
+| `WW`   | Week number, two digits with zero-padding            |
+| `WWW`  | Abbreviated week-day name                            |
+| `WWWW` | Full week-day name                                   |
+| `YY`   | Year rendered using two digits                       |
+| `YYYY` | Year rendered using four digits                      |
+| `AM`   | Upper-case AM/PM indicator                           |
+| `am`   | Lower-case AM/PM indicator                           |
+| `h`    | Hour without zero-padding, using a 12-hour clock     |
+| `hh`   | Hour with zero-padding, using a 12-hour clock        |
+| `H`    | Hour without zero-padding, using a 24-hour clock     |
+| `HH`   | Hour with zero-padding, using a 24-hour clock        |
+| `m`    | Minute without zero-padding                          |
+| `mm`   | Minute with zero-padding                             |
+| `s`    | Second without zero-padding                          |
+| `ss`   | Second with zero-padding                             |
+| `zzz`  | Milliseconds using exactly three digits              |
+
+The following semantic rules apply:
+
+- tokens are matched greedily, so the longest valid token at a given position is used
+- month and week-day names (both full and abbreviated forms) are locale-dependent
+- `AM` and `am` determine only the case of the AM/PM marker and may be used with either 12-hour or 24-hour hour tokens
+- `zzz` renders milliseconds using exactly three digits; values with finer precision are truncated or rounded in an implementation-defined manner
+- tokens that refer to components not present on the input type are invalid
+
+Examples:
+
+~~~
+format(@2026-06-20, 'YYYY-MM-DD')               // '2026-06-20'
+format(@2026-06-20, 'DD/MM/YY')                 // '20/06/26'
+format(@15:04:09, 'H:mm:ss')                    // '15:04:09'
+format(@15:04:09, 'hh:mm AM')                   // '03:04 PM'
+format(@2026-06-20T15:04:09, 'WWW, D MMM YYYY') // locale-dependent week-day and month names
+~~~
+
+Invalid literal format strings should be rejected at compile time where possible. At minimum, the following are invalid:
+
+- empty format strings
+- use of `h`, `hh`, `H`, `HH`, `m`, `mm`, `s`, `ss`, `zzz`, `AM`, or `am` when formatting a `date`
+- use of `D`, `DD`, `M`, `MM`, `MMM`, `MMMM`, `W`, `WW`, `WWW`, `WWWW`, `YY`, or `YYYY` when formatting a `time`
+- a trailing `\` escape character with no following character
 
 Grammar
 -------
