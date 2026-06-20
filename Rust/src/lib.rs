@@ -20,6 +20,7 @@ pub mod schema_fixture;
 pub mod semantic;
 pub mod source;
 pub mod syntax;
+pub mod utils;
 pub mod value;
 pub mod vm;
 
@@ -361,6 +362,19 @@ pub fn compile_with_source_name_and_schema(
 		Some(schema_catalog),
 	)?;
 	write_program_to_path(output_path, &program).map_err(TabloError::ObjectFile)
+}
+
+pub fn discover_project_config_path(file_path: &Path) -> Option<PathBuf> {
+	let mut current = file_path.parent()?;
+
+	loop {
+		let candidate = current.join("tablo.toml");
+		if candidate.is_file() {
+			return Some(candidate);
+		}
+
+		current = current.parent()?;
+	}
 }
 
 pub(crate) fn encode_external_source_diagnostic(

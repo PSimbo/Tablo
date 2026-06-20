@@ -3,8 +3,6 @@ use std::io;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::io::Write;
-use std::path::Path;
-use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
@@ -20,10 +18,13 @@ use tablo::diagnostics::diagnostic_at_start;
 use tablo::diagnostics::diagnostic_for_tablo_error;
 use tablo::diagnostics::trailing_whitespace_diagnostics;
 use tablo::diagnostics::unused_variable_diagnostics;
+use tablo::discover_project_config_path;
 use tablo::local_usage_with_source_name;
 use tablo::local_usage_with_source_name_and_schema;
 use tablo::runtime_config::read_schema_catalog_from_runtime_config_path;
 use tablo::source::SourceText;
+use tablo::source::source_offset_for_position;
+use tablo::utils::file_path_from_document_uri;
 
 fn main() {
 	let stdin = io::stdin();
@@ -143,7 +144,7 @@ impl LspServer {
 		let Some(document) = self.open_documents.get(uri) else {
 			return Vec::new();
 		};
-		let Some(cursor_offset) = source_offset_for_position(&document.text, position) else {
+		let Some(cursor_offset) = source_offset_for_position(&document.text, position.line, position.character) else {
 			return Vec::new();
 		};
 		let visible_text = &document.text[..cursor_offset];
@@ -235,7 +236,7 @@ impl LspServer {
 		match method {
 			Some("initialize") => {
 				if let Some(id) = id {
-					write_lsp_message(writer, json!({
+					write_lsp_message(writer, &json!({
 						"jsonrpc": "2.0",
 						"id": id,
 						"result": {
@@ -268,7 +269,7 @@ impl LspServer {
 				let items = self.completion_items(&params.text_document.uri, params.position);
 
 				if let Some(id) = id {
-					write_lsp_message(writer, json!({
+					write_lsp_message(writer, &json!({
 						"jsonrpc": "2.0",
 						"id": id,
 						"result": items
@@ -294,7 +295,7 @@ impl LspServer {
 				self.shutdown_requested = true;
 
 				if let Some(id) = id {
-					write_lsp_message(writer, json!({
+					write_lsp_message(writer, &json!({
 						"jsonrpc": "2.0",
 						"id": id,
 						"result": null
@@ -312,7 +313,7 @@ impl LspServer {
 			}
 			Some(method_name) => {
 				if let Some(id) = id {
-					write_lsp_message(writer, json!({
+					write_lsp_message(writer, &json!({
 						"jsonrpc": "2.0",
 						"id": id,
 						"error": {
@@ -344,7 +345,7 @@ impl LspServer {
 			.map(diagnostic_to_json)
 			.collect::<Vec<_>>();
 
-		write_lsp_message(writer, json!({
+		write_lsp_message(writer, &json!({
 			"jsonrpc": "2.0",
 			"method": "textDocument/publishDiagnostics",
 			"params": {
@@ -356,7 +357,7 @@ impl LspServer {
 	}
 
 	fn publish_empty_diagnostics<W: Write>(&self, writer: &mut W, uri: &str) -> Result<(), String> {
-		write_lsp_message(writer, json!({
+		write_lsp_message(writer, &json!({
 			"jsonrpc": "2.0",
 			"method": "textDocument/publishDiagnostics",
 			"params": {
@@ -418,30 +419,6 @@ fn diagnostic_to_json(diagnostic: Diagnostic) -> JsonValue {
 	})
 }
 
-fn discover_project_config_path(file_path: &Path) -> Option<PathBuf> {
-	let mut current = file_path.parent()?;
-
-	loop {
-		let candidate = current.join("tablo.toml");
-		if candidate.is_file() {
-			return Some(candidate);
-		}
-
-		current = current.parent()?;
-	}
-}
-
-fn file_path_from_document_uri(uri: &str) -> Option<PathBuf> {
-	let path = uri.strip_prefix("file://")?;
-
-	if cfg!(windows) {
-		Some(PathBuf::from(path.trim_start_matches('/')))
-	}
-	else {
-		Some(PathBuf::from(path))
-	}
-}
-
 fn parse_content_length(header_line: &str) -> Result<Option<usize>, String> {
 	let Some((name, value)) = header_line.split_once(':') else {
 		return Ok(None);
@@ -491,13 +468,8 @@ fn read_lsp_message<R: BufRead>(reader: &mut R) -> Result<Option<JsonValue>, Str
 	Ok(Some(message))
 }
 
-fn source_offset_for_position(text: &str, position: Position) -> Option<usize> {
-	let source = SourceText::new(text);
-	source.offset_from_lsp_position(position.line, position.character)
-}
-
-fn write_lsp_message<W: Write>(writer: &mut W, message: JsonValue) -> Result<(), String> {
-	let body = serde_json::to_vec(&message)
+fn write_lsp_message<W: Write>(writer: &mut W, message: &JsonValue) -> Result<(), String> {
+	let body = serde_json::to_vec(message)
 		.map_err(|error| format!("Failed to serialize LSP message: {error}"))?;
 	let header = format!("Content-Length: {}\r\n\r\n", body.len());
 

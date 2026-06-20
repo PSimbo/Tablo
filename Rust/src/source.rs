@@ -298,6 +298,11 @@ pub fn skip_whitespace(text: &str, start: usize) -> usize {
 	index
 }
 
+pub fn source_offset_for_position(text: &str, line: u32, character: u32) -> Option<usize> {
+	let source = SourceText::new(text);
+	source.offset_from_lsp_position(line, character)
+}
+
 pub fn token_span_at_position(source: &SourceText, position: usize) -> Option<(usize, usize)> {
 	let text = source.as_str();
 	let position = position.min(text.len());
@@ -412,6 +417,7 @@ mod tests {
 	use super::skip_comment;
 	use super::skip_string_literal;
 	use super::skip_whitespace;
+	use super::source_offset_for_position;
 	use super::token_span_at_position;
 
 	#[test]
@@ -487,6 +493,11 @@ mod tests {
 	fn resolves_offset_from_lsp_position() {
 		let source = SourceText::new("a\nbc\n");
 		assert_eq!(source.offset_from_lsp_position(1, 1), Some(3));
+	}
+
+	#[test]
+	fn resolves_source_offset_for_position_helper() {
+		assert_eq!(source_offset_for_position("a\nbc\n", 1, 1), Some(3));
 	}
 
 	#[test]
