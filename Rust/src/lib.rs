@@ -10,6 +10,7 @@ pub mod bytecode;
 pub mod compiler;
 pub mod completion;
 pub mod debugger;
+pub mod diagnostics;
 pub mod format_string;
 pub mod object_file;
 pub mod query;

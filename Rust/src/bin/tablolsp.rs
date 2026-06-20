@@ -10,20 +10,20 @@ use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use serde_json::json;
 
-use tablo::TabloError;
 use tablo::completion::CompletionItem;
 use tablo::completion::CompletionItemKind;
 use tablo::completion::collect_document_completion_items;
 use tablo::completion::dedupe_completion_items;
 use tablo::completion::default_completion_items;
+use tablo::diagnostics::Diagnostic;
+use tablo::diagnostics::diagnostic_at_start;
+use tablo::diagnostics::diagnostic_for_tablo_error;
+use tablo::diagnostics::trailing_whitespace_diagnostics;
+use tablo::diagnostics::unused_variable_diagnostics;
 use tablo::local_usage_with_source_name;
 use tablo::local_usage_with_source_name_and_schema;
 use tablo::runtime_config::read_schema_catalog_from_runtime_config_path;
-use tablo::semantic::ssa::LocalDeclarationKind;
-use tablo::semantic::ssa::ProgramLocalUsage;
 use tablo::source::SourceText;
-use tablo::source::local_name_span;
-use tablo::source::token_span_at_position;
 
 fn main() {
 	let stdin = io::stdin();
@@ -150,7 +150,7 @@ impl LspServer {
 		collect_document_completion_items(visible_text)
 	}
 
-	fn document_diagnostics(&self, uri: &str, source: &str) -> Result<Vec<JsonValue>, String> {
+	fn document_diagnostics(&self, uri: &str, source: &str) -> Result<Vec<Diagnostic>, String> {
 		let Some(file_path) = file_path_from_document_uri(uri) else {
 			return Ok(Vec::new());
 		};
@@ -161,10 +161,8 @@ impl LspServer {
 			match read_schema_catalog_from_runtime_config_path(&config_path) {
 				Ok(schema_catalog) => local_usage_with_source_name_and_schema(source, file_name, &schema_catalog),
 				Err(error) => {
-					diagnostics.push(diagnostic_json(
-						uri,
-						&SourceText::new(source),
-						0,
+					diagnostics.push(diagnostic_at_start(
+						source,
 						1,
 						&format!(
 							"Failed to load schema configuration from `{}`: {}",
@@ -182,11 +180,11 @@ impl LspServer {
 
 		match validation_result {
 			Ok(local_usage) => {
-				diagnostics.extend(unused_variable_diagnostics(uri, source, &local_usage));
+				diagnostics.extend(unused_variable_diagnostics(source, &local_usage));
 				Ok(diagnostics)
 			}
 			Err(error) => {
-				diagnostics.push(tablo_error_to_diagnostic(uri, source, error));
+				diagnostics.push(diagnostic_for_tablo_error(source, error));
 				Ok(diagnostics)
 			}
 		}
@@ -341,7 +339,10 @@ impl LspServer {
 		let Some(document) = self.open_documents.get(uri) else {
 			return self.publish_empty_diagnostics(writer, uri);
 		};
-		let diagnostics = self.document_diagnostics(uri, &document.text)?;
+		let diagnostics = self.document_diagnostics(uri, &document.text)?
+			.into_iter()
+			.map(diagnostic_to_json)
+			.collect::<Vec<_>>();
 
 		write_lsp_message(writer, json!({
 			"jsonrpc": "2.0",
@@ -399,76 +400,19 @@ fn completion_item_to_json(item: CompletionItem) -> JsonValue {
 	})
 }
 
-fn diagnostic_json(uri: &str, source: &SourceText, position: usize, severity: u32, message: &str) -> JsonValue {
-	let (line, column) = source.line_and_column(position);
-	let line_index = line.saturating_sub(1) as u32;
-	let column_index = column.saturating_sub(1) as u32;
-	let end_column = column_index + 1;
-	let _ = uri;
-
+fn diagnostic_to_json(diagnostic: Diagnostic) -> JsonValue {
 	json!({
-		"severity": severity,
+		"severity": diagnostic.severity,
 		"source": "tablolsp",
-		"message": message,
+		"message": diagnostic.message,
 		"range": {
 			"start": {
-				"line": line_index,
-				"character": column_index,
+				"line": diagnostic.range.start.line,
+				"character": diagnostic.range.start.character,
 			},
 			"end": {
-				"line": line_index,
-				"character": end_column,
-			}
-		}
-	})
-}
-
-fn diagnostic_json_for_byte_span(
-	source: &SourceText,
-	start: usize,
-	end: usize,
-	severity: u32,
-	message: &str,
-) -> JsonValue {
-	let (start_line, start_column) = source.line_and_column(start);
-	let (end_line, end_column) = source.line_and_column(end);
-
-	json!({
-		"severity": severity,
-		"source": "tablolsp",
-		"message": message,
-		"range": {
-			"start": {
-				"line": start_line.saturating_sub(1) as u32,
-				"character": start_column.saturating_sub(1) as u32,
-			},
-			"end": {
-				"line": end_line.saturating_sub(1) as u32,
-				"character": end_column.saturating_sub(1) as u32,
-			}
-		}
-	})
-}
-
-fn diagnostic_json_for_range(
-	line_index: u32,
-	start_column: u32,
-	end_column: u32,
-	severity: u32,
-	message: &str,
-) -> JsonValue {
-	json!({
-		"severity": severity,
-		"source": "tablolsp",
-		"message": message,
-		"range": {
-			"start": {
-				"line": line_index,
-				"character": start_column,
-			},
-			"end": {
-				"line": line_index,
-				"character": end_column,
+				"line": diagnostic.range.end.line,
+				"character": diagnostic.range.end.character,
 			}
 		}
 	})
@@ -552,106 +496,6 @@ fn source_offset_for_position(text: &str, position: Position) -> Option<usize> {
 	source.offset_from_lsp_position(position.line, position.character)
 }
 
-fn tablo_error_to_diagnostic(uri: &str, source: &str, error: TabloError) -> JsonValue {
-	let source = SourceText::new(source);
-	let (position, message) = match error {
-		TabloError::Compile(error) => (error.position, error.message),
-		TabloError::Lex(error) => (error.position, error.message),
-		TabloError::Parse(error) => (error.position, error.message),
-		TabloError::ObjectFile(error) => (0, error.message),
-		TabloError::Runtime(error) => (
-			error.source_location
-				.map(|location| {
-					let (line, column) = (location.line() as usize, location.column() as usize);
-					source.offset_from_line_and_column(line, column)
-				})
-				.unwrap_or(0),
-			error.message,
-		),
-	};
-
-	let _ = uri;
-
-	if let Some((start, end)) = token_span_at_position(&source, position) {
-		diagnostic_json_for_byte_span(&source, start, end, 1, &message)
-	}
-	else {
-		diagnostic_json(uri, &source, position, 1, &message)
-	}
-}
-
-fn trailing_whitespace_diagnostics(source: &str) -> Vec<JsonValue> {
-	let mut diagnostics = Vec::new();
-
-	for (line_index, line) in source.split('\n').enumerate() {
-		let visible_line = line.strip_suffix('\r').unwrap_or(line);
-		let trimmed = visible_line.trim_end_matches([' ', '\t']);
-
-		if trimmed.len() == visible_line.len() {
-			continue;
-		}
-
-		let start_column = trimmed.chars().count() as u32;
-		let end_column = visible_line.chars().count() as u32;
-		diagnostics.push(diagnostic_json_for_range(
-			line_index as u32,
-			start_column,
-			end_column,
-			2,
-			"Line has trailing whitespace.",
-		));
-	}
-
-	diagnostics
-}
-
-fn unused_variable_diagnostics(uri: &str, source: &str, local_usage: &ProgramLocalUsage) -> Vec<JsonValue> {
-	let mut diagnostics = Vec::new();
-	let source = SourceText::new(source);
-
-	for function in &local_usage.functions {
-		for local in &function.locals {
-			let is_plain_local = matches!(
-				local.declaration.kind,
-				LocalDeclarationKind::Variable | LocalDeclarationKind::RecordPointerVariable
-			);
-
-			if !is_plain_local || !local.is_never_read() {
-				continue;
-			}
-
-			let message = if local.has_writes_after_declaration() {
-				format!("Local variable `{}` is assigned to but never read.", local.declaration.name)
-			}
-			else {
-				format!("Local variable `{}` is never read.", local.declaration.name)
-			};
-			let _ = uri;
-
-			if let Some((start, end)) = local_name_span(&source, local.declaration.position, &local.declaration.name) {
-				diagnostics.push(diagnostic_json_for_byte_span(
-					&source,
-					start,
-					end,
-					2,
-					&message,
-				));
-			}
-			else {
-				diagnostics.push(diagnostic_json(
-					uri,
-					&source,
-					local.declaration.position,
-					2,
-					&message,
-				));
-			}
-		}
-	}
-
-	diagnostics
-}
-
 fn write_lsp_message<W: Write>(writer: &mut W, message: JsonValue) -> Result<(), String> {
 	let body = serde_json::to_vec(&message)
 		.map_err(|error| format!("Failed to serialize LSP message: {error}"))?;
@@ -677,10 +521,11 @@ mod tests {
 	use super::LspServer;
 	use super::OpenDocument;
 	use super::Position;
+	use super::diagnostic_to_json;
 	use super::discover_project_config_path;
-	use super::tablo_error_to_diagnostic;
-	use tablo::compiler::CompileError;
 	use tablo::TabloError;
+	use tablo::compiler::CompileError;
+	use tablo::diagnostics::diagnostic_for_tablo_error;
 
 	fn unique_temp_directory(name: &str) -> PathBuf {
 		let nanos = SystemTime::now()
@@ -759,14 +604,13 @@ mod tests {
 	#[test]
 	fn highlights_full_span_for_assignment_type_error_on_string_literal() {
 		let source = "fn Main(args: [text]) int { var x: int = 'abc'; return 0; }";
-		let diagnostic = tablo_error_to_diagnostic(
-			"file:///tmp/example.tablo",
+		let diagnostic = diagnostic_to_json(diagnostic_for_tablo_error(
 			source,
 			TabloError::Compile(CompileError {
 				message: String::from("Cannot assign a value of type `text` to a variable of type `int`."),
 				position: 41,
 			}),
-		);
+		));
 		let diagnostic = diagnostic.to_string();
 
 		assert!(diagnostic.contains("Cannot assign a value of type `text` to a variable of type `int`."));
@@ -777,14 +621,13 @@ mod tests {
 	#[test]
 	fn highlights_full_span_for_unknown_table_field_diagnostic() {
 		let source = "with ExampleDb;\nfn Main(args: [text]) int { count Customers where MissingField == 1; return 0; }";
-		let diagnostic = tablo_error_to_diagnostic(
-			"file:///tmp/example.tablo",
+		let diagnostic = diagnostic_to_json(diagnostic_for_tablo_error(
 			source,
 			TabloError::Compile(CompileError {
 				message: String::from("Field `MissingField` does not exist on table `Customers`."),
 				position: 66,
 			}),
-		);
+		));
 		let diagnostic = diagnostic.to_string();
 
 		assert!(diagnostic.contains("Field `MissingField` does not exist on table `Customers`."));
