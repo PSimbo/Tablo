@@ -1443,6 +1443,7 @@ impl VirtualMachine {
 				)),
 			},
 			BuiltInFunction::IntCast => match arguments.as_slice() {
+				[Value::Boolean(value)] => Ok(Some(Value::Integer(if *value { 1 } else { 0 }))),
 				[Value::Enum(value)] => Ok(Some((*value.backing_value).clone())),
 				[Value::Text(value)] => {
 					let parsed = value.parse::<i64>().map_err(|_| vm_error(

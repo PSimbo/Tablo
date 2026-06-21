@@ -279,6 +279,7 @@ impl BuiltInFunction {
 				_ => None,
 			},
 			Self::IntCast => match argument_types {
+				[arg] if matches!(arg.without_nullability(), DataType::Bool) => Some(DataType::Int),
 				[arg] if matches!(arg.without_nullability(), DataType::Text) => Some(DataType::Int),
 				_ => None,
 			},

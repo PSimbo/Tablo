@@ -1664,6 +1664,10 @@ Returns the index of the first instance of `str` within `arr` or `null` if `str`
 
 Returns the index of the first instance of the sub-string `sub` within `str` or `null` if `str` does not contain `sub`.
 
+### `int(v: bool): int`
+
+Returns `1` if `v` is `true` or `0` otherwise.
+
 ### `int(v: dec): int`
 
 Returns the `int` obtained by casting `v`. If `v` cannot be converted then the function fails.

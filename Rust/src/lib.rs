@@ -3163,6 +3163,19 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_int_cast_from_bool_source_text() {
+		let result = evaluate_snippet("[int(false), int(true)]").unwrap();
+
+		assert_eq!(
+			result,
+			Some(Value::Array(vec![
+				Value::Integer(0),
+				Value::Integer(1),
+			])),
+		);
+	}
+
+	#[test]
 	fn runs_int_cast_from_text_source_text() {
 		let result = evaluate_snippet("int('42')").unwrap();
 
