@@ -1093,7 +1093,16 @@ impl VirtualMachine {
 			"SELECT seq FROM {sequence_source} WHERE name = ?1"
 		);
 
-		let result = connection.query_row(&statement, [sequence_name], |row| row.get::<_, i64>(0));
+		let result = connection.query_row(&statement, [sequence_name], |row| {
+			let value = row.get_ref(0)?;
+			sqlite_integer_from_value_ref(value).map_err(|message| {
+				rusqlite::Error::FromSqlConversionFailure(
+					0,
+					value.data_type(),
+					Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, message)),
+				)
+			})
+		});
 
 		match result {
 			Ok(value) => Ok(value),
@@ -2692,6 +2701,22 @@ fn resolve_record_field_value(field: &RecordFieldValue, instruction_index: usize
 	}
 }
 
+fn sqlite_integer_from_value_ref(value: SqlValueRef<'_>) -> Result<i64, String> {
+	match value {
+		SqlValueRef::Integer(value) => Ok(value),
+		SqlValueRef::Text(value) => {
+			let text = std::str::from_utf8(value)
+				.map_err(|_| String::from("SQLite text value is not valid UTF-8."))?;
+			text.parse::<i64>()
+				.map_err(|_| format!("SQLite value `{text}` cannot be converted to `int`."))
+		}
+		other => Err(format!(
+			"SQLite {} value cannot be converted to `int`.",
+			sqlite_value_ref_type_name(other),
+		)),
+	}
+}
+
 fn sqlite_path_from_connection_string(database_name: &str, value: &str) -> Result<PathBuf, String> {
 	if value.is_empty() {
 		return Err(format!(
@@ -2749,6 +2774,16 @@ fn sqlite_value_from_runtime_value(value: Value, instruction_index: usize) -> Re
 			instruction_index,
 			format!("Cannot bind a `{}` value into a SQLite query parameter.", type_name(&other)),
 		)),
+	}
+}
+
+fn sqlite_value_ref_type_name(value: SqlValueRef<'_>) -> &'static str {
+	match value {
+		SqlValueRef::Blob(_) => "blob",
+		SqlValueRef::Integer(_) => "integer",
+		SqlValueRef::Null => "null",
+		SqlValueRef::Real(_) => "real",
+		SqlValueRef::Text(_) => "text",
 	}
 }
 

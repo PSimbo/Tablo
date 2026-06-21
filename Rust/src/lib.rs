@@ -3508,6 +3508,40 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_read_of_quoted_sqlite_sequence_name() {
+		let database_path = create_sqlite_test_database(
+			"runs_read_of_quoted_sqlite_sequence_name",
+			r#"
+				CREATE TABLE TempSeqTable (
+					Id INTEGER PRIMARY KEY AUTOINCREMENT,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO TempSeqTable (Name) VALUES ('First');
+				UPDATE sqlite_sequence SET name = 'temp-seq' WHERE name = 'TempSeqTable';
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int { return \"temp-seq\"; }",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table TempSeqTable (
+					Id int not null,
+					Name text not null
+				);
+				create sequence "temp-seq";
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
 	fn runs_relational_source_text() {
 		let result = evaluate_snippet("1 + 2 < 4").unwrap();
 
@@ -3555,6 +3589,40 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_seqnext_on_quoted_sqlite_sequence_name() {
+		let database_path = create_sqlite_test_database(
+			"runs_seqnext_on_quoted_sqlite_sequence_name",
+			r#"
+				CREATE TABLE TempSeqTable (
+					Id INTEGER PRIMARY KEY AUTOINCREMENT,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO TempSeqTable (Name) VALUES ('First');
+				UPDATE sqlite_sequence SET name = 'temp-seq' WHERE name = 'TempSeqTable';
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int { return seqnext(\"temp-seq\"); }",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table TempSeqTable (
+					Id int not null,
+					Name text not null
+				);
+				create sequence "temp-seq";
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(2)));
+	}
+
+	#[test]
 	fn runs_seqnext_on_sqlite_sequence() {
 		let database_path = create_sqlite_test_database(
 			"runs_seqnext_on_sqlite_sequence",
@@ -3585,6 +3653,43 @@ mod tests {
 		let _ = std::fs::remove_file(&database_path);
 
 		assert_eq!(result, Some(Value::Integer(2)));
+	}
+
+	#[test]
+	fn runs_seqnext_when_sqlite_sequence_value_is_stored_as_text() {
+		let database_path = create_sqlite_test_database(
+			"runs_seqnext_when_sqlite_sequence_value_is_stored_as_text",
+			r#"
+				CREATE TABLE TempSeqTable (
+					Id INTEGER PRIMARY KEY AUTOINCREMENT,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO TempSeqTable (Name) VALUES ('First');
+				UPDATE sqlite_sequence
+					SET name = 'temp-seq',
+						seq = CAST('0' AS TEXT)
+					WHERE name = 'TempSeqTable';
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int { return seqnext(\"temp-seq\"); }",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table TempSeqTable (
+					Id int not null,
+					Name text not null
+				);
+				create sequence "temp-seq";
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(1)));
 	}
 
 	#[test]
