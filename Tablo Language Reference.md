@@ -177,7 +177,7 @@ Note that the `json` data type does not require that the database backend have e
 
 Beyond the primitive data types listed in this section, custom data types may be defined as objects (see the "Objects" section).
 
-Technically, Tablo supports one more primitive data type: the record pointer. However, the semantics for record pointers are quite different compared to other variables. For one, a record pointer is declared using the `rec` keyword rather than the `var` keyword and is immutable unless the `mut` keyword is also specified. Record pointers are described further in the "Database Queries" section.
+Technically, Tablo supports two more primitive data types: record pointers and sequences. However, the semantics for these are quite different compared to other variables. A record pointer is declared using the `rec` keyword rather than the `var` keyword and is immutable unless the `mut` keyword is also specified. Record pointers are described further in the "Database Queries" section. Sequences cannot be defined in code; only referenced. They are described in the "Sequences" section.
 
 Identifiers
 -----------
@@ -238,6 +238,7 @@ The following identifiers are reserved as keywords:
 | `pub`         | Marks a function as public                          |
 | `rec`         | Record pointer data type                            |
 | `return`      | Exits a function by returning a result              |
+| `seq`         | Sequence data type                                  |
 | `text`        | String data type                                    |
 | `time`        | Time data type                                      |
 | `timestamp`   | Timestamp data type                                 |
@@ -1168,6 +1169,45 @@ If a `delete` statement is used on a record pointer that doesn't exist or is loc
 
 Following a `delete` statement, the record pointer is no longer valid. Calling the `exists()` function on the record pointer returns `false`.
 
+Sequences
+---------
+
+A sequence is a database-backed value generator that provides a means of accessing and modifying its current value. Sequences cannot be created in code; they can only reference existing database sequences. At present, only integer-valued sequences are supported.
+
+As with database tables, a `with` statement makes all sequences from the corresponding database available at file scope. Sequence references follow the same name resolution and disambiguation rules as table references. That is, a sequence may be referenced by `<sequence>`, `<schema>.<sequence>`, or `<database>.<schema>.<sequence>` depending on what is required to identify it unambiguously.
+
+Get the current value of a sequence by referencing it like a variable:
+
+~~~
+var foo: int = MySequence;
+~~~
+
+Assigning a sequence to an ordinary variable copies only its current integer value. It does not create an alias to the underlying database sequence.
+
+Set the current value by assigning to it like a variable:
+
+~~~
+MySequence = 1;
+~~~
+
+Only plain sequence identifiers are valid assignment targets.
+
+Sequences may be passed to functions, but they use their own parameter syntax rather than the ordinary `int` type. A sequence parameter is written as `seq <sequence>` and refers to the underlying database sequence rather than merely its current integer value.
+
+~~~
+fn BumpInvoiceNumber(invoiceNo: seq InvoiceNumber) int {
+  return seqnext(invoiceNo);
+}
+~~~
+
+Tablo provides a built-in `seqnext` function for incrementing a sequence and returning the new value. If the sequence has an increment value other than 1, the appropriate increment is applied.
+
+~~~
+var nextVal: int = seqnext(MySequence);
+~~~
+
+The precise way in which sequence reads and modifications interact with transactions is backend-specific. Tablo does not attempt to override the native sequence semantics of the underlying database backend.
+
 Transactions
 ------------
 
@@ -1733,6 +1773,10 @@ Returns the seconds component of `t`.
 ### `second(t: timestamp): int`
 
 Returns the seconds component of `t`.
+
+### `seqnext(s: seq): int`
+
+Increments `s` and returns the new value.
 
 ### `split(str: text, by: text): [text]`
 
