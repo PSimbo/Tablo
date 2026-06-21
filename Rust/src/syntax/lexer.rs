@@ -369,6 +369,7 @@ impl Lexer {
 			"pub" => TokenKind::PubKeyword,
 			"rec" => TokenKind::RecKeyword,
 			"return" => TokenKind::ReturnKeyword,
+			"seq" => TokenKind::SeqKeyword,
 			"text" => TokenKind::TextKeyword,
 			"time" => TokenKind::TimeKeyword,
 			"timestamp" => TokenKind::TimestampKeyword,

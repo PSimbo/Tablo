@@ -72,6 +72,7 @@ pub enum TokenKind {
 	RightBracket,
 	RightParenthesis,
 	Semicolon,
+	SeqKeyword,
 	SlashEqual,
 	StringLiteral,
 	TextKeyword,

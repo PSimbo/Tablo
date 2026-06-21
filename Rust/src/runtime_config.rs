@@ -127,9 +127,20 @@ fn resolve_config_path(base_directory: &Path, configured_path: &str) -> PathBuf 
 
 fn schema_error_message(error: crate::schema::SchemaError) -> String {
 	match error {
+		crate::schema::SchemaError::AmbiguousDatabaseQualifiedSequenceName { database_name, sequence_name } => {
+			format!("Sequence `{sequence_name}` is ambiguous within database `{database_name}`.")
+		}
 		crate::schema::SchemaError::AmbiguousDatabaseQualifiedTableName { database_name, table_name } => {
 			format!("Table `{table_name}` is ambiguous within database `{database_name}`.")
 		}
+		crate::schema::SchemaError::AmbiguousSchemaQualifiedSequenceName {
+			active_databases,
+			schema_name,
+			sequence_name,
+		} => format!(
+			"Sequence `{schema_name}.{sequence_name}` is ambiguous across active databases: {}.",
+			active_databases.join(", "),
+		),
 		crate::schema::SchemaError::AmbiguousSchemaQualifiedTableName {
 			active_databases,
 			schema_name,
@@ -145,6 +156,13 @@ fn schema_error_message(error: crate::schema::SchemaError) -> String {
 			"Table `{table_name}` is ambiguous across active databases: {}.",
 			active_databases.join(", "),
 		),
+		crate::schema::SchemaError::AmbiguousSequenceName {
+			active_databases,
+			sequence_name,
+		} => format!(
+			"Sequence `{sequence_name}` is ambiguous across active databases: {}.",
+			active_databases.join(", "),
+		),
 		crate::schema::SchemaError::DuplicateColumn { column_name, table_name } => {
 			format!("Column `{column_name}` is defined more than once in table `{table_name}`.")
 		}
@@ -154,6 +172,13 @@ fn schema_error_message(error: crate::schema::SchemaError) -> String {
 		crate::schema::SchemaError::DuplicateSchema { database_name, schema_name } => {
 			format!("Schema `{schema_name}` is defined more than once in database `{database_name}`.")
 		}
+		crate::schema::SchemaError::DuplicateSequence {
+			database_name,
+			schema_name,
+			sequence_name,
+		} => format!(
+			"Sequence `{sequence_name}` is defined more than once in `{database_name}.{schema_name}`."
+		),
 		crate::schema::SchemaError::DuplicateTable {
 			database_name,
 			schema_name,
@@ -169,6 +194,9 @@ fn schema_error_message(error: crate::schema::SchemaError) -> String {
 				Some(database_name) => format!("Schema `{schema_name}` is not present in database `{database_name}`."),
 				None => format!("Schema `{schema_name}` is not present in the schema catalog."),
 			}
+		}
+		crate::schema::SchemaError::UnknownSequence { sequence_name } => {
+			format!("Sequence `{sequence_name}` is not present in the schema catalog.")
 		}
 		crate::schema::SchemaError::UnknownTable { table_name } => {
 			format!("Table `{table_name}` is not present in the schema catalog.")

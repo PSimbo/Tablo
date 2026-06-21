@@ -144,6 +144,7 @@ pub enum FindKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FunctionParameterType {
 	RecordPointer(TableReference),
+	Sequence(SequenceReference),
 	Value(DataType),
 }
 
@@ -153,6 +154,10 @@ impl FunctionParameterType {
 			Self::RecordPointer(table) => format!(
 				"rec {}",
 				table.components.iter().map(|component| component.name.as_str()).collect::<Vec<_>>().join(".")
+			),
+			Self::Sequence(sequence) => format!(
+				"seq {}",
+				sequence.components.iter().map(|component| component.name.as_str()).collect::<Vec<_>>().join(".")
 			),
 			Self::Value(data_type) => data_type.name(),
 		}
@@ -499,6 +504,12 @@ pub struct RecordPointerType {
 pub struct ReturnStatement {
 	pub position: usize,
 	pub value: Option<Expr>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SequenceReference {
+	pub components: Vec<IdentifierExpr>,
+	pub position: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

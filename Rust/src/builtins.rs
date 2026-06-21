@@ -20,6 +20,7 @@ pub enum BuiltInFunction {
 	Minute,
 	Month,
 	Second,
+	SeqNext,
 	Split,
 	TextCast,
 	Trim,
@@ -47,6 +48,7 @@ impl BuiltInFunction {
 			Self::Minute,
 			Self::Month,
 			Self::Second,
+			Self::SeqNext,
 			Self::Split,
 			Self::TextCast,
 			Self::Trim,
@@ -78,6 +80,7 @@ impl BuiltInFunction {
 			20 => Some(Self::Minute),
 			21 => Some(Self::Second),
 			22 => Some(Self::Format),
+			23 => Some(Self::SeqNext),
 			_ => None,
 		}
 	}
@@ -102,6 +105,7 @@ impl BuiltInFunction {
 			"minute" => Some(Self::Minute),
 			"month" => Some(Self::Month),
 			"second" => Some(Self::Second),
+			"seqnext" => Some(Self::SeqNext),
 			"split" => Some(Self::Split),
 			"text" => Some(Self::TextCast),
 			"trim" => Some(Self::Trim),
@@ -134,6 +138,7 @@ impl BuiltInFunction {
 			Self::Minute => 20,
 			Self::Second => 21,
 			Self::Format => 22,
+			Self::SeqNext => 23,
 		}
 	}
 
@@ -157,6 +162,7 @@ impl BuiltInFunction {
 			Self::Minute => "minute",
 			Self::Month => "month",
 			Self::Second => "second",
+			Self::SeqNext => "seqnext",
 			Self::Split => "split",
 			Self::TextCast => "text",
 			Self::Trim => "trim",
@@ -283,6 +289,7 @@ impl BuiltInFunction {
 				[arg] if matches!(arg.without_nullability(), DataType::Text) => Some(DataType::Int),
 				_ => None,
 			},
+			Self::SeqNext => None,
 			Self::TextCast | Self::DecCast | Self::BoolCast => None,
 		}
 	}
@@ -308,6 +315,7 @@ impl BuiltInFunction {
 			| Self::Minute
 			| Self::Month
 			| Self::Second
+			| Self::SeqNext
 			| Self::TextCast
 			| Self::Trim
 			| Self::Year => argument_count == 1,
@@ -332,6 +340,7 @@ impl BuiltInFunction {
 			| Self::Minute
 			| Self::Month
 			| Self::Second
+			| Self::SeqNext
 			| Self::Split
 			| Self::TextCast
 			| Self::Trim

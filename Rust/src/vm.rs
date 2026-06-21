@@ -347,6 +347,36 @@ impl VirtualMachine {
 		}
 	}
 
+	fn advance_sequence(
+		&self,
+		database_name: &str,
+		schema_is_implicit: bool,
+		schema_name: &str,
+		sequence_name: &str,
+		instruction_index: usize,
+	) -> Result<i64, VmError> {
+		let current = self.load_sequence_current(
+			database_name,
+			schema_is_implicit,
+			schema_name,
+			sequence_name,
+			instruction_index,
+		)?;
+		let next = current.checked_add(1).ok_or(vm_error(
+			instruction_index,
+			format!("Advancing sequence `{sequence_name}` would overflow the supported `int` range."),
+		))?;
+		self.store_sequence_current(
+			database_name,
+			schema_is_implicit,
+			schema_name,
+			sequence_name,
+			next,
+			instruction_index,
+		)?;
+		Ok(next)
+	}
+
 	fn create_record(
 		&self,
 		record: RecordPointerValue,
@@ -458,6 +488,17 @@ impl VirtualMachine {
 				let rhs = self.pop_value(instruction_index)?;
 				let lhs = self.pop_value(instruction_index)?;
 				self.stack.push(add_values(lhs, rhs, instruction_index)?);
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::AdvanceSequence { database_name, schema_is_implicit, schema_name, sequence_name } => {
+				let value = self.advance_sequence(
+					database_name,
+					*schema_is_implicit,
+					schema_name,
+					sequence_name,
+					instruction_index,
+				)?;
+				self.stack.push(Value::Integer(value));
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::And => {
@@ -621,6 +662,17 @@ impl VirtualMachine {
 					},
 				};
 				self.stack.push(Value::Reference(reference));
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::LoadSequenceCurrent { database_name, schema_is_implicit, schema_name, sequence_name } => {
+				let value = self.load_sequence_current(
+					database_name,
+					*schema_is_implicit,
+					schema_name,
+					sequence_name,
+					instruction_index,
+				)?;
+				self.stack.push(Value::Integer(value));
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::MakeArray(element_count) => {
@@ -842,6 +894,24 @@ impl VirtualMachine {
 				}
 				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::StoreSequenceCurrent { database_name, schema_is_implicit, schema_name, sequence_name } => {
+				let value = self.pop_value(instruction_index)?;
+				let Value::Integer(value) = value else {
+					return Err(vm_error(
+						instruction_index,
+						String::from("Sequence assignment requires an `int` value."),
+					));
+				};
+				self.store_sequence_current(
+					database_name,
+					*schema_is_implicit,
+					schema_name,
+					sequence_name,
+					value,
+					instruction_index,
+				)?;
+				Ok(ExecutionOutcome::Continue(None))
+			}
 			Instruction::Xor => {
 				let rhs = self.pop_boolean(instruction_index)?;
 				let lhs = self.pop_boolean(instruction_index)?;
@@ -1007,6 +1077,48 @@ impl VirtualMachine {
 			format!("Reference target slot {} has not been initialized.", reference.slot),
 		))?;
 		self.resolve_runtime_value(value, instruction_index)
+	}
+
+	fn load_sequence_current(
+		&self,
+		database_name: &str,
+		schema_is_implicit: bool,
+		schema_name: &str,
+		sequence_name: &str,
+		instruction_index: usize,
+	) -> Result<i64, VmError> {
+		let connection = self.open_sqlite_database(database_name, instruction_index)?;
+		let sequence_source = sqlite_sequence_source(schema_name, schema_is_implicit);
+		let statement = format!(
+			"SELECT seq FROM {sequence_source} WHERE name = ?1"
+		);
+
+		let result = connection.query_row(&statement, [sequence_name], |row| row.get::<_, i64>(0));
+
+		match result {
+			Ok(value) => Ok(value),
+			Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+			Err(error) => Err(vm_error(
+				instruction_index,
+				format!("Failed to read SQLite sequence `{sequence_name}`: {error}"),
+			)),
+		}
+	}
+
+	fn open_sqlite_database(
+		&self,
+		database_name: &str,
+		instruction_index: usize,
+	) -> Result<Connection, VmError> {
+		let database_path = self.database_config.sqlite_database_path(database_name).ok_or(vm_error(
+			instruction_index,
+			format!("SQLite database `{database_name}` is not configured at runtime."),
+		))?;
+
+		Connection::open(database_path).map_err(|error| vm_error(
+			instruction_index,
+			format!("Failed to open SQLite database `{}`: {error}", database_path.display()),
+		))
 	}
 
 	fn pop_boolean(&mut self, instruction_index: usize) -> Result<bool, VmError> {
@@ -1479,6 +1591,10 @@ impl VirtualMachine {
 					format!("Built-in function `date` expects 1 argument(s), found {}.", arguments.len()),
 				)),
 			},
+			BuiltInFunction::SeqNext => Err(vm_error(
+				instruction_index,
+				String::from("Built-in function `seqnext` must be compiled into a sequence instruction before runtime."),
+			)),
 			BuiltInFunction::TextCast
 			| BuiltInFunction::DecCast
 			| BuiltInFunction::BoolCast
@@ -1541,6 +1657,38 @@ impl VirtualMachine {
 				Ok(())
 			}
 		}
+	}
+
+	fn store_sequence_current(
+		&self,
+		database_name: &str,
+		schema_is_implicit: bool,
+		schema_name: &str,
+		sequence_name: &str,
+		value: i64,
+		instruction_index: usize,
+	) -> Result<(), VmError> {
+		let connection = self.open_sqlite_database(database_name, instruction_index)?;
+		let sequence_source = sqlite_sequence_source(schema_name, schema_is_implicit);
+		let update_statement = format!(
+			"UPDATE {sequence_source} SET seq = ?1 WHERE name = ?2"
+		);
+		let updated_rows = connection.execute(&update_statement, (&value, sequence_name)).map_err(|error| vm_error(
+			instruction_index,
+			format!("Failed to update SQLite sequence `{sequence_name}`: {error}"),
+		))?;
+
+		if updated_rows == 0 {
+			let insert_statement = format!(
+				"INSERT INTO {sequence_source} (name, seq) VALUES (?1, ?2)"
+			);
+			connection.execute(&insert_statement, (sequence_name, value)).map_err(|error| vm_error(
+				instruction_index,
+				format!("Failed to initialize SQLite sequence `{sequence_name}`: {error}"),
+			))?;
+		}
+
+		Ok(())
 	}
 }
 
@@ -2565,6 +2713,15 @@ fn sqlite_path_from_connection_string(database_name: &str, value: &str) -> Resul
 	};
 
 	Ok(PathBuf::from(normalized))
+}
+
+fn sqlite_sequence_source(schema_name: &str, schema_is_implicit: bool) -> String {
+	if schema_is_implicit {
+		String::from("sqlite_sequence")
+	}
+	else {
+		format!("{}.sqlite_sequence", quote_identifier(schema_name))
+	}
 }
 
 fn sqlite_table_source(schema_name: &str, table_name: &str, schema_is_implicit: bool) -> String {

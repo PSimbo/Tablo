@@ -3555,6 +3555,39 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_seqnext_on_sqlite_sequence() {
+		let database_path = create_sqlite_test_database(
+			"runs_seqnext_on_sqlite_sequence",
+			r#"
+				CREATE TABLE InvoiceNumber (
+					Id INTEGER PRIMARY KEY AUTOINCREMENT,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO InvoiceNumber (Name) VALUES ('First');
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int { return seqnext(InvoiceNumber); }",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table InvoiceNumber (
+					Id int not null,
+					Name text not null
+				);
+				create sequence InvoiceNumber;
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(2)));
+	}
+
+	#[test]
 	fn runs_source_text() {
 		let result = run(standalone_expression("1 + 2 + 3")).unwrap();
 
@@ -3930,6 +3963,71 @@ mod tests {
 		let _ = std::fs::remove_file(&database_path);
 
 		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
+	fn runs_sqlite_sequence_assignment() {
+		let database_path = create_sqlite_test_database(
+			"runs_sqlite_sequence_assignment",
+			r#"
+				CREATE TABLE InvoiceNumber (
+					Id INTEGER PRIMARY KEY AUTOINCREMENT,
+					Name TEXT NOT NULL
+				);
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int { InvoiceNumber = 10; return InvoiceNumber; }",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table InvoiceNumber (
+					Id int not null,
+					Name text not null
+				);
+				create sequence InvoiceNumber;
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(10)));
+	}
+
+	#[test]
+	fn runs_sqlite_sequence_read_when_table_and_sequence_share_a_name() {
+		let database_path = create_sqlite_test_database(
+			"runs_sqlite_sequence_read_when_table_and_sequence_share_a_name",
+			r#"
+				CREATE TABLE InvoiceNumber (
+					Id INTEGER PRIMARY KEY AUTOINCREMENT,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO InvoiceNumber (Name) VALUES ('First');
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int { return InvoiceNumber; }",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table InvoiceNumber (
+					Id int not null,
+					Name text not null
+				);
+				create sequence InvoiceNumber;
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(1)));
 	}
 
 	#[test]

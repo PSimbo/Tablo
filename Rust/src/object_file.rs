@@ -28,6 +28,7 @@ use crate::value::Decimal;
 const MAGIC_BYTES: [u8; 4] = *b"TBO0";
 const FORMAT_VERSION: u16 = 1;
 const OPCODE_ADD: u8 = 1;
+const OPCODE_ADVANCE_SEQUENCE: u8 = 61;
 const OPCODE_AND: u8 = 2;
 const OPCODE_CALL: u8 = 30;
 const OPCODE_CALL_BUILT_IN: u8 = 36;
@@ -50,10 +51,11 @@ const OPCODE_LOAD_FIELD_PATH: u8 = 42;
 const OPCODE_LOAD_INDEX: u8 = 34;
 const OPCODE_LOAD_LOCAL: u8 = 14;
 const OPCODE_LOAD_REFERENCE: u8 = 15;
+const OPCODE_LOAD_SEQUENCE_CURRENT: u8 = 59;
 const OPCODE_MAKE_ARRAY: u8 = 33;
 const OPCODE_MAKE_OBJECT: u8 = 40;
-const OPCODE_MAKE_RECORD_POINTER: u8 = 58;
 const OPCODE_MAKE_RANGE: u8 = 38;
+const OPCODE_MAKE_RECORD_POINTER: u8 = 58;
 const OPCODE_MAKE_STEPPED_RANGE: u8 = 39;
 const OPCODE_MODULO: u8 = 16;
 const OPCODE_MULTIPLY: u8 = 17;
@@ -83,6 +85,7 @@ const OPCODE_RETURN_VOID: u8 = 32;
 const OPCODE_STORE_FIELD_PATH: u8 = 43;
 const OPCODE_STORE_INDEX: u8 = 35;
 const OPCODE_STORE_LOCAL: u8 = 21;
+const OPCODE_STORE_SEQUENCE_CURRENT: u8 = 60;
 const OPCODE_SUBTRACT: u8 = 22;
 const OPCODE_XOR: u8 = 27;
 const QUERY_KIND_SQL: u8 = 1;
@@ -401,6 +404,12 @@ impl<'a> ObjectFileReader<'a> {
 	fn read_instruction_payload(&mut self, opcode: u8, opcode_offset: usize) -> Result<Instruction, ObjectFileError> {
 		match opcode {
 			OPCODE_ADD => Ok(Instruction::Add),
+			OPCODE_ADVANCE_SEQUENCE => Ok(Instruction::AdvanceSequence {
+				database_name: self.read_string()?,
+				schema_is_implicit: self.read_bool()?,
+				schema_name: self.read_string()?,
+				sequence_name: self.read_string()?,
+			}),
 			OPCODE_AND => Ok(Instruction::And),
 			OPCODE_CALL => Ok(Instruction::Call(self.read_u32()?, self.read_u32()?)),
 			OPCODE_CALL_BUILT_IN => {
@@ -431,6 +440,12 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_LOAD_INDEX => Ok(Instruction::LoadIndex),
 			OPCODE_LOAD_LOCAL => Ok(Instruction::LoadLocal(self.read_u32()?)),
 			OPCODE_LOAD_REFERENCE => Ok(Instruction::LoadReference(self.read_u32()?)),
+			OPCODE_LOAD_SEQUENCE_CURRENT => Ok(Instruction::LoadSequenceCurrent {
+				database_name: self.read_string()?,
+				schema_is_implicit: self.read_bool()?,
+				schema_name: self.read_string()?,
+				sequence_name: self.read_string()?,
+			}),
 			OPCODE_MAKE_ARRAY => Ok(Instruction::MakeArray(self.read_u32()?)),
 			OPCODE_MAKE_OBJECT => {
 				let field_count = self.read_u32()? as usize;
@@ -474,6 +489,15 @@ impl<'a> ObjectFileReader<'a> {
 				offset: self.offset.saturating_sub(6),
 				message,
 			})?)),
+			OPCODE_PUSH_DECIMAL => Ok(Instruction::PushDecimal(self.read_decimal()?)),
+			OPCODE_PUSH_ENUM_VALUE => Ok(Instruction::PushEnumValue {
+				backing_value: self.read_constant_value()?,
+				enum_name: self.read_string()?,
+				variant_name: self.read_string()?,
+			}),
+			OPCODE_PUSH_INTEGER => Ok(Instruction::PushInteger(self.read_i64()?)),
+			OPCODE_PUSH_NULL => Ok(Instruction::PushNull),
+			OPCODE_PUSH_TEXT => Ok(Instruction::PushText(self.read_string()?)),
 			OPCODE_PUSH_TIME => Ok(Instruction::PushTime(crate::value::Time::from_sqlite_text(&self.read_string()?).map_err(|message| ObjectFileError {
 				offset: self.offset,
 				message,
@@ -490,20 +514,17 @@ impl<'a> ObjectFileReader<'a> {
 				offset: self.offset,
 				message,
 			})?)),
-			OPCODE_PUSH_DECIMAL => Ok(Instruction::PushDecimal(self.read_decimal()?)),
-			OPCODE_PUSH_ENUM_VALUE => Ok(Instruction::PushEnumValue {
-				backing_value: self.read_constant_value()?,
-				enum_name: self.read_string()?,
-				variant_name: self.read_string()?,
-			}),
-			OPCODE_PUSH_INTEGER => Ok(Instruction::PushInteger(self.read_i64()?)),
-			OPCODE_PUSH_NULL => Ok(Instruction::PushNull),
-			OPCODE_PUSH_TEXT => Ok(Instruction::PushText(self.read_string()?)),
 			OPCODE_RETURN => Ok(Instruction::Return),
 			OPCODE_RETURN_VOID => Ok(Instruction::ReturnVoid),
 			OPCODE_STORE_FIELD_PATH => Ok(Instruction::StoreFieldPath(self.read_string_vec()?)),
 			OPCODE_STORE_INDEX => Ok(Instruction::StoreIndex),
 			OPCODE_STORE_LOCAL => Ok(Instruction::StoreLocal(self.read_u32()?)),
+			OPCODE_STORE_SEQUENCE_CURRENT => Ok(Instruction::StoreSequenceCurrent {
+				database_name: self.read_string()?,
+				schema_is_implicit: self.read_bool()?,
+				schema_name: self.read_string()?,
+				sequence_name: self.read_string()?,
+			}),
 			OPCODE_SUBTRACT => Ok(Instruction::Subtract),
 			OPCODE_XOR => Ok(Instruction::Xor),
 			_ => Err(ObjectFileError {
@@ -739,6 +760,16 @@ fn write_data_type(bytes: &mut Vec<u8>, data_type: &DataType) {
 fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 	match instruction {
 		Instruction::Add => bytes.push(OPCODE_ADD),
+		Instruction::AdvanceSequence { database_name, schema_is_implicit, schema_name, sequence_name } => {
+			bytes.push(OPCODE_ADVANCE_SEQUENCE);
+			bytes.extend_from_slice(&(database_name.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(database_name.as_bytes());
+			bytes.push(u8::from(*schema_is_implicit));
+			bytes.extend_from_slice(&(schema_name.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(schema_name.as_bytes());
+			bytes.extend_from_slice(&(sequence_name.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(sequence_name.as_bytes());
+		}
 		Instruction::And => bytes.push(OPCODE_AND),
 		Instruction::Call(function_index, argument_count) => {
 			bytes.push(OPCODE_CALL);
@@ -795,6 +826,16 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 		Instruction::LoadReference(slot) => {
 			bytes.push(OPCODE_LOAD_REFERENCE);
 			bytes.extend_from_slice(&slot.to_le_bytes());
+		}
+		Instruction::LoadSequenceCurrent { database_name, schema_is_implicit, schema_name, sequence_name } => {
+			bytes.push(OPCODE_LOAD_SEQUENCE_CURRENT);
+			bytes.extend_from_slice(&(database_name.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(database_name.as_bytes());
+			bytes.push(u8::from(*schema_is_implicit));
+			bytes.extend_from_slice(&(schema_name.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(schema_name.as_bytes());
+			bytes.extend_from_slice(&(sequence_name.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(sequence_name.as_bytes());
 		}
 		Instruction::MakeArray(element_count) => {
 			bytes.push(OPCODE_MAKE_ARRAY);
@@ -921,6 +962,16 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 		Instruction::StoreLocal(slot) => {
 			bytes.push(OPCODE_STORE_LOCAL);
 			bytes.extend_from_slice(&slot.to_le_bytes());
+		}
+		Instruction::StoreSequenceCurrent { database_name, schema_is_implicit, schema_name, sequence_name } => {
+			bytes.push(OPCODE_STORE_SEQUENCE_CURRENT);
+			bytes.extend_from_slice(&(database_name.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(database_name.as_bytes());
+			bytes.push(u8::from(*schema_is_implicit));
+			bytes.extend_from_slice(&(schema_name.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(schema_name.as_bytes());
+			bytes.extend_from_slice(&(sequence_name.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(sequence_name.as_bytes());
 		}
 		Instruction::Subtract => bytes.push(OPCODE_SUBTRACT),
 		Instruction::Xor => bytes.push(OPCODE_XOR),

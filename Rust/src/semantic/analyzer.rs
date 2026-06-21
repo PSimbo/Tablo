@@ -35,6 +35,7 @@ use crate::ast::RangeExpr;
 use crate::ast::RecordPointerDeclaration;
 use crate::ast::RecordPointerType;
 use crate::ast::ReturnStatement;
+use crate::ast::SequenceReference;
 use crate::ast::Statement;
 use crate::ast::TableReference;
 use crate::ast::TernaryExpr;
@@ -166,8 +167,17 @@ pub struct RecordPointerBindingInfo {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedSequenceReference {
+	pub database_name: String,
+	pub schema_is_implicit: bool,
+	pub schema_name: String,
+	pub sequence_name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedTableReference {
 	pub database_name: String,
+	pub schema_is_implicit: bool,
 	pub schema_name: String,
 	pub table_name: String,
 }
@@ -198,7 +208,9 @@ pub struct SemanticProgram {
 	new_record_layouts: BTreeMap<usize, NewRecordLayout>,
 	object_declarations: BTreeMap<String, ObjectDeclaration>,
 	record_pointer_bindings: BTreeMap<usize, RecordPointerBindingInfo>,
+	resolved_sequences: BTreeMap<usize, ResolvedSequenceReference>,
 	resolved_tables: BTreeMap<usize, ResolvedTableReference>,
+	sequence_call_targets: BTreeMap<usize, ResolvedSequenceReference>,
 }
 
 impl SemanticProgram {
@@ -298,8 +310,16 @@ impl SemanticProgram {
 		self.record_pointer_bindings.get(&position)
 	}
 
+	pub fn resolved_sequence(&self, position: usize) -> Option<&ResolvedSequenceReference> {
+		self.resolved_sequences.get(&position)
+	}
+
 	pub fn resolved_table(&self, position: usize) -> Option<&ResolvedTableReference> {
 		self.resolved_tables.get(&position)
+	}
+
+	pub fn sequence_call_target(&self, position: usize) -> Option<&ResolvedSequenceReference> {
+		self.sequence_call_targets.get(&position)
 	}
 }
 
@@ -844,6 +864,21 @@ impl SemanticAnalyzer {
 			.map(|argument| self.infer_expression_type(&argument.value))
 			.collect::<Result<Vec<_>, _>>()?;
 
+		if built_in == BuiltInFunction::SeqNext {
+			let [argument] = arguments else {
+				return Err(self.compile_error(position, String::from("Built-in function `seqnext` expects 1 argument(s), found 0.")));
+			};
+			let Some(resolved_sequence) = self.semantic_program.resolved_sequence(argument.value.position()).cloned() else {
+				return Err(self.compile_error(
+					argument.value.position(),
+					String::from("Built-in function `seqnext` requires a sequence reference."),
+				));
+			};
+			self.semantic_program.sequence_call_targets.insert(position, resolved_sequence);
+			self.semantic_program.call_return_types.insert(position, DataType::Int);
+			return Ok(DataType::Int);
+		}
+
 		if let Some(return_type) = self.infer_enum_downcast_built_in_type(built_in, &argument_types, position)? {
 			self.semantic_program.built_in_call_targets.insert(position, built_in);
 			self.semantic_program.call_return_types.insert(position, return_type.clone());
@@ -985,30 +1020,55 @@ impl SemanticAnalyzer {
 			Expr::Assignment(AssignmentExpr { operator, target, value, .. }) => {
 				match target {
 					AssignmentTarget::Identifier(target) => {
-						let local = self.lookup_local(&target.name).ok_or(self.compile_error(
-							target.position,
-							format!("Variable `{}` is not declared in this scope.", target.name),
-						))?;
-						self.semantic_program.identifier_slots.insert(target.position, local.slot);
+						if let Some(local) = self.lookup_local(&target.name) {
+							self.semantic_program.identifier_slots.insert(target.position, local.slot);
 
-						if local.is_const {
-							let operation = match operator {
-								AssignmentOperator::Assign => "=",
-								AssignmentOperator::AddAssign => "+=",
-								AssignmentOperator::DivideAssign => "/=",
-								AssignmentOperator::ModuloAssign => "%=",
-								AssignmentOperator::MultiplyAssign => "*=",
-								AssignmentOperator::SubtractAssign => "-=",
-							};
+							if local.is_const {
+								let operation = match operator {
+									AssignmentOperator::Assign => "=",
+									AssignmentOperator::AddAssign => "+=",
+									AssignmentOperator::DivideAssign => "/=",
+									AssignmentOperator::ModuloAssign => "%=",
+									AssignmentOperator::MultiplyAssign => "*=",
+									AssignmentOperator::SubtractAssign => "-=",
+								};
 
-							return Err(self.compile_error(
-								expression.position(),
-								format!("Constant `{}` cannot be assigned using `{operation}`.", target.name),
-							));
+								return Err(self.compile_error(
+									expression.position(),
+									format!("Constant `{}` cannot be assigned using `{operation}`.", target.name),
+								));
+							}
+
+							let value_type = self.infer_expression_type(value)?;
+							self.assignment_result_type(*operator, &local.data_type, &value_type, expression.position())
 						}
+						else if let Some(resolved_sequence) = self.try_resolve_unqualified_sequence(&target.name, target.position)? {
+							if *operator != AssignmentOperator::Assign {
+								let operation = match operator {
+									AssignmentOperator::Assign => "=",
+									AssignmentOperator::AddAssign => "+=",
+									AssignmentOperator::DivideAssign => "/=",
+									AssignmentOperator::ModuloAssign => "%=",
+									AssignmentOperator::MultiplyAssign => "*=",
+									AssignmentOperator::SubtractAssign => "-=",
+								};
 
-						let value_type = self.infer_expression_type(value)?;
-						self.assignment_result_type(*operator, &local.data_type, &value_type, expression.position())
+								return Err(self.compile_error(
+									expression.position(),
+									format!("Sequence `{}` cannot be assigned using `{operation}`.", target.name),
+								));
+							}
+
+							self.record_resolved_sequence(target.position, &resolved_sequence);
+							let value_type = self.infer_expression_type(value)?;
+							self.assignment_result_type(*operator, &DataType::Int, &value_type, expression.position())
+						}
+						else {
+							Err(self.compile_error(
+								target.position,
+								format!("Variable `{}` is not declared in this scope.", target.name),
+							))
+						}
 					}
 					AssignmentTarget::Index(target) => {
 						let local = self.lookup_local(&target.array.name).ok_or(self.compile_error(
@@ -1214,6 +1274,11 @@ impl SemanticAnalyzer {
 					return Ok(DataType::Object(identifier.name.clone()));
 				}
 
+				if let Some(resolved_sequence) = self.try_resolve_sequence_expression(expression)? {
+					self.record_resolved_sequence(expression.position(), &resolved_sequence);
+					return Ok(DataType::Int);
+				}
+
 				let object_type = self.infer_expression_type(object)?;
 				let object_type = object_type.without_nullability().clone();
 
@@ -1255,12 +1320,20 @@ impl SemanticAnalyzer {
 			}
 			Expr::Find(find) => self.infer_find_expression_type(find),
 			Expr::Identifier(IdentifierExpr { name, .. }) => {
-				let local = self.lookup_local(name).ok_or(self.compile_error(
-					expression.position(),
-					format!("Variable `{name}` is not declared in this scope."),
-				))?;
-				self.semantic_program.identifier_slots.insert(expression.position(), local.slot);
-				Ok(local.data_type)
+				if let Some(local) = self.lookup_local(name) {
+					self.semantic_program.identifier_slots.insert(expression.position(), local.slot);
+					Ok(local.data_type)
+				}
+				else if let Some(resolved_sequence) = self.try_resolve_unqualified_sequence(name, expression.position())? {
+					self.record_resolved_sequence(expression.position(), &resolved_sequence);
+					Ok(DataType::Int)
+				}
+				else {
+					Err(self.compile_error(
+						expression.position(),
+						format!("Variable `{name}` is not declared in this scope."),
+					))
+				}
 			}
 			Expr::Index(IndexExpr { array, index, .. }) => {
 				let mut array_type = self.infer_expression_type(array)?;
@@ -2386,6 +2459,14 @@ impl SemanticAnalyzer {
 		binding.assigned_fields.insert(path);
 	}
 
+	fn record_resolved_sequence(
+		&mut self,
+		position: usize,
+		resolved: &ResolvedSequenceReference,
+	) {
+		self.semantic_program.resolved_sequences.insert(position, resolved.clone());
+	}
+
 	fn refine_expression_type_from_assumptions(&self, expression: &Expr, data_type: DataType) -> DataType {
 		if self.current_non_null_assumptions.iter().any(|assumed| self.expressions_match_for_non_null_refinement(assumed, expression))
 			&& let DataType::Nullable(inner) = data_type {
@@ -2644,6 +2725,10 @@ impl SemanticAnalyzer {
 					table_name: resolved_table.table().name().to_string(),
 				}))
 			}
+			FunctionParameterType::Sequence(_) => Err(self.compile_error(
+				parameter.position,
+				String::from("Sequence parameters are not yet supported."),
+			)),
 			FunctionParameterType::Value(data_type) => {
 				self.validate_non_void_data_type(
 					data_type,
@@ -2696,6 +2781,52 @@ impl SemanticAnalyzer {
 		Ok((local.slot, field_path, current_type))
 	}
 
+	fn resolve_sequence_reference(
+		&mut self,
+		sequence: &SequenceReference,
+	) -> Result<crate::schema::ResolvedSequence<'_>, CompileError> {
+		if let Some(resolved) = self.semantic_program.resolved_sequences.get(&sequence.position) {
+			let schema_catalog = self.current_schema_catalog.as_ref().ok_or(self.compile_error(
+				sequence.position,
+				String::from("Database sequences require schema metadata, but none was supplied."),
+			))?;
+
+			return schema_catalog.resolve_database_schema_sequence(
+				&self.semantic_program.active_databases.iter().map(String::as_str).collect::<Vec<_>>(),
+				&resolved.database_name,
+				&resolved.schema_name,
+				&resolved.sequence_name,
+			).map_err(|error| self.schema_error_to_compile_error(sequence.position, error));
+		}
+
+		let schema_catalog = self.current_schema_catalog.as_ref().ok_or(self.compile_error(
+			sequence.position,
+			String::from("Database sequences require schema metadata, but none was supplied."),
+		))?;
+		let active_databases = self.semantic_program.active_databases.iter().map(String::as_str).collect::<Vec<_>>();
+
+		let resolved = match sequence.components.as_slice() {
+			[sequence_name] => schema_catalog.resolve_sequence(&active_databases, &sequence_name.name),
+			[first, sequence_name] => {
+				match schema_catalog.resolve_database_sequence(&active_databases, &first.name, &sequence_name.name) {
+					Ok(resolved) => Ok(resolved),
+					Err(SchemaError::UnknownDatabase { .. }) | Err(SchemaError::AmbiguousDatabaseQualifiedSequenceName { .. }) => {
+						schema_catalog.resolve_schema_sequence(&active_databases, &first.name, &sequence_name.name)
+					}
+					Err(other) => Err(other),
+				}
+			}
+			[database, schema, sequence_name] => {
+				schema_catalog.resolve_database_schema_sequence(&active_databases, &database.name, &schema.name, &sequence_name.name)
+			}
+			_ => Err(SchemaError::UnknownSequence {
+				sequence_name: String::from("<invalid sequence reference>"),
+			}),
+		}.map_err(|error| self.schema_error_to_compile_error(sequence.position, error))?;
+
+		Ok(resolved)
+	}
+
 	fn resolve_table_reference(
 		&mut self,
 		table: &TableReference,
@@ -2743,6 +2874,7 @@ impl SemanticAnalyzer {
 
 		self.semantic_program.resolved_tables.insert(table.position, ResolvedTableReference {
 			database_name: resolved.database().name().to_string(),
+			schema_is_implicit: resolved.schema().is_implicit(),
 			schema_name: resolved.schema().name().to_string(),
 			table_name: resolved.table().name().to_string(),
 		});
@@ -2752,14 +2884,31 @@ impl SemanticAnalyzer {
 
 	fn schema_error_to_compile_error(&self, position: usize, error: SchemaError) -> CompileError {
 		self.compile_error(position, match error {
+			SchemaError::AmbiguousDatabaseQualifiedSequenceName { database_name, sequence_name } => {
+				format!(
+					"Sequence reference `{database_name}.{sequence_name}` is ambiguous because database `{database_name}` contains multiple schemas."
+				)
+			}
 			SchemaError::AmbiguousDatabaseQualifiedTableName { database_name, table_name } => {
 				format!(
 					"Table reference `{database_name}.{table_name}` is ambiguous because database `{database_name}` contains multiple schemas."
 				)
 			}
+			SchemaError::AmbiguousSchemaQualifiedSequenceName { active_databases, schema_name, sequence_name } => {
+				format!(
+					"Sequence reference `{schema_name}.{sequence_name}` is ambiguous across active databases: {}.",
+					active_databases.join(", ")
+				)
+			}
 			SchemaError::AmbiguousSchemaQualifiedTableName { active_databases, schema_name, table_name } => {
 				format!(
 					"Table reference `{schema_name}.{table_name}` is ambiguous across active databases: {}.",
+					active_databases.join(", ")
+				)
+			}
+			SchemaError::AmbiguousSequenceName { active_databases, sequence_name } => {
+				format!(
+					"Sequence reference `{sequence_name}` is ambiguous across active databases: {}.",
 					active_databases.join(", ")
 				)
 			}
@@ -2772,6 +2921,7 @@ impl SemanticAnalyzer {
 			SchemaError::DuplicateColumn { .. }
 			| SchemaError::DuplicateDatabase { .. }
 			| SchemaError::DuplicateSchema { .. }
+			| SchemaError::DuplicateSequence { .. }
 			| SchemaError::DuplicateTable { .. } => {
 				String::from("The supplied schema catalog is internally inconsistent.")
 			}
@@ -2786,10 +2936,36 @@ impl SemanticAnalyzer {
 					None => format!("Schema `{schema_name}` does not exist in the active databases."),
 				}
 			}
+			SchemaError::UnknownSequence { sequence_name } => {
+				format!("Sequence `{sequence_name}` is not present in the active databases.")
+			}
 			SchemaError::UnknownTable { table_name } => {
 				format!("Table `{table_name}` is not present in the active databases.")
 			}
 		})
+	}
+
+	fn sequence_reference_from_expression(&self, expression: &Expr) -> Option<SequenceReference> {
+		match expression {
+			Expr::Identifier(identifier) => Some(SequenceReference {
+				components: vec![identifier.clone()],
+				position: identifier.position,
+			}),
+			Expr::FieldAccess(field_access) => {
+				let (base, fields) = self.query_field_access_chain(field_access)?;
+				if self.lookup_local(&base.name).is_some() {
+					return None;
+				}
+
+				let mut components = vec![base.clone()];
+				components.extend(fields.into_iter().cloned());
+				Some(SequenceReference {
+					position: base.position,
+					components,
+				})
+			}
+			_ => None,
+		}
 	}
 
 	fn statement_guarantees_return(&self, statement: &Statement) -> bool {
@@ -2806,6 +2982,50 @@ impl SemanticAnalyzer {
 			Statement::RecordPointerDeclaration(_) => false,
 			Statement::Return(_) => true,
 			Statement::Expression(_) | Statement::For(_) | Statement::ForRecord(_) | Statement::Use(_) | Statement::VariableDeclaration(_) | Statement::While(_) => false,
+		}
+	}
+
+	fn try_resolve_sequence_expression(
+		&mut self,
+		expression: &Expr,
+	) -> Result<Option<ResolvedSequenceReference>, CompileError> {
+		let Some(reference) = self.sequence_reference_from_expression(expression) else {
+			return Ok(None);
+		};
+
+		if reference.components.len() == 1 && self.lookup_local(&reference.components[0].name).is_some() {
+			return Ok(None);
+		}
+
+		let resolved = self.resolve_sequence_reference(&reference)?;
+		Ok(Some(ResolvedSequenceReference {
+			database_name: resolved.database().name().to_string(),
+			schema_is_implicit: resolved.schema().is_implicit(),
+			schema_name: resolved.schema().name().to_string(),
+			sequence_name: resolved.sequence().name().to_string(),
+		}))
+	}
+
+	fn try_resolve_unqualified_sequence(
+		&mut self,
+		name: &str,
+		position: usize,
+	) -> Result<Option<ResolvedSequenceReference>, CompileError> {
+		let schema_catalog = match self.current_schema_catalog.as_ref() {
+			Some(schema_catalog) => schema_catalog,
+			None => return Ok(None),
+		};
+		let active_databases = self.semantic_program.active_databases.iter().map(String::as_str).collect::<Vec<_>>();
+
+		match schema_catalog.resolve_sequence(&active_databases, name) {
+			Ok(resolved) => Ok(Some(ResolvedSequenceReference {
+				database_name: resolved.database().name().to_string(),
+				schema_is_implicit: resolved.schema().is_implicit(),
+				schema_name: resolved.schema().name().to_string(),
+				sequence_name: resolved.sequence().name().to_string(),
+			})),
+			Err(SchemaError::UnknownSequence { .. }) => Ok(None),
+			Err(error) => Err(self.schema_error_to_compile_error(position, error)),
 		}
 	}
 

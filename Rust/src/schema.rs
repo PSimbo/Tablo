@@ -27,14 +27,27 @@ pub enum SchemaDataType {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SchemaError {
+	AmbiguousDatabaseQualifiedSequenceName {
+		database_name: String,
+		sequence_name: String,
+	},
 	AmbiguousDatabaseQualifiedTableName {
 		database_name: String,
 		table_name: String,
+	},
+	AmbiguousSchemaQualifiedSequenceName {
+		active_databases: Vec<String>,
+		schema_name: String,
+		sequence_name: String,
 	},
 	AmbiguousSchemaQualifiedTableName {
 		active_databases: Vec<String>,
 		schema_name: String,
 		table_name: String,
+	},
+	AmbiguousSequenceName {
+		active_databases: Vec<String>,
+		sequence_name: String,
 	},
 	AmbiguousTableName {
 		active_databases: Vec<String>,
@@ -51,6 +64,11 @@ pub enum SchemaError {
 		database_name: String,
 		schema_name: String,
 	},
+	DuplicateSequence {
+		database_name: String,
+		schema_name: String,
+		sequence_name: String,
+	},
 	DuplicateTable {
 		database_name: String,
 		schema_name: String,
@@ -62,6 +80,9 @@ pub enum SchemaError {
 	UnknownSchema {
 		database_name: Option<String>,
 		schema_name: String,
+	},
+	UnknownSequence {
+		sequence_name: String,
 	},
 	UnknownTable {
 		table_name: String,
@@ -101,6 +122,7 @@ impl ColumnSchema {
 pub struct DatabaseNamespace {
 	is_implicit: bool,
 	name: String,
+	sequences: BTreeMap<String, SequenceSchema>,
 	tables: BTreeMap<String, TableSchema>,
 }
 
@@ -109,8 +131,24 @@ impl DatabaseNamespace {
 		Self {
 			is_implicit: false,
 			name: name.into(),
+			sequences: BTreeMap::new(),
 			tables: BTreeMap::new(),
 		}
+	}
+
+	pub fn add_sequence(&mut self, sequence: SequenceSchema, database_name: &str) -> Result<(), SchemaError> {
+		let normalized_name = normalize_name(sequence.name());
+
+		if self.sequences.contains_key(&normalized_name) {
+			return Err(SchemaError::DuplicateSequence {
+				database_name: database_name.to_string(),
+				schema_name: self.name.clone(),
+				sequence_name: sequence.name().to_string(),
+			});
+		}
+
+		self.sequences.insert(normalized_name, sequence);
+		Ok(())
 	}
 
 	pub fn add_table(&mut self, table: TableSchema, database_name: &str) -> Result<(), SchemaError> {
@@ -136,6 +174,14 @@ impl DatabaseNamespace {
 		&self.name
 	}
 
+	pub fn sequence(&self, name: &str) -> Option<&SequenceSchema> {
+		self.sequences.get(&normalize_name(name))
+	}
+
+	pub fn sequences(&self) -> impl Iterator<Item = &SequenceSchema> {
+		self.sequences.values()
+	}
+
 	pub fn table(&self, name: &str) -> Option<&TableSchema> {
 		self.tables.get(&normalize_name(name))
 	}
@@ -148,6 +194,7 @@ impl DatabaseNamespace {
 		Self {
 			is_implicit: true,
 			name: name.into(),
+			sequences: BTreeMap::new(),
 			tables: BTreeMap::new(),
 		}
 	}
@@ -217,6 +264,27 @@ impl DatabaseSchema {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedSequence<'a> {
+	database: &'a DatabaseSchema,
+	schema: &'a DatabaseNamespace,
+	sequence: &'a SequenceSchema,
+}
+
+impl<'a> ResolvedSequence<'a> {
+	pub fn database(&self) -> &'a DatabaseSchema {
+		self.database
+	}
+
+	pub fn schema(&self) -> &'a DatabaseNamespace {
+		self.schema
+	}
+
+	pub fn sequence(&self) -> &'a SequenceSchema {
+		self.sequence
+	}
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedTable<'a> {
 	database: &'a DatabaseSchema,
 	schema: &'a DatabaseNamespace,
@@ -274,6 +342,25 @@ impl SchemaCatalog {
 		self.databases.values()
 	}
 
+	pub fn resolve_database_schema_sequence<'a>(
+		&'a self,
+		active_databases: &[&str],
+		database_name: &str,
+		schema_name: &str,
+		sequence_name: &str,
+	) -> Result<ResolvedSequence<'a>, SchemaError> {
+		let database = self.active_database(active_databases, database_name)?;
+		let schema = database.schema(schema_name).ok_or(SchemaError::UnknownSchema {
+			database_name: Some(database.name().to_string()),
+			schema_name: schema_name.to_string(),
+		})?;
+		let sequence = schema.sequence(sequence_name).ok_or(SchemaError::UnknownSequence {
+			sequence_name: format!("{}.{}.{}", database.name(), schema_name, sequence_name),
+		})?;
+
+		Ok(ResolvedSequence { database, schema, sequence })
+	}
+
 	pub fn resolve_database_schema_table<'a>(
 		&'a self,
 		active_databases: &[&str],
@@ -291,6 +378,29 @@ impl SchemaCatalog {
 		})?;
 
 		Ok(ResolvedTable { database, schema, table })
+	}
+
+	pub fn resolve_database_sequence<'a>(
+		&'a self,
+		active_databases: &[&str],
+		database_name: &str,
+		sequence_name: &str,
+	) -> Result<ResolvedSequence<'a>, SchemaError> {
+		let database = self.active_database(active_databases, database_name)?;
+
+		if !database.allows_database_table_shorthand() {
+			return Err(SchemaError::AmbiguousDatabaseQualifiedSequenceName {
+				database_name: database.name().to_string(),
+				sequence_name: sequence_name.to_string(),
+			});
+		}
+
+		let schema = database.schemas().next().unwrap();
+		let sequence = schema.sequence(sequence_name).ok_or(SchemaError::UnknownSequence {
+			sequence_name: format!("{}.{}", database.name(), sequence_name),
+		})?;
+
+		Ok(ResolvedSequence { database, schema, sequence })
 	}
 
 	pub fn resolve_database_table<'a>(
@@ -314,6 +424,36 @@ impl SchemaCatalog {
 		})?;
 
 		Ok(ResolvedTable { database, schema, table })
+	}
+
+	pub fn resolve_schema_sequence<'a>(
+		&'a self,
+		active_databases: &[&str],
+		schema_name: &str,
+		sequence_name: &str,
+	) -> Result<ResolvedSequence<'a>, SchemaError> {
+		let mut matches = Vec::new();
+
+		for database_name in active_databases {
+			let database = self.active_database(active_databases, database_name)?;
+
+			if let Some(schema) = database.schema(schema_name)
+				&& let Some(sequence) = schema.sequence(sequence_name) {
+				matches.push(ResolvedSequence { database, schema, sequence });
+			}
+		}
+
+		match matches.len() {
+			0 => Err(SchemaError::UnknownSequence {
+				sequence_name: format!("{schema_name}.{sequence_name}"),
+			}),
+			1 => Ok(matches.pop().unwrap()),
+			_ => Err(SchemaError::AmbiguousSchemaQualifiedSequenceName {
+				active_databases: active_databases.iter().map(|name| (*name).to_string()).collect(),
+				schema_name: schema_name.to_string(),
+				sequence_name: sequence_name.to_string(),
+			}),
+		}
 	}
 
 	pub fn resolve_schema_table<'a>(
@@ -342,6 +482,35 @@ impl SchemaCatalog {
 				active_databases: active_databases.iter().map(|name| (*name).to_string()).collect(),
 				schema_name: schema_name.to_string(),
 				table_name: table_name.to_string(),
+			}),
+		}
+	}
+
+	pub fn resolve_sequence<'a>(
+		&'a self,
+		active_databases: &[&str],
+		sequence_name: &str,
+	) -> Result<ResolvedSequence<'a>, SchemaError> {
+		let mut matches = Vec::new();
+
+		for database_name in active_databases {
+			let database = self.active_database(active_databases, database_name)?;
+
+			for schema in database.schemas() {
+				if let Some(sequence) = schema.sequence(sequence_name) {
+					matches.push(ResolvedSequence { database, schema, sequence });
+				}
+			}
+		}
+
+		match matches.len() {
+			0 => Err(SchemaError::UnknownSequence {
+				sequence_name: sequence_name.to_string(),
+			}),
+			1 => Ok(matches.pop().unwrap()),
+			_ => Err(SchemaError::AmbiguousSequenceName {
+				active_databases: active_databases.iter().map(|name| (*name).to_string()).collect(),
+				sequence_name: sequence_name.to_string(),
 			}),
 		}
 	}
@@ -399,6 +568,23 @@ impl Default for SchemaCatalog {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SequenceSchema {
+	name: String,
+}
+
+impl SequenceSchema {
+	pub fn new(name: impl Into<String>) -> Self {
+		Self {
+			name: name.into(),
+		}
+	}
+
+	pub fn name(&self) -> &str {
+		&self.name
+	}
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableSchema {
 	columns: BTreeMap<String, ColumnSchema>,
 	name: String,
@@ -448,10 +634,12 @@ mod tests {
 	use super::ColumnSchema;
 	use super::DatabaseNamespace;
 	use super::DatabaseSchema;
+	use super::ResolvedSequence;
 	use super::ResolvedTable;
 	use super::SchemaCatalog;
 	use super::SchemaDataType;
 	use super::SchemaError;
+	use super::SequenceSchema;
 	use super::TableSchema;
 
 	fn resolved_names(resolved: ResolvedTable<'_>) -> (String, String, String) {
@@ -460,6 +648,20 @@ mod tests {
 			resolved.schema().name().to_string(),
 			resolved.table().name().to_string(),
 		)
+	}
+
+	fn resolved_sequence_names(resolved: ResolvedSequence<'_>) -> (String, String, String) {
+		(
+			resolved.database().name().to_string(),
+			resolved.schema().name().to_string(),
+			resolved.sequence().name().to_string(),
+		)
+	}
+
+	fn schema_with_sequence(name: &str, sequence: &str) -> DatabaseNamespace {
+		let mut schema = DatabaseNamespace::new(name);
+		schema.add_sequence(SequenceSchema::new(sequence), "ExampleDb").unwrap();
+		schema
 	}
 
 	fn schema_with_table(name: &str, table: &str) -> DatabaseNamespace {
@@ -472,6 +674,25 @@ mod tests {
 		let mut table = TableSchema::new(name);
 		table.add_column(ColumnSchema::new("Id", SchemaDataType::Int, false)).unwrap();
 		table
+	}
+
+	#[test]
+	fn allows_table_and_sequence_to_share_a_name() {
+		let mut schema = DatabaseNamespace::new("Public");
+		schema.add_table(table_with_id("Customers"), "ExampleDb").unwrap();
+		schema.add_sequence(SequenceSchema::new("Customers"), "ExampleDb").unwrap();
+
+		let mut database = DatabaseSchema::new("ExampleDb");
+		database.add_schema(schema).unwrap();
+
+		let mut catalog = SchemaCatalog::new();
+		catalog.add_database(database).unwrap();
+
+		let resolved_table = catalog.resolve_table(&["exampledb"], "customers").unwrap();
+		let resolved_sequence = catalog.resolve_sequence(&["exampledb"], "customers").unwrap();
+
+		assert_eq!(resolved_table.table().name(), "Customers");
+		assert_eq!(resolved_sequence.sequence().name(), "Customers");
 	}
 
 	#[test]
@@ -658,6 +879,22 @@ mod tests {
 		assert_eq!(
 			resolved_names(resolved),
 			(String::from("Sales"), String::from("Crm"), String::from("Customers"))
+		);
+	}
+
+	#[test]
+	fn resolves_unqualified_sequence_name_from_active_databases_when_unique() {
+		let mut database = DatabaseSchema::new("Sales");
+		database.add_schema(schema_with_sequence("Public", "CustomerId")).unwrap();
+
+		let mut catalog = SchemaCatalog::new();
+		catalog.add_database(database).unwrap();
+
+		let resolved = catalog.resolve_sequence(&["sales"], "customerid").unwrap();
+
+		assert_eq!(
+			resolved_sequence_names(resolved),
+			(String::from("Sales"), String::from("Public"), String::from("CustomerId"))
 		);
 	}
 

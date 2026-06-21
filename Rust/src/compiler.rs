@@ -317,9 +317,26 @@ impl Compiler {
 						self.compile_object_field_assignment(slot, &target.fields, *operator, value, semantic_program, emission);
 					}
 					AssignmentTarget::Identifier(target) => {
-						let slot = semantic_program.identifier_slot(target.position)
-							.unwrap_or_else(|| panic!("Missing slot for identifier `{}`.", target.name));
-						self.compile_assignment(slot, *operator, value, semantic_program, emission);
+						if let Some(resolved_sequence) = semantic_program.resolved_sequence(target.position) {
+							self.compile_into(value, semantic_program, emission);
+							self.emit(emission, Instruction::StoreSequenceCurrent {
+								database_name: resolved_sequence.database_name.clone(),
+								schema_is_implicit: resolved_sequence.schema_is_implicit,
+								schema_name: resolved_sequence.schema_name.clone(),
+								sequence_name: resolved_sequence.sequence_name.clone(),
+							}, value.position());
+							self.emit(emission, Instruction::LoadSequenceCurrent {
+								database_name: resolved_sequence.database_name.clone(),
+								schema_is_implicit: resolved_sequence.schema_is_implicit,
+								schema_name: resolved_sequence.schema_name.clone(),
+								sequence_name: resolved_sequence.sequence_name.clone(),
+							}, value.position());
+						}
+						else {
+							let slot = semantic_program.identifier_slot(target.position)
+								.unwrap_or_else(|| panic!("Missing slot for identifier `{}`.", target.name));
+							self.compile_assignment(slot, *operator, value, semantic_program, emission);
+						}
 					}
 					AssignmentTarget::Index(target) => {
 						let slot = semantic_program.identifier_slot(target.array.position)
@@ -337,6 +354,16 @@ impl Compiler {
 				self.emit(emission, Instruction::PushBoolean(*value), expression_position);
 			}
 			Expr::Call(CallExpr { arguments, .. }) => {
+				if let Some(resolved_sequence) = semantic_program.sequence_call_target(expression.position()) {
+					self.emit(emission, Instruction::AdvanceSequence {
+						database_name: resolved_sequence.database_name.clone(),
+						schema_is_implicit: resolved_sequence.schema_is_implicit,
+						schema_name: resolved_sequence.schema_name.clone(),
+						sequence_name: resolved_sequence.sequence_name.clone(),
+					}, expression_position);
+					return;
+				}
+
 				let reference_slots = semantic_program.call_argument_reference_slots(expression.position());
 
 				for (index, argument) in arguments.iter().enumerate() {
@@ -384,6 +411,14 @@ impl Compiler {
 						variant_name: field.name.clone(),
 					}, expression_position);
 				}
+				else if let Some(resolved_sequence) = semantic_program.resolved_sequence(expression.position()) {
+					self.emit(emission, Instruction::LoadSequenceCurrent {
+						database_name: resolved_sequence.database_name.clone(),
+						schema_is_implicit: resolved_sequence.schema_is_implicit,
+						schema_name: resolved_sequence.schema_name.clone(),
+						sequence_name: resolved_sequence.sequence_name.clone(),
+					}, expression_position);
+				}
 				else {
 					self.compile_into_with_debug_position(object, semantic_program, emission, debug_position);
 					self.emit(emission, Instruction::LoadField(field.name.clone()), expression_position);
@@ -398,9 +433,19 @@ impl Compiler {
 				self.emit(emission, Instruction::ExecuteQuery(query_index), expression_position);
 			}
 			Expr::Identifier(IdentifierExpr { name, .. }) => {
-				let slot = semantic_program.identifier_slot(expression.position())
-					.unwrap_or_else(|| panic!("Missing slot for identifier `{name}`."));
-				self.emit(emission, Instruction::LoadLocal(slot), expression_position);
+				if let Some(resolved_sequence) = semantic_program.resolved_sequence(expression.position()) {
+					self.emit(emission, Instruction::LoadSequenceCurrent {
+						database_name: resolved_sequence.database_name.clone(),
+						schema_is_implicit: resolved_sequence.schema_is_implicit,
+						schema_name: resolved_sequence.schema_name.clone(),
+						sequence_name: resolved_sequence.sequence_name.clone(),
+					}, expression_position);
+				}
+				else {
+					let slot = semantic_program.identifier_slot(expression.position())
+						.unwrap_or_else(|| panic!("Missing slot for identifier `{name}`."));
+					self.emit(emission, Instruction::LoadLocal(slot), expression_position);
+				}
 			}
 			Expr::Index(IndexExpr { array, index, .. }) => {
 				self.compile_into_with_debug_position(array, semantic_program, emission, debug_position);

@@ -21,6 +21,12 @@ pub enum Constant {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Instruction {
 	Add,
+	AdvanceSequence {
+		database_name: String,
+		schema_is_implicit: bool,
+		schema_name: String,
+		sequence_name: String,
+	},
 	And,
 	Call(u32, u32),
 	CallBuiltIn(BuiltInFunction, u32),
@@ -43,6 +49,12 @@ pub enum Instruction {
 	LoadIndex,
 	LoadLocal(u32),
 	LoadReference(u32),
+	LoadSequenceCurrent {
+		database_name: String,
+		schema_is_implicit: bool,
+		schema_name: String,
+		sequence_name: String,
+	},
 	MakeArray(u32),
 	MakeObject(Vec<String>),
 	MakeRange,
@@ -84,6 +96,12 @@ pub enum Instruction {
 	StoreFieldPath(Vec<String>),
 	StoreIndex,
 	StoreLocal(u32),
+	StoreSequenceCurrent {
+		database_name: String,
+		schema_is_implicit: bool,
+		schema_name: String,
+		sequence_name: String,
+	},
 	Subtract,
 	Xor,
 }

@@ -46,6 +46,7 @@ use crate::ast::Program;
 use crate::ast::RangeExpr;
 use crate::ast::RecordPointerDeclaration;
 use crate::ast::ReturnStatement;
+use crate::ast::SequenceReference;
 use crate::ast::Statement;
 use crate::ast::TableReference;
 use crate::ast::TernaryExpr;
@@ -822,6 +823,10 @@ impl Parser {
 		let data_type = if self.current().is_some_and(|token| token.kind == TokenKind::RecKeyword) {
 			self.next();
 			FunctionParameterType::RecordPointer(self.parse_table_reference()?)
+		}
+		else if self.current().is_some_and(|token| token.kind == TokenKind::SeqKeyword) {
+			self.next();
+			FunctionParameterType::Sequence(self.parse_sequence_reference()?)
 		}
 		else {
 			FunctionParameterType::Value(self.parse_data_type()?)
@@ -1835,6 +1840,35 @@ impl Parser {
 		self.parse_object_shape_declaration(name, position)
 	}
 
+	fn parse_sequence_reference(&mut self) -> Result<SequenceReference, ParseError> {
+		let first = self.expect_token(TokenKind::Identifier, "Expected sequence name.")?;
+		let mut components = vec![IdentifierExpr {
+			name: first.lexeme,
+			position: first.start,
+		}];
+
+		while self.current().is_some_and(|token| token.kind == TokenKind::Dot) {
+			self.next();
+			let next = self.expect_token(TokenKind::Identifier, "Expected identifier after `.` in sequence reference.")?;
+			components.push(IdentifierExpr {
+				name: next.lexeme,
+				position: next.start,
+			});
+		}
+
+		if components.len() > 3 {
+			return Err(ParseError {
+				message: String::from("Sequence references may contain at most three identifier components."),
+				position: components[3].position,
+			});
+		}
+
+		Ok(SequenceReference {
+			position: components[0].position,
+			components,
+		})
+	}
+
 	fn parse_statement(&mut self) -> Result<Statement, ParseError> {
 		match self.current() {
 			Some(token) if token.kind == TokenKind::BreakKeyword => self.parse_break_statement(),
@@ -2241,6 +2275,7 @@ mod tests {
 	use crate::ast::RangeExpr;
 	use crate::ast::RecordPointerDeclaration;
 	use crate::ast::ReturnStatement;
+	use crate::ast::SequenceReference;
 	use crate::ast::Statement;
 	use crate::ast::TableReference;
 	use crate::ast::TernaryExpr;
@@ -2494,6 +2529,9 @@ mod tests {
 				FunctionParameterType::RecordPointer(table) => {
 					FunctionParameterType::RecordPointer(normalize_table_reference(table))
 				}
+				FunctionParameterType::Sequence(sequence) => {
+					FunctionParameterType::Sequence(normalize_sequence_reference(sequence))
+				}
 				FunctionParameterType::Value(data_type) => FunctionParameterType::Value(data_type),
 			},
 			is_by_ref: parameter.is_by_ref,
@@ -2589,6 +2627,13 @@ mod tests {
 		ReturnStatement {
 			position: 0,
 			value: return_statement.value.map(normalize_expr),
+		}
+	}
+
+	fn normalize_sequence_reference(sequence: SequenceReference) -> SequenceReference {
+		SequenceReference {
+			components: sequence.components.into_iter().map(normalize_identifier).collect(),
+			position: 0,
 		}
 	}
 

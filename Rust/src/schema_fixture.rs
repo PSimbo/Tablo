@@ -140,7 +140,7 @@ impl SchemaTextParser {
 				}
 				SchemaTokenKind::Identifier(word) if word.eq_ignore_ascii_case("create") => {
 					self.next();
-					let object_type = self.expect_identifier("Expected `schema` or `table` after `create`.")?;
+					let object_type = self.expect_identifier("Expected `schema`, `table`, or `sequence` after `create`.")?;
 
 					if object_type.eq_ignore_ascii_case("schema") {
 						let schema_name = self.expect_identifier("Expected schema name after `create schema`.")?;
@@ -171,9 +171,24 @@ impl SchemaTextParser {
 						})?;
 						schema.add_table(table, &database_name).map_err(schema_error_to_fixture_error)?;
 					}
+					else if object_type.eq_ignore_ascii_case("sequence") {
+						let sequence_name = self.expect_identifier("Expected sequence name after `create sequence`.")?;
+						self.expect_semicolon("Expected `;` after sequence declaration.")?;
+						self.ensure_database_initialized(&mut database, &database_name)?;
+						let database = database.as_mut().unwrap();
+						let database_name = database.name().to_string();
+						let schema_name = current_schema_name.clone().ok_or_else(|| SchemaFixtureError {
+							message: String::from("A schema must be declared before any sequence definitions."),
+						})?;
+						let schema = database.schema_mut(&schema_name).ok_or_else(|| SchemaFixtureError {
+							message: format!("Schema `{schema_name}` must be declared before adding sequences to it."),
+						})?;
+						schema.add_sequence(crate::schema::SequenceSchema::new(sequence_name), &database_name)
+							.map_err(schema_error_to_fixture_error)?;
+					}
 					else {
 						return Err(self.error_at_current(format!(
-							"Expected `schema` or `table` after `create`, found `{object_type}`."
+							"Expected `schema`, `table`, or `sequence` after `create`, found `{object_type}`."
 						)));
 					}
 				}
@@ -192,9 +207,25 @@ impl SchemaTextParser {
 					})?;
 					schema.add_table(table, &database_name).map_err(schema_error_to_fixture_error)?;
 				}
+				SchemaTokenKind::Identifier(word) if word.eq_ignore_ascii_case("sequence") => {
+					self.next();
+					let sequence_name = self.expect_identifier("Expected sequence name after `sequence`.")?;
+					self.expect_semicolon("Expected `;` after sequence declaration.")?;
+					self.ensure_database_initialized(&mut database, &database_name)?;
+					let database = database.as_mut().unwrap();
+					let database_name = database.name().to_string();
+					let schema_name = current_schema_name.clone().ok_or_else(|| SchemaFixtureError {
+						message: String::from("A schema must be declared before any sequence definitions."),
+					})?;
+					let schema = database.schema_mut(&schema_name).ok_or_else(|| SchemaFixtureError {
+						message: format!("Schema `{schema_name}` must be declared before adding sequences to it."),
+					})?;
+					schema.add_sequence(crate::schema::SequenceSchema::new(sequence_name), &database_name)
+						.map_err(schema_error_to_fixture_error)?;
+				}
 				_ => {
 					return Err(self.error_at_current(String::from(
-						"Expected a database declaration, schema declaration, or table declaration.",
+						"Expected a database declaration, schema declaration, table declaration, or sequence declaration.",
 					)));
 				}
 			}
@@ -206,7 +237,7 @@ impl SchemaTextParser {
 
 		if catalog.databases().next().is_none() {
 			return Err(SchemaFixtureError {
-				message: String::from("Schema file must declare at least a database, schema, and one table."),
+				message: String::from("Schema file must declare at least a database and one schema object."),
 			});
 		}
 
@@ -355,8 +386,21 @@ fn read_schema_catalog_from_sql_like_str(source: &str) -> Result<SchemaCatalog, 
 fn schema_error_to_fixture_error(error: SchemaError) -> SchemaFixtureError {
 	SchemaFixtureError {
 		message: match error {
+			SchemaError::AmbiguousDatabaseQualifiedSequenceName { database_name, sequence_name } => {
+				format!("Sequence `{sequence_name}` is ambiguous within database `{database_name}`.")
+			}
 			SchemaError::AmbiguousDatabaseQualifiedTableName { database_name, table_name } => {
 				format!("Table `{table_name}` is ambiguous within database `{database_name}`.")
+			}
+			SchemaError::AmbiguousSchemaQualifiedSequenceName {
+				active_databases,
+				schema_name,
+				sequence_name,
+			} => {
+				format!(
+					"Sequence `{schema_name}.{sequence_name}` is ambiguous across active databases: {}.",
+					active_databases.join(", ")
+				)
 			}
 			SchemaError::AmbiguousSchemaQualifiedTableName {
 				active_databases,
@@ -365,6 +409,12 @@ fn schema_error_to_fixture_error(error: SchemaError) -> SchemaFixtureError {
 			} => {
 				format!(
 					"Table `{schema_name}.{table_name}` is ambiguous across active databases: {}.",
+					active_databases.join(", ")
+				)
+			}
+			SchemaError::AmbiguousSequenceName { active_databases, sequence_name } => {
+				format!(
+					"Sequence `{sequence_name}` is ambiguous across active databases: {}.",
 					active_databases.join(", ")
 				)
 			}
@@ -382,6 +432,15 @@ fn schema_error_to_fixture_error(error: SchemaError) -> SchemaFixtureError {
 			}
 			SchemaError::DuplicateSchema { database_name, schema_name } => {
 				format!("Schema `{schema_name}` is declared more than once in database `{database_name}`.")
+			}
+			SchemaError::DuplicateSequence {
+				database_name,
+				schema_name,
+				sequence_name,
+			} => {
+				format!(
+					"Sequence `{sequence_name}` is declared more than once in schema `{schema_name}` of database `{database_name}`."
+				)
 			}
 			SchemaError::DuplicateTable {
 				database_name,
@@ -402,6 +461,9 @@ fn schema_error_to_fixture_error(error: SchemaError) -> SchemaFixtureError {
 					}
 					None => format!("Unknown schema `{schema_name}`."),
 				}
+			}
+			SchemaError::UnknownSequence { sequence_name } => {
+				format!("Unknown sequence `{sequence_name}`.")
 			}
 			SchemaError::UnknownTable { table_name } => {
 				format!("Unknown table `{table_name}`.")
