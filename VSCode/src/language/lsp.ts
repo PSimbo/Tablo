@@ -461,6 +461,8 @@ function toVsCodeCompletionItemKind(kind: number | undefined): vscode.Completion
 			return vscode.CompletionItemKind.Field;
 		case 14:
 			return vscode.CompletionItemKind.Keyword;
+		case 20:
+			return vscode.CompletionItemKind.EnumMember;
 		case 21:
 			return vscode.CompletionItemKind.Constant;
 		case 25:

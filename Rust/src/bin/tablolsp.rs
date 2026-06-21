@@ -397,6 +397,7 @@ impl LspServer {
 fn completion_item_kind_to_lsp(kind: CompletionItemKind) -> u32 {
 	match kind {
 		CompletionItemKind::Enum => 13,
+		CompletionItemKind::EnumMember => 20,
 		CompletionItemKind::Field => 5,
 		CompletionItemKind::BuiltInFunction | CompletionItemKind::Function => 3,
 		CompletionItemKind::Keyword => 14,

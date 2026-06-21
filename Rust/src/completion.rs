@@ -1,6 +1,7 @@
 use crate::builtins::BuiltInFunction;
 use crate::schema::ResolvedTable;
 use crate::schema::SchemaCatalog;
+use crate::schema::SchemaDataType;
 use crate::source::find_matching_paren;
 use crate::source::is_identifier_char;
 use crate::source::read_identifier;
@@ -12,6 +13,7 @@ use crate::source::skip_whitespace;
 pub enum CompletionItemKind {
 	BuiltInFunction,
 	Enum,
+	EnumMember,
 	Field,
 	Function,
 	Keyword,
@@ -27,16 +29,6 @@ pub struct CompletionItem {
 	pub detail: &'static str,
 	pub kind: CompletionItemKind,
 	pub label: String,
-}
-
-fn built_in_completion_items() -> Vec<CompletionItem> {
-	BuiltInFunction::all().into_iter()
-		.map(|built_in| CompletionItem {
-			label: String::from(built_in.name()),
-			kind: CompletionItemKind::BuiltInFunction,
-			detail: "Built-in function",
-		})
-		.collect()
 }
 
 pub fn collect_document_completion_items(source: &str) -> Vec<CompletionItem> {
@@ -193,13 +185,47 @@ pub fn member_completion_items(
 	cursor_offset: usize,
 	schema_catalog: Option<&SchemaCatalog>,
 ) -> Option<Vec<CompletionItem>> {
-	let schema_catalog = schema_catalog?;
 	let visible_text = &source[..cursor_offset.min(source.len())];
-	let receiver = extract_member_receiver(visible_text)?;
+	let receiver_chain = extract_member_receiver_chain(visible_text)?;
 	let active_databases = collect_active_databases(visible_text);
-	let record_pointer_bindings = collect_visible_record_pointer_bindings(visible_text, schema_catalog, &active_databases);
-	let resolved = record_pointer_bindings.get(&receiver)?;
+	let object_declarations = collect_object_declarations(source);
+	let enum_declarations = collect_enum_declarations(source);
+	let visible_bindings = collect_visible_bindings(
+		visible_text,
+		schema_catalog,
+		&active_databases,
+		&object_declarations,
+	);
+	let member_type = resolve_member_type(
+		&receiver_chain,
+		&visible_bindings,
+		&object_declarations,
+		schema_catalog,
+		&active_databases,
+	)?;
 
+	if let Some(variants) = enum_declarations.get(&member_type) {
+		return Some(variants.iter()
+			.map(|variant| CompletionItem {
+				label: variant.clone(),
+				kind: CompletionItemKind::EnumMember,
+				detail: "Enum member",
+			})
+			.collect());
+	}
+
+	if let Some(fields) = object_declarations.get(&member_type) {
+		return Some(fields.iter()
+			.map(|field| CompletionItem {
+				label: field.name.clone(),
+				kind: CompletionItemKind::Field,
+				detail: "Object field",
+			})
+			.collect());
+	}
+
+	let schema_catalog = schema_catalog?;
+	let resolved = resolve_type_name_to_table(&member_type, schema_catalog, &active_databases)?;
 	Some(resolved.table().columns()
 		.map(|column| CompletionItem {
 			label: String::from(column.name()),
@@ -207,6 +233,27 @@ pub fn member_completion_items(
 			detail: "Record field",
 		})
 		.collect())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ObjectFieldInfo {
+	name: String,
+	type_name: Option<String>,
+}
+
+struct ObjectFieldType {
+	next_index: usize,
+	type_name: Option<String>,
+}
+
+fn built_in_completion_items() -> Vec<CompletionItem> {
+	BuiltInFunction::all().into_iter()
+		.map(|built_in| CompletionItem {
+			label: String::from(built_in.name()),
+			kind: CompletionItemKind::BuiltInFunction,
+			detail: "Built-in function",
+		})
+		.collect()
 }
 
 fn collect_active_databases(source: &str) -> Vec<String> {
@@ -260,11 +307,21 @@ fn collect_active_databases(source: &str) -> Vec<String> {
 	databases
 }
 
-fn collect_function_parameter_record_pointer_bindings<'a>(
+fn collect_enum_declarations(source: &str) -> std::collections::BTreeMap<String, Vec<String>> {
+	let mut declarations = std::collections::BTreeMap::new();
+
+	for (name, body) in find_brace_declarations(source, "enum") {
+		declarations.insert(name, extract_top_level_member_names(&body));
+	}
+
+	declarations
+}
+
+fn collect_function_parameter_bindings(
 	parameters: &str,
-	schema_catalog: &'a SchemaCatalog,
+	schema_catalog: Option<&SchemaCatalog>,
 	active_databases: &[String],
-) -> std::collections::BTreeMap<String, ResolvedTable<'a>> {
+) -> std::collections::BTreeMap<String, String> {
 	let mut bindings = std::collections::BTreeMap::new();
 	let mut index = 0;
 
@@ -282,17 +339,98 @@ fn collect_function_parameter_record_pointer_bindings<'a>(
 
 		let type_start = skip_whitespace(parameters, colon_index + 1);
 		let type_end = skip_expression(parameters, type_start, &[","]);
-		if let Some(resolved) = resolve_record_pointer_parameter_type(
-			parameters[type_start..type_end].trim(),
-			schema_catalog,
-			active_databases,
-		) {
-			bindings.insert(name.value, resolved);
+		let type_name = extract_reference_type_name(parameters[type_start..type_end].trim())
+			.or_else(|| {
+				let schema_catalog = schema_catalog?;
+				resolve_record_pointer_parameter_type(
+					parameters[type_start..type_end].trim(),
+					schema_catalog,
+					active_databases,
+				).map(resolved_table_type_name)
+			});
+
+		if let Some(type_name) = type_name {
+			bindings.insert(name.value, type_name);
 		}
 		index = type_end.saturating_add(1);
 	}
 
 	bindings
+}
+
+fn collect_object_declarations(source: &str) -> std::collections::BTreeMap<String, Vec<ObjectFieldInfo>> {
+	let mut declarations = std::collections::BTreeMap::new();
+
+	for (name, body) in find_brace_declarations(source, "obj") {
+		collect_object_fields(&name, &body, &mut declarations);
+	}
+
+	declarations
+}
+
+fn collect_object_fields(
+	type_name: &str,
+	body: &str,
+	objects: &mut std::collections::BTreeMap<String, Vec<ObjectFieldInfo>>,
+) {
+	let mut fields = Vec::new();
+	let mut depth: usize = 0;
+	let mut index = 0;
+
+	while index < body.len() {
+		if let Some(comment_end) = skip_comment(body, index) {
+			index = comment_end;
+			continue;
+		}
+
+		if let Some(string_end) = skip_string_literal(body, index) {
+			index = string_end;
+			continue;
+		}
+
+		let Some(ch) = body[index..].chars().next() else {
+			break;
+		};
+
+		match ch {
+			'{' => {
+				depth += 1;
+				index += 1;
+				continue;
+			}
+			'}' => {
+				depth = depth.saturating_sub(1);
+				index += 1;
+				continue;
+			}
+			_ => {}
+		}
+
+		if depth == 0
+			&& let Some(identifier) = read_identifier(body, index) {
+			let colon_index = skip_whitespace(body, identifier.end);
+			if body[colon_index..].chars().next() == Some(':') {
+				let field_type = read_object_field_type(
+					body,
+					colon_index + 1,
+					type_name,
+					&identifier.value,
+					objects,
+				);
+				fields.push(ObjectFieldInfo {
+					name: identifier.value,
+					type_name: field_type.type_name,
+				});
+				index = field_type.next_index;
+				continue;
+			}
+		}
+
+		index += ch.len_utf8();
+	}
+
+	dedupe_object_fields(&mut fields);
+	objects.insert(String::from(type_name), fields);
 }
 
 fn collect_parameter_completion_items(parameters: &str, items: &mut Vec<CompletionItem>) {
@@ -319,11 +457,12 @@ fn collect_parameter_completion_items(parameters: &str, items: &mut Vec<Completi
 	}
 }
 
-fn collect_visible_record_pointer_bindings<'a>(
+fn collect_visible_bindings(
 	source: &str,
-	schema_catalog: &'a SchemaCatalog,
+	schema_catalog: Option<&SchemaCatalog>,
 	active_databases: &[String],
-) -> std::collections::BTreeMap<String, ResolvedTable<'a>> {
+	object_declarations: &std::collections::BTreeMap<String, Vec<ObjectFieldInfo>>,
+) -> std::collections::BTreeMap<String, String> {
 	let mut scopes = vec![std::collections::BTreeMap::new()];
 	let mut pending_scopes = Vec::new();
 	let mut index = 0;
@@ -366,31 +505,40 @@ fn collect_visible_record_pointer_bindings<'a>(
 		}
 
 		match identifier.value.as_str() {
+			"const" | "var" => {
+				if let Some((name, type_name, next_index)) = parse_variable_binding(source, identifier.end) {
+					if let Some(scope) = scopes.last_mut() {
+						scope.insert(name, type_name);
+					}
+					index = next_index;
+					continue;
+				}
+			}
 			"fn" => {
-				if let Some((bindings, next_index)) = parse_function_record_pointer_bindings(source, identifier.end, schema_catalog, active_databases) {
+				if let Some((bindings, next_index)) = parse_function_bindings(source, identifier.end, schema_catalog, active_databases, object_declarations) {
 					pending_scopes.push(bindings);
 					index = next_index;
 					continue;
 				}
 			}
-			"if" => {
-				if let Some((name, resolved, next_index)) = parse_if_record_binding(source, identifier.end, schema_catalog, active_databases) {
-					pending_scopes.push(std::collections::BTreeMap::from([(name, resolved)]));
+			"for" => {
+				if let Some((name, type_name, next_index)) = parse_for_binding(source, identifier.end, schema_catalog, active_databases, object_declarations, &merge_string_bindings(&scopes)) {
+					pending_scopes.push(std::collections::BTreeMap::from([(name, type_name)]));
 					index = next_index;
 					continue;
 				}
 			}
-			"for" => {
-				if let Some((name, resolved, next_index)) = parse_for_record_binding(source, identifier.end, schema_catalog, active_databases) {
-					pending_scopes.push(std::collections::BTreeMap::from([(name, resolved)]));
+			"if" => {
+				if let Some((name, type_name, next_index)) = parse_if_binding(source, identifier.end, schema_catalog, active_databases, object_declarations, &merge_string_bindings(&scopes)) {
+					pending_scopes.push(std::collections::BTreeMap::from([(name, type_name)]));
 					index = next_index;
 					continue;
 				}
 			}
 			"rec" => {
-				if let Some((name, resolved, next_index)) = parse_record_binding(source, identifier.end, schema_catalog, active_databases) {
+				if let Some((name, type_name, next_index)) = parse_record_type_binding(source, identifier.end, schema_catalog, active_databases, object_declarations, &merge_string_bindings(&scopes)) {
 					if let Some(scope) = scopes.last_mut() {
-						scope.insert(name, resolved);
+						scope.insert(name, type_name);
 					}
 					index = next_index;
 					continue;
@@ -402,37 +550,260 @@ fn collect_visible_record_pointer_bindings<'a>(
 		index = identifier.end;
 	}
 
-	let mut merged = std::collections::BTreeMap::new();
-	for scope in scopes {
-		for (name, resolved) in scope {
-			merged.insert(name, resolved);
-		}
-	}
-	merged
+	merge_string_bindings(&scopes)
 }
 
-fn extract_member_receiver(source: &str) -> Option<String> {
+fn dedupe_object_fields(fields: &mut Vec<ObjectFieldInfo>) {
+	let mut seen = std::collections::BTreeSet::new();
+	fields.retain(|field| seen.insert(field.name.clone()));
+}
+
+fn extract_member_receiver_chain(source: &str) -> Option<Vec<String>> {
 	let trimmed = source.trim_end();
 	let before_dot = trimmed.strip_suffix('.')?;
 	let start = before_dot.char_indices()
 		.rev()
-		.find(|(_, ch)| !is_identifier_char(*ch))
+		.find(|(_, ch)| !is_identifier_char(*ch) && *ch != '.' && !ch.is_whitespace())
 		.map_or(0, |(index, ch)| index + ch.len_utf8());
+	let candidate = before_dot[start..].trim_start();
+	split_qualified_chain(candidate)
+}
 
-	if start >= before_dot.len() {
+fn extract_object_construction_type_name(source: &str) -> Option<String> {
+	let brace_index = source.find('{')?;
+	if brace_index == 0 {
 		return None;
 	}
 
-	let identifier = read_identifier(before_dot, start)?;
-	(identifier.end == before_dot.len()).then_some(identifier.value)
+	let prefix = source[..brace_index].trim();
+	if prefix.is_empty() {
+		return None;
+	}
+
+	let chain = split_qualified_chain(prefix)?;
+	Some(chain.join("."))
 }
 
-fn parse_for_record_binding<'a>(
+fn extract_reference_type_name(source: &str) -> Option<String> {
+	let trimmed = source.trim().trim_end_matches('?').trim();
+	if trimmed.is_empty() || trimmed.starts_with('[') || trimmed.starts_with('&') || trimmed.contains('|') {
+		return None;
+	}
+
+	let parts = split_qualified_chain(trimmed)?;
+	Some(parts.join("."))
+}
+
+fn extract_top_level_member_names(body: &str) -> Vec<String> {
+	let mut members = Vec::new();
+	let mut depth: usize = 0;
+	let mut index = 0;
+
+	while index < body.len() {
+		if let Some(comment_end) = skip_comment(body, index) {
+			index = comment_end;
+			continue;
+		}
+
+		if let Some(string_end) = skip_string_literal(body, index) {
+			index = string_end;
+			continue;
+		}
+
+		let Some(ch) = body[index..].chars().next() else {
+			break;
+		};
+
+		match ch {
+			'{' => {
+				depth += 1;
+				index += 1;
+				continue;
+			}
+			'}' => {
+				depth = depth.saturating_sub(1);
+				index += 1;
+				continue;
+			}
+			_ => {}
+		}
+
+		if depth == 0
+			&& let Some(identifier) = read_identifier(body, index) {
+			members.push(identifier.value);
+			index = identifier.end;
+			continue;
+		}
+
+		index += ch.len_utf8();
+	}
+
+	members.sort();
+	members.dedup();
+	members
+}
+
+fn find_brace_declarations(source: &str, keyword: &str) -> Vec<(String, String)> {
+	let mut declarations = Vec::new();
+	let mut index = 0;
+
+	while index < source.len() {
+		if let Some(comment_end) = skip_comment(source, index) {
+			index = comment_end;
+			continue;
+		}
+
+		if let Some(string_end) = skip_string_literal(source, index) {
+			index = string_end;
+			continue;
+		}
+
+		let Some(identifier) = read_identifier(source, index) else {
+			index += source[index..].chars().next().map(char::len_utf8).unwrap_or(1);
+			continue;
+		};
+
+		if identifier.quoted || identifier.value != keyword {
+			index = identifier.end;
+			continue;
+		}
+
+		let name_index = skip_whitespace(source, identifier.end);
+		let Some(name) = read_identifier(source, name_index) else {
+			index = identifier.end;
+			continue;
+		};
+
+		let brace_index = skip_whitespace(source, name.end);
+		if source[brace_index..].chars().next() != Some('{') {
+			index = name.end;
+			continue;
+		}
+
+		let Some(end_index) = find_matching_brace(source, brace_index) else {
+			index = brace_index + 1;
+			continue;
+		};
+
+		declarations.push((name.value, String::from(&source[brace_index + 1..end_index])));
+		index = end_index + 1;
+	}
+
+	declarations
+}
+
+fn find_matching_brace(text: &str, open_brace_index: usize) -> Option<usize> {
+	let mut depth = 0;
+	let mut index = open_brace_index;
+
+	while index < text.len() {
+		if let Some(comment_end) = skip_comment(text, index) {
+			index = comment_end;
+			continue;
+		}
+
+		if let Some(string_end) = skip_string_literal(text, index) {
+			index = string_end;
+			continue;
+		}
+
+		let ch = text[index..].chars().next()?;
+		if ch == '{' {
+			depth += 1;
+		}
+		else if ch == '}' {
+			depth -= 1;
+			if depth == 0 {
+				return Some(index);
+			}
+		}
+
+		index += ch.len_utf8();
+	}
+
+	None
+}
+
+fn find_type_end(source: &str, start: usize) -> usize {
+	let mut index = start;
+	let mut bracket_depth: usize = 0;
+
+	while index < source.len() {
+		if let Some(comment_end) = skip_comment(source, index) {
+			index = comment_end;
+			continue;
+		}
+
+		if let Some(string_end) = skip_string_literal(source, index) {
+			index = string_end;
+			continue;
+		}
+
+		let Some(ch) = source[index..].chars().next() else {
+			break;
+		};
+
+		match ch {
+			'[' => bracket_depth += 1,
+			']' => bracket_depth = bracket_depth.saturating_sub(1),
+			'=' | ';' | '\n' | '\r' if bracket_depth == 0 => break,
+			_ => {}
+		}
+
+		index += ch.len_utf8();
+	}
+
+	index
+}
+
+fn infer_expression_type(
+	source: &str,
+	schema_catalog: Option<&SchemaCatalog>,
+	active_databases: &[String],
+	object_declarations: &std::collections::BTreeMap<String, Vec<ObjectFieldInfo>>,
+	visible_bindings: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+	let source = strip_wrapping_parentheses(source.trim());
+	if source.is_empty() {
+		return None;
+	}
+
+	let schema_catalog = schema_catalog;
+	if let Some(schema_catalog) = schema_catalog
+		&& let Some(resolved) = resolve_record_pointer_expression(source, schema_catalog, active_databases) {
+		return Some(resolved_table_type_name(resolved));
+	}
+
+	if let Some(type_name) = extract_object_construction_type_name(source) {
+		return Some(type_name);
+	}
+
+	let chain = split_qualified_chain(source)?;
+	resolve_member_type(&chain, visible_bindings, object_declarations, schema_catalog, active_databases)
+}
+
+fn merge_string_bindings(
+	scopes: &[std::collections::BTreeMap<String, String>],
+) -> std::collections::BTreeMap<String, String> {
+	let mut merged = std::collections::BTreeMap::new();
+
+	for scope in scopes {
+		for (name, type_name) in scope {
+			merged.insert(name.clone(), type_name.clone());
+		}
+	}
+
+	merged
+}
+
+fn parse_for_binding(
 	source: &str,
 	start: usize,
-	schema_catalog: &'a SchemaCatalog,
+	schema_catalog: Option<&SchemaCatalog>,
 	active_databases: &[String],
-) -> Option<(String, ResolvedTable<'a>, usize)> {
+	object_declarations: &std::collections::BTreeMap<String, Vec<ObjectFieldInfo>>,
+	visible_bindings: &std::collections::BTreeMap<String, String>,
+) -> Option<(String, String, usize)> {
 	let mut index = skip_whitespace(source, start);
 	let rec_keyword = read_identifier(source, index)?;
 	if rec_keyword.quoted || rec_keyword.value != "rec" {
@@ -454,13 +825,36 @@ fn parse_for_record_binding<'a>(
 
 	let expression_start = skip_whitespace(source, in_keyword.end);
 	let expression_end = skip_expression(source, expression_start, &["where", "order", "{"]);
-	let resolved = resolve_record_pointer_expression(
+	let type_name = infer_expression_type(
 		source[expression_start..expression_end].trim(),
 		schema_catalog,
 		active_databases,
+		object_declarations,
+		visible_bindings,
 	)?;
 
-	Some((name.value, resolved, expression_end))
+	Some((name.value, type_name, expression_end))
+}
+
+fn parse_function_bindings(
+	source: &str,
+	start: usize,
+	schema_catalog: Option<&SchemaCatalog>,
+	active_databases: &[String],
+	_object_declarations: &std::collections::BTreeMap<String, Vec<ObjectFieldInfo>>,
+) -> Option<(std::collections::BTreeMap<String, String>, usize)> {
+	let index = skip_whitespace(source, start);
+	let name = read_identifier(source, index)?;
+	let mut index = skip_whitespace(source, name.end);
+	if source[index..].chars().next()? != '(' {
+		return None;
+	}
+
+	let end_index = find_matching_paren(source, index)?;
+	let parameters = &source[index + 1..end_index];
+	let bindings = collect_function_parameter_bindings(parameters, schema_catalog, active_databases);
+	index = end_index + 1;
+	Some((bindings, index))
 }
 
 fn parse_function_completion_items(
@@ -484,32 +878,14 @@ fn parse_function_completion_items(
 	Some((name.value, index))
 }
 
-fn parse_function_record_pointer_bindings<'a>(
+fn parse_if_binding(
 	source: &str,
 	start: usize,
-	schema_catalog: &'a SchemaCatalog,
+	schema_catalog: Option<&SchemaCatalog>,
 	active_databases: &[String],
-) -> Option<(std::collections::BTreeMap<String, ResolvedTable<'a>>, usize)> {
-	let index = skip_whitespace(source, start);
-	let name = read_identifier(source, index)?;
-	let mut index = skip_whitespace(source, name.end);
-	if source[index..].chars().next()? != '(' {
-		return None;
-	}
-
-	let end_index = find_matching_paren(source, index)?;
-	let parameters = &source[index + 1..end_index];
-	let bindings = collect_function_parameter_record_pointer_bindings(parameters, schema_catalog, active_databases);
-	index = end_index + 1;
-	Some((bindings, index))
-}
-
-fn parse_if_record_binding<'a>(
-	source: &str,
-	start: usize,
-	schema_catalog: &'a SchemaCatalog,
-	active_databases: &[String],
-) -> Option<(String, ResolvedTable<'a>, usize)> {
+	object_declarations: &std::collections::BTreeMap<String, Vec<ObjectFieldInfo>>,
+	visible_bindings: &std::collections::BTreeMap<String, String>,
+) -> Option<(String, String, usize)> {
 	let mut index = skip_whitespace(source, start);
 	let rec_keyword = read_identifier(source, index)?;
 	if rec_keyword.quoted || rec_keyword.value != "rec" {
@@ -525,13 +901,15 @@ fn parse_if_record_binding<'a>(
 
 	let expression_start = skip_whitespace(source, index + 1);
 	let expression_end = skip_expression(source, expression_start, &["{"]);
-	let resolved = resolve_record_pointer_expression(
+	let type_name = infer_expression_type(
 		source[expression_start..expression_end].trim(),
 		schema_catalog,
 		active_databases,
+		object_declarations,
+		visible_bindings,
 	)?;
 
-	Some((name.value, resolved, expression_end))
+	Some((name.value, type_name, expression_end))
 }
 
 fn parse_named_declaration(source: &str, start: usize) -> Option<(String, usize)> {
@@ -540,12 +918,14 @@ fn parse_named_declaration(source: &str, start: usize) -> Option<(String, usize)
 	Some((name.value, name.end))
 }
 
-fn parse_record_binding<'a>(
+fn parse_record_type_binding(
 	source: &str,
 	start: usize,
-	schema_catalog: &'a SchemaCatalog,
+	schema_catalog: Option<&SchemaCatalog>,
 	active_databases: &[String],
-) -> Option<(String, ResolvedTable<'a>, usize)> {
+	object_declarations: &std::collections::BTreeMap<String, Vec<ObjectFieldInfo>>,
+	visible_bindings: &std::collections::BTreeMap<String, String>,
+) -> Option<(String, String, usize)> {
 	let mut index = skip_whitespace(source, start);
 	if source[index..].starts_with("mut")
 		&& !source[index + 3..].chars().next().is_some_and(is_identifier_char) {
@@ -560,13 +940,29 @@ fn parse_record_binding<'a>(
 
 	let expression_start = skip_whitespace(source, index + 1);
 	let expression_end = skip_expression(source, expression_start, &[";"]);
-	let resolved = resolve_record_pointer_expression(
+	let type_name = infer_expression_type(
 		source[expression_start..expression_end].trim(),
 		schema_catalog,
 		active_databases,
+		object_declarations,
+		visible_bindings,
 	)?;
 
-	Some((name.value, resolved, expression_end))
+	Some((name.value, type_name, expression_end))
+}
+
+fn parse_variable_binding(source: &str, start: usize) -> Option<(String, String, usize)> {
+	let index = skip_whitespace(source, start);
+	let name = read_identifier(source, index)?;
+	let mut index = skip_whitespace(source, name.end);
+	if source[index..].chars().next()? != ':' {
+		return None;
+	}
+
+	index = skip_whitespace(source, index + 1);
+	let type_end = find_type_end(source, index);
+	let type_name = extract_reference_type_name(source[index..type_end].trim())?;
+	Some((name.value, type_name, type_end))
 }
 
 fn parse_record_completion_item(source: &str, start: usize) -> Option<(String, usize)> {
@@ -584,6 +980,95 @@ fn parse_variable_completion_item(source: &str, start: usize) -> Option<(String,
 	let index = skip_whitespace(source, start);
 	let name = read_identifier(source, index)?;
 	Some((name.value, name.end))
+}
+
+fn read_object_field_type(
+	body: &str,
+	start: usize,
+	parent_type_name: &str,
+	field_name: &str,
+	objects: &mut std::collections::BTreeMap<String, Vec<ObjectFieldInfo>>,
+) -> ObjectFieldType {
+	let mut index = skip_whitespace(body, start);
+
+	if body[index..].chars().next() == Some('{') {
+		if let Some(end_index) = find_matching_brace(body, index) {
+			let inline_type_name = format!("{parent_type_name}.{field_name}");
+			collect_object_fields(&inline_type_name, &body[index + 1..end_index], objects);
+			return ObjectFieldType {
+				next_index: skip_object_field_tail(body, end_index + 1),
+				type_name: Some(inline_type_name),
+			};
+		}
+
+		return ObjectFieldType {
+			next_index: body.len(),
+			type_name: None,
+		};
+	}
+
+	let type_start = index;
+	let mut paren_depth: usize = 0;
+	let mut bracket_depth: usize = 0;
+
+	while index < body.len() {
+		if let Some(comment_end) = skip_comment(body, index) {
+			index = comment_end;
+			continue;
+		}
+
+		if let Some(string_end) = skip_string_literal(body, index) {
+			index = string_end;
+			continue;
+		}
+
+		let Some(ch) = body[index..].chars().next() else {
+			break;
+		};
+
+		match ch {
+			'(' => paren_depth += 1,
+			')' => paren_depth = paren_depth.saturating_sub(1),
+			'[' => bracket_depth += 1,
+			']' => bracket_depth = bracket_depth.saturating_sub(1),
+			',' | '=' | '\n' | '\r' if paren_depth == 0 && bracket_depth == 0 => break,
+			_ => {}
+		}
+
+		index += ch.len_utf8();
+	}
+
+	ObjectFieldType {
+		next_index: skip_object_field_tail(body, index),
+		type_name: extract_reference_type_name(body[type_start..index].trim()),
+	}
+}
+
+fn resolve_member_type(
+	chain: &[String],
+	visible_bindings: &std::collections::BTreeMap<String, String>,
+	object_declarations: &std::collections::BTreeMap<String, Vec<ObjectFieldInfo>>,
+	schema_catalog: Option<&SchemaCatalog>,
+	active_databases: &[String],
+) -> Option<String> {
+	let mut current_type = visible_bindings.get(chain.first()?).cloned()
+		.or_else(|| Some(chain.first()?.clone()))?;
+
+	for field_name in chain.iter().skip(1) {
+		if let Some(fields) = object_declarations.get(&current_type) {
+			let field = fields.iter().find(|candidate| candidate.name.eq_ignore_ascii_case(field_name))?;
+			current_type = field.type_name.clone()?;
+			continue;
+		}
+
+		let schema_catalog = schema_catalog?;
+		let resolved = resolve_type_name_to_table(&current_type, schema_catalog, active_databases)?;
+		let column = resolved.table().columns()
+			.find(|candidate| candidate.name().eq_ignore_ascii_case(field_name))?;
+		current_type = schema_data_type_name(column.data_type())?;
+	}
+
+	Some(current_type)
 }
 
 fn resolve_record_pointer_expression<'a>(
@@ -647,6 +1132,38 @@ fn resolve_table_reference<'a>(
 	}
 }
 
+fn resolve_type_name_to_table<'a>(
+	type_name: &str,
+	schema_catalog: &'a SchemaCatalog,
+	active_databases: &[String],
+) -> Option<ResolvedTable<'a>> {
+	let table_reference = type_name.strip_prefix("@record:")?;
+	resolve_table_reference(table_reference, schema_catalog, active_databases)
+}
+
+fn resolved_table_type_name(resolved: ResolvedTable<'_>) -> String {
+	let database_name = resolved.database().name();
+	let schema_name = resolved.schema().name();
+	let table_name = resolved.table().name();
+	format!("@record:{database_name}.{schema_name}.{table_name}")
+}
+
+fn schema_data_type_name(data_type: &SchemaDataType) -> Option<String> {
+	match data_type {
+		SchemaDataType::Array(element_type) => Some(format!("[{}]", schema_data_type_name(element_type)?)),
+		SchemaDataType::Bool => Some(String::from("bool")),
+		SchemaDataType::Date => Some(String::from("date")),
+		SchemaDataType::Dec | SchemaDataType::Float => Some(String::from("dec")),
+		SchemaDataType::Int => Some(String::from("int")),
+		SchemaDataType::Text => Some(String::from("text")),
+		SchemaDataType::Time => Some(String::from("time")),
+		SchemaDataType::TimeTz => Some(String::from("timetz")),
+		SchemaDataType::Timestamp => Some(String::from("timestamp")),
+		SchemaDataType::TimestampTz => Some(String::from("timestamptz")),
+		_ => None,
+	}
+}
+
 fn skip_expression(source: &str, start: usize, terminators: &[&str]) -> usize {
 	let mut brace_depth: usize = 0;
 	let mut bracket_depth: usize = 0;
@@ -701,6 +1218,49 @@ fn skip_expression(source: &str, start: usize, terminators: &[&str]) -> usize {
 	index
 }
 
+fn skip_object_field_tail(body: &str, start: usize) -> usize {
+	let mut index = start;
+	let mut brace_depth: usize = 0;
+	let mut bracket_depth: usize = 0;
+	let mut paren_depth: usize = 0;
+
+	while index < body.len() {
+		if let Some(comment_end) = skip_comment(body, index) {
+			index = comment_end;
+			continue;
+		}
+
+		if let Some(string_end) = skip_string_literal(body, index) {
+			index = string_end;
+			continue;
+		}
+
+		let Some(ch) = body[index..].chars().next() else {
+			break;
+		};
+
+		match ch {
+			'{' => brace_depth += 1,
+			'}' => {
+				if brace_depth == 0 {
+					return index;
+				}
+				brace_depth -= 1;
+			}
+			'[' => bracket_depth += 1,
+			']' => bracket_depth = bracket_depth.saturating_sub(1),
+			'(' => paren_depth += 1,
+			')' => paren_depth = paren_depth.saturating_sub(1),
+			',' if brace_depth == 0 && bracket_depth == 0 && paren_depth == 0 => return index,
+			_ => {}
+		}
+
+		index += ch.len_utf8();
+	}
+
+	index
+}
+
 fn split_qualified_chain(source: &str) -> Option<Vec<String>> {
 	let mut parts = Vec::new();
 	let mut index = 0;
@@ -720,6 +1280,23 @@ fn split_qualified_chain(source: &str) -> Option<Vec<String>> {
 	}
 
 	Some(parts)
+}
+
+fn strip_wrapping_parentheses(source: &str) -> &str {
+	let mut current = source.trim();
+
+	while current.starts_with('(') && current.ends_with(')') {
+		let Some(end_index) = find_matching_paren(current, 0) else {
+			break;
+		};
+		if end_index != current.len() - 1 {
+			break;
+		}
+
+		current = current[1..current.len() - 1].trim();
+	}
+
+	current
 }
 
 #[cfg(test)]
@@ -749,6 +1326,45 @@ mod tests {
 		assert!(labels.contains(&String::from("Helper")));
 		assert!(labels.contains(&String::from("localValue")));
 		assert!(labels.contains(&String::from("value")));
+	}
+
+	#[test]
+	fn member_completion_items_include_enum_variants() {
+		let source = "\
+enum Status {
+	Pending,
+	Complete,
+};
+
+fn Main(args: [text]) int {
+	Status.
+";
+		let items = member_completion_items(source, source.len(), None).unwrap();
+		let labels = items.into_iter().map(|item| item.label).collect::<Vec<_>>();
+
+		assert!(labels.contains(&String::from("Pending")));
+		assert!(labels.contains(&String::from("Complete")));
+	}
+
+	#[test]
+	fn member_completion_items_include_object_fields() {
+		let source = "\
+obj Config {
+	Values: {
+		FieldA: text,
+		FieldB: int,
+	}
+};
+
+fn Main(args: [text]) int {
+	var config: Config = Config {};
+	config.Values.
+";
+		let items = member_completion_items(source, source.len(), None).unwrap();
+		let labels = items.into_iter().map(|item| item.label).collect::<Vec<_>>();
+
+		assert!(labels.contains(&String::from("FieldA")));
+		assert!(labels.contains(&String::from("FieldB")));
 	}
 
 	#[test]
