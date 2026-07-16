@@ -47,6 +47,7 @@ use crate::bytecode::LocalVariableDebugInfo;
 use crate::bytecode::Program;
 use crate::schema::SchemaCatalog;
 use crate::semantic::analyzer::EnumValue;
+use crate::semantic::analyzer::RecordPointerInitialization;
 use crate::semantic::analyzer::SemanticAnalyzer;
 use crate::semantic::analyzer::SemanticProgram;
 
@@ -64,6 +65,7 @@ pub struct Compiler {
 
 #[derive(Default)]
 struct EmissionState {
+	cleanup_scope_stack: Vec<Vec<PendingCreateCleanup>>,
 	instructions: Vec<Instruction>,
 	local_scope_stack: Vec<Vec<usize>>,
 	locals: Vec<LocalVariableDebugInfo>,
@@ -73,8 +75,15 @@ struct EmissionState {
 #[derive(Default)]
 struct LoopContext {
 	break_jump_indices: Vec<usize>,
+	cleanup_scope_depth: usize,
 	continue_jump_indices: Vec<usize>,
 	loop_start: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingCreateCleanup {
+	position: usize,
+	slot: u32,
 }
 
 impl AssignmentOperator {
@@ -646,6 +655,10 @@ impl Compiler {
 						String::from("`break` may only be used inside a `while` or `for` loop."),
 					));
 				};
+				let cleanup_scope_depth = loop_context.cleanup_scope_depth;
+				self.emit_pending_create_cleanups_from(emission, cleanup_scope_depth, *position);
+				let loop_context = self.loop_stack.last_mut()
+					.expect("Loop context must still exist while compiling `break`.");
 				loop_context.break_jump_indices.push(emission.instructions.len());
 				self.emit(emission, Instruction::Jump(0), *position);
 				Ok(())
@@ -667,6 +680,10 @@ impl Compiler {
 						String::from("`continue` may only be used inside a `while` or `for` loop."),
 					));
 				};
+				let cleanup_scope_depth = loop_context.cleanup_scope_depth;
+				self.emit_pending_create_cleanups_from(emission, cleanup_scope_depth, *position);
+				let loop_context = self.loop_stack.last_mut()
+					.expect("Loop context must still exist while compiling `continue`.");
 				loop_context.continue_jump_indices.push(emission.instructions.len());
 				self.emit(emission, Instruction::Jump(0), *position);
 				Ok(())
@@ -704,6 +721,7 @@ impl Compiler {
 				let loop_start = emission.instructions.len() as u32;
 				self.loop_stack.push(LoopContext {
 					break_jump_indices: Vec::new(),
+					cleanup_scope_depth: emission.cleanup_scope_stack.len(),
 					continue_jump_indices: Vec::new(),
 					loop_start,
 				});
@@ -779,6 +797,7 @@ impl Compiler {
 				let loop_start = emission.instructions.len() as u32;
 				self.loop_stack.push(LoopContext {
 					break_jump_indices: Vec::new(),
+					cleanup_scope_depth: emission.cleanup_scope_stack.len(),
 					continue_jump_indices: Vec::new(),
 					loop_start,
 				});
@@ -900,6 +919,7 @@ impl Compiler {
 				))?;
 				self.compile_into(initial_value, semantic_program, emission);
 				self.emit(emission, Instruction::StoreLocal(slot), *position);
+				self.register_pending_create_cleanup(emission, semantic_program, *position, slot);
 				self.record_local_debug(
 					emission,
 					name.clone(),
@@ -914,9 +934,11 @@ impl Compiler {
 			Statement::Return(ReturnStatement { value, .. }) => {
 				if let Some(value) = value {
 					self.compile_into(value, semantic_program, emission);
+					self.emit_all_pending_create_cleanups(emission, value.position());
 					self.emit(emission, Instruction::Return, value.position());
 				}
 				else {
+					self.emit_all_pending_create_cleanups(emission, statement_position(statement));
 					self.emit(emission, Instruction::ReturnVoid, statement_position(statement));
 				}
 
@@ -964,6 +986,7 @@ impl Compiler {
 				let loop_start = emission.instructions.len() as u32;
 				self.loop_stack.push(LoopContext {
 					break_jump_indices: Vec::new(),
+					cleanup_scope_depth: emission.cleanup_scope_stack.len(),
 					continue_jump_indices: Vec::new(),
 					loop_start,
 				});
@@ -996,6 +1019,10 @@ impl Compiler {
 	fn emit(&self, emission: &mut EmissionState, instruction: Instruction, position: usize) {
 		emission.instructions.push(instruction);
 		emission.positions.push(position.min(u32::MAX as usize) as u32);
+	}
+
+	fn emit_all_pending_create_cleanups(&self, emission: &mut EmissionState, position: usize) {
+		self.emit_pending_create_cleanups_from(emission, 0, position);
 	}
 
 	fn emit_default_value(
@@ -1098,11 +1125,45 @@ impl Compiler {
 		}
 	}
 
+	fn emit_pending_create_cleanup(
+		&self,
+		emission: &mut EmissionState,
+		cleanup: &PendingCreateCleanup,
+		position: usize,
+	) {
+		self.emit(emission, Instruction::LoadLocal(cleanup.slot), position);
+		self.emit(emission, Instruction::CreateRecordIfPending, position);
+		self.emit(emission, Instruction::StoreLocal(cleanup.slot), position);
+	}
+
+	fn emit_pending_create_cleanups_from(
+		&self,
+		emission: &mut EmissionState,
+		scope_depth: usize,
+		position: usize,
+	) {
+		let pending_cleanups = emission.cleanup_scope_stack.iter()
+			.skip(scope_depth)
+			.flat_map(|scope| scope.iter().cloned())
+			.collect::<Vec<_>>();
+
+		for cleanup in pending_cleanups.iter().rev() {
+			self.emit_pending_create_cleanup(emission, cleanup, position);
+		}
+	}
+
 	fn enter_debug_scope(&self, emission: &mut EmissionState) {
+		emission.cleanup_scope_stack.push(Vec::new());
 		emission.local_scope_stack.push(Vec::new());
 	}
 
 	fn exit_debug_scope(&self, emission: &mut EmissionState) {
+		if let Some(pending_cleanups) = emission.cleanup_scope_stack.pop() {
+			for cleanup in pending_cleanups.iter().rev() {
+				self.emit_pending_create_cleanup(emission, cleanup, cleanup.position);
+			}
+		}
+
 		let Some(local_indices) = emission.local_scope_stack.pop() else {
 			return;
 		};
@@ -1144,6 +1205,29 @@ impl Compiler {
 
 		if let Some(scope) = emission.local_scope_stack.last_mut() {
 			scope.push(local_index);
+		}
+	}
+
+	fn register_pending_create_cleanup(
+		&self,
+		emission: &mut EmissionState,
+		semantic_program: &SemanticProgram,
+		declaration_position: usize,
+		slot: u32,
+	) {
+		let Some(binding) = semantic_program.record_pointer_binding(declaration_position) else {
+			return;
+		};
+
+		if binding.initialization != RecordPointerInitialization::New {
+			return;
+		}
+
+		if let Some(scope) = emission.cleanup_scope_stack.last_mut() {
+			scope.push(PendingCreateCleanup {
+				position: declaration_position,
+				slot,
+			});
 		}
 	}
 }

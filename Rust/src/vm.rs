@@ -412,6 +412,18 @@ impl VirtualMachine {
 		}
 	}
 
+	fn create_record_if_pending(
+		&self,
+		record: RecordPointerValue,
+		instruction_index: usize,
+	) -> Result<Value, VmError> {
+		if record.persisted {
+			return Ok(Value::RecordPointer(record));
+		}
+
+		self.create_record(record, instruction_index)
+	}
+
 	fn create_sqlite_record(
 		&self,
 		database_path: &Path,
@@ -528,6 +540,17 @@ impl VirtualMachine {
 					));
 				};
 				self.stack.push(self.create_record(record, instruction_index)?);
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::CreateRecordIfPending => {
+				let record = self.pop_value(instruction_index)?;
+				let Value::RecordPointer(record) = record else {
+					return Err(vm_error(
+						instruction_index,
+						String::from("Pending `create` cleanup requires a record pointer operand."),
+					));
+				};
+				self.stack.push(self.create_record_if_pending(record, instruction_index)?);
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::Dup2 => {

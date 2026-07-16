@@ -1360,6 +1360,137 @@ mod tests {
 	}
 
 	#[test]
+	fn auto_creates_new_record_before_break() {
+		let database_path = create_sqlite_test_database(
+			"auto_creates_new_record_before_break",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int {\n    while true {\n        rec mut cust = new Customers;\n        cust.Id = 13;\n        cust.Name = 'Cia';\n        break;\n    }\n    return count Customers where Id == 13 and Name == 'Cia';\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn auto_creates_new_record_before_continue() {
+		let database_path = create_sqlite_test_database(
+			"auto_creates_new_record_before_continue",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int {\n    var i: int = 0;\n    while i < 2 {\n        i += 1;\n        rec mut cust = new Customers;\n        cust.Id = i;\n        cust.Name = 'Dee';\n        if i == 1 {\n            continue;\n        }\n    }\n    return count Customers where Name == 'Dee';\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(2)));
+	}
+
+	#[test]
+	fn auto_creates_new_record_before_return() {
+		let database_path = create_sqlite_test_database(
+			"auto_creates_new_record_before_return",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int {\n    rec mut cust = new Customers;\n    cust.Id = 11;\n    cust.Name = 'Bea';\n    return 5;\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let connection = Connection::open(&database_path).unwrap();
+		let inserted_count: i64 = connection.query_row(
+			"SELECT COUNT(*) FROM Customers WHERE Id = 11 AND Name = 'Bea'",
+			[],
+			|row| row.get(0),
+		).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(5)));
+		assert_eq!(inserted_count, 1);
+	}
+
+	#[test]
+	fn auto_creates_new_record_on_block_exit() {
+		let database_path = create_sqlite_test_database(
+			"auto_creates_new_record_on_block_exit",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int {\n    {\n        rec mut cust = new Customers;\n        cust.Id = 7;\n        cust.Name = 'Ada';\n    }\n    return count Customers where Id == 7 and Name == 'Ada';\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
 	fn compiles_source_text_to_object_file() {
 		let output_path = unique_test_output_path("compiles_source_text_to_object_file");
 		compile("fn Main(args: [text]) int { return 1 + 2; }", &output_path).unwrap();

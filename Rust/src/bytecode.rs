@@ -31,6 +31,7 @@ pub enum Instruction {
 	Call(u32, u32),
 	CallBuiltIn(BuiltInFunction, u32),
 	CreateRecord,
+	CreateRecordIfPending,
 	Divide,
 	Dup2,
 	Equal,
