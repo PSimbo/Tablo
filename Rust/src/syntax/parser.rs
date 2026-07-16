@@ -55,6 +55,7 @@ use crate::ast::TimeLiteral;
 use crate::ast::TimeTzLiteral;
 use crate::ast::TimestampLiteral;
 use crate::ast::TimestampTzLiteral;
+use crate::ast::TransactionStatement;
 use crate::ast::UnaryExpr;
 use crate::ast::UnaryOperator;
 use crate::ast::UseDeclaration;
@@ -1885,6 +1886,7 @@ impl Parser {
 			Some(token) if token.kind == TokenKind::LeftBrace => self.parse_block_statement(),
 			Some(token) if token.kind == TokenKind::RecKeyword => self.parse_record_pointer_declaration_statement(),
 			Some(token) if token.kind == TokenKind::ReturnKeyword => self.parse_return_statement(),
+			Some(token) if token.kind == TokenKind::TransactionKeyword => self.parse_transaction_statement(),
 			Some(token) if token.kind == TokenKind::UseKeyword => {
 				Ok(Statement::Use(self.parse_use_declaration()?))
 			}
@@ -2038,6 +2040,19 @@ impl Parser {
 			position: token.start,
 			value: token.lexeme,
 		})
+	}
+
+	fn parse_transaction_statement(&mut self) -> Result<Statement, ParseError> {
+		let start = self.expect_token(TokenKind::TransactionKeyword, "Expected `transaction`.")?;
+		let body = match self.parse_block_statement()? {
+			Statement::Block(block) => block,
+			_ => unreachable!("parse_block_statement must return a block statement."),
+		};
+
+		Ok(Statement::Transaction(TransactionStatement {
+			body,
+			position: start.start,
+		}))
 	}
 
 	fn parse_use_declaration(&mut self) -> Result<UseDeclaration, ParseError> {
@@ -2284,6 +2299,7 @@ mod tests {
 	use crate::ast::TimeTzLiteral;
 	use crate::ast::TimestampLiteral;
 	use crate::ast::TimestampTzLiteral;
+	use crate::ast::TransactionStatement;
 	use crate::ast::UnaryExpr;
 	use crate::ast::UnaryOperator;
 	use crate::ast::UseDeclaration;
@@ -2664,6 +2680,10 @@ mod tests {
 				Statement::RecordPointerDeclaration(normalize_record_pointer_declaration(declaration))
 			}
 			Statement::Return(return_statement) => Statement::Return(normalize_return_statement(return_statement)),
+			Statement::Transaction(transaction_statement) => Statement::Transaction(TransactionStatement {
+				body: normalize_block(transaction_statement.body),
+				position: 0,
+			}),
 			Statement::Use(use_declaration) => Statement::Use(normalize_use_declaration(use_declaration)),
 			Statement::VariableDeclaration(declaration) => {
 				Statement::VariableDeclaration(normalize_variable_declaration(declaration))

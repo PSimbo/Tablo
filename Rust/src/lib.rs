@@ -617,6 +617,11 @@ fn extend_function_source_indices_from_statement(
 				extend_function_source_indices_from_statement(else_branch, source_file_index, source_indices);
 			}
 		}
+		ast::Statement::Transaction(transaction_statement) => {
+			for statement in &transaction_statement.body.statements {
+				extend_function_source_indices_from_statement(statement, source_file_index, source_indices);
+			}
+		}
 		ast::Statement::While(while_statement) => {
 			for statement in &while_statement.body.statements {
 				extend_function_source_indices_from_statement(statement, source_file_index, source_indices);
@@ -1053,6 +1058,9 @@ fn rewrite_statement_calls(
 				rewrite_expression_calls(value, top_level_renames, import_bindings, shadowed_function_names);
 			}
 		}
+		ast::Statement::Transaction(transaction_statement) => {
+			rewrite_statements_calls(&mut transaction_statement.body.statements, top_level_renames, import_bindings, shadowed_function_names);
+		}
 		ast::Statement::VariableDeclaration(variable) => {
 			if let Some(initial_value) = &mut variable.initial_value {
 				rewrite_expression_calls(initial_value, top_level_renames, import_bindings, shadowed_function_names);
@@ -1472,6 +1480,37 @@ mod tests {
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
 			"with exampledb;\nfn Main(args: [text]) int {\n    {\n        rec mut cust = new Customers;\n        cust.Id = 7;\n        cust.Name = 'Ada';\n    }\n    return count Customers where Id == 7 and Name == 'Ada';\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn commits_auto_created_record_after_successful_transaction() {
+		let database_path = create_sqlite_test_database(
+			"commits_auto_created_record_after_successful_transaction",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int {\n    transaction {\n        {\n            rec mut cust = new Customers;\n            cust.Id = 19;\n            cust.Name = 'Iris';\n        }\n    }\n    return count Customers where Id == 19 and Name == 'Iris';\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -2447,6 +2486,44 @@ mod tests {
 			position: 2,
 			message: String::from("Expected `:` after ternary true branch."),
 		}));
+	}
+
+	#[test]
+	fn rolls_back_auto_created_record_after_transaction_runtime_error() {
+		let database_path = create_sqlite_test_database(
+			"rolls_back_auto_created_record_after_transaction_runtime_error",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int {\n    transaction {\n        {\n            rec mut cust = new Customers;\n            cust.Id = 23;\n            cust.Name = 'Noor';\n        }\n        var fail: int = 1 / 0;\n    }\n    return 0;\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config);
+		let connection = Connection::open(&database_path).unwrap();
+		let inserted_count: i64 = connection.query_row(
+			"SELECT COUNT(*) FROM Customers WHERE Id = 23 AND Name = 'Noor'",
+			[],
+			|row| row.get(0),
+		).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert!(result.is_err());
+		assert_eq!(inserted_count, 0);
 	}
 
 	#[test]

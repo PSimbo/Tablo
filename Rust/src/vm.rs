@@ -120,6 +120,12 @@ impl RuntimeDatabaseConfig {
 
 struct RuntimeDatabaseSession {
 	connection: Connection,
+	transaction_depth: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RuntimeTransactionScope {
+	savepoint_name: String,
 }
 
 #[derive(Default)]
@@ -128,7 +134,9 @@ pub struct VirtualMachine {
 	database_sessions: BTreeMap<String, RuntimeDatabaseSession>,
 	finished_result: Option<Option<Value>>,
 	frames: Vec<CallFrame>,
+	next_transaction_id: u64,
 	stack: Vec<Value>,
+	transaction_stack: Vec<RuntimeTransactionScope>,
 }
 
 pub(crate) enum VmExecutionState {
@@ -245,7 +253,9 @@ impl VirtualMachine {
 			database_sessions: BTreeMap::new(),
 			finished_result: None,
 			frames: Vec::new(),
+			next_transaction_id: 0,
 			stack: Vec::new(),
+			transaction_stack: Vec::new(),
 		}
 	}
 
@@ -271,7 +281,10 @@ impl VirtualMachine {
 		self.finished_result = None;
 		self.database_sessions.clear();
 		self.frames.clear();
+		self.next_transaction_id = 0;
 		self.stack.clear();
+		self.transaction_stack.clear();
+
 		match _program.entry_point() {
 			crate::bytecode::EntryPoint::Code(_) => {
 				self.frames.push(CallFrame::new(None, 0, Vec::new()));
@@ -334,7 +347,16 @@ impl VirtualMachine {
 		let outcome = match outcome {
 			Ok(outcome) => outcome,
 			Err(error) => {
-				return Err(self.enrich_vm_error(program, error));
+				let rollback_result = self.rollback_active_transactions(error.instruction_index);
+				let mut error = self.enrich_vm_error(program, error);
+				if let Err(rollback_error) = rollback_result {
+					error.message = format!(
+						"{} Also failed to roll back active transaction(s): {}",
+						error.message,
+						rollback_error.message,
+					);
+				}
+				return Err(error);
 			}
 		};
 
@@ -388,6 +410,61 @@ impl VirtualMachine {
 			instruction_index,
 		)?;
 		Ok(next)
+	}
+
+	fn begin_transaction(&mut self, instruction_index: usize) -> Result<(), VmError> {
+		let savepoint_name = format!("tablo_tx_{}", self.next_transaction_id);
+		self.next_transaction_id += 1;
+		self.transaction_stack.push(RuntimeTransactionScope {
+			savepoint_name,
+		});
+
+		for session in self.database_sessions.values_mut() {
+			sync_runtime_database_session_transactions(
+				session,
+				&self.transaction_stack,
+				instruction_index,
+			)?;
+		}
+
+		Ok(())
+	}
+
+	fn commit_transaction(&mut self, instruction_index: usize) -> Result<(), VmError> {
+		let Some(transaction) = self.transaction_stack.last().cloned() else {
+			return Err(vm_error(
+				instruction_index,
+				String::from("Cannot commit a transaction because no transaction is active."),
+			));
+		};
+		let target_depth = self.transaction_stack.len();
+
+		for session in self.database_sessions.values_mut() {
+			if session.transaction_depth < target_depth {
+				continue;
+			}
+
+			if target_depth == 1 {
+				session.connection.execute_batch("COMMIT").map_err(|error| vm_error(
+					instruction_index,
+					format!("Failed to commit SQLite transaction: {error}"),
+				))?;
+			}
+			else {
+				session.connection.execute_batch(&format!(
+					"RELEASE SAVEPOINT {}",
+					quote_identifier(&transaction.savepoint_name),
+				)).map_err(|error| vm_error(
+					instruction_index,
+					format!("Failed to release SQLite transaction savepoint: {error}"),
+				))?;
+			}
+
+			session.transaction_depth -= 1;
+		}
+
+		self.transaction_stack.pop();
+		Ok(())
 	}
 
 	fn complete_frame(
@@ -529,6 +606,10 @@ impl VirtualMachine {
 				self.stack.push(Value::Boolean(lhs && rhs));
 				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::BeginTransaction => {
+				self.begin_transaction(instruction_index)?;
+				Ok(ExecutionOutcome::Continue(None))
+			}
 			Instruction::Call(function_index, argument_count) => {
 				let arguments = self.pop_call_arguments(*argument_count as usize, instruction_index)?;
 				Ok(ExecutionOutcome::Call(*function_index, arguments))
@@ -539,6 +620,10 @@ impl VirtualMachine {
 				if let Some(result) = result {
 					self.stack.push(result);
 				}
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::CommitTransaction => {
+				self.commit_transaction(instruction_index)?;
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::CreateRecord => {
@@ -1274,6 +1359,53 @@ impl VirtualMachine {
 			.collect()
 	}
 
+	fn rollback_active_transactions(&mut self, instruction_index: usize) -> Result<(), VmError> {
+		let mut first_error = None;
+
+		while let Some(transaction) = self.transaction_stack.last().cloned() {
+			let target_depth = self.transaction_stack.len();
+
+			for session in self.database_sessions.values_mut() {
+				if session.transaction_depth < target_depth {
+					continue;
+				}
+
+				let rollback_result = if target_depth == 1 {
+					session.connection.execute_batch("ROLLBACK").map_err(|error| vm_error(
+						instruction_index,
+						format!("Failed to roll back SQLite transaction: {error}"),
+					))
+				}
+				else {
+					session.connection.execute_batch(&format!(
+						"ROLLBACK TO SAVEPOINT {}; RELEASE SAVEPOINT {}",
+						quote_identifier(&transaction.savepoint_name),
+						quote_identifier(&transaction.savepoint_name),
+					)).map_err(|error| vm_error(
+						instruction_index,
+						format!("Failed to roll back SQLite transaction savepoint: {error}"),
+					))
+				};
+
+				match rollback_result {
+					Ok(()) => session.transaction_depth -= 1,
+					Err(error) => {
+						if first_error.is_none() {
+							first_error = Some(error);
+						}
+					}
+				}
+			}
+
+			self.transaction_stack.pop();
+		}
+
+		match first_error {
+			Some(error) => Err(error),
+			None => Ok(()),
+		}
+	}
+
 	fn run_built_in_function(
 		&mut self,
 		built_in: BuiltInFunction,
@@ -1653,12 +1785,20 @@ impl VirtualMachine {
 
 			self.database_sessions.insert(normalized_name.clone(), RuntimeDatabaseSession {
 				connection,
+				transaction_depth: 0,
 			});
 		}
 
-		Ok(&mut self.database_sessions.get_mut(&normalized_name)
-			.expect("SQLite database session must exist after initialization.")
-			.connection)
+		let transaction_stack = self.transaction_stack.clone();
+		let session = self.database_sessions.get_mut(&normalized_name)
+			.expect("SQLite database session must exist after initialization.");
+		sync_runtime_database_session_transactions(
+			session,
+			&transaction_stack,
+			instruction_index,
+		)?;
+
+		Ok(&mut session.connection)
 	}
 
 	fn sqlite_parameter_value(
@@ -3088,6 +3228,35 @@ fn subtract_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<V
 			Ok(Value::Decimal(lhs.checked_sub(&rhs).map_err(|message| vm_error(instruction_index, message))?))
 		}
 	}
+}
+
+fn sync_runtime_database_session_transactions(
+	session: &mut RuntimeDatabaseSession,
+	transaction_stack: &[RuntimeTransactionScope],
+	instruction_index: usize,
+) -> Result<(), VmError> {
+	while session.transaction_depth < transaction_stack.len() {
+		if session.transaction_depth == 0 {
+			session.connection.execute_batch("BEGIN").map_err(|error| vm_error(
+				instruction_index,
+				format!("Failed to begin SQLite transaction: {error}"),
+			))?;
+		}
+		else {
+			let transaction = &transaction_stack[session.transaction_depth];
+			session.connection.execute_batch(&format!(
+				"SAVEPOINT {}",
+				quote_identifier(&transaction.savepoint_name),
+			)).map_err(|error| vm_error(
+				instruction_index,
+				format!("Failed to create SQLite transaction savepoint: {error}"),
+			))?;
+		}
+
+		session.transaction_depth += 1;
+	}
+
+	Ok(())
 }
 
 fn type_name(value: &Value) -> &'static str {

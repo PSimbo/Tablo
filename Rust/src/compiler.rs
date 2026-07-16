@@ -34,6 +34,7 @@ use crate::ast::TimeLiteral;
 use crate::ast::TimeTzLiteral;
 use crate::ast::TimestampLiteral;
 use crate::ast::TimestampTzLiteral;
+use crate::ast::TransactionStatement;
 use crate::ast::UnaryExpr;
 use crate::ast::UseDeclaration;
 use crate::ast::VariableDeclaration;
@@ -70,6 +71,7 @@ struct EmissionState {
 	local_scope_stack: Vec<Vec<usize>>,
 	locals: Vec<LocalVariableDebugInfo>,
 	positions: Vec<u32>,
+	transaction_scope_stack: Vec<PendingTransactionCleanup>,
 }
 
 #[derive(Default)]
@@ -78,12 +80,18 @@ struct LoopContext {
 	cleanup_scope_depth: usize,
 	continue_jump_indices: Vec<usize>,
 	loop_start: u32,
+	transaction_scope_depth: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PendingCreateCleanup {
 	position: usize,
 	slot: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PendingTransactionCleanup {
+	position: usize,
 }
 
 impl AssignmentOperator {
@@ -656,7 +664,9 @@ impl Compiler {
 					));
 				};
 				let cleanup_scope_depth = loop_context.cleanup_scope_depth;
+				let transaction_scope_depth = loop_context.transaction_scope_depth;
 				self.emit_pending_create_cleanups_from(emission, cleanup_scope_depth, *position);
+				self.emit_transaction_commits_from(emission, transaction_scope_depth, *position);
 				let loop_context = self.loop_stack.last_mut()
 					.expect("Loop context must still exist while compiling `break`.");
 				loop_context.break_jump_indices.push(emission.instructions.len());
@@ -681,7 +691,9 @@ impl Compiler {
 					));
 				};
 				let cleanup_scope_depth = loop_context.cleanup_scope_depth;
+				let transaction_scope_depth = loop_context.transaction_scope_depth;
 				self.emit_pending_create_cleanups_from(emission, cleanup_scope_depth, *position);
+				self.emit_transaction_commits_from(emission, transaction_scope_depth, *position);
 				let loop_context = self.loop_stack.last_mut()
 					.expect("Loop context must still exist while compiling `continue`.");
 				loop_context.continue_jump_indices.push(emission.instructions.len());
@@ -724,6 +736,7 @@ impl Compiler {
 					cleanup_scope_depth: emission.cleanup_scope_stack.len(),
 					continue_jump_indices: Vec::new(),
 					loop_start,
+					transaction_scope_depth: emission.transaction_scope_stack.len(),
 				});
 
 				self.emit(emission, Instruction::LoadLocal(iterator_slot), *position);
@@ -800,6 +813,7 @@ impl Compiler {
 					cleanup_scope_depth: emission.cleanup_scope_stack.len(),
 					continue_jump_indices: Vec::new(),
 					loop_start,
+					transaction_scope_depth: emission.transaction_scope_stack.len(),
 				});
 
 				self.emit(emission, Instruction::LoadLocal(iterator_slot), *position);
@@ -935,13 +949,26 @@ impl Compiler {
 				if let Some(value) = value {
 					self.compile_into(value, semantic_program, emission);
 					self.emit_all_pending_create_cleanups(emission, value.position());
+					self.emit_all_transaction_commits(emission, value.position());
 					self.emit(emission, Instruction::Return, value.position());
 				}
 				else {
 					self.emit_all_pending_create_cleanups(emission, statement_position(statement));
+					self.emit_all_transaction_commits(emission, statement_position(statement));
 					self.emit(emission, Instruction::ReturnVoid, statement_position(statement));
 				}
 
+				Ok(())
+			}
+			Statement::Transaction(TransactionStatement { body, position }) => {
+				self.emit(emission, Instruction::BeginTransaction, *position);
+				emission.transaction_scope_stack.push(PendingTransactionCleanup {
+					position: *position,
+				});
+				self.compile_statement(&Statement::Block(body.clone()), semantic_program, emission)?;
+				let transaction = emission.transaction_scope_stack.pop()
+					.expect("Transaction scope must exist after compiling transaction body.");
+				self.emit(emission, Instruction::CommitTransaction, transaction.position);
 				Ok(())
 			}
 			Statement::Use(UseDeclaration { .. }) => Ok(()),
@@ -989,6 +1016,7 @@ impl Compiler {
 					cleanup_scope_depth: emission.cleanup_scope_stack.len(),
 					continue_jump_indices: Vec::new(),
 					loop_start,
+					transaction_scope_depth: emission.transaction_scope_stack.len(),
 				});
 				self.compile_into(condition, semantic_program, emission);
 				let jump_if_false_index = emission.instructions.len();
@@ -1023,6 +1051,10 @@ impl Compiler {
 
 	fn emit_all_pending_create_cleanups(&self, emission: &mut EmissionState, position: usize) {
 		self.emit_pending_create_cleanups_from(emission, 0, position);
+	}
+
+	fn emit_all_transaction_commits(&self, emission: &mut EmissionState, position: usize) {
+		self.emit_transaction_commits_from(emission, 0, position);
 	}
 
 	fn emit_default_value(
@@ -1152,6 +1184,22 @@ impl Compiler {
 		}
 	}
 
+	fn emit_transaction_commits_from(
+		&self,
+		emission: &mut EmissionState,
+		scope_depth: usize,
+		position: usize,
+	) {
+		let pending_transactions = emission.transaction_scope_stack.iter()
+			.skip(scope_depth)
+			.cloned()
+			.collect::<Vec<_>>();
+
+		for _transaction in pending_transactions.iter().rev() {
+			self.emit(emission, Instruction::CommitTransaction, position);
+		}
+	}
+
 	fn enter_debug_scope(&self, emission: &mut EmissionState) {
 		emission.cleanup_scope_stack.push(Vec::new());
 		emission.local_scope_stack.push(Vec::new());
@@ -1260,6 +1308,7 @@ fn collect_functions_from_statement<'a>(statement: &'a Statement, functions: &mu
 				collect_functions_from_statement(else_branch, functions);
 			}
 		}
+		Statement::Transaction(statement) => collect_functions_from_statements(statement.body.statements.as_slice(), functions),
 		Statement::While(statement) => collect_functions_from_statements(statement.body.statements.as_slice(), functions),
 		Statement::Break(_) | Statement::Continue(_) | Statement::Create(_) | Statement::Expression(_) | Statement::RecordPointerDeclaration(_) | Statement::Return(_) | Statement::Use(_) | Statement::VariableDeclaration(_) => {}
 	}
@@ -1292,6 +1341,7 @@ fn statement_position(statement: &Statement) -> usize {
 		Statement::If(statement) => statement.position,
 		Statement::RecordPointerDeclaration(statement) => statement.position,
 		Statement::Return(statement) => statement.position,
+		Statement::Transaction(statement) => statement.position,
 		Statement::Use(statement) => statement.position,
 		Statement::VariableDeclaration(statement) => statement.position,
 		Statement::While(statement) => statement.position,

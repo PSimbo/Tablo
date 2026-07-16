@@ -196,6 +196,7 @@ pub enum Statement {
 	If(IfStatement),
 	RecordPointerDeclaration(RecordPointerDeclaration),
 	Return(ReturnStatement),
+	Transaction(TransactionStatement),
 	Use(UseDeclaration),
 	VariableDeclaration(VariableDeclaration),
 	While(WhileStatement),
@@ -554,6 +555,12 @@ pub struct TimestampLiteral {
 pub struct TimestampTzLiteral {
 	pub position: usize,
 	pub value: crate::value::TimestampTz,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransactionStatement {
+	pub body: BlockStatement,
+	pub position: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

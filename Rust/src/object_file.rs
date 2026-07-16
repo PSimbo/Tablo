@@ -30,9 +30,11 @@ const FORMAT_VERSION: u16 = 1;
 const OPCODE_ADD: u8 = 1;
 const OPCODE_ADVANCE_SEQUENCE: u8 = OPCODE_ADD + 1;
 const OPCODE_AND: u8 = OPCODE_ADVANCE_SEQUENCE + 1;
-const OPCODE_CALL: u8 = OPCODE_AND + 1;
+const OPCODE_BEGIN_TRANSACTION: u8 = OPCODE_AND + 1;
+const OPCODE_CALL: u8 = OPCODE_BEGIN_TRANSACTION + 1;
 const OPCODE_CALL_BUILT_IN: u8 = OPCODE_CALL + 1;
-const OPCODE_CREATE_RECORD: u8 = OPCODE_CALL_BUILT_IN + 1;
+const OPCODE_COMMIT_TRANSACTION: u8 = OPCODE_CALL_BUILT_IN + 1;
+const OPCODE_CREATE_RECORD: u8 = OPCODE_COMMIT_TRANSACTION + 1;
 const OPCODE_CREATE_RECORD_IF_PENDING: u8 = OPCODE_CREATE_RECORD + 1;
 const OPCODE_DIVIDE: u8 = OPCODE_CREATE_RECORD_IF_PENDING + 1;
 const OPCODE_DUP2: u8 = OPCODE_DIVIDE + 1;
@@ -412,6 +414,7 @@ impl<'a> ObjectFileReader<'a> {
 				sequence_name: self.read_string()?,
 			}),
 			OPCODE_AND => Ok(Instruction::And),
+			OPCODE_BEGIN_TRANSACTION => Ok(Instruction::BeginTransaction),
 			OPCODE_CALL => Ok(Instruction::Call(self.read_u32()?, self.read_u32()?)),
 			OPCODE_CALL_BUILT_IN => {
 				let built_in_id = self.read_u8()?;
@@ -422,6 +425,7 @@ impl<'a> ObjectFileReader<'a> {
 				})?;
 				Ok(Instruction::CallBuiltIn(built_in, argument_count))
 			}
+			OPCODE_COMMIT_TRANSACTION => Ok(Instruction::CommitTransaction),
 			OPCODE_CREATE_RECORD => Ok(Instruction::CreateRecord),
 			OPCODE_CREATE_RECORD_IF_PENDING => Ok(Instruction::CreateRecordIfPending),
 			OPCODE_DIVIDE => Ok(Instruction::Divide),
@@ -773,6 +777,7 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.extend_from_slice(sequence_name.as_bytes());
 		}
 		Instruction::And => bytes.push(OPCODE_AND),
+		Instruction::BeginTransaction => bytes.push(OPCODE_BEGIN_TRANSACTION),
 		Instruction::Call(function_index, argument_count) => {
 			bytes.push(OPCODE_CALL);
 			bytes.extend_from_slice(&function_index.to_le_bytes());
@@ -783,6 +788,7 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.push(built_in.id());
 			bytes.extend_from_slice(&argument_count.to_le_bytes());
 		}
+		Instruction::CommitTransaction => bytes.push(OPCODE_COMMIT_TRANSACTION),
 		Instruction::CreateRecord => bytes.push(OPCODE_CREATE_RECORD),
 		Instruction::CreateRecordIfPending => bytes.push(OPCODE_CREATE_RECORD_IF_PENDING),
 		Instruction::Divide => bytes.push(OPCODE_DIVIDE),
@@ -1477,6 +1483,19 @@ mod tests {
 	fn round_trips_text_program_bytes() {
 		let program = Program::new(vec![
 			Instruction::PushText(String::from("hello")),
+		]);
+
+		let bytes = write_program(&program);
+		let decoded = read_program(&bytes).unwrap();
+
+		assert_eq!(decoded, program);
+	}
+
+	#[test]
+	fn round_trips_transaction_program_bytes() {
+		let program = Program::new(vec![
+			Instruction::BeginTransaction,
+			Instruction::CommitTransaction,
 		]);
 
 		let bytes = write_program(&program);

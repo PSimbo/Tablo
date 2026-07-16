@@ -663,6 +663,9 @@ impl<'a> FunctionSsaBuilder<'a> {
 				});
 				None
 			}
+			Statement::Transaction(transaction_statement) => {
+				self.lower_block_statement(&transaction_statement.body, Some(block_id), loop_targets)
+			}
 			Statement::Use(_) => Some(block_id),
 			Statement::VariableDeclaration(declaration) => {
 				if let Some(initial_value) = &declaration.initial_value {
@@ -1083,6 +1086,11 @@ fn collect_statement_function_local_usage(
 				collect_statement_function_local_usage(else_branch, semantic_program, ssa_program, functions);
 			}
 		}
+		Statement::Transaction(transaction_statement) => {
+			for statement in &transaction_statement.body.statements {
+				collect_statement_function_local_usage(statement, semantic_program, ssa_program, functions);
+			}
+		}
 		Statement::While(while_statement) => {
 			for statement in &while_statement.body.statements {
 				collect_statement_function_local_usage(statement, semantic_program, ssa_program, functions);
@@ -1125,6 +1133,11 @@ fn collect_statement_function_ssa(statement: &Statement, semantic_program: &Sema
 
 			if let Some(else_branch) = &if_statement.else_branch {
 				collect_statement_function_ssa(else_branch, semantic_program, functions);
+			}
+		}
+		Statement::Transaction(transaction_statement) => {
+			for statement in &transaction_statement.body.statements {
+				collect_statement_function_ssa(statement, semantic_program, functions);
 			}
 		}
 		Statement::While(while_statement) => {
@@ -1204,6 +1217,9 @@ fn collect_statement_local_declarations(
 		}
 		Statement::RecordPointerDeclaration(declaration) => {
 			collect_record_pointer_declaration(declaration, semantic_program, locals);
+		}
+		Statement::Transaction(transaction_statement) => {
+			collect_statement_list_local_declarations(&transaction_statement.body.statements, semantic_program, locals);
 		}
 		Statement::VariableDeclaration(declaration) => {
 			collect_variable_declaration(declaration, semantic_program, locals);

@@ -39,6 +39,7 @@ use crate::ast::SequenceReference;
 use crate::ast::Statement;
 use crate::ast::TableReference;
 use crate::ast::TernaryExpr;
+use crate::ast::TransactionStatement;
 use crate::ast::UnaryExpr;
 use crate::ast::UnaryOperator;
 use crate::ast::UseDeclaration;
@@ -2981,6 +2982,7 @@ impl SemanticAnalyzer {
 			}
 			Statement::RecordPointerDeclaration(_) => false,
 			Statement::Return(_) => true,
+			Statement::Transaction(transaction_statement) => self.block_guarantees_return(&transaction_statement.body),
 			Statement::Expression(_) | Statement::For(_) | Statement::ForRecord(_) | Statement::Use(_) | Statement::VariableDeclaration(_) | Statement::While(_) => false,
 		}
 	}
@@ -3673,6 +3675,9 @@ impl SemanticAnalyzer {
 					)),
 				}
 			}
+			Statement::Transaction(TransactionStatement { body, .. }) => {
+				self.validate_statement(&Statement::Block(body.clone()))
+			}
 			Statement::Use(UseDeclaration { .. }) => Ok(()),
 			Statement::VariableDeclaration(VariableDeclaration { data_type, initial_value, is_const, name, position }) => {
 				self.validate_non_void_data_type(
@@ -3837,6 +3842,7 @@ fn statement_position(statement: &Statement) -> usize {
 		Statement::If(statement) => statement.position,
 		Statement::RecordPointerDeclaration(statement) => statement.position,
 		Statement::Return(statement) => statement.position,
+		Statement::Transaction(statement) => statement.position,
 		Statement::Use(statement) => statement.position,
 		Statement::VariableDeclaration(statement) => statement.position,
 		Statement::While(statement) => statement.position,

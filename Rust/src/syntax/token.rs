@@ -80,6 +80,7 @@ pub enum TokenKind {
 	TimeTzKeyword,
 	TimestampKeyword,
 	TimestampTzKeyword,
+	TransactionKeyword,
 	TrueKeyword,
 	UseKeyword,
 	VarKeyword,
