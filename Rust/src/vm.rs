@@ -48,17 +48,17 @@ enum ComparisonKind {
 	LessThanOrEqual,
 }
 
+enum ExecutionOutcome {
+	Call(u32, Vec<Value>),
+	Continue(Option<usize>),
+	Return(Option<Value>),
+}
+
 struct CallFrame {
 	base_stack_len: usize,
 	function_index: Option<usize>,
 	instruction_index: usize,
 	locals: Vec<Value>,
-}
-
-enum ExecutionOutcome {
-	Call(u32, Vec<Value>),
-	Continue(Option<usize>),
-	Return(Option<Value>),
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -118,9 +118,14 @@ impl RuntimeDatabaseConfig {
 	}
 }
 
+struct RuntimeDatabaseSession {
+	connection: Connection,
+}
+
 #[derive(Default)]
 pub struct VirtualMachine {
 	database_config: RuntimeDatabaseConfig,
+	database_sessions: BTreeMap<String, RuntimeDatabaseSession>,
 	finished_result: Option<Option<Value>>,
 	frames: Vec<CallFrame>,
 	stack: Vec<Value>,
@@ -237,6 +242,7 @@ impl VirtualMachine {
 	pub fn new() -> Self {
 		Self {
 			database_config: RuntimeDatabaseConfig::default(),
+			database_sessions: BTreeMap::new(),
 			finished_result: None,
 			frames: Vec::new(),
 			stack: Vec::new(),
@@ -263,6 +269,7 @@ impl VirtualMachine {
 
 	pub(crate) fn begin_execution(&mut self, _program: &Program) {
 		self.finished_result = None;
+		self.database_sessions.clear();
 		self.frames.clear();
 		self.stack.clear();
 		match _program.entry_point() {
@@ -307,7 +314,8 @@ impl VirtualMachine {
 
 	pub(crate) fn step(&mut self, program: &Program) -> Result<VmExecutionState, VmError> {
 		if self.frames.is_empty() {
-			return Ok(VmExecutionState::Completed(self.finished_result.take().unwrap_or(None)));
+			let result = self.finished_result.take().unwrap_or(None);
+			return Ok(VmExecutionState::Completed(result));
 		}
 
 		let frame_index = self.frames.len() - 1;
@@ -316,14 +324,19 @@ impl VirtualMachine {
 
 		if instruction_index >= code_body.instructions.len() {
 			let result = self.stack.pop();
-			return Ok(self.finish_current_frame(result));
+			return self.complete_frame(result);
 		}
 
 		let instruction = code_body.instructions[instruction_index].clone();
 		let mut locals = std::mem::take(&mut self.frames[frame_index].locals);
 		let outcome = self.execute_instruction(program, frame_index, &instruction, instruction_index, &mut locals);
 		self.frames[frame_index].locals = locals;
-		let outcome = outcome.map_err(|error| self.enrich_vm_error(program, error))?;
+		let outcome = match outcome {
+			Ok(outcome) => outcome,
+			Err(error) => {
+				return Err(self.enrich_vm_error(program, error));
+			}
+		};
 
 		match outcome {
 			ExecutionOutcome::Call(function_index, arguments) => {
@@ -343,12 +356,12 @@ impl VirtualMachine {
 				self.frames[frame_index].instruction_index = next_instruction_index.unwrap_or(instruction_index + 1);
 				Ok(VmExecutionState::Running)
 			}
-			ExecutionOutcome::Return(result) => Ok(self.finish_current_frame(result)),
+			ExecutionOutcome::Return(result) => self.complete_frame(result),
 		}
 	}
 
 	fn advance_sequence(
-		&self,
+		&mut self,
 		database_name: &str,
 		schema_is_implicit: bool,
 		schema_name: &str,
@@ -377,8 +390,15 @@ impl VirtualMachine {
 		Ok(next)
 	}
 
+	fn complete_frame(
+		&mut self,
+		result: Option<Value>,
+	) -> Result<VmExecutionState, VmError> {
+		Ok(self.finish_current_frame(result))
+	}
+
 	fn create_record(
-		&self,
+		&mut self,
 		record: RecordPointerValue,
 		instruction_index: usize,
 	) -> Result<Value, VmError> {
@@ -403,17 +423,11 @@ impl VirtualMachine {
 			));
 		}
 
-		match self.database_config.sqlite_database_path(&record.record_type.database_name) {
-			Some(database_path) => self.create_sqlite_record(database_path, record, instruction_index),
-			None => Err(vm_error(
-				instruction_index,
-				format!("Database `{}` is not configured at runtime.", record.record_type.database_name),
-			)),
-		}
+		self.create_sqlite_record(record, instruction_index)
 	}
 
 	fn create_record_if_pending(
-		&self,
+		&mut self,
 		record: RecordPointerValue,
 		instruction_index: usize,
 	) -> Result<Value, VmError> {
@@ -425,15 +439,10 @@ impl VirtualMachine {
 	}
 
 	fn create_sqlite_record(
-		&self,
-		database_path: &Path,
+		&mut self,
 		record: RecordPointerValue,
 		instruction_index: usize,
 	) -> Result<Value, VmError> {
-		let connection = Connection::open(database_path).map_err(|error| vm_error(
-			instruction_index,
-			format!("Failed to open SQLite database `{}`: {error}", database_path.display()),
-		))?;
 		let table_source = sqlite_table_source(
 			&record.record_type.schema_name,
 			&record.record_type.table_name,
@@ -458,6 +467,7 @@ impl VirtualMachine {
 				sqlite_value_from_runtime_value(value, instruction_index)
 			})
 			.collect::<Result<Vec<_>, _>>()?;
+		let connection = self.sqlite_connection_mut(&record.record_type.database_name, instruction_index)?;
 
 		connection.execute(&statement, params_from_iter(parameter_values)).map_err(|error| vm_error(
 			instruction_index,
@@ -539,7 +549,8 @@ impl VirtualMachine {
 						String::from("`create` requires a record pointer operand."),
 					));
 				};
-				self.stack.push(self.create_record(record, instruction_index)?);
+				let record = self.create_record(record, instruction_index)?;
+				self.stack.push(record);
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::CreateRecordIfPending => {
@@ -550,7 +561,8 @@ impl VirtualMachine {
 						String::from("Pending `create` cleanup requires a record pointer operand."),
 					));
 				};
-				self.stack.push(self.create_record_if_pending(record, instruction_index)?);
+				let record = self.create_record_if_pending(record, instruction_index)?;
+				self.stack.push(record);
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::Dup2 => {
@@ -945,7 +957,7 @@ impl VirtualMachine {
 	}
 
 	fn execute_query(
-		&self,
+		&mut self,
 		query: &LoweredBackendQuery,
 		locals: &[Value],
 		instruction_index: usize,
@@ -956,7 +968,7 @@ impl VirtualMachine {
 	}
 
 	fn execute_sql_query(
-		&self,
+		&mut self,
 		query: &SqlQuery,
 		locals: &[Value],
 		instruction_index: usize,
@@ -967,26 +979,19 @@ impl VirtualMachine {
 	}
 
 	fn execute_sqlite_query(
-		&self,
+		&mut self,
 		query: &SqlQuery,
 		locals: &[Value],
 		instruction_index: usize,
 	) -> Result<Value, VmError> {
-		let database_path = self.database_config.sqlite_database_path(&query.database_name).ok_or(vm_error(
-			instruction_index,
-			format!("SQLite database `{}` is not configured at runtime.", query.database_name),
-		))?;
-		let connection = Connection::open(database_path).map_err(|error| vm_error(
-			instruction_index,
-			format!("Failed to open SQLite database `{}`: {error}", database_path.display()),
-		))?;
+		let parameter_values = query.parameters.iter()
+			.map(|parameter| self.sqlite_parameter_value(parameter.slot, &parameter.field_path, locals, instruction_index))
+			.collect::<Result<Vec<_>, _>>()?;
+		let connection = self.sqlite_connection_mut(&query.database_name, instruction_index)?;
 		let mut statement = connection.prepare(&query.statement).map_err(|error| vm_error(
 			instruction_index,
 			format!("Failed to prepare SQLite query: {error}"),
 		))?;
-		let parameter_values = query.parameters.iter()
-			.map(|parameter| self.sqlite_parameter_value(parameter.slot, &parameter.field_path, locals, instruction_index))
-			.collect::<Result<Vec<_>, _>>()?;
 
 		match &query.result_shape {
 			SqlQueryResultShape::IntegerScalar => {
@@ -1103,18 +1108,18 @@ impl VirtualMachine {
 	}
 
 	fn load_sequence_current(
-		&self,
+		&mut self,
 		database_name: &str,
 		schema_is_implicit: bool,
 		schema_name: &str,
 		sequence_name: &str,
 		instruction_index: usize,
 	) -> Result<i64, VmError> {
-		let connection = self.open_sqlite_database(database_name, instruction_index)?;
 		let sequence_source = sqlite_sequence_source(schema_name, schema_is_implicit);
 		let statement = format!(
 			"SELECT seq FROM {sequence_source} WHERE name = ?1"
 		);
+		let connection = self.sqlite_connection_mut(database_name, instruction_index)?;
 
 		let result = connection.query_row(&statement, [sequence_name], |row| {
 			let value = row.get_ref(0)?;
@@ -1135,22 +1140,6 @@ impl VirtualMachine {
 				format!("Failed to read SQLite sequence `{sequence_name}`: {error}"),
 			)),
 		}
-	}
-
-	fn open_sqlite_database(
-		&self,
-		database_name: &str,
-		instruction_index: usize,
-	) -> Result<Connection, VmError> {
-		let database_path = self.database_config.sqlite_database_path(database_name).ok_or(vm_error(
-			instruction_index,
-			format!("SQLite database `{database_name}` is not configured at runtime."),
-		))?;
-
-		Connection::open(database_path).map_err(|error| vm_error(
-			instruction_index,
-			format!("Failed to open SQLite database `{}`: {error}", database_path.display()),
-		))
 	}
 
 	fn pop_boolean(&mut self, instruction_index: usize) -> Result<bool, VmError> {
@@ -1644,6 +1633,34 @@ impl VirtualMachine {
 		}
 	}
 
+	fn sqlite_connection_mut(
+		&mut self,
+		database_name: &str,
+		instruction_index: usize,
+	) -> Result<&mut Connection, VmError> {
+		let normalized_name = normalize_database_name(database_name);
+
+		if !self.database_sessions.contains_key(&normalized_name) {
+			let database_path = self.database_config.sqlite_database_path(database_name).ok_or(vm_error(
+				instruction_index,
+				format!("SQLite database `{database_name}` is not configured at runtime."),
+			))?.to_path_buf();
+
+			let connection = Connection::open(&database_path).map_err(|error| vm_error(
+				instruction_index,
+				format!("Failed to open SQLite database `{}`: {error}", database_path.display()),
+			))?;
+
+			self.database_sessions.insert(normalized_name.clone(), RuntimeDatabaseSession {
+				connection,
+			});
+		}
+
+		Ok(&mut self.database_sessions.get_mut(&normalized_name)
+			.expect("SQLite database session must exist after initialization.")
+			.connection)
+	}
+
 	fn sqlite_parameter_value(
 		&self,
 		slot: u32,
@@ -1692,7 +1709,7 @@ impl VirtualMachine {
 	}
 
 	fn store_sequence_current(
-		&self,
+		&mut self,
 		database_name: &str,
 		schema_is_implicit: bool,
 		schema_name: &str,
@@ -1700,11 +1717,11 @@ impl VirtualMachine {
 		value: i64,
 		instruction_index: usize,
 	) -> Result<(), VmError> {
-		let connection = self.open_sqlite_database(database_name, instruction_index)?;
 		let sequence_source = sqlite_sequence_source(schema_name, schema_is_implicit);
 		let update_statement = format!(
 			"UPDATE {sequence_source} SET seq = ?1 WHERE name = ?2"
 		);
+		let connection = self.sqlite_connection_mut(database_name, instruction_index)?;
 		let updated_rows = connection.execute(&update_statement, (&value, sequence_name)).map_err(|error| vm_error(
 			instruction_index,
 			format!("Failed to update SQLite sequence `{sequence_name}`: {error}"),

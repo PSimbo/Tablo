@@ -1740,6 +1740,44 @@ mod tests {
 	}
 
 	#[test]
+	fn keeps_auto_created_record_after_later_runtime_error_without_transaction() {
+		let database_path = create_sqlite_test_database(
+			"keeps_auto_created_record_after_later_runtime_error_without_transaction",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int {\n    {\n        rec mut cust = new Customers;\n        cust.Id = 17;\n        cust.Name = 'Eli';\n    }\n    return 1 / 0;\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config);
+		let connection = Connection::open(&database_path).unwrap();
+		let inserted_count: i64 = connection.query_row(
+			"SELECT COUNT(*) FROM Customers WHERE Id = 17 AND Name = 'Eli'",
+			[],
+			|row| row.get(0),
+		).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert!(result.is_err());
+		assert_eq!(inserted_count, 1);
+	}
+
+	#[test]
 	fn omits_synthetic_entry_frame_from_standalone_runtime_stack_trace() {
 		let source = "fn inner() int {\n  var xs: [int] = [1];\n  return xs[2];\n}\nfn Main(args: [text]) int {\n  return inner();\n}";
 		let error = run(source).unwrap_err();
