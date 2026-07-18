@@ -567,6 +567,82 @@ impl VirtualMachine {
 		}
 	}
 
+	fn delete_record(
+		&mut self,
+		record: RecordPointerValue,
+		instruction_index: usize,
+	) -> Result<Value, VmError> {
+		if !record.exists {
+			return Err(vm_error(
+				instruction_index,
+				String::from("Cannot delete a record pointer that does not reference a record."),
+			));
+		}
+
+		if record.locked {
+			return Err(vm_error(
+				instruction_index,
+				String::from("Cannot delete a locked record pointer."),
+			));
+		}
+
+		if !record.persisted {
+			return Err(vm_error(
+				instruction_index,
+				String::from("Cannot delete a record that has not been created."),
+			));
+		}
+
+		self.delete_sqlite_record(record, instruction_index)
+	}
+
+	fn delete_sqlite_record(
+		&mut self,
+		record: RecordPointerValue,
+		instruction_index: usize,
+	) -> Result<Value, VmError> {
+		let table_source = sqlite_table_source(
+			&record.record_type.schema_name,
+			&record.record_type.table_name,
+			record.schema_is_implicit,
+		);
+		let predicate_column_names = record_identity_column_names(&record);
+		let predicates = predicate_column_names.iter()
+			.map(|name| format!("{} IS ?", quote_identifier(name)))
+			.collect::<Vec<_>>()
+			.join(" AND ");
+		let statement = format!("DELETE FROM {table_source} WHERE {predicates}");
+		let parameter_values = sqlite_original_record_identity_values(
+			&record,
+			&predicate_column_names,
+			instruction_index,
+		)?;
+
+		let connection = self.sqlite_connection_mut(&record.record_type.database_name, instruction_index)?;
+		let affected_rows = connection.execute(&statement, params_from_iter(parameter_values)).map_err(|error| vm_error(
+			instruction_index,
+			format!("Failed to execute SQLite delete statement: {error}"),
+		))?;
+
+		if affected_rows != 1 {
+			return Err(vm_error(
+				instruction_index,
+				format!("SQLite delete expected to affect 1 row, affected {affected_rows}."),
+			));
+		}
+
+		Ok(Value::RecordPointer(RecordPointerValue {
+			exists: false,
+			fields: BTreeMap::new(),
+			is_dirty: false,
+			locked: false,
+			original_fields: BTreeMap::new(),
+			primary_key_column_names: Vec::new(),
+			persisted: false,
+			..record
+		}))
+	}
+
 	fn enrich_vm_error(&self, program: &Program, mut error: VmError) -> VmError {
 		if error.source_location.is_none() {
 			error.source_location = self.current_instruction_site(program)
@@ -650,6 +726,18 @@ impl VirtualMachine {
 					));
 				};
 				let record = self.create_record_if_pending(record, instruction_index)?;
+				self.stack.push(record);
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::DeleteRecord => {
+				let record = self.pop_value(instruction_index)?;
+				let Value::RecordPointer(record) = record else {
+					return Err(vm_error(
+						instruction_index,
+						String::from("`delete` requires a record pointer operand."),
+					));
+				};
+				let record = self.delete_record(record, instruction_index)?;
 				self.stack.push(record);
 				Ok(ExecutionOutcome::Continue(None))
 			}
@@ -1978,12 +2066,7 @@ impl VirtualMachine {
 			.map(|name| format!("{} = ?", quote_identifier(name)))
 			.collect::<Vec<_>>()
 			.join(", ");
-		let predicate_column_names = if record.primary_key_column_names.is_empty() {
-			record.column_names.clone()
-		}
-		else {
-			record.primary_key_column_names.clone()
-		};
+		let predicate_column_names = record_identity_column_names(&record);
 		let predicates = predicate_column_names.iter()
 			.map(|name| format!("{} IS ?", quote_identifier(name)))
 			.collect::<Vec<_>>()
@@ -2000,14 +2083,11 @@ impl VirtualMachine {
 			parameter_values.push(sqlite_value_from_runtime_value(value, instruction_index)?);
 		}
 
-		for column_name in &predicate_column_names {
-			let field = record.original_fields.get(&normalize_record_field_name(column_name)).ok_or(vm_error(
-				instruction_index,
-				format!("Record pointer is missing original field data for `{column_name}`."),
-			))?;
-			let value = resolve_record_field_value(field, instruction_index)?;
-			parameter_values.push(sqlite_value_from_runtime_value(value, instruction_index)?);
-		}
+		parameter_values.extend(sqlite_original_record_identity_values(
+			&record,
+			&predicate_column_names,
+			instruction_index,
+		)?);
 
 		let connection = self.sqlite_connection_mut(&record.record_type.database_name, instruction_index)?;
 		let affected_rows = connection.execute(&statement, params_from_iter(parameter_values)).map_err(|error| vm_error(
@@ -3011,13 +3091,12 @@ fn quote_identifier(name: &str) -> String {
 	format!("\"{}\"", name.replace('"', "\"\""))
 }
 
-fn runtime_value_from_constant(constant: &crate::bytecode::Constant) -> Value {
-	match constant {
-		crate::bytecode::Constant::Boolean(value) => Value::Boolean(*value),
-		crate::bytecode::Constant::Date(value) => Value::Date(*value),
-		crate::bytecode::Constant::Decimal(value) => Value::Decimal(value.clone()),
-		crate::bytecode::Constant::Integer(value) => Value::Integer(*value),
-		crate::bytecode::Constant::Text(value) => Value::Text(value.clone()),
+fn record_identity_column_names(record: &RecordPointerValue) -> Vec<String> {
+	if record.primary_key_column_names.is_empty() {
+		record.column_names.clone()
+	}
+	else {
+		record.primary_key_column_names.clone()
 	}
 }
 
@@ -3028,6 +3107,16 @@ fn resolve_record_field_value(field: &RecordFieldValue, instruction_index: usize
 			sqlite_record_field_runtime_value(value, data_type, *is_nullable)
 				.map_err(|message| vm_error(instruction_index, message))
 		}
+	}
+}
+
+fn runtime_value_from_constant(constant: &crate::bytecode::Constant) -> Value {
+	match constant {
+		crate::bytecode::Constant::Boolean(value) => Value::Boolean(*value),
+		crate::bytecode::Constant::Date(value) => Value::Date(*value),
+		crate::bytecode::Constant::Decimal(value) => Value::Decimal(value.clone()),
+		crate::bytecode::Constant::Integer(value) => Value::Integer(*value),
+		crate::bytecode::Constant::Text(value) => Value::Text(value.clone()),
 	}
 }
 
@@ -3045,6 +3134,23 @@ fn sqlite_integer_from_value_ref(value: SqlValueRef<'_>) -> Result<i64, String> 
 			sqlite_value_ref_type_name(other),
 		)),
 	}
+}
+
+fn sqlite_original_record_identity_values(
+	record: &RecordPointerValue,
+	column_names: &[String],
+	instruction_index: usize,
+) -> Result<Vec<SqlValue>, VmError> {
+	column_names.iter()
+		.map(|column_name| {
+			let field = record.original_fields.get(&normalize_record_field_name(column_name)).ok_or(vm_error(
+				instruction_index,
+				format!("Record pointer is missing original field data for `{column_name}`."),
+			))?;
+			let value = resolve_record_field_value(field, instruction_index)?;
+			sqlite_value_from_runtime_value(value, instruction_index)
+		})
+		.collect()
 }
 
 fn sqlite_path_from_connection_string(database_name: &str, value: &str) -> Result<PathBuf, String> {

@@ -36,7 +36,8 @@ const OPCODE_CALL_BUILT_IN: u8 = OPCODE_CALL + 1;
 const OPCODE_COMMIT_TRANSACTION: u8 = OPCODE_CALL_BUILT_IN + 1;
 const OPCODE_CREATE_RECORD: u8 = OPCODE_COMMIT_TRANSACTION + 1;
 const OPCODE_CREATE_RECORD_IF_PENDING: u8 = OPCODE_CREATE_RECORD + 1;
-const OPCODE_DIVIDE: u8 = OPCODE_CREATE_RECORD_IF_PENDING + 1;
+const OPCODE_DELETE_RECORD: u8 = OPCODE_CREATE_RECORD_IF_PENDING + 1;
+const OPCODE_DIVIDE: u8 = OPCODE_DELETE_RECORD + 1;
 const OPCODE_DUP2: u8 = OPCODE_DIVIDE + 1;
 const OPCODE_EQUAL: u8 = OPCODE_DUP2 + 1;
 const OPCODE_EXECUTE_QUERY: u8 = OPCODE_EQUAL + 1;
@@ -430,6 +431,7 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_COMMIT_TRANSACTION => Ok(Instruction::CommitTransaction),
 			OPCODE_CREATE_RECORD => Ok(Instruction::CreateRecord),
 			OPCODE_CREATE_RECORD_IF_PENDING => Ok(Instruction::CreateRecordIfPending),
+			OPCODE_DELETE_RECORD => Ok(Instruction::DeleteRecord),
 			OPCODE_DIVIDE => Ok(Instruction::Divide),
 			OPCODE_DUP2 => Ok(Instruction::Dup2),
 			OPCODE_EQUAL => Ok(Instruction::Equal),
@@ -797,6 +799,7 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 		Instruction::CommitTransaction => bytes.push(OPCODE_COMMIT_TRANSACTION),
 		Instruction::CreateRecord => bytes.push(OPCODE_CREATE_RECORD),
 		Instruction::CreateRecordIfPending => bytes.push(OPCODE_CREATE_RECORD_IF_PENDING),
+		Instruction::DeleteRecord => bytes.push(OPCODE_DELETE_RECORD),
 		Instruction::Divide => bytes.push(OPCODE_DIVIDE),
 		Instruction::Dup2 => bytes.push(OPCODE_DUP2),
 		Instruction::Equal => bytes.push(OPCODE_EQUAL),
@@ -1343,6 +1346,18 @@ mod tests {
 			Instruction::PushDecimal(crate::value::Decimal::from_literal("1.25").unwrap()),
 			Instruction::PushDecimal(crate::value::Decimal::from_literal(".5").unwrap()),
 			Instruction::Add,
+		]);
+
+		let bytes = write_program(&program);
+		let decoded = read_program(&bytes).unwrap();
+
+		assert_eq!(decoded, program);
+	}
+
+	#[test]
+	fn round_trips_delete_program_bytes() {
+		let program = Program::new(vec![
+			Instruction::DeleteRecord,
 		]);
 
 		let bytes = write_program(&program);

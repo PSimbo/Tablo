@@ -188,6 +188,7 @@ pub enum Statement {
 	Break(BreakStatement),
 	Continue(ContinueStatement),
 	Create(CreateStatement),
+	Delete(DeleteStatement),
 	EnumDeclaration(EnumDeclaration),
 	Expression(Expr),
 	For(ForStatement),
@@ -303,6 +304,12 @@ pub struct DateLiteral {
 pub struct DecimalLiteral {
 	pub position: usize,
 	pub value: Decimal,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeleteStatement {
+	pub position: usize,
+	pub target: IdentifierExpr,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

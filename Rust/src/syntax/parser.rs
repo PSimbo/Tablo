@@ -16,6 +16,7 @@ use crate::ast::CreateStatement;
 use crate::ast::DataType;
 use crate::ast::DateLiteral;
 use crate::ast::DecimalLiteral;
+use crate::ast::DeleteStatement;
 use crate::ast::EnumDeclaration;
 use crate::ast::EnumVariantDeclaration;
 use crate::ast::Expr;
@@ -541,6 +542,20 @@ impl Parser {
 		Ok(Expr::Decimal(DecimalLiteral {
 			position: token.start,
 			value,
+		}))
+	}
+
+	fn parse_delete_statement(&mut self) -> Result<Statement, ParseError> {
+		let delete_keyword = self.expect_token(TokenKind::DeleteKeyword, "Expected `delete` to start delete statement.")?;
+		let target = self.expect_token(TokenKind::Identifier, "Expected record pointer name after `delete`.")?;
+		self.expect_token(TokenKind::Semicolon, "Expected `;` after delete statement.")?;
+
+		Ok(Statement::Delete(DeleteStatement {
+			position: delete_keyword.start,
+			target: IdentifierExpr {
+				name: target.lexeme,
+				position: target.start,
+			},
 		}))
 	}
 
@@ -1876,6 +1891,7 @@ impl Parser {
 			Some(token) if token.kind == TokenKind::BreakKeyword => self.parse_break_statement(),
 			Some(token) if token.kind == TokenKind::ContinueKeyword => self.parse_continue_statement(),
 			Some(token) if token.kind == TokenKind::CreateKeyword => self.parse_create_statement(),
+			Some(token) if token.kind == TokenKind::DeleteKeyword => self.parse_delete_statement(),
 			Some(token) if token.kind == TokenKind::EnumKeyword => Ok(Statement::EnumDeclaration(self.parse_enum_declaration()?)),
 			Some(token) if token.kind == TokenKind::ForKeyword => self.parse_for_statement(),
 			Some(_) if self.current_starts_function_declaration() => Ok(Statement::FunctionDeclaration(self.parse_function_declaration()?)),
@@ -2268,6 +2284,7 @@ mod tests {
 	use crate::ast::DataType;
 	use crate::ast::DateLiteral;
 	use crate::ast::DecimalLiteral;
+	use crate::ast::DeleteStatement;
 	use crate::ast::EnumDeclaration;
 	use crate::ast::EnumVariantDeclaration;
 	use crate::ast::Expr;
@@ -2674,6 +2691,10 @@ mod tests {
 			Statement::Create(create_statement) => Statement::Create(CreateStatement {
 				position: 0,
 				target: normalize_identifier(create_statement.target),
+			}),
+			Statement::Delete(delete_statement) => Statement::Delete(DeleteStatement {
+				position: 0,
+				target: normalize_identifier(delete_statement.target),
 			}),
 			Statement::EnumDeclaration(declaration) => {
 				Statement::EnumDeclaration(normalize_enum_declaration(declaration))

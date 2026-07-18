@@ -20,6 +20,7 @@ pub enum TokenKind {
 	DateLiteral,
 	DecKeyword,
 	DecimalLiteral,
+	DeleteKeyword,
 	DescKeyword,
 	Dot,
 	ElseKeyword,

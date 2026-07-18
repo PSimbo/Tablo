@@ -34,6 +34,7 @@ pub enum Instruction {
 	CommitTransaction,
 	CreateRecord,
 	CreateRecordIfPending,
+	DeleteRecord,
 	Divide,
 	Dup2,
 	Equal,

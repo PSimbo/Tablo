@@ -630,6 +630,7 @@ fn extend_function_source_indices_from_statement(
 		ast::Statement::Break(_)
 		| ast::Statement::Continue(_)
 		| ast::Statement::Create(_)
+		| ast::Statement::Delete(_)
 		| ast::Statement::EnumDeclaration(_)
 		| ast::Statement::Expression(_)
 		| ast::Statement::RecordPointerDeclaration(_)
@@ -1073,6 +1074,7 @@ fn rewrite_statement_calls(
 		ast::Statement::Break(_)
 		| ast::Statement::Continue(_)
 		| ast::Statement::Create(_)
+		| ast::Statement::Delete(_)
 		| ast::Statement::EnumDeclaration(_)
 		| ast::Statement::Update(_)
 		| ast::Statement::Use(_) => {}
@@ -1734,6 +1736,70 @@ mod tests {
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Null));
+	}
+
+	#[test]
+	fn deleted_record_pointer_no_longer_exists() {
+		let database_path = create_sqlite_test_database(
+			"deleted_record_pointer_no_longer_exists",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO Customers (Id, Name) VALUES (32, 'Ada');
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int {\n    rec mut cust = find first Customers where Id == 32;\n    delete cust;\n    if cust {\n        return 1;\n    }\n    return 0;\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null primary key,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(0)));
+	}
+
+	#[test]
+	fn deletes_sqlite_record_from_mutable_record_pointer() {
+		let database_path = create_sqlite_test_database(
+			"deletes_sqlite_record_from_mutable_record_pointer",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO Customers (Id, Name) VALUES (31, 'Ada');
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int {\n    rec mut cust = find first Customers where Id == 31;\n    delete cust;\n    return count Customers where Id == 31;\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null primary key,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(0)));
 	}
 
 	#[test]
@@ -2626,6 +2692,45 @@ mod tests {
 
 		assert!(result.is_err());
 		assert_eq!(inserted_count, 0);
+	}
+
+	#[test]
+	fn rolls_back_explicit_delete_inside_transaction_after_runtime_error() {
+		let database_path = create_sqlite_test_database(
+			"rolls_back_explicit_delete_inside_transaction_after_runtime_error",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO Customers (Id, Name) VALUES (33, 'Ada');
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int {\n    transaction {\n        rec mut cust = find first Customers where Id == 33;\n        delete cust;\n        var fail: int = 1 / 0;\n    }\n    return 0;\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null primary key,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config);
+		let connection = Connection::open(&database_path).unwrap();
+		let stored_count: i64 = connection.query_row(
+			"SELECT COUNT(*) FROM Customers WHERE Id = 33 AND Name = 'Ada'",
+			[],
+			|row| row.get(0),
+		).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert!(result.is_err());
+		assert_eq!(stored_count, 1);
 	}
 
 	#[test]

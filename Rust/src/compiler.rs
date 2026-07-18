@@ -13,6 +13,7 @@ use crate::ast::CallExpr;
 use crate::ast::ContinueStatement;
 use crate::ast::CreateStatement;
 use crate::ast::DecimalLiteral;
+use crate::ast::DeleteStatement;
 use crate::ast::Expr;
 use crate::ast::FieldAccessExpr;
 use crate::ast::ForRecordStatement;
@@ -716,6 +717,16 @@ impl Compiler {
 				))?;
 				self.emit(emission, Instruction::LoadLocal(slot), *position);
 				self.emit(emission, Instruction::CreateRecord, *position);
+				self.emit(emission, Instruction::StoreLocal(slot), *position);
+				Ok(())
+			}
+			Statement::Delete(DeleteStatement { position, target }) => {
+				let slot = semantic_program.identifier_slot(target.position).ok_or(self.compile_error(
+					target.position,
+					format!("Missing slot for record pointer `{}` in `delete` statement.", target.name),
+				))?;
+				self.emit(emission, Instruction::LoadLocal(slot), *position);
+				self.emit(emission, Instruction::DeleteRecord, *position);
 				self.emit(emission, Instruction::StoreLocal(slot), *position);
 				Ok(())
 			}
@@ -1426,6 +1437,7 @@ fn collect_functions_from_statement<'a>(statement: &'a Statement, functions: &mu
 		Statement::Break(_)
 		| Statement::Continue(_)
 		| Statement::Create(_)
+		| Statement::Delete(_)
 		| Statement::Expression(_)
 		| Statement::RecordPointerDeclaration(_)
 		| Statement::Return(_)
@@ -1454,6 +1466,7 @@ fn statement_position(statement: &Statement) -> usize {
 		Statement::Break(statement) => statement.position,
 		Statement::Continue(statement) => statement.position,
 		Statement::Create(statement) => statement.position,
+		Statement::Delete(statement) => statement.position,
 		Statement::EnumDeclaration(statement) => statement.position,
 		Statement::Expression(expression) => expression.position(),
 		Statement::For(statement) => statement.position,

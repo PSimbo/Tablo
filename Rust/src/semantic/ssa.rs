@@ -640,6 +640,13 @@ impl<'a> FunctionSsaBuilder<'a> {
 
 				Some(block_id)
 			}
+			Statement::Delete(delete) => {
+				if let Some(slot) = self.semantic_program.identifier_slot(delete.target.position) {
+					self.push_read(block_id, slot, delete.target.position);
+				}
+
+				Some(block_id)
+			}
 			Statement::EnumDeclaration(_) => Some(block_id),
 			Statement::Expression(expression) => {
 				self.lower_expression(block_id, expression);
@@ -1106,6 +1113,7 @@ fn collect_statement_function_local_usage(
 		Statement::Break(_)
 		| Statement::Continue(_)
 		| Statement::Create(_)
+		| Statement::Delete(_)
 		| Statement::EnumDeclaration(_)
 		| Statement::Expression(_)
 		| Statement::RecordPointerDeclaration(_)
@@ -1156,6 +1164,7 @@ fn collect_statement_function_ssa(statement: &Statement, semantic_program: &Sema
 		Statement::Break(_)
 		| Statement::Continue(_)
 		| Statement::Create(_)
+		| Statement::Delete(_)
 		| Statement::EnumDeclaration(_)
 		| Statement::Expression(_)
 		| Statement::RecordPointerDeclaration(_)
@@ -1239,6 +1248,7 @@ fn collect_statement_local_declarations(
 		Statement::Break(_)
 		| Statement::Continue(_)
 		| Statement::Create(_)
+		| Statement::Delete(_)
 		| Statement::EnumDeclaration(_)
 		| Statement::Expression(_)
 		| Statement::Return(_)

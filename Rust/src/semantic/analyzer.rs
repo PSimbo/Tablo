@@ -14,6 +14,7 @@ use crate::ast::ContinueStatement;
 use crate::ast::CountExpr;
 use crate::ast::CreateStatement;
 use crate::ast::DataType;
+use crate::ast::DeleteStatement;
 use crate::ast::EnumDeclaration;
 use crate::ast::Expr;
 use crate::ast::FieldAccessExpr;
@@ -2995,6 +2996,7 @@ impl SemanticAnalyzer {
 			Statement::Block(block) => self.block_guarantees_return(block),
 			Statement::Break(_) | Statement::Continue(_) => false,
 			Statement::Create(_) => false,
+			Statement::Delete(_) => false,
 			Statement::EnumDeclaration(_) => false,
 			Statement::FunctionDeclaration(_) => false,
 			Statement::If(if_statement) => {
@@ -3415,6 +3417,29 @@ impl SemanticAnalyzer {
 					return Err(self.compile_error(
 						target.position,
 						String::from("`create` requires a record pointer declared from a `new` expression."),
+					));
+				}
+
+				Ok(())
+			}
+			Statement::Delete(DeleteStatement { target, .. }) => {
+				let local = self.lookup_local(&target.name).ok_or(self.compile_error(
+					target.position,
+					format!("Variable `{}` is not declared in this scope.", target.name),
+				))?;
+				self.semantic_program.identifier_slots.insert(target.position, local.slot);
+
+				let DataType::RecordPointer(_) = local.data_type.without_nullability() else {
+					return Err(self.compile_error(
+						target.position,
+						format!("`delete` requires a record pointer operand, found `{}`.", local.data_type.name()),
+					));
+				};
+
+				if local.is_const {
+					return Err(self.compile_error(
+						target.position,
+						format!("`delete` requires a mutable record pointer, but `{}` is immutable.", target.name),
 					));
 				}
 
@@ -3884,6 +3909,7 @@ fn statement_position(statement: &Statement) -> usize {
 		Statement::Break(statement) => statement.position,
 		Statement::Continue(statement) => statement.position,
 		Statement::Create(statement) => statement.position,
+		Statement::Delete(statement) => statement.position,
 		Statement::EnumDeclaration(statement) => statement.position,
 		Statement::Expression(expression) => expression.position(),
 		Statement::For(statement) => statement.position,
