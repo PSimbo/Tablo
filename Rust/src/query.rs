@@ -229,6 +229,7 @@ pub struct QueryForPlan {
 	pub backend: DatabaseBackend,
 	pub database_name: String,
 	pub filter: Option<QueryExpr>,
+	pub limit: Option<QueryExpr>,
 	pub order_by: Vec<QueryOrderByItem>,
 	pub record_columns: Vec<QueryResultColumn>,
 	pub schema_is_implicit: bool,
@@ -280,6 +281,12 @@ impl QueryForPlan {
 				.collect::<Vec<_>>()
 				.join(", ");
 			statement.push_str(&order_by);
+		}
+
+		if let Some(limit) = &self.limit {
+			statement.push_str(" LIMIT max((");
+			statement.push_str(&lower_query_expr_sqlite(limit, &mut parameters));
+			statement.push_str("), 0)");
 		}
 
 		SqlQuery {
@@ -838,6 +845,7 @@ mod tests {
 				operator: QueryBinaryOperator::Equal,
 				right: Box::new(QueryExpr::Literal(QueryLiteral::Boolean(true))),
 			})),
+			limit: None,
 			order_by: vec![
 				QueryOrderByItem {
 					direction: OrderByDirection::Descending,
@@ -889,6 +897,59 @@ mod tests {
 			schema_name: String::from("Main"),
 			statement: String::from(
 				"SELECT \"Customers\".\"Id\", \"Customers\".\"Name\" FROM \"Customers\" WHERE (\"Customers\".\"Active\" = 1) ORDER BY \"Customers\".\"Name\" DESC"
+			),
+			table_name: String::from("Customers"),
+		}));
+	}
+
+	#[test]
+	fn lowers_sqlite_for_record_plan_with_limit_to_sql_query() {
+		let query = QueryForPlan {
+			backend: DatabaseBackend::Sqlite,
+			database_name: String::from("ExampleDb"),
+			filter: None,
+			limit: Some(QueryExpr::Parameter(QueryParameter {
+				data_type: DataType::Int,
+				field_path: vec![],
+				slot: 2,
+			})),
+			order_by: vec![],
+			record_columns: vec![
+				QueryResultColumn {
+					column_name: String::from("Id"),
+					data_type: DataType::Int,
+					is_nullable: false,
+					is_primary_key: true,
+				},
+			],
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
+			table_name: String::from("Customers"),
+		}.lower_to_backend().unwrap();
+
+		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
+			database_name: String::from("ExampleDb"),
+			dialect: SqlDialect::Sqlite,
+			parameters: vec![
+				SqlParameter {
+					data_type: DataType::Int,
+					field_path: vec![],
+					index: 1,
+					slot: 2,
+				},
+			],
+			result_shape: SqlQueryResultShape::RecordPointerArray(vec![
+				QueryResultColumn {
+					column_name: String::from("Id"),
+					data_type: DataType::Int,
+					is_nullable: false,
+					is_primary_key: true,
+				},
+			]),
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
+			statement: String::from(
+				"SELECT \"Customers\".\"Id\" FROM \"Customers\" LIMIT max((?1), 0)"
 			),
 			table_name: String::from("Customers"),
 		}));

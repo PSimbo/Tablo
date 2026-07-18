@@ -1031,6 +1031,10 @@ fn rewrite_statement_calls(
 				rewrite_expression_calls(&mut order_by.expression, top_level_renames, import_bindings, shadowed_function_names);
 			}
 
+			if let Some(limit) = &mut for_statement.limit {
+				rewrite_expression_calls(limit, top_level_renames, import_bindings, shadowed_function_names);
+			}
+
 			rewrite_statements_calls(&mut for_statement.body.statements, top_level_renames, import_bindings, shadowed_function_names);
 		}
 		ast::Statement::FunctionDeclaration(function) => {
@@ -1982,6 +1986,40 @@ mod tests {
 
 		assert!(result.is_err());
 		assert_eq!(inserted_count, 1);
+	}
+
+	#[test]
+	fn limits_for_record_loop_iterations() {
+		let database_path = create_sqlite_test_database(
+			"limits_for_record_loop_iterations",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO Customers (Id, Name) VALUES (10, 'Ada');
+				INSERT INTO Customers (Id, Name) VALUES (11, 'Bea');
+				INSERT INTO Customers (Id, Name) VALUES (12, 'Cia');
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int {\n    var total: int = 0;\n    var maxRows: int = 2;\n    for rec cust in Customers order by Id limit maxRows {\n        total += cust.Id;\n    }\n    return total;\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(21)));
 	}
 
 	#[test]

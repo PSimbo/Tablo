@@ -738,6 +738,7 @@ impl Parser {
 			None
 		};
 		let order_by = self.parse_optional_order_by_clause()?;
+		let limit = self.parse_optional_limit_clause()?;
 		let body = match self.parse_block_statement()? {
 			Statement::Block(block) => block,
 			_ => unreachable!("Block parser must return a block statement."),
@@ -746,6 +747,7 @@ impl Parser {
 		Ok(Statement::ForRecord(ForRecordStatement {
 			body,
 			is_mut,
+			limit,
 			order_by,
 			position,
 			table,
@@ -1412,6 +1414,15 @@ impl Parser {
 		}];
 		objects.extend(nested_objects);
 		Ok(objects)
+	}
+
+	fn parse_optional_limit_clause(&mut self) -> Result<Option<Box<Expr>>, ParseError> {
+		if !self.current().is_some_and(|token| token.kind == TokenKind::LimitKeyword) {
+			return Ok(None);
+		}
+
+		self.next();
+		Ok(Some(Box::new(self.parse_query_expression_with_binding_power(BindingPower::Default)?)))
 	}
 
 	fn parse_optional_order_by_clause(&mut self) -> Result<Vec<OrderByItem>, ParseError> {
@@ -2537,6 +2548,7 @@ mod tests {
 		ForRecordStatement {
 			body: normalize_block(for_statement.body),
 			is_mut: for_statement.is_mut,
+			limit: for_statement.limit.map(|expression| Box::new(normalize_expr(*expression))),
 			order_by: for_statement.order_by.into_iter().map(normalize_order_by_item).collect(),
 			position: 0,
 			table: normalize_table_reference(for_statement.table),
@@ -3737,6 +3749,7 @@ mod tests {
 							],
 						},
 						is_mut: true,
+						limit: None,
 						order_by: vec![
 							OrderByItem {
 								direction: OrderByDirection::Descending,
@@ -3747,6 +3760,71 @@ mod tests {
 								position: 0,
 							},
 						],
+						position: 0,
+						table: TableReference {
+							components: vec![
+								IdentifierExpr {
+									name: String::from("customers"),
+									position: 0,
+								},
+							],
+							position: 0,
+						},
+						variable: IdentifierExpr {
+							name: String::from("cust"),
+							position: 0,
+						},
+						where_clause: Some(Box::new(Expr::Binary(BinaryExpr {
+							left: Box::new(Expr::Identifier(IdentifierExpr {
+								name: String::from("active"),
+								position: 0,
+							})),
+							operator: BinaryOperator::Equal,
+							position: 0,
+							right: Box::new(Expr::Boolean(BooleanLiteral {
+								position: 0,
+								value: true,
+							})),
+						}))),
+					}),
+				],
+				with_declarations: vec![],
+			}
+		);
+	}
+
+	#[test]
+	fn parses_for_record_statement_with_limit_clause() {
+		assert_eq!(
+			normalize_program(parse_program("for rec cust in customers where active == true limit 3 { cust.name; }")),
+			Program {
+				functions: vec![],
+				objects: vec![],
+				result: None,
+				statements: vec![
+					Statement::ForRecord(ForRecordStatement {
+						body: BlockStatement {
+							position: 0,
+							statements: vec![
+								Statement::Expression(Expr::FieldAccess(FieldAccessExpr {
+									field: IdentifierExpr {
+										name: String::from("name"),
+										position: 0,
+									},
+									object: Box::new(Expr::Identifier(IdentifierExpr {
+										name: String::from("cust"),
+										position: 0,
+									})),
+									position: 0,
+								})),
+							],
+						},
+						is_mut: false,
+						limit: Some(Box::new(Expr::Integer(IntegerLiteral {
+							position: 0,
+							value: 3,
+						}))),
+						order_by: vec![],
 						position: 0,
 						table: TableReference {
 							components: vec![

@@ -347,6 +347,7 @@ pub struct FindExpr {
 pub struct ForRecordStatement {
 	pub body: BlockStatement,
 	pub is_mut: bool,
+	pub limit: Option<Box<Expr>>,
 	pub order_by: Vec<OrderByItem>,
 	pub position: usize,
 	pub table: TableReference,

@@ -2114,11 +2114,15 @@ impl SemanticAnalyzer {
 				expression: self.lower_query_expression(&item.expression, &for_record.table, backend)?,
 			}))
 			.collect::<Result<Vec<_>, CompileError>>()?;
+		let limit = for_record.limit.as_ref()
+			.map(|limit| self.lower_query_expression(limit, &for_record.table, backend))
+			.transpose()?;
 
 		Ok(QueryForPlan {
 			backend,
 			database_name,
 			filter,
+			limit,
 			order_by,
 			record_columns,
 			schema_is_implicit,
@@ -3505,6 +3509,7 @@ impl SemanticAnalyzer {
 			Statement::ForRecord(ForRecordStatement {
 				body,
 				is_mut,
+				limit,
 				order_by,
 				position,
 				table,
@@ -3514,6 +3519,7 @@ impl SemanticAnalyzer {
 				let lowered_query = self.lower_for_record_query(&ForRecordStatement {
 					body: body.clone(),
 					is_mut: *is_mut,
+					limit: limit.clone(),
 					order_by: order_by.clone(),
 					position: *position,
 					table: table.clone(),
@@ -3547,6 +3553,17 @@ impl SemanticAnalyzer {
 						return Err(self.compile_error(
 							order_by.position,
 							String::from("`order by` expressions must produce a runtime value."),
+						));
+					}
+				}
+
+				if let Some(limit) = limit {
+					let limit_type = self.infer_query_expression_type(limit, table)?;
+
+					if limit_type.without_nullability() != &DataType::Int {
+						return Err(self.compile_error(
+							limit.position(),
+							format!("`limit` clause must evaluate to `int`, found `{}`.", limit_type.name()),
 						));
 					}
 				}

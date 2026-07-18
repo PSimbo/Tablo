@@ -51,6 +51,7 @@ pub enum TokenKind {
 	LeftParenthesis,
 	LessThan,
 	LessThanOrEqual,
+	LimitKeyword,
 	MinusEqual,
 	MultiplyEqual,
 	MutKeyword,

@@ -468,6 +468,10 @@ impl<'a> FunctionSsaBuilder<'a> {
 			self.lower_expression(loop_header, &item.expression);
 		}
 
+		if let Some(limit) = &for_statement.limit {
+			self.lower_expression(loop_header, limit);
+		}
+
 		self.blocks[loop_header].terminator = Some(SsaTerminator::Branch {
 			else_block: exit_block,
 			position: for_statement.position,
