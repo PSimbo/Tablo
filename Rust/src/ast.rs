@@ -197,6 +197,7 @@ pub enum Statement {
 	RecordPointerDeclaration(RecordPointerDeclaration),
 	Return(ReturnStatement),
 	Transaction(TransactionStatement),
+	Update(UpdateStatement),
 	Use(UseDeclaration),
 	VariableDeclaration(VariableDeclaration),
 	While(WhileStatement),
@@ -568,6 +569,12 @@ pub struct UnaryExpr {
 	pub operand: Box<Expr>,
 	pub operator: UnaryOperator,
 	pub position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpdateStatement {
+	pub position: usize,
+	pub target: IdentifierExpr,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

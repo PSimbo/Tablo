@@ -551,7 +551,10 @@ impl VirtualMachine {
 			format!("Failed to execute SQLite create statement: {error}"),
 		))?;
 
+		let original_fields = record.fields.clone();
 		Ok(Value::RecordPointer(RecordPointerValue {
+			is_dirty: false,
+			original_fields,
 			persisted: true,
 			..record
 		}))
@@ -849,7 +852,10 @@ impl VirtualMachine {
 					column_names: field_names.clone(),
 					exists: true,
 					fields,
+					is_dirty: false,
 					locked: false,
+					original_fields: BTreeMap::new(),
+					primary_key_column_names: Vec::new(),
 					persisted: false,
 					record_type: record_type.clone(),
 					schema_is_implicit: *schema_is_implicit,
@@ -1032,6 +1038,30 @@ impl VirtualMachine {
 				)?;
 				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::UpdateRecord => {
+				let record = self.pop_value(instruction_index)?;
+				let Value::RecordPointer(record) = record else {
+					return Err(vm_error(
+						instruction_index,
+						String::from("`update` requires a record pointer operand."),
+					));
+				};
+				let record = self.update_record(record, false, instruction_index)?;
+				self.stack.push(record);
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::UpdateRecordIfChanged => {
+				let record = self.pop_value(instruction_index)?;
+				let Value::RecordPointer(record) = record else {
+					return Err(vm_error(
+						instruction_index,
+						String::from("Pending `update` cleanup requires a record pointer operand."),
+					));
+				};
+				let record = self.update_record(record, true, instruction_index)?;
+				self.stack.push(record);
+				Ok(ExecutionOutcome::Continue(None))
+			}
 			Instruction::Xor => {
 				let rhs = self.pop_boolean(instruction_index)?;
 				let lhs = self.pop_boolean(instruction_index)?;
@@ -1100,7 +1130,13 @@ impl VirtualMachine {
 						column_names: columns.iter().map(|column| column.column_name.clone()).collect(),
 						exists: false,
 						fields: BTreeMap::new(),
+						is_dirty: false,
 						locked: false,
+						original_fields: BTreeMap::new(),
+						primary_key_column_names: columns.iter()
+							.filter(|column| column.is_primary_key)
+							.map(|column| column.column_name.clone())
+							.collect(),
 						persisted: false,
 						record_type: crate::ast::RecordPointerType {
 							database_name: query.database_name.clone(),
@@ -1111,11 +1147,18 @@ impl VirtualMachine {
 					}));
 				};
 				let fields = load_sqlite_record_fields(row, columns, instruction_index)?;
+				let original_fields = fields.clone();
 				Ok(Value::RecordPointer(RecordPointerValue {
 					column_names: columns.iter().map(|column| column.column_name.clone()).collect(),
 					exists: true,
 					fields,
+					is_dirty: false,
 					locked: false,
+					original_fields,
+					primary_key_column_names: columns.iter()
+						.filter(|column| column.is_primary_key)
+						.map(|column| column.column_name.clone())
+						.collect(),
 					persisted: true,
 					record_type: crate::ast::RecordPointerType {
 						database_name: query.database_name.clone(),
@@ -1137,11 +1180,18 @@ impl VirtualMachine {
 					format!("Failed to read SQLite query result: {error}"),
 				))? {
 					let fields = load_sqlite_record_fields(row, columns, instruction_index)?;
+					let original_fields = fields.clone();
 					records.push(Value::RecordPointer(RecordPointerValue {
 						column_names: columns.iter().map(|column| column.column_name.clone()).collect(),
 						exists: true,
 						fields,
+						is_dirty: false,
 						locked: false,
+						original_fields,
+						primary_key_column_names: columns.iter()
+							.filter(|column| column.is_primary_key)
+							.map(|column| column.column_name.clone())
+							.collect(),
 						persisted: true,
 						record_type: crate::ast::RecordPointerType {
 							database_name: query.database_name.clone(),
@@ -1878,6 +1928,106 @@ impl VirtualMachine {
 		}
 
 		Ok(())
+	}
+
+	fn update_record(
+		&mut self,
+		record: RecordPointerValue,
+		only_if_changed: bool,
+		instruction_index: usize,
+	) -> Result<Value, VmError> {
+		if only_if_changed && !record.is_dirty {
+			return Ok(Value::RecordPointer(record));
+		}
+
+		if !record.exists {
+			return Err(vm_error(
+				instruction_index,
+				String::from("Cannot update a record pointer that does not reference a record."),
+			));
+		}
+
+		if record.locked {
+			return Err(vm_error(
+				instruction_index,
+				String::from("Cannot update a locked record pointer."),
+			));
+		}
+
+		if !record.persisted {
+			return Err(vm_error(
+				instruction_index,
+				String::from("Cannot update a record that has not been created."),
+			));
+		}
+
+		self.update_sqlite_record(record, instruction_index)
+	}
+
+	fn update_sqlite_record(
+		&mut self,
+		record: RecordPointerValue,
+		instruction_index: usize,
+	) -> Result<Value, VmError> {
+		let table_source = sqlite_table_source(
+			&record.record_type.schema_name,
+			&record.record_type.table_name,
+			record.schema_is_implicit,
+		);
+		let assignments = record.column_names.iter()
+			.map(|name| format!("{} = ?", quote_identifier(name)))
+			.collect::<Vec<_>>()
+			.join(", ");
+		let predicate_column_names = if record.primary_key_column_names.is_empty() {
+			record.column_names.clone()
+		}
+		else {
+			record.primary_key_column_names.clone()
+		};
+		let predicates = predicate_column_names.iter()
+			.map(|name| format!("{} IS ?", quote_identifier(name)))
+			.collect::<Vec<_>>()
+			.join(" AND ");
+		let statement = format!("UPDATE {table_source} SET {assignments} WHERE {predicates}");
+		let mut parameter_values = Vec::with_capacity(record.column_names.len() + predicate_column_names.len());
+
+		for column_name in &record.column_names {
+			let field = record.fields.get(&normalize_record_field_name(column_name)).ok_or(vm_error(
+				instruction_index,
+				format!("Record pointer does not contain a field named `{column_name}`."),
+			))?;
+			let value = resolve_record_field_value(field, instruction_index)?;
+			parameter_values.push(sqlite_value_from_runtime_value(value, instruction_index)?);
+		}
+
+		for column_name in &predicate_column_names {
+			let field = record.original_fields.get(&normalize_record_field_name(column_name)).ok_or(vm_error(
+				instruction_index,
+				format!("Record pointer is missing original field data for `{column_name}`."),
+			))?;
+			let value = resolve_record_field_value(field, instruction_index)?;
+			parameter_values.push(sqlite_value_from_runtime_value(value, instruction_index)?);
+		}
+
+		let connection = self.sqlite_connection_mut(&record.record_type.database_name, instruction_index)?;
+		let affected_rows = connection.execute(&statement, params_from_iter(parameter_values)).map_err(|error| vm_error(
+			instruction_index,
+			format!("Failed to execute SQLite update statement: {error}"),
+		))?;
+
+		if affected_rows != 1 {
+			return Err(vm_error(
+				instruction_index,
+				format!("SQLite update expected to affect 1 row, affected {affected_rows}."),
+			));
+		}
+
+		let original_fields = record.fields.clone();
+		Ok(Value::RecordPointer(RecordPointerValue {
+			is_dirty: false,
+			original_fields,
+			..record
+		}))
 	}
 }
 
@@ -3030,6 +3180,8 @@ fn store_field_path_into_record_pointer(
 
 	let exists = record.exists;
 	let column_names = record.column_names;
+	let original_fields = record.original_fields;
+	let primary_key_column_names = record.primary_key_column_names;
 	let locked = record.locked;
 	let persisted = record.persisted;
 	let record_type = record.record_type;
@@ -3058,7 +3210,10 @@ fn store_field_path_into_record_pointer(
 			column_names,
 			exists,
 			fields,
+			is_dirty: true,
 			locked,
+			original_fields,
+			primary_key_column_names,
 			persisted,
 			record_type,
 			schema_is_implicit,
@@ -3080,7 +3235,10 @@ fn store_field_path_into_record_pointer(
 		column_names,
 		exists,
 		fields,
+		is_dirty: true,
 		locked,
+		original_fields,
+		primary_key_column_names,
 		persisted,
 		record_type,
 		schema_is_implicit,
@@ -3413,7 +3571,10 @@ mod tests {
 								RecordFieldValue::Materialized(Value::Text(String::from("Ada"))),
 							),
 						]),
+						is_dirty: false,
 						locked: false,
+						original_fields: BTreeMap::new(),
+						primary_key_column_names: Vec::new(),
 						persisted: true,
 						record_type: RecordPointerType {
 							database_name: String::from("ExampleDb"),

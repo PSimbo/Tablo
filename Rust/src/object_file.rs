@@ -90,7 +90,9 @@ const OPCODE_STORE_INDEX: u8 = OPCODE_STORE_FIELD_PATH + 1;
 const OPCODE_STORE_LOCAL: u8 = OPCODE_STORE_INDEX + 1;
 const OPCODE_STORE_SEQUENCE_CURRENT: u8 = OPCODE_STORE_LOCAL + 1;
 const OPCODE_SUBTRACT: u8 = OPCODE_STORE_SEQUENCE_CURRENT + 1;
-const OPCODE_XOR: u8 = OPCODE_SUBTRACT + 1;
+const OPCODE_UPDATE_RECORD: u8 = OPCODE_SUBTRACT + 1;
+const OPCODE_UPDATE_RECORD_IF_CHANGED: u8 = OPCODE_UPDATE_RECORD + 1;
+const OPCODE_XOR: u8 = OPCODE_UPDATE_RECORD_IF_CHANGED + 1;
 const QUERY_KIND_SQL: u8 = 1;
 const SQL_DIALECT_SQLITE: u8 = 1;
 const SQL_RESULT_INTEGER_SCALAR: u8 = 1;
@@ -532,6 +534,8 @@ impl<'a> ObjectFileReader<'a> {
 				sequence_name: self.read_string()?,
 			}),
 			OPCODE_SUBTRACT => Ok(Instruction::Subtract),
+			OPCODE_UPDATE_RECORD => Ok(Instruction::UpdateRecord),
+			OPCODE_UPDATE_RECORD_IF_CHANGED => Ok(Instruction::UpdateRecordIfChanged),
 			OPCODE_XOR => Ok(Instruction::Xor),
 			_ => Err(ObjectFileError {
 				offset: opcode_offset,
@@ -618,6 +622,7 @@ impl<'a> ObjectFileReader<'a> {
 						column_name: self.read_string()?,
 						data_type: self.read_data_type()?,
 						is_nullable: self.read_bool()?,
+						is_primary_key: self.read_bool()?,
 					});
 				}
 
@@ -632,6 +637,7 @@ impl<'a> ObjectFileReader<'a> {
 						column_name: self.read_string()?,
 						data_type: self.read_data_type()?,
 						is_nullable: self.read_bool()?,
+						is_primary_key: self.read_bool()?,
 					});
 				}
 
@@ -983,6 +989,8 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.extend_from_slice(sequence_name.as_bytes());
 		}
 		Instruction::Subtract => bytes.push(OPCODE_SUBTRACT),
+		Instruction::UpdateRecord => bytes.push(OPCODE_UPDATE_RECORD),
+		Instruction::UpdateRecordIfChanged => bytes.push(OPCODE_UPDATE_RECORD_IF_CHANGED),
 		Instruction::Xor => bytes.push(OPCODE_XOR),
 	}
 }
@@ -1045,6 +1053,7 @@ fn write_sql_query(bytes: &mut Vec<u8>, query: &SqlQuery) {
 				bytes.extend_from_slice(column.column_name.as_bytes());
 				write_data_type(bytes, &column.data_type);
 				bytes.push(if column.is_nullable { 1 } else { 0 });
+				bytes.push(if column.is_primary_key { 1 } else { 0 });
 			}
 		}
 		SqlQueryResultShape::RecordPointerArray(columns) => {
@@ -1056,6 +1065,7 @@ fn write_sql_query(bytes: &mut Vec<u8>, query: &SqlQuery) {
 				bytes.extend_from_slice(column.column_name.as_bytes());
 				write_data_type(bytes, &column.data_type);
 				bytes.push(if column.is_nullable { 1 } else { 0 });
+				bytes.push(if column.is_primary_key { 1 } else { 0 });
 			}
 		}
 	}
@@ -1496,6 +1506,19 @@ mod tests {
 		let program = Program::new(vec![
 			Instruction::BeginTransaction,
 			Instruction::CommitTransaction,
+		]);
+
+		let bytes = write_program(&program);
+		let decoded = read_program(&bytes).unwrap();
+
+		assert_eq!(decoded, program);
+	}
+
+	#[test]
+	fn round_trips_update_program_bytes() {
+		let program = Program::new(vec![
+			Instruction::UpdateRecord,
+			Instruction::UpdateRecordIfChanged,
 		]);
 
 		let bytes = write_program(&program);

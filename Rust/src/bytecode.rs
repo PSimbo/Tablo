@@ -106,6 +106,8 @@ pub enum Instruction {
 		sequence_name: String,
 	},
 	Subtract,
+	UpdateRecord,
+	UpdateRecordIfChanged,
 	Xor,
 }
 

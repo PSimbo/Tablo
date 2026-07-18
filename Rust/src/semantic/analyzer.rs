@@ -42,6 +42,7 @@ use crate::ast::TernaryExpr;
 use crate::ast::TransactionStatement;
 use crate::ast::UnaryExpr;
 use crate::ast::UnaryOperator;
+use crate::ast::UpdateStatement;
 use crate::ast::UseDeclaration;
 use crate::ast::VariableDeclaration;
 use crate::ast::Visibility;
@@ -2019,8 +2020,17 @@ impl SemanticAnalyzer {
 	fn lower_find_query(&mut self, find: &FindExpr) -> Result<QueryFindPlan, CompileError> {
 		let (backend, database_name, schema_name, schema_is_implicit, table_name, record_column_schemas) = {
 			let resolved_table = self.resolve_table_reference(&find.table)?;
+			let primary_key_columns = resolved_table.table().primary_key_columns()
+				.into_iter()
+				.map(|column| column.name().to_string())
+				.collect::<BTreeSet<_>>();
 			let record_column_schemas = resolved_table.table().columns()
-				.map(|column| (column.name().to_string(), column.data_type().clone(), column.is_nullable()))
+				.map(|column| (
+					column.name().to_string(),
+					column.data_type().clone(),
+					column.is_nullable(),
+					primary_key_columns.contains(column.name()),
+				))
 				.collect::<Vec<_>>();
 			(
 				resolved_table.database().backend(),
@@ -2032,10 +2042,11 @@ impl SemanticAnalyzer {
 			)
 		};
 		let record_columns = record_column_schemas.into_iter()
-			.map(|(column_name, schema_type, is_nullable)| Ok(QueryResultColumn {
+			.map(|(column_name, schema_type, is_nullable, is_primary_key)| Ok(QueryResultColumn {
 				column_name,
 				data_type: self.data_type_from_schema_type(&schema_type)?,
 				is_nullable,
+				is_primary_key,
 			}))
 			.collect::<Result<Vec<_>, CompileError>>()?;
 		let filter = find.where_clause.as_ref()
@@ -2064,8 +2075,17 @@ impl SemanticAnalyzer {
 	fn lower_for_record_query(&mut self, for_record: &ForRecordStatement) -> Result<QueryForPlan, CompileError> {
 		let (backend, database_name, schema_name, schema_is_implicit, table_name, record_column_schemas) = {
 			let resolved_table = self.resolve_table_reference(&for_record.table)?;
+			let primary_key_columns = resolved_table.table().primary_key_columns()
+				.into_iter()
+				.map(|column| column.name().to_string())
+				.collect::<BTreeSet<_>>();
 			let record_column_schemas = resolved_table.table().columns()
-				.map(|column| (column.name().to_string(), column.data_type().clone(), column.is_nullable()))
+				.map(|column| (
+					column.name().to_string(),
+					column.data_type().clone(),
+					column.is_nullable(),
+					primary_key_columns.contains(column.name()),
+				))
 				.collect::<Vec<_>>();
 			(
 				resolved_table.database().backend(),
@@ -2077,10 +2097,11 @@ impl SemanticAnalyzer {
 			)
 		};
 		let record_columns = record_column_schemas.into_iter()
-			.map(|(column_name, schema_type, is_nullable)| Ok(QueryResultColumn {
+			.map(|(column_name, schema_type, is_nullable, is_primary_key)| Ok(QueryResultColumn {
 				column_name,
 				data_type: self.data_type_from_schema_type(&schema_type)?,
 				is_nullable,
+				is_primary_key,
 			}))
 			.collect::<Result<Vec<_>, CompileError>>()?;
 		let filter = for_record.where_clause.as_ref()
@@ -2983,7 +3004,13 @@ impl SemanticAnalyzer {
 			Statement::RecordPointerDeclaration(_) => false,
 			Statement::Return(_) => true,
 			Statement::Transaction(transaction_statement) => self.block_guarantees_return(&transaction_statement.body),
-			Statement::Expression(_) | Statement::For(_) | Statement::ForRecord(_) | Statement::Use(_) | Statement::VariableDeclaration(_) | Statement::While(_) => false,
+			Statement::Expression(_)
+			| Statement::For(_)
+			| Statement::ForRecord(_)
+			| Statement::Update(_)
+			| Statement::Use(_)
+			| Statement::VariableDeclaration(_)
+			| Statement::While(_) => false,
 		}
 	}
 
@@ -3678,6 +3705,29 @@ impl SemanticAnalyzer {
 			Statement::Transaction(TransactionStatement { body, .. }) => {
 				self.validate_statement(&Statement::Block(body.clone()))
 			}
+			Statement::Update(UpdateStatement { target, .. }) => {
+				let local = self.lookup_local(&target.name).ok_or(self.compile_error(
+					target.position,
+					format!("Variable `{}` is not declared in this scope.", target.name),
+				))?;
+				self.semantic_program.identifier_slots.insert(target.position, local.slot);
+
+				let DataType::RecordPointer(_) = local.data_type.without_nullability() else {
+					return Err(self.compile_error(
+						target.position,
+						format!("`update` requires a record pointer operand, found `{}`.", local.data_type.name()),
+					));
+				};
+
+				if local.is_const {
+					return Err(self.compile_error(
+						target.position,
+						format!("`update` requires a mutable record pointer, but `{}` is immutable.", target.name),
+					));
+				}
+
+				Ok(())
+			}
 			Statement::Use(UseDeclaration { .. }) => Ok(()),
 			Statement::VariableDeclaration(VariableDeclaration { data_type, initial_value, is_const, name, position }) => {
 				self.validate_non_void_data_type(
@@ -3843,6 +3893,7 @@ fn statement_position(statement: &Statement) -> usize {
 		Statement::RecordPointerDeclaration(statement) => statement.position,
 		Statement::Return(statement) => statement.position,
 		Statement::Transaction(statement) => statement.position,
+		Statement::Update(statement) => statement.position,
 		Statement::Use(statement) => statement.position,
 		Statement::VariableDeclaration(statement) => statement.position,
 		Statement::While(statement) => statement.position,

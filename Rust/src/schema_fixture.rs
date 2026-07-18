@@ -302,8 +302,20 @@ impl SchemaTextParser {
 			else {
 				self.consume_keyword("null")
 			};
+			let primary_key_ordinal = if self.consume_keyword("primary") {
+				let keyword = self.expect_identifier("Expected `key` after `primary` in column primary key marker.")?;
+				if !keyword.eq_ignore_ascii_case("key") {
+					return Err(self.error_at_current(format!(
+						"Expected `key` after `primary`, found `{keyword}`."
+					)));
+				}
+				Some(table.primary_key_columns().len())
+			}
+			else {
+				None
+			};
 
-			table.add_column(ColumnSchema::new(column_name, data_type, is_nullable))
+			table.add_column(ColumnSchema::with_primary_key_ordinal(column_name, data_type, is_nullable, primary_key_ordinal))
 				.map_err(schema_error_to_fixture_error)?;
 
 			match self.current() {
@@ -598,6 +610,29 @@ mod tests {
 
 	use super::SchemaFixtureError;
 	use super::read_schema_catalog_from_str;
+
+	#[test]
+	fn accepts_inline_primary_key_marker_in_sql_like_schema() {
+		let catalog = read_schema_catalog_from_str(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id INTEGER not null primary key,
+					Name TEXT not null
+				);
+			"#,
+		).unwrap();
+
+		let database = catalog.database("exampledb").unwrap();
+		let schema = database.schema("main").unwrap();
+		let table = schema.table("customers").unwrap();
+		let primary_key_columns = table.primary_key_columns();
+
+		assert_eq!(primary_key_columns.len(), 1);
+		assert_eq!(primary_key_columns[0].name(), "Id");
+		assert_eq!(primary_key_columns[0].primary_key_ordinal(), Some(0));
+	}
 
 	#[test]
 	fn accepts_integer_alias_in_sql_like_schema() {

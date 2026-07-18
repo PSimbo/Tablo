@@ -1230,7 +1230,10 @@ mod tests {
 			column_names: vec![String::from("Address1"), String::from("Id")],
 			exists: true,
 			fields,
+			is_dirty: false,
 			locked: false,
+			original_fields: BTreeMap::new(),
+			primary_key_column_names: Vec::new(),
 			persisted: true,
 			record_type: RecordPointerType {
 				database_name: String::from("ExampleDb"),

@@ -58,6 +58,7 @@ use crate::ast::TimestampTzLiteral;
 use crate::ast::TransactionStatement;
 use crate::ast::UnaryExpr;
 use crate::ast::UnaryOperator;
+use crate::ast::UpdateStatement;
 use crate::ast::UseDeclaration;
 use crate::ast::VariableDeclaration;
 use crate::ast::Visibility;
@@ -1875,25 +1876,18 @@ impl Parser {
 			Some(token) if token.kind == TokenKind::BreakKeyword => self.parse_break_statement(),
 			Some(token) if token.kind == TokenKind::ContinueKeyword => self.parse_continue_statement(),
 			Some(token) if token.kind == TokenKind::CreateKeyword => self.parse_create_statement(),
-			Some(token) if token.kind == TokenKind::EnumKeyword => {
-				Ok(Statement::EnumDeclaration(self.parse_enum_declaration()?))
-			}
+			Some(token) if token.kind == TokenKind::EnumKeyword => Ok(Statement::EnumDeclaration(self.parse_enum_declaration()?)),
 			Some(token) if token.kind == TokenKind::ForKeyword => self.parse_for_statement(),
-			Some(_) if self.current_starts_function_declaration() => {
-				Ok(Statement::FunctionDeclaration(self.parse_function_declaration()?))
-			}
+			Some(_) if self.current_starts_function_declaration() => Ok(Statement::FunctionDeclaration(self.parse_function_declaration()?)),
 			Some(token) if token.kind == TokenKind::IfKeyword => self.parse_if_statement(),
 			Some(token) if token.kind == TokenKind::LeftBrace => self.parse_block_statement(),
 			Some(token) if token.kind == TokenKind::RecKeyword => self.parse_record_pointer_declaration_statement(),
 			Some(token) if token.kind == TokenKind::ReturnKeyword => self.parse_return_statement(),
 			Some(token) if token.kind == TokenKind::TransactionKeyword => self.parse_transaction_statement(),
-			Some(token) if token.kind == TokenKind::UseKeyword => {
-				Ok(Statement::Use(self.parse_use_declaration()?))
-			}
+			Some(token) if token.kind == TokenKind::UpdateKeyword => self.parse_update_statement(),
+			Some(token) if token.kind == TokenKind::UseKeyword => Ok(Statement::Use(self.parse_use_declaration()?)),
 			Some(token) if token.kind == TokenKind::WhileKeyword => self.parse_while_statement(),
-			Some(token) if matches!(token.kind, TokenKind::ConstKeyword | TokenKind::VarKeyword) => {
-				self.parse_variable_declaration_statement()
-			}
+			Some(token) if matches!(token.kind, TokenKind::ConstKeyword | TokenKind::VarKeyword) => self.parse_variable_declaration_statement(),
 			Some(_) => {
 				let expression = self.parse_assignment_expression()?;
 				self.expect_token(TokenKind::Semicolon, "Expected `;` after expression statement.")?;
@@ -2052,6 +2046,20 @@ impl Parser {
 		Ok(Statement::Transaction(TransactionStatement {
 			body,
 			position: start.start,
+		}))
+	}
+
+	fn parse_update_statement(&mut self) -> Result<Statement, ParseError> {
+		let update_keyword = self.expect_token(TokenKind::UpdateKeyword, "Expected `update` to start update statement.")?;
+		let target = self.expect_token(TokenKind::Identifier, "Expected record pointer name after `update`.")?;
+		self.expect_token(TokenKind::Semicolon, "Expected `;` after update statement.")?;
+
+		Ok(Statement::Update(UpdateStatement {
+			position: update_keyword.start,
+			target: IdentifierExpr {
+				name: target.lexeme,
+				position: target.start,
+			},
 		}))
 	}
 
@@ -2302,6 +2310,7 @@ mod tests {
 	use crate::ast::TransactionStatement;
 	use crate::ast::UnaryExpr;
 	use crate::ast::UnaryOperator;
+	use crate::ast::UpdateStatement;
 	use crate::ast::UseDeclaration;
 	use crate::ast::VariableDeclaration;
 	use crate::ast::Visibility;
@@ -2683,6 +2692,10 @@ mod tests {
 			Statement::Transaction(transaction_statement) => Statement::Transaction(TransactionStatement {
 				body: normalize_block(transaction_statement.body),
 				position: 0,
+			}),
+			Statement::Update(update_statement) => Statement::Update(UpdateStatement {
+				position: 0,
+				target: normalize_identifier(update_statement.target),
 			}),
 			Statement::Use(use_declaration) => Statement::Use(normalize_use_declaration(use_declaration)),
 			Statement::VariableDeclaration(declaration) => {

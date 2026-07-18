@@ -666,6 +666,13 @@ impl<'a> FunctionSsaBuilder<'a> {
 			Statement::Transaction(transaction_statement) => {
 				self.lower_block_statement(&transaction_statement.body, Some(block_id), loop_targets)
 			}
+			Statement::Update(update) => {
+				if let Some(slot) = self.semantic_program.identifier_slot(update.target.position) {
+					self.push_read(block_id, slot, update.target.position);
+				}
+
+				Some(block_id)
+			}
 			Statement::Use(_) => Some(block_id),
 			Statement::VariableDeclaration(declaration) => {
 				if let Some(initial_value) = &declaration.initial_value {
@@ -1103,6 +1110,7 @@ fn collect_statement_function_local_usage(
 		| Statement::Expression(_)
 		| Statement::RecordPointerDeclaration(_)
 		| Statement::Return(_)
+		| Statement::Update(_)
 		| Statement::Use(_)
 		| Statement::VariableDeclaration(_) => {}
 	}
@@ -1152,6 +1160,7 @@ fn collect_statement_function_ssa(statement: &Statement, semantic_program: &Sema
 		| Statement::Expression(_)
 		| Statement::RecordPointerDeclaration(_)
 		| Statement::Return(_)
+		| Statement::Update(_)
 		| Statement::Use(_)
 		| Statement::VariableDeclaration(_) => {}
 	}
@@ -1233,6 +1242,7 @@ fn collect_statement_local_declarations(
 		| Statement::EnumDeclaration(_)
 		| Statement::Expression(_)
 		| Statement::Return(_)
+		| Statement::Update(_)
 		| Statement::Use(_) => {}
 	}
 }

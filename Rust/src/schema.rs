@@ -94,17 +94,10 @@ pub struct ColumnSchema {
 	data_type: SchemaDataType,
 	is_nullable: bool,
 	name: String,
+	primary_key_ordinal: Option<usize>,
 }
 
 impl ColumnSchema {
-	pub fn new(name: impl Into<String>, data_type: SchemaDataType, is_nullable: bool) -> Self {
-		Self {
-			data_type,
-			is_nullable,
-			name: name.into(),
-		}
-	}
-
 	pub fn data_type(&self) -> &SchemaDataType {
 		&self.data_type
 	}
@@ -115,6 +108,28 @@ impl ColumnSchema {
 
 	pub fn name(&self) -> &str {
 		&self.name
+	}
+
+	pub fn new(name: impl Into<String>, data_type: SchemaDataType, is_nullable: bool) -> Self {
+		Self::with_primary_key_ordinal(name, data_type, is_nullable, None)
+	}
+
+	pub fn primary_key_ordinal(&self) -> Option<usize> {
+		self.primary_key_ordinal
+	}
+
+	pub fn with_primary_key_ordinal(
+		name: impl Into<String>,
+		data_type: SchemaDataType,
+		is_nullable: bool,
+		primary_key_ordinal: Option<usize>,
+	) -> Self {
+		Self {
+			data_type,
+			is_nullable,
+			name: name.into(),
+			primary_key_ordinal,
+		}
 	}
 }
 
@@ -622,6 +637,14 @@ impl TableSchema {
 
 	pub fn name(&self) -> &str {
 		&self.name
+	}
+
+	pub fn primary_key_columns(&self) -> Vec<&ColumnSchema> {
+		let mut columns = self.columns.values()
+			.filter(|column| column.primary_key_ordinal().is_some())
+			.collect::<Vec<_>>();
+		columns.sort_by_key(|column| column.primary_key_ordinal().unwrap_or(usize::MAX));
+		columns
 	}
 }
 

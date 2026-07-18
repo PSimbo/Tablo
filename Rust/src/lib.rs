@@ -634,6 +634,7 @@ fn extend_function_source_indices_from_statement(
 		| ast::Statement::Expression(_)
 		| ast::Statement::RecordPointerDeclaration(_)
 		| ast::Statement::Return(_)
+		| ast::Statement::Update(_)
 		| ast::Statement::Use(_)
 		| ast::Statement::VariableDeclaration(_) => {}
 	}
@@ -1013,7 +1014,6 @@ fn rewrite_statement_calls(
 		ast::Statement::Block(block) => {
 			rewrite_statements_calls(&mut block.statements, top_level_renames, import_bindings, shadowed_function_names);
 		}
-		ast::Statement::Create(_) | ast::Statement::Break(_) | ast::Statement::Continue(_) | ast::Statement::EnumDeclaration(_) | ast::Statement::Use(_) => {}
 		ast::Statement::Expression(expression) => {
 			rewrite_expression_calls(expression, top_level_renames, import_bindings, shadowed_function_names);
 		}
@@ -1070,6 +1070,12 @@ fn rewrite_statement_calls(
 			rewrite_expression_calls(&mut while_statement.condition, top_level_renames, import_bindings, shadowed_function_names);
 			rewrite_statements_calls(&mut while_statement.body.statements, top_level_renames, import_bindings, shadowed_function_names);
 		}
+		ast::Statement::Break(_)
+		| ast::Statement::Continue(_)
+		| ast::Statement::Create(_)
+		| ast::Statement::EnumDeclaration(_)
+		| ast::Statement::Update(_)
+		| ast::Statement::Use(_) => {}
 	}
 }
 
@@ -1480,6 +1486,102 @@ mod tests {
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
 			"with exampledb;\nfn Main(args: [text]) int {\n    {\n        rec mut cust = new Customers;\n        cust.Id = 7;\n        cust.Name = 'Ada';\n    }\n    return count Customers where Id == 7 and Name == 'Ada';\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn auto_update_cleanup_ignores_unchanged_missing_record_pointer() {
+		let database_path = create_sqlite_test_database(
+			"auto_update_cleanup_ignores_unchanged_missing_record_pointer",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int {\n    rec mut cust = find first Customers where Id == -1;\n    return 0;\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(0)));
+	}
+
+	#[test]
+	fn auto_updates_mutable_for_record_loop_variable_each_iteration() {
+		let database_path = create_sqlite_test_database(
+			"auto_updates_mutable_for_record_loop_variable_each_iteration",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO Customers (Id, Name) VALUES (10, 'Ada');
+				INSERT INTO Customers (Id, Name) VALUES (11, 'Ada');
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int {\n    for rec mut cust in Customers where Name == 'Ada' {\n        cust.Name = 'Updated';\n    }\n    return count Customers where Name == 'Updated';\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(2)));
+	}
+
+	#[test]
+	fn auto_updates_mutable_record_pointer_when_scope_exits() {
+		let database_path = create_sqlite_test_database(
+			"auto_updates_mutable_record_pointer_when_scope_exits",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO Customers (Id, Name) VALUES (8, 'Ada');
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int {\n    {\n        rec mut cust = find first Customers where Id == 8;\n        cust.Name = 'Mina';\n    }\n    return count Customers where Id == 8 and Name == 'Mina';\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -2524,6 +2626,45 @@ mod tests {
 
 		assert!(result.is_err());
 		assert_eq!(inserted_count, 0);
+	}
+
+	#[test]
+	fn rolls_back_explicit_update_inside_transaction_after_runtime_error() {
+		let database_path = create_sqlite_test_database(
+			"rolls_back_explicit_update_inside_transaction_after_runtime_error",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO Customers (Id, Name) VALUES (9, 'Ada');
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int {\n    transaction {\n        rec mut cust = find first Customers where Id == 9;\n        cust.Name = 'Noor';\n        update cust;\n        var fail: int = 1 / 0;\n    }\n    return 0;\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config);
+		let connection = Connection::open(&database_path).unwrap();
+		let stored_name: String = connection.query_row(
+			"SELECT Name FROM Customers WHERE Id = 9",
+			[],
+			|row| row.get(0),
+		).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert!(result.is_err());
+		assert_eq!(stored_name, "Ada");
 	}
 
 	#[test]
@@ -4739,6 +4880,70 @@ mod tests {
 		let result = run(
 			"enum Color { Red, Green: 3, Blue }\nfn Main(args: [text]) int { var color: Color; color = Color.Blue; var message: text = 'Selected: ${ color }'; if message == 'Selected: Blue' { return 1; } return 0; }"
 		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn updates_sqlite_record_from_mutable_record_pointer() {
+		let database_path = create_sqlite_test_database(
+			"updates_sqlite_record_from_mutable_record_pointer",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO Customers (Id, Name) VALUES (7, 'Ada');
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int {\n    rec mut cust = find first Customers where Id == 7;\n    cust.Name = 'Grace';\n    update cust;\n    return count Customers where Id == 7 and Name == 'Grace';\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn updates_sqlite_record_using_primary_key_metadata() {
+		let database_path = create_sqlite_test_database(
+			"updates_sqlite_record_using_primary_key_metadata",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO Customers (Id, Name) VALUES (12, 'Ada');
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int {\n    rec mut cust = find first Customers where Id == 12;\n    cust.Name = 'Grace';\n    update cust;\n    return count Customers where Id == 12 and Name == 'Grace';\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null primary key,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
 
 		assert_eq!(result, Some(Value::Integer(1)));
 	}

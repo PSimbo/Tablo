@@ -313,6 +313,7 @@ pub struct QueryResultColumn {
 	pub column_name: String,
 	pub data_type: DataType,
 	pub is_nullable: bool,
+	pub is_primary_key: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -782,11 +783,13 @@ mod tests {
 					column_name: String::from("Id"),
 					data_type: DataType::Int,
 					is_nullable: false,
+					is_primary_key: true,
 				},
 				QueryResultColumn {
 					column_name: String::from("Name"),
 					data_type: DataType::Text,
 					is_nullable: false,
+					is_primary_key: false,
 				},
 			],
 			schema_is_implicit: true,
@@ -803,11 +806,13 @@ mod tests {
 					column_name: String::from("Id"),
 					data_type: DataType::Int,
 					is_nullable: false,
+					is_primary_key: true,
 				},
 				QueryResultColumn {
 					column_name: String::from("Name"),
 					data_type: DataType::Text,
 					is_nullable: false,
+					is_primary_key: false,
 				},
 			]),
 			schema_is_implicit: true,
@@ -848,11 +853,13 @@ mod tests {
 					column_name: String::from("Id"),
 					data_type: DataType::Int,
 					is_nullable: false,
+					is_primary_key: true,
 				},
 				QueryResultColumn {
 					column_name: String::from("Name"),
 					data_type: DataType::Text,
 					is_nullable: false,
+					is_primary_key: false,
 				},
 			],
 			schema_is_implicit: true,
@@ -869,11 +876,13 @@ mod tests {
 					column_name: String::from("Id"),
 					data_type: DataType::Int,
 					is_nullable: false,
+					is_primary_key: true,
 				},
 				QueryResultColumn {
 					column_name: String::from("Name"),
 					data_type: DataType::Text,
 					is_nullable: false,
+					is_primary_key: false,
 				},
 			]),
 			schema_is_implicit: true,
