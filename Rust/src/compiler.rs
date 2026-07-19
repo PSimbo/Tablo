@@ -391,6 +391,18 @@ impl Compiler {
 					return;
 				}
 
+				if let Some(group_boundary_call) = semantic_program.group_boundary_call(expression.position()) {
+					self.emit(emission, Instruction::LoadLocal(group_boundary_call.record_slot), expression_position);
+					for key_name in &group_boundary_call.key_names {
+						self.emit(emission, Instruction::PushText(key_name.clone()), expression_position);
+					}
+					let argument_count = group_boundary_call.key_names.len() as u32 + 1;
+					let built_in = semantic_program.built_in_call_target(expression.position())
+						.unwrap_or_else(|| panic!("Missing built-in target for group-boundary call."));
+					self.emit(emission, Instruction::CallBuiltIn(built_in, argument_count), expression_position);
+					return;
+				}
+
 				let reference_slots = semantic_program.call_argument_reference_slots(expression.position());
 
 				for (index, argument) in arguments.iter().enumerate() {

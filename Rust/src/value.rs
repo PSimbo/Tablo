@@ -461,10 +461,17 @@ pub struct LocalReference {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordGroupBoundary {
+	pub first: bool,
+	pub last: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordPointerValue {
 	pub column_names: Vec<String>,
 	pub exists: bool,
 	pub fields: BTreeMap<String, RecordFieldValue>,
+	pub group_boundaries: BTreeMap<String, RecordGroupBoundary>,
 	pub is_dirty: bool,
 	pub locked: bool,
 	pub original_fields: BTreeMap<String, RecordFieldValue>,

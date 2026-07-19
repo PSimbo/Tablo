@@ -21,6 +21,7 @@ use crate::format_string::TemporalFormatTarget;
 use crate::query::LoweredBackendQuery;
 use crate::query::QueryResultColumn;
 use crate::query::SqlDialect;
+use crate::query::SqlGroupByItem;
 use crate::query::SqlQuery;
 use crate::query::SqlQueryResultShape;
 use crate::source::SourceText;
@@ -36,6 +37,7 @@ use crate::value::IntegerRangeIterator;
 use crate::value::IteratorState;
 use crate::value::LocalReference;
 use crate::value::RecordFieldValue;
+use crate::value::RecordGroupBoundary;
 use crate::value::RecordPointerValue;
 use crate::value::Value;
 use crate::value::sqlite_record_field_runtime_value;
@@ -59,6 +61,12 @@ struct CallFrame {
 	function_index: Option<usize>,
 	instruction_index: usize,
 	locals: Vec<Value>,
+}
+
+struct LoadedSqliteRecordPointer {
+	fields: BTreeMap<String, RecordFieldValue>,
+	group_keys: Vec<Value>,
+	original_fields: BTreeMap<String, RecordFieldValue>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -940,6 +948,7 @@ impl VirtualMachine {
 					column_names: field_names.clone(),
 					exists: true,
 					fields,
+					group_boundaries: BTreeMap::new(),
 					is_dirty: false,
 					locked: false,
 					original_fields: BTreeMap::new(),
@@ -1218,6 +1227,7 @@ impl VirtualMachine {
 						column_names: columns.iter().map(|column| column.column_name.clone()).collect(),
 						exists: false,
 						fields: BTreeMap::new(),
+						group_boundaries: BTreeMap::new(),
 						is_dirty: false,
 						locked: false,
 						original_fields: BTreeMap::new(),
@@ -1240,6 +1250,7 @@ impl VirtualMachine {
 					column_names: columns.iter().map(|column| column.column_name.clone()).collect(),
 					exists: true,
 					fields,
+					group_boundaries: BTreeMap::new(),
 					is_dirty: false,
 					locked: false,
 					original_fields,
@@ -1261,7 +1272,7 @@ impl VirtualMachine {
 					instruction_index,
 					format!("Failed to execute SQLite query: {error}"),
 				))?;
-				let mut records = Vec::new();
+				let mut loaded_records = Vec::new();
 
 				while let Some(row) = rows.next().map_err(|error| vm_error(
 					instruction_index,
@@ -1269,13 +1280,31 @@ impl VirtualMachine {
 				))? {
 					let fields = load_sqlite_record_fields(row, columns, instruction_index)?;
 					let original_fields = fields.clone();
+					let group_keys = load_sqlite_group_key_values(
+						row,
+						columns.len(),
+						&query.group_by,
+						instruction_index,
+					)?;
+					loaded_records.push(LoadedSqliteRecordPointer {
+						fields,
+						group_keys,
+						original_fields,
+					});
+				}
+
+				let mut records = Vec::new();
+				let group_boundaries = sqlite_record_group_boundaries(&loaded_records, &query.group_by);
+
+				for (index, loaded_record) in loaded_records.into_iter().enumerate() {
 					records.push(Value::RecordPointer(RecordPointerValue {
 						column_names: columns.iter().map(|column| column.column_name.clone()).collect(),
 						exists: true,
-						fields,
+						fields: loaded_record.fields,
+						group_boundaries: group_boundaries.get(index).cloned().unwrap_or_default(),
 						is_dirty: false,
 						locked: false,
-						original_fields,
+						original_fields: loaded_record.original_fields,
 						primary_key_column_names: columns.iter()
 							.filter(|column| column.is_primary_key)
 							.map(|column| column.column_name.clone())
@@ -1648,6 +1677,11 @@ impl VirtualMachine {
 					format!("Built-in function `exists` expects 1 argument(s), found {}.", arguments.len()),
 				)),
 			},
+			BuiltInFunction::FirstOf => group_boundary_built_in_value(
+				BuiltInFunction::FirstOf,
+				arguments.as_slice(),
+				instruction_index,
+			),
 			BuiltInFunction::Format => match arguments.as_slice() {
 				[Value::Date(value), Value::Text(pattern)] => {
 					let pattern = TemporalFormatPattern::parse(pattern, TemporalFormatTarget::Date)
@@ -1732,6 +1766,11 @@ impl VirtualMachine {
 					format!("Built-in function `indexof` expects 2 argument(s), found {}.", arguments.len()),
 				)),
 			},
+			BuiltInFunction::LastOf => group_boundary_built_in_value(
+				BuiltInFunction::LastOf,
+				arguments.as_slice(),
+				instruction_index,
+			),
 			BuiltInFunction::Len => match arguments.as_slice() {
 				[Value::Array(values)] => Ok(Some(Value::Integer(values.len() as i64))),
 				[Value::Text(value)] => Ok(Some(Value::Integer(value.chars().count() as i64))),
@@ -2634,6 +2673,49 @@ fn evaluate_debug_expression(expression: &Expr, frame: &VmStackFrame) -> Result<
 	}
 }
 
+fn group_boundary_built_in_value(
+	built_in: BuiltInFunction,
+	arguments: &[Value],
+	instruction_index: usize,
+) -> Result<Option<Value>, VmError> {
+	let Some((Value::RecordPointer(record), key_values)) = arguments.split_first() else {
+		return Err(vm_error(
+			instruction_index,
+			format!("Built-in function `{}` requires grouped record context.", built_in.name()),
+		));
+	};
+
+	let Some(last_key_value) = key_values.last() else {
+		return Err(vm_error(
+			instruction_index,
+			format!("Built-in function `{}` expects at least 1 grouping argument.", built_in.name()),
+		));
+	};
+
+	let Value::Text(last_key_name) = last_key_value else {
+		return Err(vm_error(
+			instruction_index,
+			format!("Built-in function `{}` requires grouping names as text.", built_in.name()),
+		));
+	};
+
+	let normalized_key_name = normalize_record_field_name(last_key_name);
+	let Some(boundary) = record.group_boundaries.get(&normalized_key_name) else {
+		return Err(vm_error(
+			instruction_index,
+			format!("Grouping level `{last_key_name}` is not available for this record pointer."),
+		));
+	};
+
+	let value = match built_in {
+		BuiltInFunction::FirstOf => boundary.first,
+		BuiltInFunction::LastOf => boundary.last,
+		_ => unreachable!("group-boundary helper must only be used for firstof/lastof"),
+	};
+
+	Ok(Some(Value::Boolean(value)))
+}
+
 fn iterator_has_next(iterator: &Value, instruction_index: usize) -> Result<bool, VmError> {
 	let iterator = match iterator {
 		Value::Iterator(iterator) => iterator,
@@ -2824,6 +2906,27 @@ fn load_range_slice_value(values: Vec<Value>, range: IntegerRange, instruction_i
 	}
 
 	Ok(Value::Array(result))
+}
+
+fn load_sqlite_group_key_values(
+	row: &rusqlite::Row<'_>,
+	column_count: usize,
+	group_by: &[SqlGroupByItem],
+	instruction_index: usize,
+) -> Result<Vec<Value>, VmError> {
+	let mut values = Vec::with_capacity(group_by.len());
+
+	for (index, group_by_item) in group_by.iter().enumerate() {
+		let value = row.get_ref(column_count + index).map_err(|error| vm_error(
+			instruction_index,
+			format!("Failed to read SQLite grouping column: {error}"),
+		))?;
+		let deferred = deferred_sqlite_value(value).map_err(|message| vm_error(instruction_index, message))?;
+		values.push(sqlite_record_field_runtime_value(&deferred, &group_by_item.data_type, group_by_item.data_type.is_nullable())
+			.map_err(|message| vm_error(instruction_index, message))?);
+	}
+
+	Ok(values)
 }
 
 fn load_sqlite_record_fields(
@@ -3176,6 +3279,35 @@ fn sqlite_path_from_connection_string(database_name: &str, value: &str) -> Resul
 	Ok(PathBuf::from(normalized))
 }
 
+fn sqlite_record_group_boundaries(
+	records: &[LoadedSqliteRecordPointer],
+	group_by: &[SqlGroupByItem],
+) -> Vec<BTreeMap<String, RecordGroupBoundary>> {
+	let mut result = Vec::with_capacity(records.len());
+
+	for index in 0..records.len() {
+		let mut boundaries = BTreeMap::new();
+
+		for group_index in 0..group_by.len() {
+			let first = index == 0
+				|| records[index - 1].group_keys[..=group_index] != records[index].group_keys[..=group_index];
+			let last = index + 1 == records.len()
+				|| records[index + 1].group_keys[..=group_index] != records[index].group_keys[..=group_index];
+
+			for key_name in &group_by[group_index].key_names {
+				boundaries.insert(
+					normalize_record_field_name(key_name),
+					RecordGroupBoundary { first, last },
+				);
+			}
+		}
+
+		result.push(boundaries);
+	}
+
+	result
+}
+
 fn sqlite_sequence_source(schema_name: &str, schema_is_implicit: bool) -> String {
 	if schema_is_implicit {
 		String::from("sqlite_sequence")
@@ -3286,6 +3418,7 @@ fn store_field_path_into_record_pointer(
 
 	let exists = record.exists;
 	let column_names = record.column_names;
+	let group_boundaries = record.group_boundaries;
 	let original_fields = record.original_fields;
 	let primary_key_column_names = record.primary_key_column_names;
 	let locked = record.locked;
@@ -3316,6 +3449,7 @@ fn store_field_path_into_record_pointer(
 			column_names,
 			exists,
 			fields,
+			group_boundaries,
 			is_dirty: true,
 			locked,
 			original_fields,
@@ -3341,6 +3475,7 @@ fn store_field_path_into_record_pointer(
 		column_names,
 		exists,
 		fields,
+		group_boundaries,
 		is_dirty: true,
 		locked,
 		original_fields,
@@ -3677,6 +3812,7 @@ mod tests {
 								RecordFieldValue::Materialized(Value::Text(String::from("Ada"))),
 							),
 						]),
+						group_boundaries: BTreeMap::new(),
 						is_dirty: false,
 						locked: false,
 						original_fields: BTreeMap::new(),

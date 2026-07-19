@@ -3431,6 +3431,42 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_firstof_and_lastof_in_grouped_for_record_loop() {
+		let database_path = create_sqlite_test_database(
+			"runs_firstof_and_lastof_in_grouped_for_record_loop",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Country TEXT NOT NULL,
+					City TEXT NOT NULL
+				);
+				INSERT INTO Customers (Id, Country, City) VALUES (30, 'US', 'New York');
+				INSERT INTO Customers (Id, Country, City) VALUES (20, 'CA', 'Toronto');
+				INSERT INTO Customers (Id, Country, City) VALUES (10, 'CA', 'Ottawa');
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int {\n    var firstCountries: int = 0;\n    var lastCountries: int = 0;\n    var firstCities: int = 0;\n    for rec cust in Customers group by Country as country, City {\n        if firstof(country) {\n            firstCountries += 1;\n        }\n        if lastof(country) {\n            lastCountries += 1;\n        }\n        if firstof(country, City) {\n            firstCities += 1;\n        }\n    }\n    return firstCountries * 100 + lastCountries * 10 + firstCities;\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Country text not null,
+					City text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(223)));
+	}
+
+	#[test]
 	fn runs_for_array_source_text() {
 		let result = run(standalone_body("var total: int = 0;\nfor value in [1, 2, 3] {\n  total += value;\n}\nreturn total;")).unwrap();
 

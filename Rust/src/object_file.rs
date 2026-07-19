@@ -20,6 +20,7 @@ use crate::bytecode::SourceFileDebugInfo;
 use crate::query::LoweredBackendQuery;
 use crate::query::QueryResultColumn;
 use crate::query::SqlDialect;
+use crate::query::SqlGroupByItem;
 use crate::query::SqlParameter;
 use crate::query::SqlQuery;
 use crate::query::SqlQueryResultShape;
@@ -663,10 +664,20 @@ impl<'a> ObjectFileReader<'a> {
 				slot: self.read_u32()?,
 			});
 		}
+		let group_by_count = self.read_u32()? as usize;
+		let mut group_by = Vec::with_capacity(group_by_count);
+
+		for _ in 0..group_by_count {
+			group_by.push(SqlGroupByItem {
+				data_type: self.read_data_type()?,
+				key_names: self.read_string_vec()?,
+			});
+		}
 
 		Ok(SqlQuery {
 			database_name,
 			dialect,
+			group_by,
 			parameters,
 			result_shape,
 			schema_is_implicit: self.read_bool()?,
@@ -1083,6 +1094,15 @@ fn write_sql_query(bytes: &mut Vec<u8>, query: &SqlQuery) {
 		}
 		bytes.extend_from_slice(&parameter.index.to_le_bytes());
 		bytes.extend_from_slice(&parameter.slot.to_le_bytes());
+	}
+	bytes.extend_from_slice(&(query.group_by.len() as u32).to_le_bytes());
+	for item in &query.group_by {
+		write_data_type(bytes, &item.data_type);
+		bytes.extend_from_slice(&(item.key_names.len() as u32).to_le_bytes());
+		for key_name in &item.key_names {
+			bytes.extend_from_slice(&(key_name.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(key_name.as_bytes());
+		}
 	}
 	bytes.push(u8::from(query.schema_is_implicit));
 	bytes.extend_from_slice(&(query.schema_name.len() as u32).to_le_bytes());

@@ -1230,6 +1230,7 @@ mod tests {
 			column_names: vec![String::from("Address1"), String::from("Id")],
 			exists: true,
 			fields,
+			group_boundaries: BTreeMap::new(),
 			is_dirty: false,
 			locked: false,
 			original_fields: BTreeMap::new(),

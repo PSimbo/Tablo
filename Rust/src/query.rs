@@ -140,6 +140,7 @@ impl QueryCountPlan {
 		SqlQuery {
 			database_name: self.database_name.clone(),
 			dialect: SqlDialect::Sqlite,
+			group_by: vec![],
 			parameters,
 			result_shape: SqlQueryResultShape::IntegerScalar,
 			schema_is_implicit: self.schema_is_implicit,
@@ -214,6 +215,7 @@ impl QueryFindPlan {
 		SqlQuery {
 			database_name: self.database_name.clone(),
 			dialect: SqlDialect::Sqlite,
+			group_by: vec![],
 			parameters,
 			result_shape: SqlQueryResultShape::RecordPointer(self.record_columns.clone()),
 			schema_is_implicit: self.schema_is_implicit,
@@ -251,7 +253,7 @@ impl QueryForPlan {
 	fn lower_to_sqlite(&self) -> SqlQuery {
 		let mut parameters = Vec::new();
 		let table_source = sqlite_table_source(&self.schema_name, &self.table_name, self.schema_is_implicit);
-		let select_columns = self.record_columns.iter()
+		let mut select_columns = self.record_columns.iter()
 			.map(|column| {
 				format!(
 					"{}.{}",
@@ -259,8 +261,11 @@ impl QueryForPlan {
 					quote_identifier(&column.column_name),
 				)
 			})
-			.collect::<Vec<_>>()
-			.join(", ");
+			.collect::<Vec<_>>();
+		for item in &self.group_by {
+			select_columns.push(lower_query_expr_sqlite(&item.expression, &mut parameters));
+		}
+		let select_columns = select_columns.join(", ");
 		let mut statement = format!("SELECT {select_columns} FROM {table_source}");
 
 		if let Some(filter) = &self.filter {
@@ -301,6 +306,12 @@ impl QueryForPlan {
 		SqlQuery {
 			database_name: self.database_name.clone(),
 			dialect: SqlDialect::Sqlite,
+			group_by: self.group_by.iter()
+				.map(|item| SqlGroupByItem {
+					data_type: item.data_type.clone(),
+					key_names: item.key_names.clone(),
+				})
+				.collect(),
 			parameters,
 			result_shape: SqlQueryResultShape::RecordPointerArray(self.record_columns.clone()),
 			schema_is_implicit: self.schema_is_implicit,
@@ -314,7 +325,9 @@ impl QueryForPlan {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryGroupByItem {
 	pub alias: Option<String>,
+	pub data_type: DataType,
 	pub expression: QueryExpr,
+	pub key_names: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -345,6 +358,12 @@ pub struct QueryUnaryExpr {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SqlGroupByItem {
+	pub data_type: DataType,
+	pub key_names: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SqlParameter {
 	pub data_type: DataType,
 	pub field_path: Vec<String>,
@@ -356,6 +375,7 @@ pub struct SqlParameter {
 pub struct SqlQuery {
 	pub database_name: String,
 	pub dialect: SqlDialect,
+	pub group_by: Vec<SqlGroupByItem>,
 	pub parameters: Vec<SqlParameter>,
 	pub result_shape: SqlQueryResultShape,
 	pub schema_is_implicit: bool,
@@ -555,6 +575,7 @@ mod tests {
 	use super::QueryUnaryExpr;
 	use super::QueryUnaryOperator;
 	use super::SqlDialect;
+	use super::SqlGroupByItem;
 	use super::SqlParameter;
 	use super::SqlQuery;
 	use super::SqlQueryResultShape;
@@ -588,6 +609,7 @@ mod tests {
 		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
 			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::Sqlite,
+			group_by: vec![],
 			parameters: vec![],
 			result_shape: SqlQueryResultShape::IntegerScalar,
 			schema_is_implicit: true,
@@ -626,6 +648,7 @@ mod tests {
 		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
 			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::Sqlite,
+			group_by: vec![],
 			parameters: vec![],
 			result_shape: SqlQueryResultShape::IntegerScalar,
 			schema_is_implicit: true,
@@ -675,6 +698,7 @@ mod tests {
 		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
 			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::Sqlite,
+			group_by: vec![],
 			parameters: vec![],
 			result_shape: SqlQueryResultShape::IntegerScalar,
 			schema_is_implicit: true,
@@ -727,6 +751,7 @@ mod tests {
 		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
 			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::Sqlite,
+			group_by: vec![],
 			parameters: vec![
 				SqlParameter {
 					data_type: DataType::Int,
@@ -765,6 +790,7 @@ mod tests {
 		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
 			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::Sqlite,
+			group_by: vec![],
 			parameters: vec![],
 			result_shape: SqlQueryResultShape::IntegerScalar,
 			schema_is_implicit: false,
@@ -823,6 +849,7 @@ mod tests {
 		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
 			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::Sqlite,
+			group_by: vec![],
 			parameters: vec![],
 			result_shape: SqlQueryResultShape::RecordPointer(vec![
 				QueryResultColumn {
@@ -856,19 +883,23 @@ mod tests {
 			group_by: vec![
 				QueryGroupByItem {
 					alias: Some(String::from("country")),
+					data_type: DataType::Text,
 					expression: QueryExpr::Column(QueryColumnReference {
 						column_name: String::from("Country"),
 						data_type: DataType::Text,
 						table_name: String::from("Customers"),
 					}),
+					key_names: vec![String::from("country"), String::from("Country")],
 				},
 				QueryGroupByItem {
 					alias: None,
+					data_type: DataType::Text,
 					expression: QueryExpr::Column(QueryColumnReference {
 						column_name: String::from("City"),
 						data_type: DataType::Text,
 						table_name: String::from("Customers"),
 					}),
+					key_names: vec![String::from("City")],
 				},
 			],
 			limit: None,
@@ -889,6 +920,16 @@ mod tests {
 		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
 			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::Sqlite,
+			group_by: vec![
+				SqlGroupByItem {
+					data_type: DataType::Text,
+					key_names: vec![String::from("country"), String::from("Country")],
+				},
+				SqlGroupByItem {
+					data_type: DataType::Text,
+					key_names: vec![String::from("City")],
+				},
+			],
 			parameters: vec![],
 			result_shape: SqlQueryResultShape::RecordPointerArray(vec![
 				QueryResultColumn {
@@ -901,7 +942,7 @@ mod tests {
 			schema_is_implicit: true,
 			schema_name: String::from("Main"),
 			statement: String::from(
-				"SELECT \"Customers\".\"Id\" FROM \"Customers\" ORDER BY \"Customers\".\"Country\", \"Customers\".\"City\""
+				"SELECT \"Customers\".\"Id\", \"Customers\".\"Country\", \"Customers\".\"City\" FROM \"Customers\" ORDER BY \"Customers\".\"Country\", \"Customers\".\"City\""
 			),
 			table_name: String::from("Customers"),
 		}));
@@ -955,6 +996,7 @@ mod tests {
 		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
 			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::Sqlite,
+			group_by: vec![],
 			parameters: vec![],
 			result_shape: SqlQueryResultShape::RecordPointerArray(vec![
 				QueryResultColumn {
@@ -1008,6 +1050,7 @@ mod tests {
 		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
 			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::Sqlite,
+			group_by: vec![],
 			parameters: vec![
 				SqlParameter {
 					data_type: DataType::Int,
@@ -1056,6 +1099,7 @@ mod tests {
 		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
 			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::Sqlite,
+			group_by: vec![],
 			parameters: vec![
 				SqlParameter {
 					data_type: DataType::Date,

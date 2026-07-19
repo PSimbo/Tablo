@@ -11,10 +11,12 @@ pub enum BuiltInFunction {
 	Disp,
 	Displn,
 	Exists,
+	FirstOf,
 	Format,
 	Hour,
 	IndexOf,
 	IntCast,
+	LastOf,
 	Len,
 	Locked,
 	Minute,
@@ -39,10 +41,12 @@ impl BuiltInFunction {
 			Self::Disp,
 			Self::Displn,
 			Self::Exists,
+			Self::FirstOf,
 			Self::Format,
 			Self::Hour,
 			Self::IndexOf,
 			Self::IntCast,
+			Self::LastOf,
 			Self::Len,
 			Self::Locked,
 			Self::Minute,
@@ -81,6 +85,8 @@ impl BuiltInFunction {
 			21 => Some(Self::Second),
 			22 => Some(Self::Format),
 			23 => Some(Self::SeqNext),
+			24 => Some(Self::FirstOf),
+			25 => Some(Self::LastOf),
 			_ => None,
 		}
 	}
@@ -96,10 +102,12 @@ impl BuiltInFunction {
 			"disp" => Some(Self::Disp),
 			"displn" => Some(Self::Displn),
 			"exists" => Some(Self::Exists),
+			"firstof" => Some(Self::FirstOf),
 			"format" => Some(Self::Format),
 			"hour" => Some(Self::Hour),
 			"indexof" => Some(Self::IndexOf),
 			"int" => Some(Self::IntCast),
+			"lastof" => Some(Self::LastOf),
 			"len" => Some(Self::Len),
 			"locked" => Some(Self::Locked),
 			"minute" => Some(Self::Minute),
@@ -139,6 +147,8 @@ impl BuiltInFunction {
 			Self::Second => 21,
 			Self::Format => 22,
 			Self::SeqNext => 23,
+			Self::FirstOf => 24,
+			Self::LastOf => 25,
 		}
 	}
 
@@ -153,10 +163,12 @@ impl BuiltInFunction {
 			Self::Disp => "disp",
 			Self::Displn => "displn",
 			Self::Exists => "exists",
+			Self::FirstOf => "firstof",
 			Self::Format => "format",
 			Self::Hour => "hour",
 			Self::IndexOf => "indexof",
 			Self::IntCast => "int",
+			Self::LastOf => "lastof",
 			Self::Len => "len",
 			Self::Locked => "locked",
 			Self::Minute => "minute",
@@ -217,6 +229,10 @@ impl BuiltInFunction {
 					Some(DataType::Bool)
 				}
 				_ => None,
+			},
+			Self::FirstOf | Self::LastOf => match argument_types {
+				[] => None,
+				_ => Some(DataType::Bool),
 			},
 			Self::Format => match argument_types {
 				[left, right]
@@ -301,6 +317,8 @@ impl BuiltInFunction {
 			| Self::Format
 			| Self::IndexOf
 			| Self::Split => argument_count == 2,
+			Self::FirstOf
+			| Self::LastOf => argument_count >= 1,
 			Self::BoolCast
 			| Self::DateCast
 			| Self::Day
@@ -331,10 +349,12 @@ impl BuiltInFunction {
 			| Self::Day
 			| Self::DecCast
 			| Self::Exists
+			| Self::FirstOf
 			| Self::Format
 			| Self::Hour
 			| Self::IndexOf
 			| Self::IntCast
+			| Self::LastOf
 			| Self::Len
 			| Self::Locked
 			| Self::Minute

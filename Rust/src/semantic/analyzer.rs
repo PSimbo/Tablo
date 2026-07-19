@@ -111,6 +111,7 @@ pub struct SemanticAnalyzer {
 	enums: ScopeStack<EnumBinding>,
 	function_depth: usize,
 	functions: ScopeStack<FunctionSignature>,
+	group_boundary_contexts: Vec<GroupBoundaryContext>,
 	locals: ScopeStack<LocalBinding>,
 	loop_depth: usize,
 	next_function_index: u32,
@@ -138,6 +139,18 @@ struct FunctionSignature {
 	function_index: u32,
 	parameters: Vec<FunctionParameterSignature>,
 	return_type: DataType,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GroupBoundaryCallInfo {
+	pub key_names: Vec<String>,
+	pub record_slot: u32,
+}
+
+#[derive(Clone)]
+struct GroupBoundaryContext {
+	group_keys: Vec<Vec<String>>,
+	record_slot: u32,
 }
 
 #[derive(Clone)]
@@ -204,6 +217,7 @@ pub struct SemanticProgram {
 	enum_variant_values: BTreeMap<usize, EnumValue>,
 	enum_variants: BTreeMap<String, BTreeMap<String, EnumValue>>,
 	function_declaration_targets: BTreeMap<usize, u32>,
+	group_boundary_calls: BTreeMap<usize, GroupBoundaryCallInfo>,
 	identifier_slots: BTreeMap<usize, u32>,
 	iterator_slots: BTreeMap<usize, u32>,
 	lowered_count_queries: BTreeMap<usize, QueryCountPlan>,
@@ -282,6 +296,10 @@ impl SemanticProgram {
 		self.function_declaration_targets.get(&position).copied()
 	}
 
+	pub fn group_boundary_call(&self, position: usize) -> Option<&GroupBoundaryCallInfo> {
+		self.group_boundary_calls.get(&position)
+	}
+
 	pub fn identifier_slot(&self, position: usize) -> Option<u32> {
 		self.identifier_slots.get(&position).copied()
 	}
@@ -337,6 +355,7 @@ impl SemanticAnalyzer {
 			enums: ScopeStack::default(),
 			function_depth: 0,
 			functions: ScopeStack::default(),
+			group_boundary_contexts: Vec::new(),
 			locals: ScopeStack::default(),
 			loop_depth: 0,
 			next_function_index: 0,
@@ -360,6 +379,7 @@ impl SemanticAnalyzer {
 		self.current_return_type = None;
 		self.functions = ScopeStack::default();
 		self.enums = ScopeStack::default();
+		self.group_boundary_contexts.clear();
 		self.locals = ScopeStack::default();
 		self.function_depth = 0;
 		self.loop_depth = 0;
@@ -825,6 +845,22 @@ impl SemanticAnalyzer {
 		}
 	}
 
+	fn group_by_item_key_names(&self, item: &crate::ast::GroupByItem) -> Vec<String> {
+		let mut names = Vec::new();
+
+		if let Some(alias) = &item.alias {
+			names.push(alias.name.clone());
+		}
+
+		if let Some(name) = simple_group_by_expression_name(&item.expression) {
+			if !names.iter().any(|existing| existing.eq_ignore_ascii_case(&name)) {
+				names.push(name);
+			}
+		}
+
+		names
+	}
+
 	fn infer_array_literal_type(&mut self, elements: &[Expr], position: usize) -> Result<DataType, CompileError> {
 		let mut element_type: Option<DataType> = None;
 
@@ -853,6 +889,10 @@ impl SemanticAnalyzer {
 					arguments.len(),
 				),
 			));
+		}
+
+		if matches!(built_in, BuiltInFunction::FirstOf | BuiltInFunction::LastOf) {
+			return self.infer_group_boundary_call_type(built_in, arguments, position);
 		}
 
 		for argument in arguments {
@@ -914,6 +954,13 @@ impl SemanticAnalyzer {
 		position: usize,
 		table: &TableReference,
 	) -> Result<DataType, CompileError> {
+		if matches!(built_in, BuiltInFunction::FirstOf | BuiltInFunction::LastOf) {
+			return Err(self.compile_error(
+				position,
+				format!("Built-in function `{}` may only be used inside the body of a grouped `for rec` loop.", built_in.name()),
+			));
+		}
+
 		if !built_in.supports_arity(arguments.len()) {
 			return Err(self.compile_error(
 				position,
@@ -1600,6 +1647,74 @@ impl SemanticAnalyzer {
 		Ok(DataType::RecordPointer(record_pointer))
 	}
 
+	fn infer_group_boundary_call_type(
+		&mut self,
+		built_in: BuiltInFunction,
+		arguments: &[CallArgument],
+		position: usize,
+	) -> Result<DataType, CompileError> {
+		for argument in arguments {
+			if argument.is_by_ref {
+				return Err(self.compile_error(
+					argument.position,
+					format!("Built-in function `{}` does not accept by-reference arguments.", built_in.name()),
+				));
+			}
+		}
+
+		let Some(context) = self.group_boundary_contexts.last() else {
+			return Err(self.compile_error(
+				position,
+				format!("Built-in function `{}` may only be used inside a grouped `for rec` loop.", built_in.name()),
+			));
+		};
+
+		if arguments.len() > context.group_keys.len() {
+			return Err(self.compile_error(
+				position,
+				format!(
+					"Built-in function `{}` references {} grouping level(s), but the current loop only has {}.",
+					built_in.name(),
+					arguments.len(),
+					context.group_keys.len(),
+				),
+			));
+		}
+
+		let mut key_names = Vec::with_capacity(arguments.len());
+
+		for (index, argument) in arguments.iter().enumerate() {
+			let Some(key_name) = simple_group_by_expression_name(&argument.value) else {
+				return Err(self.compile_error(
+					argument.value.position(),
+					format!("Arguments to `{}` must identify grouping levels by alias or simple field reference.", built_in.name()),
+				));
+			};
+			let expected_names = &context.group_keys[index];
+
+			if !expected_names.iter().any(|expected| expected.eq_ignore_ascii_case(&key_name)) {
+				return Err(self.compile_error(
+					argument.value.position(),
+					format!(
+						"Grouping level `{}` does not match grouping level {} for the current `for rec` loop.",
+						key_name,
+						index + 1,
+					),
+				));
+			}
+
+			key_names.push(expected_names.first().cloned().unwrap_or(key_name));
+		}
+
+		self.semantic_program.built_in_call_targets.insert(position, built_in);
+		self.semantic_program.call_return_types.insert(position, DataType::Bool);
+		self.semantic_program.group_boundary_calls.insert(position, GroupBoundaryCallInfo {
+			key_names,
+			record_slot: context.record_slot,
+		});
+		Ok(DataType::Bool)
+	}
+
 	fn infer_new_expression_type(&mut self, new_expression: &NewExpr) -> Result<DataType, CompileError> {
 		let (record_type, schema_is_implicit, table_columns) = {
 			let resolved_table = self.resolve_table_reference(&new_expression.table)?;
@@ -2116,10 +2231,15 @@ impl SemanticAnalyzer {
 			}))
 			.collect::<Result<Vec<_>, CompileError>>()?;
 		let group_by = for_record.group_by.iter()
-			.map(|item| Ok(QueryGroupByItem {
-				alias: item.alias.as_ref().map(|alias| alias.name.clone()),
-				expression: self.lower_query_expression(&item.expression, &for_record.table, backend)?,
-			}))
+			.map(|item| {
+				let data_type = self.infer_query_expression_type(&item.expression, &for_record.table)?;
+				Ok(QueryGroupByItem {
+					alias: item.alias.as_ref().map(|alias| alias.name.clone()),
+					data_type,
+					expression: self.lower_query_expression(&item.expression, &for_record.table, backend)?,
+					key_names: self.group_by_item_key_names(item),
+				})
+			})
 			.collect::<Result<Vec<_>, CompileError>>()?;
 		let limit = for_record.limit.as_ref()
 			.map(|limit| self.lower_query_expression(limit, &for_record.table, backend))
@@ -3600,6 +3720,9 @@ impl SemanticAnalyzer {
 					*position,
 					query_lowering_error_message(error),
 				))?;
+				let group_boundary_keys = lowered_query.group_by.iter()
+					.map(|item| item.key_names.clone())
+					.collect::<Vec<_>>();
 				self.semantic_program.compiled_for_record_queries.insert(*position, compiled_query);
 				self.semantic_program.lowered_for_record_queries.insert(*position, lowered_query);
 
@@ -3639,7 +3762,16 @@ impl SemanticAnalyzer {
 				self.semantic_program.iterator_slots.insert(*position, iterator_slot);
 
 				self.loop_depth += 1;
+				if !group_boundary_keys.is_empty() {
+					self.group_boundary_contexts.push(GroupBoundaryContext {
+						group_keys: group_boundary_keys,
+						record_slot: loop_variable_slot,
+					});
+				}
 				let validation_result = self.validate_statement(&Statement::Block(body.clone()));
+				if !group_by.is_empty() {
+					self.group_boundary_contexts.pop();
+				}
 				self.loop_depth -= 1;
 				self.exit_scope();
 				validation_result
@@ -3945,6 +4077,21 @@ fn query_lowering_error_message(error: QueryLoweringError) -> String {
 				database_backend_name(backend),
 			)
 		}
+	}
+}
+
+fn simple_group_by_expression_name(expression: &Expr) -> Option<String> {
+	match expression {
+		Expr::Identifier(identifier) => Some(identifier.name.clone()),
+		Expr::FieldAccess(field_access) => {
+			if matches!(field_access.object.as_ref(), Expr::Identifier(_)) {
+				Some(field_access.field.name.clone())
+			}
+			else {
+				None
+			}
+		}
+		_ => None,
 	}
 }
 
