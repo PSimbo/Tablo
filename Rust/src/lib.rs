@@ -1031,6 +1031,10 @@ fn rewrite_statement_calls(
 				rewrite_expression_calls(&mut order_by.expression, top_level_renames, import_bindings, shadowed_function_names);
 			}
 
+			for group_by in &mut for_statement.group_by {
+				rewrite_expression_calls(&mut group_by.expression, top_level_renames, import_bindings, shadowed_function_names);
+			}
+
 			if let Some(limit) = &mut for_statement.limit {
 				rewrite_expression_calls(limit, top_level_renames, import_bindings, shadowed_function_names);
 			}
@@ -1948,6 +1952,42 @@ mod tests {
 			error.format_with_source(&source),
 			"Compile error in <source>:2:7: `while` condition must be of type `bool`, found `int`."
 		);
+	}
+
+	#[test]
+	fn groups_for_record_loop_iterations_by_ordering_group_keys() {
+		let database_path = create_sqlite_test_database(
+			"groups_for_record_loop_iterations_by_ordering_group_keys",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Country TEXT NOT NULL,
+					City TEXT NOT NULL
+				);
+				INSERT INTO Customers (Id, Country, City) VALUES (30, 'US', 'New York');
+				INSERT INTO Customers (Id, Country, City) VALUES (20, 'CA', 'Toronto');
+				INSERT INTO Customers (Id, Country, City) VALUES (10, 'CA', 'Ottawa');
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int {\n    var firstId: int = 0;\n    for rec cust in Customers group by Country as country, City {\n        firstId = cust.Id;\n        break;\n    }\n    return firstId;\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Country text not null,
+					City text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(10)));
 	}
 
 	#[test]

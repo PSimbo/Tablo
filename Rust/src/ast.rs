@@ -346,6 +346,7 @@ pub struct FindExpr {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ForRecordStatement {
 	pub body: BlockStatement,
+	pub group_by: Vec<GroupByItem>,
 	pub is_mut: bool,
 	pub limit: Option<Box<Expr>>,
 	pub order_by: Vec<OrderByItem>,
@@ -378,6 +379,13 @@ pub struct FunctionParameter {
 	pub data_type: FunctionParameterType,
 	pub is_by_ref: bool,
 	pub name: String,
+	pub position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GroupByItem {
+	pub alias: Option<IdentifierExpr>,
+	pub expression: Expr,
 	pub position: usize,
 }
 

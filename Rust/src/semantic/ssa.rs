@@ -468,6 +468,10 @@ impl<'a> FunctionSsaBuilder<'a> {
 			self.lower_expression(loop_header, &item.expression);
 		}
 
+		for item in &for_statement.group_by {
+			self.lower_expression(loop_header, &item.expression);
+		}
+
 		if let Some(limit) = &for_statement.limit {
 			self.lower_expression(loop_header, limit);
 		}

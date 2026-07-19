@@ -28,6 +28,7 @@ use crate::ast::ForStatement;
 use crate::ast::FunctionDeclaration;
 use crate::ast::FunctionParameter;
 use crate::ast::FunctionParameterType;
+use crate::ast::GroupByItem;
 use crate::ast::IdentifierExpr;
 use crate::ast::IfCondition;
 use crate::ast::IfStatement;
@@ -737,7 +738,18 @@ impl Parser {
 		else {
 			None
 		};
+		let mut group_by = self.parse_optional_group_by_clause()?;
 		let order_by = self.parse_optional_order_by_clause()?;
+		if group_by.is_empty()
+			&& self.current().is_some_and(|token| token.kind == TokenKind::GroupKeyword) {
+			group_by = self.parse_optional_group_by_clause()?;
+		}
+		if !group_by.is_empty() && !order_by.is_empty() {
+			return Err(ParseError {
+				message: String::from("A query may not specify both `group by` and `order by`."),
+				position: order_by[0].position,
+			});
+		}
 		let limit = self.parse_optional_limit_clause()?;
 		let body = match self.parse_block_statement()? {
 			Statement::Block(block) => block,
@@ -746,6 +758,7 @@ impl Parser {
 
 		Ok(Statement::ForRecord(ForRecordStatement {
 			body,
+			group_by,
 			is_mut,
 			limit,
 			order_by,
@@ -1423,6 +1436,45 @@ impl Parser {
 
 		self.next();
 		Ok(Some(Box::new(self.parse_query_expression_with_binding_power(BindingPower::Default)?)))
+	}
+
+	fn parse_optional_group_by_clause(&mut self) -> Result<Vec<GroupByItem>, ParseError> {
+		if !self.current().is_some_and(|token| token.kind == TokenKind::GroupKeyword) {
+			return Ok(vec![]);
+		}
+
+		self.next();
+		self.expect_token(TokenKind::ByKeyword, "Expected `by` after `group`.")?;
+		let mut items = Vec::new();
+
+		loop {
+			let expression = self.parse_query_expression_with_binding_power(BindingPower::Default)?;
+			let alias = if self.current().is_some_and(|token| token.kind == TokenKind::AsKeyword) {
+				self.next();
+				let alias = self.expect_token(TokenKind::Identifier, "Expected alias after `as`.")?;
+				Some(IdentifierExpr {
+					name: alias.lexeme,
+					position: alias.start,
+				})
+			}
+			else {
+				None
+			};
+
+			items.push(GroupByItem {
+				alias,
+				position: expression.position(),
+				expression,
+			});
+
+			if !self.current().is_some_and(|token| token.kind == TokenKind::Comma) {
+				break;
+			}
+
+			self.next();
+		}
+
+		Ok(items)
 	}
 
 	fn parse_optional_order_by_clause(&mut self) -> Result<Vec<OrderByItem>, ParseError> {
@@ -2307,6 +2359,7 @@ mod tests {
 	use crate::ast::FunctionDeclaration;
 	use crate::ast::FunctionParameter;
 	use crate::ast::FunctionParameterType;
+	use crate::ast::GroupByItem;
 	use crate::ast::IdentifierExpr;
 	use crate::ast::IfCondition;
 	use crate::ast::IfStatement;
@@ -2547,6 +2600,7 @@ mod tests {
 	fn normalize_for_record_statement(for_statement: ForRecordStatement) -> ForRecordStatement {
 		ForRecordStatement {
 			body: normalize_block(for_statement.body),
+			group_by: for_statement.group_by.into_iter().map(normalize_group_by_item).collect(),
 			is_mut: for_statement.is_mut,
 			limit: for_statement.limit.map(|expression| Box::new(normalize_expr(*expression))),
 			order_by: for_statement.order_by.into_iter().map(normalize_order_by_item).collect(),
@@ -2590,6 +2644,14 @@ mod tests {
 			},
 			is_by_ref: parameter.is_by_ref,
 			name: parameter.name,
+			position: 0,
+		}
+	}
+
+	fn normalize_group_by_item(item: GroupByItem) -> GroupByItem {
+		GroupByItem {
+			alias: item.alias.map(normalize_identifier),
+			expression: normalize_expr(item.expression),
 			position: 0,
 		}
 	}
@@ -3748,6 +3810,7 @@ mod tests {
 								})),
 							],
 						},
+						group_by: vec![],
 						is_mut: true,
 						limit: None,
 						order_by: vec![
@@ -3760,6 +3823,105 @@ mod tests {
 								position: 0,
 							},
 						],
+						position: 0,
+						table: TableReference {
+							components: vec![
+								IdentifierExpr {
+									name: String::from("customers"),
+									position: 0,
+								},
+							],
+							position: 0,
+						},
+						variable: IdentifierExpr {
+							name: String::from("cust"),
+							position: 0,
+						},
+						where_clause: Some(Box::new(Expr::Binary(BinaryExpr {
+							left: Box::new(Expr::Identifier(IdentifierExpr {
+								name: String::from("active"),
+								position: 0,
+							})),
+							operator: BinaryOperator::Equal,
+							position: 0,
+							right: Box::new(Expr::Boolean(BooleanLiteral {
+								position: 0,
+								value: true,
+							})),
+						}))),
+					}),
+				],
+				with_declarations: vec![],
+			}
+		);
+	}
+
+	#[test]
+	fn parses_for_record_statement_with_group_by_clause() {
+		assert_eq!(
+			normalize_program(parse_program("for rec cust in customers where active == true group by lower(countryCode) as country, city limit 2 { cust.name; }")),
+			Program {
+				functions: vec![],
+				objects: vec![],
+				result: None,
+				statements: vec![
+					Statement::ForRecord(ForRecordStatement {
+						body: BlockStatement {
+							position: 0,
+							statements: vec![
+								Statement::Expression(Expr::FieldAccess(FieldAccessExpr {
+									field: IdentifierExpr {
+										name: String::from("name"),
+										position: 0,
+									},
+									object: Box::new(Expr::Identifier(IdentifierExpr {
+										name: String::from("cust"),
+										position: 0,
+									})),
+									position: 0,
+								})),
+							],
+						},
+						group_by: vec![
+							GroupByItem {
+								alias: Some(IdentifierExpr {
+									name: String::from("country"),
+									position: 0,
+								}),
+								expression: Expr::Call(CallExpr {
+									arguments: vec![
+										CallArgument {
+											is_by_ref: false,
+											position: 0,
+											value: Expr::Identifier(IdentifierExpr {
+												name: String::from("countryCode"),
+												position: 0,
+											}),
+										},
+									],
+									callee: IdentifierExpr {
+										name: String::from("lower"),
+										position: 0,
+									},
+									position: 0,
+								}),
+								position: 0,
+							},
+							GroupByItem {
+								alias: None,
+								expression: Expr::Identifier(IdentifierExpr {
+									name: String::from("city"),
+									position: 0,
+								}),
+								position: 0,
+							},
+						],
+						is_mut: false,
+						limit: Some(Box::new(Expr::Integer(IntegerLiteral {
+							position: 0,
+							value: 2,
+						}))),
+						order_by: vec![],
 						position: 0,
 						table: TableReference {
 							components: vec![
@@ -3819,6 +3981,7 @@ mod tests {
 								})),
 							],
 						},
+						group_by: vec![],
 						is_mut: false,
 						limit: Some(Box::new(Expr::Integer(IntegerLiteral {
 							position: 0,

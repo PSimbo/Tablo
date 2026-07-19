@@ -229,6 +229,7 @@ pub struct QueryForPlan {
 	pub backend: DatabaseBackend,
 	pub database_name: String,
 	pub filter: Option<QueryExpr>,
+	pub group_by: Vec<QueryGroupByItem>,
 	pub limit: Option<QueryExpr>,
 	pub order_by: Vec<QueryOrderByItem>,
 	pub record_columns: Vec<QueryResultColumn>,
@@ -267,7 +268,15 @@ impl QueryForPlan {
 			statement.push_str(&lower_query_expr_sqlite(filter, &mut parameters));
 		}
 
-		if !self.order_by.is_empty() {
+		if !self.group_by.is_empty() {
+			statement.push_str(" ORDER BY ");
+			let group_by = self.group_by.iter()
+				.map(|item| lower_query_expr_sqlite(&item.expression, &mut parameters))
+				.collect::<Vec<_>>()
+				.join(", ");
+			statement.push_str(&group_by);
+		}
+		else if !self.order_by.is_empty() {
 			statement.push_str(" ORDER BY ");
 			let order_by = self.order_by.iter()
 				.map(|item| {
@@ -300,6 +309,12 @@ impl QueryForPlan {
 			table_name: self.table_name.clone(),
 		}
 	}
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryGroupByItem {
+	pub alias: Option<String>,
+	pub expression: QueryExpr,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -532,6 +547,7 @@ mod tests {
 	use super::QueryExpr;
 	use super::QueryFindPlan;
 	use super::QueryForPlan;
+	use super::QueryGroupByItem;
 	use super::QueryLiteral;
 	use super::QueryOrderByItem;
 	use super::QueryParameter;
@@ -832,6 +848,66 @@ mod tests {
 	}
 
 	#[test]
+	fn lowers_sqlite_for_record_group_by_plan_to_ordered_sql_query() {
+		let query = QueryForPlan {
+			backend: DatabaseBackend::Sqlite,
+			database_name: String::from("ExampleDb"),
+			filter: None,
+			group_by: vec![
+				QueryGroupByItem {
+					alias: Some(String::from("country")),
+					expression: QueryExpr::Column(QueryColumnReference {
+						column_name: String::from("Country"),
+						data_type: DataType::Text,
+						table_name: String::from("Customers"),
+					}),
+				},
+				QueryGroupByItem {
+					alias: None,
+					expression: QueryExpr::Column(QueryColumnReference {
+						column_name: String::from("City"),
+						data_type: DataType::Text,
+						table_name: String::from("Customers"),
+					}),
+				},
+			],
+			limit: None,
+			order_by: vec![],
+			record_columns: vec![
+				QueryResultColumn {
+					column_name: String::from("Id"),
+					data_type: DataType::Int,
+					is_nullable: false,
+					is_primary_key: true,
+				},
+			],
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
+			table_name: String::from("Customers"),
+		}.lower_to_backend().unwrap();
+
+		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
+			database_name: String::from("ExampleDb"),
+			dialect: SqlDialect::Sqlite,
+			parameters: vec![],
+			result_shape: SqlQueryResultShape::RecordPointerArray(vec![
+				QueryResultColumn {
+					column_name: String::from("Id"),
+					data_type: DataType::Int,
+					is_nullable: false,
+					is_primary_key: true,
+				},
+			]),
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
+			statement: String::from(
+				"SELECT \"Customers\".\"Id\" FROM \"Customers\" ORDER BY \"Customers\".\"Country\", \"Customers\".\"City\""
+			),
+			table_name: String::from("Customers"),
+		}));
+	}
+
+	#[test]
 	fn lowers_sqlite_for_record_plan_to_sql_query() {
 		let query = QueryForPlan {
 			backend: DatabaseBackend::Sqlite,
@@ -845,6 +921,7 @@ mod tests {
 				operator: QueryBinaryOperator::Equal,
 				right: Box::new(QueryExpr::Literal(QueryLiteral::Boolean(true))),
 			})),
+			group_by: vec![],
 			limit: None,
 			order_by: vec![
 				QueryOrderByItem {
@@ -908,6 +985,7 @@ mod tests {
 			backend: DatabaseBackend::Sqlite,
 			database_name: String::from("ExampleDb"),
 			filter: None,
+			group_by: vec![],
 			limit: Some(QueryExpr::Parameter(QueryParameter {
 				data_type: DataType::Int,
 				field_path: vec![],

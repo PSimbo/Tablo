@@ -65,6 +65,7 @@ use crate::query::QueryCountPlan;
 use crate::query::QueryExpr;
 use crate::query::QueryFindPlan;
 use crate::query::QueryForPlan;
+use crate::query::QueryGroupByItem;
 use crate::query::QueryLiteral;
 use crate::query::QueryLoweringError;
 use crate::query::QueryOrderByItem;
@@ -2114,6 +2115,12 @@ impl SemanticAnalyzer {
 				expression: self.lower_query_expression(&item.expression, &for_record.table, backend)?,
 			}))
 			.collect::<Result<Vec<_>, CompileError>>()?;
+		let group_by = for_record.group_by.iter()
+			.map(|item| Ok(QueryGroupByItem {
+				alias: item.alias.as_ref().map(|alias| alias.name.clone()),
+				expression: self.lower_query_expression(&item.expression, &for_record.table, backend)?,
+			}))
+			.collect::<Result<Vec<_>, CompileError>>()?;
 		let limit = for_record.limit.as_ref()
 			.map(|limit| self.lower_query_expression(limit, &for_record.table, backend))
 			.transpose()?;
@@ -2122,6 +2129,7 @@ impl SemanticAnalyzer {
 			backend,
 			database_name,
 			filter,
+			group_by,
 			limit,
 			order_by,
 			record_columns,
@@ -3508,6 +3516,7 @@ impl SemanticAnalyzer {
 			}
 			Statement::ForRecord(ForRecordStatement {
 				body,
+				group_by,
 				is_mut,
 				limit,
 				order_by,
@@ -3518,6 +3527,7 @@ impl SemanticAnalyzer {
 			}) => {
 				let lowered_query = self.lower_for_record_query(&ForRecordStatement {
 					body: body.clone(),
+					group_by: group_by.clone(),
 					is_mut: *is_mut,
 					limit: limit.clone(),
 					order_by: order_by.clone(),
@@ -3535,6 +3545,13 @@ impl SemanticAnalyzer {
 					}
 				};
 
+				if !group_by.is_empty() && !order_by.is_empty() {
+					return Err(self.compile_error(
+						*position,
+						String::from("A query may not specify both `group by` and `order by`."),
+					));
+				}
+
 				if let Some(where_clause) = where_clause {
 					let where_type = self.infer_query_expression_type(where_clause, table)?;
 
@@ -3542,6 +3559,17 @@ impl SemanticAnalyzer {
 						return Err(self.compile_error(
 							where_clause.position(),
 							format!("`where` clause must evaluate to `bool`, found `{}`.", where_type.name()),
+						));
+					}
+				}
+
+				for group_by in group_by {
+					let group_type = self.infer_query_expression_type(&group_by.expression, table)?;
+
+					if group_type.without_nullability() == &DataType::Void {
+						return Err(self.compile_error(
+							group_by.position,
+							String::from("`group by` expressions must produce a runtime value."),
 						));
 					}
 				}
