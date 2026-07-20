@@ -239,6 +239,7 @@ pub fn lower_count_query(plan: &QueryCountPlan) -> Result<LoweredBackendQuery, Q
 
 pub fn lower_find_query(plan: &QueryFindPlan) -> Result<LoweredBackendQuery, QueryLoweringError> {
 	match plan.backend {
+		DatabaseBackend::PostgreSql => postgresql::lower_find(plan).map(LoweredBackendQuery::Sql),
 		DatabaseBackend::Sqlite => sqlite::lower_find(plan).map(LoweredBackendQuery::Sql),
 		backend => Err(QueryLoweringError::UnsupportedBackend { backend }),
 	}
@@ -400,6 +401,73 @@ mod tests {
 			schema_name: String::from("Reporting"),
 			statement: String::from(
 				"SELECT COUNT(*) FROM \"Reporting\".\"Customers\" WHERE ((\"Customers\".\"Id\" = $1) AND (\"Customers\".\"Active\" = TRUE))"
+			),
+			table_name: String::from("Customers"),
+		}));
+	}
+
+	#[test]
+	fn lowers_postgresql_find_last_plan_with_reversed_ordering() {
+		let record_columns = vec![
+			QueryResultColumn {
+				column_name: String::from("Id"),
+				data_type: DataType::Int,
+				is_nullable: false,
+				is_primary_key: true,
+			},
+			QueryResultColumn {
+				column_name: String::from("Name"),
+				data_type: DataType::Text,
+				is_nullable: false,
+				is_primary_key: false,
+			},
+		];
+		let query = QueryFindPlan {
+			backend: DatabaseBackend::PostgreSql,
+			database_name: String::from("ExampleDb"),
+			filter: Some(QueryExpr::Binary(QueryBinaryExpr {
+				left: Box::new(QueryExpr::Column(QueryColumnReference {
+					column_name: String::from("Active"),
+					data_type: DataType::Bool,
+					table_name: String::from("Customers"),
+				})),
+				operator: QueryBinaryOperator::Equal,
+				right: Box::new(QueryExpr::Parameter(QueryParameter {
+					data_type: DataType::Bool,
+					field_path: vec![],
+					slot: 4,
+				})),
+			})),
+			kind: FindKind::Last,
+			order_by: vec![QueryOrderByItem {
+				direction: OrderByDirection::Ascending,
+				expression: QueryExpr::Column(QueryColumnReference {
+					column_name: String::from("Name"),
+					data_type: DataType::Text,
+					table_name: String::from("Customers"),
+				}),
+			}],
+			record_columns: record_columns.clone(),
+			schema_is_implicit: false,
+			schema_name: String::from("Public"),
+			table_name: String::from("Customers"),
+		}.lower_to_backend().unwrap();
+
+		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
+			database_name: String::from("ExampleDb"),
+			dialect: SqlDialect::PostgreSql,
+			group_by: vec![],
+			parameters: vec![SqlParameter {
+				data_type: DataType::Bool,
+				field_path: vec![],
+				index: 1,
+				slot: 4,
+			}],
+			result_shape: SqlQueryResultShape::RecordPointer(record_columns),
+			schema_is_implicit: false,
+			schema_name: String::from("Public"),
+			statement: String::from(
+				"SELECT \"Customers\".\"Id\", \"Customers\".\"Name\" FROM \"Public\".\"Customers\" WHERE (\"Customers\".\"Active\" = $1) ORDER BY \"Customers\".\"Name\" DESC LIMIT 1"
 			),
 			table_name: String::from("Customers"),
 		}));

@@ -1233,6 +1233,7 @@ mod tests {
 	use crate::object_file::write_program_to_path;
 	use crate::query::LoweredBackendQuery;
 	use crate::query::SqlDialect;
+	use crate::query::SqlQueryResultShape;
 	use crate::schema::DatabaseBackend;
 	use crate::schema::SchemaCatalog;
 	use crate::schema_fixture::read_schema_catalog_from_str;
@@ -1667,6 +1668,45 @@ mod tests {
 			"SELECT COUNT(*) FROM \"Public\".\"Customers\" WHERE (\"Customers\".\"Id\" >= $1)",
 		);
 		assert_eq!(query.parameters.len(), 1);
+	}
+
+	#[test]
+	fn compiles_postgresql_find_query_through_normal_compiler_path() {
+		let (program, _) = compile_snippet_with_schema_fixture_and_backends(
+			concat!(
+				"with exampledb;\n",
+				"var requiredActive: bool = true;\n",
+				"rec customer = find last Customers ",
+				"where Active == requiredActive order by Name asc;\n",
+				"0",
+			),
+			r#"
+				database ExampleDb;
+				schema Public;
+				create table Customers (
+					Id int primary key,
+					Name text not null,
+					Active bool not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::PostgreSql)],
+		).unwrap();
+
+		let LoweredBackendQuery::Sql(query) = &program.queries()[0];
+		assert_eq!(query.dialect, SqlDialect::PostgreSql);
+		assert_eq!(
+			query.statement,
+			concat!(
+				"SELECT \"Customers\".\"Active\", \"Customers\".\"Id\", \"Customers\".\"Name\" ",
+				"FROM \"Public\".\"Customers\" WHERE (\"Customers\".\"Active\" = $1) ",
+				"ORDER BY \"Customers\".\"Name\" DESC LIMIT 1",
+			),
+		);
+		let SqlQueryResultShape::RecordPointer(columns) = &query.result_shape else {
+			panic!("Expected record-pointer query result metadata.");
+		};
+		assert_eq!(columns.len(), 3);
+		assert!(columns.iter().any(|column| column.column_name == "Id" && column.is_primary_key));
 	}
 
 	#[test]
