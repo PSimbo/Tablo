@@ -14,12 +14,17 @@ use crate::sql::quote_identifier;
 use crate::sql::table_source;
 use crate::value::DatabaseValue;
 use crate::value::RecordFieldValue;
-use crate::value::RecordGroupBoundary;
 use crate::value::RecordPointerValue;
 use crate::value::Value;
 use crate::value::database_record_field_runtime_value;
 
+use super::records::LoadedRecord;
+use super::records::empty_record_pointer;
+use super::records::normalize_name;
+use super::records::record_group_boundaries;
+use super::records::record_pointer;
 use super::runtime::DatabaseDriver;
+use super::values::runtime_type_name;
 
 pub(super) struct SqliteSession {
 	connection: Connection,
@@ -268,12 +273,6 @@ impl DatabaseDriver for SqliteSession {
 	}
 }
 
-struct LoadedRecord {
-	fields: BTreeMap<String, RecordFieldValue>,
-	group_keys: Vec<Value>,
-	original_fields: BTreeMap<String, RecordFieldValue>,
-}
-
 fn database_value(value: ValueRef<'_>) -> Result<DatabaseValue, String> {
 	match value {
 		ValueRef::Blob(value) => Ok(DatabaseValue::Blob(value.to_vec())),
@@ -282,22 +281,6 @@ fn database_value(value: ValueRef<'_>) -> Result<DatabaseValue, String> {
 		ValueRef::Real(value) => Ok(DatabaseValue::Real(value.to_string())),
 		ValueRef::Text(value) => Ok(DatabaseValue::Text(std::str::from_utf8(value)
 			.map_err(|_| String::from("SQLite returned invalid UTF-8 text data."))?.to_string())),
-	}
-}
-
-fn empty_record_pointer(query: &SqlQuery, columns: &[QueryResultColumn]) -> RecordPointerValue {
-	RecordPointerValue {
-		column_names: columns.iter().map(|column| column.column_name.clone()).collect(),
-		exists: false,
-		fields: BTreeMap::new(),
-		group_boundaries: BTreeMap::new(),
-		is_dirty: false,
-		locked: false,
-		original_fields: BTreeMap::new(),
-		primary_key_column_names: primary_key_column_names(columns),
-		persisted: false,
-		record_type: record_pointer_type(query),
-		schema_is_implicit: query.schema_is_implicit,
 	}
 }
 
@@ -328,10 +311,6 @@ fn load_record_fields(row: &rusqlite::Row<'_>, columns: &[QueryResultColumn]) ->
 	Ok(fields)
 }
 
-fn normalize_name(name: &str) -> String {
-	name.to_ascii_lowercase()
-}
-
 fn original_identity_values(record: &RecordPointerValue, column_names: &[String]) -> Result<Vec<SqlValue>, String> {
 	column_names.iter().map(|column_name| {
 		let field = record.original_fields.get(&normalize_name(column_name)).ok_or_else(|| {
@@ -359,83 +338,6 @@ fn path_from_connection_string(database_name: &str, connection_string: &str) -> 
 	}
 
 	Ok(PathBuf::from(if value.starts_with("///") { &value[2..] } else { value }))
-}
-
-fn primary_key_column_names(columns: &[QueryResultColumn]) -> Vec<String> {
-	columns.iter().filter(|column| column.is_primary_key).map(|column| column.column_name.clone()).collect()
-}
-
-fn record_group_boundaries(records: &[LoadedRecord], group_by: &[SqlGroupByItem]) -> Vec<BTreeMap<String, RecordGroupBoundary>> {
-	let mut result = Vec::with_capacity(records.len());
-
-	for index in 0..records.len() {
-		let mut boundaries = BTreeMap::new();
-
-		for group_index in 0..group_by.len() {
-			let first = index == 0 || records[index - 1].group_keys[..=group_index] != records[index].group_keys[..=group_index];
-			let last = index + 1 == records.len() || records[index + 1].group_keys[..=group_index] != records[index].group_keys[..=group_index];
-
-			for key_name in &group_by[group_index].key_names {
-				boundaries.insert(normalize_name(key_name), RecordGroupBoundary { first, last });
-			}
-		}
-
-		result.push(boundaries);
-	}
-
-	result
-}
-
-fn record_pointer(
-	query: &SqlQuery,
-	columns: &[QueryResultColumn],
-	fields: BTreeMap<String, RecordFieldValue>,
-	original_fields: BTreeMap<String, RecordFieldValue>,
-	group_boundaries: BTreeMap<String, RecordGroupBoundary>,
-) -> RecordPointerValue {
-	RecordPointerValue {
-		column_names: columns.iter().map(|column| column.column_name.clone()).collect(),
-		exists: true,
-		fields,
-		group_boundaries,
-		is_dirty: false,
-		locked: false,
-		original_fields,
-		primary_key_column_names: primary_key_column_names(columns),
-		persisted: true,
-		record_type: record_pointer_type(query),
-		schema_is_implicit: query.schema_is_implicit,
-	}
-}
-
-fn record_pointer_type(query: &SqlQuery) -> crate::ast::RecordPointerType {
-	crate::ast::RecordPointerType {
-		database_name: query.database_name.clone(),
-		schema_name: query.schema_name.clone(),
-		table_name: query.table_name.clone(),
-	}
-}
-
-fn runtime_type_name(value: &Value) -> &'static str {
-	match value {
-		Value::Array(_) => "array",
-		Value::Boolean(_) => "bool",
-		Value::Date(_) => "date",
-		Value::Decimal(_) => "dec",
-		Value::DecimalRange(_) | Value::IntegerRange(_) => "range",
-		Value::Enum(_) => "enum",
-		Value::Integer(_) => "int",
-		Value::Iterator(_) => "iterator",
-		Value::Null => "null",
-		Value::Object(_) => "object",
-		Value::RecordPointer(_) => "record pointer",
-		Value::Reference(_) => "reference",
-		Value::Text(_) => "text",
-		Value::Time(_) => "time",
-		Value::TimeTz(_) => "timetz",
-		Value::Timestamp(_) => "timestamp",
-		Value::TimestampTz(_) => "timestamptz",
-	}
 }
 
 fn runtime_value_to_sqlite(value: Value) -> Result<SqlValue, String> {

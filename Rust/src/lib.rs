@@ -1799,7 +1799,7 @@ mod tests {
 		assert_eq!(query.dialect, SqlDialect::PostgreSql);
 		assert_eq!(
 			query.statement,
-			"SELECT COUNT(*) FROM \"Public\".\"Customers\" WHERE (\"Customers\".\"Id\" >= $1)",
+			"SELECT COUNT(*) FROM \"Public\".\"Customers\" WHERE (\"Customers\".\"Id\" >= CAST(CAST($1 AS TEXT) AS BIGINT))",
 		);
 		assert_eq!(query.parameters.len(), 1);
 	}
@@ -1831,8 +1831,9 @@ mod tests {
 		assert_eq!(
 			query.statement,
 			concat!(
-				"SELECT \"Customers\".\"Active\", \"Customers\".\"Id\", \"Customers\".\"Name\" ",
-				"FROM \"Public\".\"Customers\" WHERE (\"Customers\".\"Active\" = $1) ",
+				"SELECT CAST(\"Customers\".\"Active\" AS TEXT), CAST(\"Customers\".\"Id\" AS TEXT), ",
+				"CAST(\"Customers\".\"Name\" AS TEXT) FROM \"Public\".\"Customers\" ",
+				"WHERE (\"Customers\".\"Active\" = CAST(CAST($1 AS TEXT) AS BOOLEAN)) ",
 				"ORDER BY \"Customers\".\"Name\" DESC LIMIT 1",
 			),
 		);
@@ -1872,10 +1873,11 @@ mod tests {
 		assert_eq!(
 			query.statement,
 			concat!(
-				"SELECT \"Customers\".\"Active\", \"Customers\".\"Country\", ",
-				"\"Customers\".\"Id\", \"Customers\".\"Name\", TRIM(\"Customers\".\"Country\") ",
-				"FROM \"Public\".\"Customers\" WHERE (\"Customers\".\"Active\" = $1) ",
-				"ORDER BY TRIM(\"Customers\".\"Country\") LIMIT $2",
+				"SELECT CAST(\"Customers\".\"Active\" AS TEXT), CAST(\"Customers\".\"Country\" AS TEXT), ",
+				"CAST(\"Customers\".\"Id\" AS TEXT), CAST(\"Customers\".\"Name\" AS TEXT), ",
+				"CAST(TRIM(\"Customers\".\"Country\") AS TEXT) FROM \"Public\".\"Customers\" ",
+				"WHERE (\"Customers\".\"Active\" = CAST(CAST($1 AS TEXT) AS BOOLEAN)) ",
+				"ORDER BY TRIM(\"Customers\".\"Country\") LIMIT CAST(CAST($2 AS TEXT) AS BIGINT)",
 			),
 		);
 		let SqlQueryResultShape::RecordPointerArray(columns) = &query.result_shape else {

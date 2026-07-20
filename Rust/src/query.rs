@@ -656,7 +656,7 @@ mod tests {
 			schema_is_implicit: false,
 			schema_name: String::from("Reporting"),
 			statement: String::from(
-				"SELECT COUNT(*) FROM \"Reporting\".\"Customers\" WHERE ((\"Customers\".\"Id\" = $1) AND (\"Customers\".\"Active\" = TRUE))"
+				"SELECT COUNT(*) FROM \"Reporting\".\"Customers\" WHERE ((\"Customers\".\"Id\" = CAST(CAST($1 AS TEXT) AS BIGINT)) AND (\"Customers\".\"Active\" = TRUE))"
 			),
 			table_name: String::from("Customers"),
 		}));
@@ -723,7 +723,7 @@ mod tests {
 			schema_is_implicit: false,
 			schema_name: String::from("Public"),
 			statement: String::from(
-				"SELECT \"Customers\".\"Id\", \"Customers\".\"Name\" FROM \"Public\".\"Customers\" WHERE (\"Customers\".\"Active\" = $1) ORDER BY \"Customers\".\"Name\" DESC LIMIT 1"
+				"SELECT CAST(\"Customers\".\"Id\" AS TEXT), CAST(\"Customers\".\"Name\" AS TEXT) FROM \"Public\".\"Customers\" WHERE (\"Customers\".\"Active\" = CAST(CAST($1 AS TEXT) AS BOOLEAN)) ORDER BY \"Customers\".\"Name\" DESC LIMIT 1"
 			),
 			table_name: String::from("Customers"),
 		}));
@@ -803,7 +803,7 @@ mod tests {
 			schema_is_implicit: false,
 			schema_name: String::from("Public"),
 			statement: String::from(
-				"SELECT \"Customers\".\"Id\", TRIM(\"Customers\".\"Country\") FROM \"Public\".\"Customers\" WHERE (\"Customers\".\"Active\" = $1) ORDER BY TRIM(\"Customers\".\"Country\") LIMIT $2"
+				"SELECT CAST(\"Customers\".\"Id\" AS TEXT), CAST(TRIM(\"Customers\".\"Country\") AS TEXT) FROM \"Public\".\"Customers\" WHERE (\"Customers\".\"Active\" = CAST(CAST($1 AS TEXT) AS BOOLEAN)) ORDER BY TRIM(\"Customers\".\"Country\") LIMIT CAST(CAST($2 AS TEXT) AS BIGINT)"
 			),
 			table_name: String::from("Customers"),
 		}));

@@ -8,6 +8,7 @@ use crate::value::Value;
 
 use super::config::RuntimeDatabaseConfig;
 use super::config::normalize_database_name;
+use super::postgresql;
 use super::sqlite;
 
 pub(super) trait DatabaseDriver {
@@ -161,6 +162,9 @@ impl DatabaseRuntime {
 				format!("Database `{database_name}` is not configured at runtime.")
 			})?;
 			let session = match database.backend() {
+				DatabaseBackend::PostgreSql => {
+					Box::new(postgresql::PostgreSqlSession::open(database_name, database.connection_string())?) as Box<dyn DatabaseDriver>
+				}
 				DatabaseBackend::Sqlite => {
 					Box::new(sqlite::SqliteSession::open(database_name, database.connection_string())?) as Box<dyn DatabaseDriver>
 				}

@@ -1,3 +1,4 @@
+use crate::ast::DataType;
 use crate::ast::OrderByDirection;
 
 use super::QueryCountPlan;
@@ -22,6 +23,23 @@ pub(super) trait SqlRenderer {
 	) -> Result<String, QueryLoweringError>;
 
 	fn quote_identifier(&self, identifier: &str) -> String;
+
+	fn result_column(&self, table_name: &str, column_name: &str, _data_type: &DataType) -> String {
+		format!(
+			"{}.{}",
+			self.quote_identifier(table_name),
+			self.quote_identifier(column_name),
+		)
+	}
+
+	fn result_expression(
+		&self,
+		expression: &QueryExpr,
+		_data_type: &DataType,
+		parameters: &mut Vec<SqlParameter>,
+	) -> Result<String, QueryLoweringError> {
+		self.lower_expression(expression, parameters)
+	}
 
 	fn table_source(&self, schema_name: &str, table_name: &str, schema_is_implicit: bool) -> String {
 		if schema_is_implicit {
@@ -66,11 +84,7 @@ pub(super) fn lower_find(
 	let mut parameters = Vec::new();
 	let table_source = renderer.table_source(&plan.schema_name, &plan.table_name, plan.schema_is_implicit);
 	let select_columns = plan.record_columns.iter()
-		.map(|column| format!(
-			"{}.{}",
-			renderer.quote_identifier(&plan.table_name),
-			renderer.quote_identifier(&column.column_name),
-		))
+		.map(|column| renderer.result_column(&plan.table_name, &column.column_name, &column.data_type))
 		.collect::<Vec<_>>()
 		.join(", ");
 	let mut statement = format!("SELECT {select_columns} FROM {table_source}");
@@ -118,15 +132,11 @@ pub(super) fn lower_for(
 	let mut parameters = Vec::new();
 	let table_source = renderer.table_source(&plan.schema_name, &plan.table_name, plan.schema_is_implicit);
 	let mut select_columns = plan.record_columns.iter()
-		.map(|column| format!(
-			"{}.{}",
-			renderer.quote_identifier(&plan.table_name),
-			renderer.quote_identifier(&column.column_name),
-		))
+		.map(|column| renderer.result_column(&plan.table_name, &column.column_name, &column.data_type))
 		.collect::<Vec<_>>();
 
 	for item in &plan.group_by {
-		select_columns.push(renderer.lower_expression(&item.expression, &mut parameters)?);
+		select_columns.push(renderer.result_expression(&item.expression, &item.data_type, &mut parameters)?);
 	}
 
 	let mut statement = format!("SELECT {} FROM {table_source}", select_columns.join(", "));

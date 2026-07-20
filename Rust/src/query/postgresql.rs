@@ -1,3 +1,4 @@
+use crate::ast::DataType;
 use crate::builtins::BuiltInFunction;
 use crate::schema::DatabaseBackend;
 use crate::sql::quote_identifier as quote_ansi_identifier;
@@ -28,6 +29,23 @@ impl SqlRenderer for PostgreSqlRenderer {
 
 	fn quote_identifier(&self, identifier: &str) -> String {
 		quote_ansi_identifier(identifier)
+	}
+
+	fn result_column(&self, table_name: &str, column_name: &str, _data_type: &DataType) -> String {
+		format!(
+			"CAST({}.{} AS TEXT)",
+			quote_ansi_identifier(table_name),
+			quote_ansi_identifier(column_name),
+		)
+	}
+
+	fn result_expression(
+		&self,
+		expression: &QueryExpr,
+		_data_type: &DataType,
+		parameters: &mut Vec<SqlParameter>,
+	) -> Result<String, QueryLoweringError> {
+		Ok(format!("CAST({} AS TEXT)", lower_expression(expression, parameters)?))
 	}
 }
 
@@ -136,7 +154,7 @@ fn lower_expression(expression: &QueryExpr, parameters: &mut Vec<SqlParameter>) 
 				index,
 				slot: parameter.slot,
 			});
-			Ok(format!("${index}"))
+			Ok(postgresql_parameter(index, &parameter.data_type)?)
 		}
 		QueryExpr::Unary(unary) => {
 			let operand = lower_expression(&unary.operand, parameters)?;
@@ -146,6 +164,29 @@ fn lower_expression(expression: &QueryExpr, parameters: &mut Vec<SqlParameter>) 
 			})
 		}
 	}
+}
+
+fn postgresql_parameter(index: u32, data_type: &DataType) -> Result<String, QueryLoweringError> {
+	let data_type = data_type.without_nullability();
+	let sql_type = match data_type {
+		DataType::Bool => "BOOLEAN",
+		DataType::Date => "DATE",
+		DataType::Dec => "NUMERIC",
+		DataType::Int => "BIGINT",
+		DataType::Text => "TEXT",
+		DataType::Time => "TIME",
+		DataType::TimeTz => "TIME WITH TIME ZONE",
+		DataType::Timestamp => "TIMESTAMP",
+		DataType::TimestampTz => "TIMESTAMP WITH TIME ZONE",
+		other => {
+			return Err(QueryLoweringError::UnsupportedExpression {
+				backend: DatabaseBackend::PostgreSql,
+				description: format!("parameter of type `{}`", other.name()),
+			});
+		}
+	};
+
+	Ok(format!("CAST(CAST(${index} AS TEXT) AS {sql_type})"))
 }
 
 fn quote_text_literal(value: &str) -> String {

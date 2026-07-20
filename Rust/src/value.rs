@@ -776,6 +776,8 @@ pub fn database_record_field_runtime_value(
 	match data_type {
 		DataType::Bool => match value {
 			DatabaseValue::Integer(value) => Ok(Value::Boolean(*value != 0)),
+			DatabaseValue::Text(value) if value == "true" => Ok(Value::Boolean(true)),
+			DatabaseValue::Text(value) if value == "false" => Ok(Value::Boolean(false)),
 			other => Err(format!(
 				"Cannot convert database value `{}` to `bool`.",
 				database_value_name(other),
@@ -799,6 +801,9 @@ pub fn database_record_field_runtime_value(
 		},
 		DataType::Int => match value {
 			DatabaseValue::Integer(value) => Ok(Value::Integer(*value)),
+			DatabaseValue::Text(value) => value.parse::<i64>()
+				.map(Value::Integer)
+				.map_err(|_| format!("Cannot convert database text value `{value}` to `int`.")),
 			other => Err(format!(
 				"Cannot convert database value `{}` to `int`.",
 				database_value_name(other),
@@ -1114,7 +1119,12 @@ fn write_time_value(
 
 #[cfg(test)]
 mod tests {
+	use crate::ast::DataType;
+
+	use super::DatabaseValue;
 	use super::Decimal;
+	use super::Value;
+	use super::database_record_field_runtime_value;
 
 	#[test]
 	fn accepts_38_digit_decimal_literal() {
@@ -1126,17 +1136,23 @@ mod tests {
 	}
 
 	#[test]
-	fn formats_decimal_with_scale() {
-		let decimal = Decimal::from_literal("1.20").unwrap();
-
-		assert_eq!(decimal.to_string(), "1.20");
+	fn converts_database_text_to_boolean() {
+		assert_eq!(
+			database_record_field_runtime_value(&DatabaseValue::Text(String::from("true")), &DataType::Bool, false).unwrap(),
+			Value::Boolean(true),
+		);
+		assert_eq!(
+			database_record_field_runtime_value(&DatabaseValue::Text(String::from("false")), &DataType::Bool, false).unwrap(),
+			Value::Boolean(false),
+		);
 	}
 
 	#[test]
-	fn negates_decimal() {
-		let decimal = Decimal::from_literal("1.25").unwrap().negated();
-
-		assert_eq!(decimal.to_string(), "-1.25");
+	fn converts_database_text_to_integer() {
+		assert_eq!(
+			database_record_field_runtime_value(&DatabaseValue::Text(String::from("9223372036854775807")), &DataType::Int, false).unwrap(),
+			Value::Integer(i64::MAX),
+		);
 	}
 
 	#[test]
@@ -1155,6 +1171,20 @@ mod tests {
 		let result = lhs.checked_div(&rhs).unwrap();
 
 		assert_eq!(result.to_string(), "0.6666666666666666666666666666666666667");
+	}
+
+	#[test]
+	fn formats_decimal_with_scale() {
+		let decimal = Decimal::from_literal("1.20").unwrap();
+
+		assert_eq!(decimal.to_string(), "1.20");
+	}
+
+	#[test]
+	fn negates_decimal() {
+		let decimal = Decimal::from_literal("1.25").unwrap().negated();
+
+		assert_eq!(decimal.to_string(), "-1.25");
 	}
 
 	#[test]
