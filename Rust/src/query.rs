@@ -11,6 +11,7 @@ use crate::value::Timestamp;
 use crate::value::TimestampTz;
 
 mod postgresql;
+mod sql_renderer;
 mod sqlite;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -231,24 +232,24 @@ pub struct SqlQuery {
 
 pub fn lower_count_query(plan: &QueryCountPlan) -> Result<LoweredBackendQuery, QueryLoweringError> {
 	match plan.backend {
-		DatabaseBackend::PostgreSql => postgresql::lower_count(plan).map(LoweredBackendQuery::Sql),
-		DatabaseBackend::Sqlite => sqlite::lower_count(plan).map(LoweredBackendQuery::Sql),
+		DatabaseBackend::PostgreSql => sql_renderer::lower_count(&postgresql::PostgreSqlRenderer, plan).map(LoweredBackendQuery::Sql),
+		DatabaseBackend::Sqlite => sql_renderer::lower_count(&sqlite::SqliteRenderer, plan).map(LoweredBackendQuery::Sql),
 		backend => Err(QueryLoweringError::UnsupportedBackend { backend }),
 	}
 }
 
 pub fn lower_find_query(plan: &QueryFindPlan) -> Result<LoweredBackendQuery, QueryLoweringError> {
 	match plan.backend {
-		DatabaseBackend::PostgreSql => postgresql::lower_find(plan).map(LoweredBackendQuery::Sql),
-		DatabaseBackend::Sqlite => sqlite::lower_find(plan).map(LoweredBackendQuery::Sql),
+		DatabaseBackend::PostgreSql => sql_renderer::lower_find(&postgresql::PostgreSqlRenderer, plan).map(LoweredBackendQuery::Sql),
+		DatabaseBackend::Sqlite => sql_renderer::lower_find(&sqlite::SqliteRenderer, plan).map(LoweredBackendQuery::Sql),
 		backend => Err(QueryLoweringError::UnsupportedBackend { backend }),
 	}
 }
 
 pub fn lower_for_query(plan: &QueryForPlan) -> Result<LoweredBackendQuery, QueryLoweringError> {
 	match plan.backend {
-		DatabaseBackend::PostgreSql => postgresql::lower_for(plan).map(LoweredBackendQuery::Sql),
-		DatabaseBackend::Sqlite => sqlite::lower_for(plan).map(LoweredBackendQuery::Sql),
+		DatabaseBackend::PostgreSql => sql_renderer::lower_for(&postgresql::PostgreSqlRenderer, plan).map(LoweredBackendQuery::Sql),
+		DatabaseBackend::Sqlite => sql_renderer::lower_for(&sqlite::SqliteRenderer, plan).map(LoweredBackendQuery::Sql),
 		backend => Err(QueryLoweringError::UnsupportedBackend { backend }),
 	}
 }
@@ -1139,5 +1140,60 @@ mod tests {
 			),
 			table_name: String::from("Customers"),
 		}));
+	}
+
+	#[test]
+	fn preserves_query_metadata_across_sql_dialects() {
+		let record_columns = vec![QueryResultColumn {
+			column_name: String::from("Id"),
+			data_type: DataType::Int,
+			is_nullable: false,
+			is_primary_key: true,
+		}];
+		let sqlite_plan = QueryForPlan {
+			backend: DatabaseBackend::Sqlite,
+			database_name: String::from("ExampleDb"),
+			filter: Some(QueryExpr::Binary(QueryBinaryExpr {
+				left: Box::new(QueryExpr::Column(QueryColumnReference {
+					column_name: String::from("Active"),
+					data_type: DataType::Bool,
+					table_name: String::from("Customers"),
+				})),
+				operator: QueryBinaryOperator::Equal,
+				right: Box::new(QueryExpr::Parameter(QueryParameter {
+					data_type: DataType::Bool,
+					field_path: vec![],
+					slot: 3,
+				})),
+			})),
+			group_by: vec![],
+			limit: Some(QueryExpr::Parameter(QueryParameter {
+				data_type: DataType::Int,
+				field_path: vec![],
+				slot: 4,
+			})),
+			order_by: vec![],
+			record_columns,
+			schema_is_implicit: false,
+			schema_name: String::from("Public"),
+			table_name: String::from("Customers"),
+		};
+		let mut postgresql_plan = sqlite_plan.clone();
+		postgresql_plan.backend = DatabaseBackend::PostgreSql;
+
+		let LoweredBackendQuery::Sql(sqlite) = sqlite_plan.lower_to_backend().unwrap();
+		let LoweredBackendQuery::Sql(postgresql) = postgresql_plan.lower_to_backend().unwrap();
+
+		assert_eq!(sqlite.database_name, postgresql.database_name);
+		assert_eq!(sqlite.group_by, postgresql.group_by);
+		assert_eq!(sqlite.parameters, postgresql.parameters);
+		assert_eq!(sqlite.result_shape, postgresql.result_shape);
+		assert_eq!(sqlite.schema_is_implicit, postgresql.schema_is_implicit);
+		assert_eq!(sqlite.schema_name, postgresql.schema_name);
+		assert_eq!(sqlite.table_name, postgresql.table_name);
+		assert_ne!(sqlite.dialect, postgresql.dialect);
+		assert_ne!(sqlite.statement, postgresql.statement);
+		assert!(sqlite.statement.contains("?1"));
+		assert!(postgresql.statement.contains("$1"));
 	}
 }

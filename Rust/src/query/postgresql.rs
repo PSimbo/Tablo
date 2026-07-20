@@ -1,158 +1,38 @@
-use crate::ast::OrderByDirection;
 use crate::builtins::BuiltInFunction;
 use crate::schema::DatabaseBackend;
-use crate::sql::quote_identifier;
-use crate::sql::table_source;
+use crate::sql::quote_identifier as quote_ansi_identifier;
 
 use super::QueryBinaryOperator;
-use super::QueryCountPlan;
 use super::QueryExpr;
-use super::QueryFindPlan;
-use super::QueryForPlan;
 use super::QueryLiteral;
 use super::QueryLoweringError;
 use super::QueryUnaryOperator;
 use super::SqlDialect;
-use super::SqlGroupByItem;
 use super::SqlParameter;
-use super::SqlQuery;
-use super::SqlQueryResultShape;
-use super::effective_find_order_direction;
+use super::sql_renderer::SqlRenderer;
 
-pub(super) fn lower_count(plan: &QueryCountPlan) -> Result<SqlQuery, QueryLoweringError> {
-	let mut parameters = Vec::new();
-	let table_source = table_source(&plan.schema_name, &plan.table_name, plan.schema_is_implicit);
-	let mut statement = format!("SELECT COUNT(*) FROM {table_source}");
+pub(super) struct PostgreSqlRenderer;
 
-	if let Some(filter) = &plan.filter {
-		statement.push_str(" WHERE ");
-		statement.push_str(&lower_expression(filter, &mut parameters)?);
+impl SqlRenderer for PostgreSqlRenderer {
+	fn dialect(&self) -> SqlDialect {
+		SqlDialect::PostgreSql
 	}
 
-	Ok(SqlQuery {
-		database_name: plan.database_name.clone(),
-		dialect: SqlDialect::PostgreSql,
-		group_by: vec![],
-		parameters,
-		result_shape: SqlQueryResultShape::IntegerScalar,
-		schema_is_implicit: plan.schema_is_implicit,
-		schema_name: plan.schema_name.clone(),
-		statement,
-		table_name: plan.table_name.clone(),
-	})
-}
-
-pub(super) fn lower_find(plan: &QueryFindPlan) -> Result<SqlQuery, QueryLoweringError> {
-	let mut parameters = Vec::new();
-	let table_source = table_source(&plan.schema_name, &plan.table_name, plan.schema_is_implicit);
-	let select_columns = plan.record_columns.iter()
-		.map(|column| format!("{}.{}", quote_identifier(&plan.table_name), quote_identifier(&column.column_name)))
-		.collect::<Vec<_>>()
-		.join(", ");
-	let mut statement = format!("SELECT {select_columns} FROM {table_source}");
-
-	if let Some(filter) = &plan.filter {
-		statement.push_str(" WHERE ");
-		statement.push_str(&lower_expression(filter, &mut parameters)?);
+	fn lower_expression(
+		&self,
+		expression: &QueryExpr,
+		parameters: &mut Vec<SqlParameter>,
+	) -> Result<String, QueryLoweringError> {
+		lower_expression(expression, parameters)
 	}
 
-	if !plan.order_by.is_empty() {
-		statement.push_str(" ORDER BY ");
-		let mut order_by = Vec::with_capacity(plan.order_by.len());
-
-		for item in &plan.order_by {
-			let expression = lower_expression(&item.expression, &mut parameters)?;
-			let direction = match effective_find_order_direction(plan.kind, item.direction) {
-				OrderByDirection::Ascending => "ASC",
-				OrderByDirection::Descending => "DESC",
-			};
-			order_by.push(format!("{expression} {direction}"));
-		}
-
-		statement.push_str(&order_by.join(", "));
+	fn lower_non_negative_limit(&self, expression: &str) -> String {
+		format!("GREATEST(({expression}), 0)")
 	}
 
-	statement.push_str(" LIMIT 1");
-
-	Ok(SqlQuery {
-		database_name: plan.database_name.clone(),
-		dialect: SqlDialect::PostgreSql,
-		group_by: vec![],
-		parameters,
-		result_shape: SqlQueryResultShape::RecordPointer(plan.record_columns.clone()),
-		schema_is_implicit: plan.schema_is_implicit,
-		schema_name: plan.schema_name.clone(),
-		statement,
-		table_name: plan.table_name.clone(),
-	})
-}
-
-pub(super) fn lower_for(plan: &QueryForPlan) -> Result<SqlQuery, QueryLoweringError> {
-	let mut parameters = Vec::new();
-	let table_source = table_source(&plan.schema_name, &plan.table_name, plan.schema_is_implicit);
-	let mut select_columns = plan.record_columns.iter()
-		.map(|column| format!("{}.{}", quote_identifier(&plan.table_name), quote_identifier(&column.column_name)))
-		.collect::<Vec<_>>();
-
-	for item in &plan.group_by {
-		select_columns.push(lower_expression(&item.expression, &mut parameters)?);
+	fn quote_identifier(&self, identifier: &str) -> String {
+		quote_ansi_identifier(identifier)
 	}
-
-	let mut statement = format!("SELECT {} FROM {table_source}", select_columns.join(", "));
-
-	if let Some(filter) = &plan.filter {
-		statement.push_str(" WHERE ");
-		statement.push_str(&lower_expression(filter, &mut parameters)?);
-	}
-
-	if !plan.group_by.is_empty() {
-		statement.push_str(" ORDER BY ");
-		let mut group_by = Vec::with_capacity(plan.group_by.len());
-
-		for item in &plan.group_by {
-			group_by.push(lower_expression(&item.expression, &mut parameters)?);
-		}
-
-		statement.push_str(&group_by.join(", "));
-	}
-	else if !plan.order_by.is_empty() {
-		statement.push_str(" ORDER BY ");
-		let mut order_by = Vec::with_capacity(plan.order_by.len());
-
-		for item in &plan.order_by {
-			let expression = lower_expression(&item.expression, &mut parameters)?;
-			let direction = match item.direction {
-				OrderByDirection::Ascending => "ASC",
-				OrderByDirection::Descending => "DESC",
-			};
-			order_by.push(format!("{expression} {direction}"));
-		}
-
-		statement.push_str(&order_by.join(", "));
-	}
-
-	if let Some(limit) = &plan.limit {
-		statement.push_str(" LIMIT GREATEST((");
-		statement.push_str(&lower_expression(limit, &mut parameters)?);
-		statement.push_str("), 0)");
-	}
-
-	Ok(SqlQuery {
-		database_name: plan.database_name.clone(),
-		dialect: SqlDialect::PostgreSql,
-		group_by: plan.group_by.iter()
-			.map(|item| SqlGroupByItem {
-				data_type: item.data_type.clone(),
-				key_names: item.key_names.clone(),
-			})
-			.collect(),
-		parameters,
-		result_shape: SqlQueryResultShape::RecordPointerArray(plan.record_columns.clone()),
-		schema_is_implicit: plan.schema_is_implicit,
-		schema_name: plan.schema_name.clone(),
-		statement,
-		table_name: plan.table_name.clone(),
-	})
 }
 
 fn lower_built_in(
@@ -239,8 +119,8 @@ fn lower_expression(expression: &QueryExpr, parameters: &mut Vec<SqlParameter>) 
 		QueryExpr::BuiltInCall(call) => lower_built_in(call, parameters),
 		QueryExpr::Column(column) => Ok(format!(
 			"{}.{}",
-			quote_identifier(&column.table_name),
-			quote_identifier(&column.column_name),
+			quote_ansi_identifier(&column.table_name),
+			quote_ansi_identifier(&column.column_name),
 		)),
 		QueryExpr::Literal(QueryLiteral::Boolean(value)) => Ok(if *value { String::from("TRUE") } else { String::from("FALSE") }),
 		QueryExpr::Literal(QueryLiteral::Date(value)) => Ok(typed_temporal_literal("DATE", &value.to_string())),
