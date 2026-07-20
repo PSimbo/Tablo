@@ -98,6 +98,7 @@ fn lower_expression(expression: &QueryExpr, parameters: &mut Vec<SqlParameter>) 
 				QueryBinaryOperator::Equal => "=",
 				QueryBinaryOperator::GreaterThan => ">",
 				QueryBinaryOperator::GreaterThanOrEqual => ">=",
+				QueryBinaryOperator::IntegerDivide => "/",
 				QueryBinaryOperator::LessThan => "<",
 				QueryBinaryOperator::LessThanOrEqual => "<=",
 				QueryBinaryOperator::Modulo => "%",

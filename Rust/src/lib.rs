@@ -1678,6 +1678,110 @@ mod tests {
 	}
 
 	#[test]
+	fn compiles_mysql_count_query_through_normal_compiler_path() {
+		let (program, _) = compile_snippet_with_schema_fixture_and_backends(
+			"with exampledb;\nvar divisor: int = 2;\nvar minimumId: int = 10;\ncount customers where id / divisor >= minimumId",
+			r#"
+				database ExampleDb;
+				schema Reporting;
+				create table Customers (
+					Id int not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::MySql)],
+		).unwrap();
+
+		let LoweredBackendQuery::Sql(query) = &program.queries()[0];
+		assert_eq!(query.dialect, SqlDialect::MySql);
+		assert_eq!(
+			query.statement,
+			"SELECT COUNT(*) FROM `Reporting`.`Customers` WHERE ((`Customers`.`Id` DIV ?) >= ?)",
+		);
+		assert_eq!(query.parameters.len(), 2);
+		assert_eq!(query.parameters[0].index, 1);
+		assert_eq!(query.parameters[1].index, 2);
+	}
+
+	#[test]
+	fn compiles_mysql_find_query_through_normal_compiler_path() {
+		let (program, _) = compile_snippet_with_schema_fixture_and_backends(
+			concat!(
+				"with exampledb;\n",
+				"var requiredActive: bool = true;\n",
+				"rec customer = find last Customers ",
+				"where Active == requiredActive order by Name asc;\n",
+				"0",
+			),
+			r#"
+				database ExampleDb;
+				schema Reporting;
+				create table Customers (
+					Id int primary key,
+					Name text not null,
+					Active bool not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::MySql)],
+		).unwrap();
+
+		let LoweredBackendQuery::Sql(query) = &program.queries()[0];
+		assert_eq!(query.dialect, SqlDialect::MySql);
+		assert_eq!(
+			query.statement,
+			concat!(
+				"SELECT `Customers`.`Active`, `Customers`.`Id`, `Customers`.`Name` ",
+				"FROM `Reporting`.`Customers` WHERE (`Customers`.`Active` = ?) ",
+				"ORDER BY `Customers`.`Name` DESC LIMIT 1",
+			),
+		);
+		let SqlQueryResultShape::RecordPointer(columns) = &query.result_shape else {
+			panic!("Expected record-pointer query result metadata.");
+		};
+		assert!(columns.iter().any(|column| column.column_name == "Id" && column.is_primary_key));
+	}
+
+	#[test]
+	fn compiles_mysql_grouped_for_query_through_normal_compiler_path() {
+		let (program, _) = compile_snippet_with_schema_fixture_and_backends(
+			concat!(
+				"with exampledb;\n",
+				"var requiredActive: bool = true;\n",
+				"var maxRows: int = 5;\n",
+				"for rec customer in Customers where Active == requiredActive ",
+				"group by trim(Country) as country limit maxRows { }\n",
+				"0",
+			),
+			r#"
+				database ExampleDb;
+				schema Reporting;
+				create table Customers (
+					Id int primary key,
+					Name text not null,
+					Country text not null,
+					Active bool not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::MySql)],
+		).unwrap();
+
+		let LoweredBackendQuery::Sql(query) = &program.queries()[0];
+		assert_eq!(query.dialect, SqlDialect::MySql);
+		assert_eq!(
+			query.statement,
+			concat!(
+				"SELECT `Customers`.`Active`, `Customers`.`Country`, ",
+				"`Customers`.`Id`, `Customers`.`Name`, TRIM(`Customers`.`Country`) ",
+				"FROM `Reporting`.`Customers` WHERE (`Customers`.`Active` = ?) ",
+				"ORDER BY TRIM(`Customers`.`Country`) LIMIT ?",
+			),
+		);
+		assert_eq!(query.parameters.len(), 2);
+		assert_eq!(query.parameters[0].index, 1);
+		assert_eq!(query.parameters[1].index, 2);
+		assert_eq!(query.group_by[0].key_names, vec![String::from("country")]);
+	}
+
+	#[test]
 	fn compiles_postgresql_count_query_through_normal_compiler_path() {
 		let (program, _) = compile_snippet_with_schema_fixture_and_backends(
 			"with exampledb;\nvar minimumId: int = 10;\ncount customers where id >= minimumId",
@@ -2392,26 +2496,6 @@ mod tests {
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Built-in function `contains` does not accept an argument of type `int`."),
 			position: 9,
-		}));
-	}
-
-	#[test]
-	fn rejects_count_expression_for_unsupported_backend() {
-		let error = compile_snippet_with_schema_fixture_and_backends(
-			"with exampledb;\ncount customers where active == true",
-			r#"
-				database ExampleDb;
-				schema Public;
-				create table Customers (
-					Active bool not null
-				);
-			"#,
-			&[("ExampleDb", DatabaseBackend::MySql)],
-		).unwrap_err();
-
-		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
-			message: String::from("Database query execution is not implemented yet for the `mysql` backend."),
-			position: 16,
 		}));
 	}
 

@@ -391,7 +391,7 @@ The `-` operator evaluates to the difference of its operands. As a unary perfix 
 
 The `*` operator evaluates to the product of its operands. Operands must be numeric and may be dissimilar.
 
-The `/` operator evaluates to the quotient of its operands. Operands must be numeric and may be dissimilar. When the result is a decimal value and the quotient cannot be represented exactly within the implementation's supported decimal capacity, the result is rounded as described in the "Primitive Types" section.
+The `/` operator evaluates to the quotient of its operands. Operands must be numeric and may be dissimilar. When both operands are of type `int`, the result is also of type `int` and any fractional part is discarded by truncating toward zero. When the result is a decimal value and the quotient cannot be represented exactly within the implementation's supported decimal capacity, the result is rounded as described in the "Primitive Types" section.
 
 The `%` operator evaluates to the modulus of its operands. Operands must be numeric and may be dissimilar.
 
