@@ -252,6 +252,27 @@ impl Compiler {
 		}
 	}
 
+	fn compile_for_record_limit(
+		&mut self,
+		limit: &Expr,
+		slot: u32,
+		semantic_program: &SemanticProgram,
+		emission: &mut EmissionState,
+		statement_position: usize,
+	) {
+		self.compile_into_with_debug_position(limit, semantic_program, emission, Some(statement_position));
+		self.emit(emission, Instruction::StoreLocal(slot), statement_position);
+		self.emit(emission, Instruction::LoadLocal(slot), statement_position);
+		self.emit(emission, Instruction::PushInteger(0), statement_position);
+		self.emit(emission, Instruction::LessThan, statement_position);
+		let skip_clamp_jump_index = emission.instructions.len();
+		self.emit(emission, Instruction::JumpIfFalse(0), statement_position);
+		self.emit(emission, Instruction::PushInteger(0), statement_position);
+		self.emit(emission, Instruction::StoreLocal(slot), statement_position);
+		let query_start = emission.instructions.len() as u32;
+		emission.instructions[skip_clamp_jump_index] = Instruction::JumpIfFalse(query_start);
+	}
+
 	fn compile_function(&mut self, function: &FunctionDeclaration, semantic_program: &SemanticProgram) -> Result<(CompiledFunction, CodeBodyDebugInfo), CompileError> {
 		self.loop_stack.clear();
 		let mut emission = EmissionState::default();
@@ -827,6 +848,7 @@ impl Compiler {
 			Statement::ForRecord(ForRecordStatement {
 				body,
 				is_mut,
+				limit,
 				position,
 				variable,
 				..
@@ -846,6 +868,15 @@ impl Compiler {
 				self.compiled_queries.push(query);
 
 				self.enter_debug_scope(emission);
+
+				if let Some(limit) = limit {
+					let limit_slot = semantic_program.for_record_limit_slot(*position).ok_or(self.compile_error(
+						*position,
+						String::from("Missing local slot for `for rec` limit."),
+					))?;
+					self.compile_for_record_limit(limit, limit_slot, semantic_program, emission, *position);
+				}
+
 				self.emit(emission, Instruction::ExecuteQuery(query_index), *position);
 				self.emit(emission, Instruction::IterInit, *position);
 				self.emit(emission, Instruction::StoreLocal(iterator_slot), *position);
@@ -891,6 +922,7 @@ impl Compiler {
 				);
 
 				self.compile_statement(&Statement::Block(body.clone()), semantic_program, emission)?;
+
 				if *is_mut {
 					self.emit_pending_update_cleanup(
 						emission,
@@ -901,6 +933,7 @@ impl Compiler {
 						variable.position,
 					);
 				}
+
 				self.emit(emission, Instruction::Jump(loop_start), *position);
 
 				let loop_end = emission.instructions.len() as u32;

@@ -160,7 +160,7 @@ pub struct QueryForPlan {
 	pub database_name: String,
 	pub filter: Option<QueryExpr>,
 	pub group_by: Vec<QueryGroupByItem>,
-	pub limit: Option<QueryExpr>,
+	pub limit: Option<QueryParameter>,
 	pub order_by: Vec<QueryOrderByItem>,
 	pub record_columns: Vec<QueryResultColumn>,
 	pub schema_is_implicit: bool,
@@ -512,11 +512,11 @@ mod tests {
 				}),
 				key_names: vec![String::from("country")],
 			}],
-			limit: Some(QueryExpr::Parameter(QueryParameter {
+			limit: Some(QueryParameter {
 				data_type: DataType::Int,
 				field_path: vec![],
 				slot: 5,
-			})),
+			}),
 			order_by: vec![],
 			record_columns: record_columns.clone(),
 			schema_is_implicit: false,
@@ -549,7 +549,7 @@ mod tests {
 			schema_is_implicit: false,
 			schema_name: String::from("Public"),
 			statement: String::from(
-				"SELECT \"Customers\".\"Id\", TRIM(\"Customers\".\"Country\") FROM \"Public\".\"Customers\" WHERE (\"Customers\".\"Active\" = $1) ORDER BY TRIM(\"Customers\".\"Country\") LIMIT GREATEST(($2), 0)"
+				"SELECT \"Customers\".\"Id\", TRIM(\"Customers\".\"Country\") FROM \"Public\".\"Customers\" WHERE (\"Customers\".\"Active\" = $1) ORDER BY TRIM(\"Customers\".\"Country\") LIMIT $2"
 			),
 			table_name: String::from("Customers"),
 		}));
@@ -1052,11 +1052,11 @@ mod tests {
 			database_name: String::from("ExampleDb"),
 			filter: None,
 			group_by: vec![],
-			limit: Some(QueryExpr::Parameter(QueryParameter {
+			limit: Some(QueryParameter {
 				data_type: DataType::Int,
 				field_path: vec![],
 				slot: 2,
-			})),
+			}),
 			order_by: vec![],
 			record_columns: vec![
 				QueryResultColumn {
@@ -1094,7 +1094,7 @@ mod tests {
 			schema_is_implicit: true,
 			schema_name: String::from("Main"),
 			statement: String::from(
-				"SELECT \"Customers\".\"Id\" FROM \"Customers\" LIMIT max((?1), 0)"
+				"SELECT \"Customers\".\"Id\" FROM \"Customers\" LIMIT ?1"
 			),
 			table_name: String::from("Customers"),
 		}));
@@ -1167,11 +1167,11 @@ mod tests {
 				})),
 			})),
 			group_by: vec![],
-			limit: Some(QueryExpr::Parameter(QueryParameter {
+			limit: Some(QueryParameter {
 				data_type: DataType::Int,
 				field_path: vec![],
 				slot: 4,
-			})),
+			}),
 			order_by: vec![],
 			record_columns,
 			schema_is_implicit: false,

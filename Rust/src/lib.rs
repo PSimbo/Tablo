@@ -1617,6 +1617,36 @@ mod tests {
 	}
 
 	#[test]
+	fn clamps_negative_for_record_limit_to_zero_before_query_execution() {
+		let database_path = create_sqlite_test_database(
+			"clamps_negative_for_record_limit_to_zero_before_query_execution",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL
+				);
+				INSERT INTO Customers (Id) VALUES (10);
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int {\n    var rows: int = 0;\n    for rec cust in Customers limit -1 {\n        rows += 1;\n    }\n    return rows;\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(0)));
+	}
+
+	#[test]
 	fn commits_auto_created_record_after_successful_transaction() {
 		let database_path = create_sqlite_test_database(
 			"commits_auto_created_record_after_successful_transaction",
@@ -1741,7 +1771,7 @@ mod tests {
 				"SELECT \"Customers\".\"Active\", \"Customers\".\"Country\", ",
 				"\"Customers\".\"Id\", \"Customers\".\"Name\", TRIM(\"Customers\".\"Country\") ",
 				"FROM \"Public\".\"Customers\" WHERE (\"Customers\".\"Active\" = $1) ",
-				"ORDER BY TRIM(\"Customers\".\"Country\") LIMIT GREATEST(($2), 0)",
+				"ORDER BY TRIM(\"Customers\".\"Country\") LIMIT $2",
 			),
 		);
 		let SqlQueryResultShape::RecordPointerArray(columns) = &query.result_shape else {
@@ -1919,6 +1949,38 @@ mod tests {
 		let _ = std::fs::remove_file(&database_path);
 
 		assert_eq!(result, Some(Value::Integer(0)));
+	}
+
+	#[test]
+	fn evaluates_for_record_limit_once_before_query_execution() {
+		let database_path = create_sqlite_test_database(
+			"evaluates_for_record_limit_once_before_query_execution",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL
+				);
+				INSERT INTO Customers (Id) VALUES (10);
+				INSERT INTO Customers (Id) VALUES (11);
+				INSERT INTO Customers (Id) VALUES (12);
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn GetLimit(callCount: &int) int { callCount += 1; return 2; }\nfn Main(args: [text]) int {\n    var callCount: int = 0;\n    var rows: int = 0;\n    for rec cust in Customers limit GetLimit(&callCount) {\n        rows += 1;\n    }\n    return callCount * 10 + rows;\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(12)));
 	}
 
 	#[test]
@@ -2699,6 +2761,28 @@ mod tests {
 			message: String::from("Variable `x` is not declared in this scope."),
 			position: 20,
 		}));
+	}
+
+	#[test]
+	fn rejects_query_table_field_in_for_record_limit() {
+		let error = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int {\n    for rec cust in Customers limit Id {}\n    return 0;\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap_err();
+
+		match error {
+			TabloError::Compile(compile_error) => {
+				assert_eq!(compile_error.message, "Variable `Id` is not declared in this scope.");
+			}
+			other => panic!("Expected compile error, found {other:?}."),
+		}
 	}
 
 	#[test]

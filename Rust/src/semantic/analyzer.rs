@@ -219,6 +219,7 @@ pub struct SemanticProgram {
 	enum_declarations: BTreeMap<String, EnumDeclaration>,
 	enum_variant_values: BTreeMap<usize, EnumValue>,
 	enum_variants: BTreeMap<String, BTreeMap<String, EnumValue>>,
+	for_record_limit_slots: BTreeMap<usize, u32>,
 	function_declaration_targets: BTreeMap<usize, u32>,
 	group_boundary_calls: BTreeMap<usize, GroupBoundaryCallInfo>,
 	identifier_slots: BTreeMap<usize, u32>,
@@ -293,6 +294,10 @@ impl SemanticProgram {
 
 	pub fn enum_variant_value(&self, position: usize) -> Option<&EnumValue> {
 		self.enum_variant_values.get(&position)
+	}
+
+	pub fn for_record_limit_slot(&self, position: usize) -> Option<u32> {
+		self.for_record_limit_slots.get(&position).copied()
 	}
 
 	pub fn function_declaration_target(&self, position: usize) -> Option<u32> {
@@ -2192,7 +2197,11 @@ impl SemanticAnalyzer {
 		})
 	}
 
-	fn lower_for_record_query(&mut self, for_record: &ForRecordStatement) -> Result<QueryForPlan, CompileError> {
+	fn lower_for_record_query(
+		&mut self,
+		for_record: &ForRecordStatement,
+		limit: Option<QueryParameter>,
+	) -> Result<QueryForPlan, CompileError> {
 		let (backend, database_name, schema_name, schema_is_implicit, table_name, record_column_schemas) = {
 			let resolved_table = self.resolve_table_reference(&for_record.table)?;
 			let primary_key_columns = resolved_table.table().primary_key_columns()
@@ -2244,9 +2253,6 @@ impl SemanticAnalyzer {
 				})
 			})
 			.collect::<Result<Vec<_>, CompileError>>()?;
-		let limit = for_record.limit.as_ref()
-			.map(|limit| self.lower_query_expression(limit, &for_record.table, backend))
-			.transpose()?;
 
 		Ok(QueryForPlan {
 			backend,
@@ -3660,6 +3666,30 @@ impl SemanticAnalyzer {
 				variable,
 				where_clause,
 			}) => {
+				let limit_parameter = if let Some(limit) = limit {
+					let limit_type = self.infer_expression_type(limit)?;
+
+					if limit_type != DataType::Int {
+						return Err(self.compile_error(
+							limit.position(),
+							format!("`limit` clause must evaluate to `int`, found `{}`.", limit_type.name()),
+						));
+					}
+
+					let slot = self.next_local_slot;
+					self.next_local_slot += 1;
+					self.semantic_program.for_record_limit_slots.insert(*position, slot);
+
+					Some(QueryParameter {
+						data_type: DataType::Int,
+						field_path: Vec::new(),
+						slot,
+					})
+				}
+				else {
+					None
+				};
+
 				let lowered_query = self.lower_for_record_query(&ForRecordStatement {
 					body: body.clone(),
 					group_by: group_by.clone(),
@@ -3670,7 +3700,7 @@ impl SemanticAnalyzer {
 					table: table.clone(),
 					variable: variable.clone(),
 					where_clause: where_clause.clone(),
-				})?;
+				}, limit_parameter)?;
 				let record_pointer = {
 					let resolved_table = self.resolve_table_reference(table)?;
 					RecordPointerType {
@@ -3716,17 +3746,6 @@ impl SemanticAnalyzer {
 						return Err(self.compile_error(
 							order_by.position,
 							String::from("`order by` expressions must produce a runtime value."),
-						));
-					}
-				}
-
-				if let Some(limit) = limit {
-					let limit_type = self.infer_query_expression_type(limit, table)?;
-
-					if limit_type.without_nullability() != &DataType::Int {
-						return Err(self.compile_error(
-							limit.position(),
-							format!("`limit` clause must evaluate to `int`, found `{}`.", limit_type.name()),
 						));
 					}
 				}

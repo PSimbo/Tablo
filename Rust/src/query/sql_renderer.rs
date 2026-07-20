@@ -21,8 +21,6 @@ pub(super) trait SqlRenderer {
 		parameters: &mut Vec<SqlParameter>,
 	) -> Result<String, QueryLoweringError>;
 
-	fn lower_non_negative_limit(&self, expression: &str) -> String;
-
 	fn quote_identifier(&self, identifier: &str) -> String;
 
 	fn table_source(&self, schema_name: &str, table_name: &str, schema_is_implicit: bool) -> String {
@@ -165,9 +163,12 @@ pub(super) fn lower_for(
 	}
 
 	if let Some(limit) = &plan.limit {
-		let expression = renderer.lower_expression(limit, &mut parameters)?;
+		let expression = renderer.lower_expression(
+			&QueryExpr::Parameter(limit.clone()),
+			&mut parameters,
+		)?;
 		statement.push_str(" LIMIT ");
-		statement.push_str(&renderer.lower_non_negative_limit(&expression));
+		statement.push_str(&expression);
 	}
 
 	Ok(SqlQuery {

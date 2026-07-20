@@ -26,10 +26,6 @@ impl SqlRenderer for SqliteRenderer {
 		lower_expression(expression, parameters)
 	}
 
-	fn lower_non_negative_limit(&self, expression: &str) -> String {
-		format!("max(({expression}), 0)")
-	}
-
 	fn quote_identifier(&self, identifier: &str) -> String {
 		quote_ansi_identifier(identifier)
 	}
