@@ -8,6 +8,7 @@ use crate::value::Value;
 
 use super::config::RuntimeDatabaseConfig;
 use super::config::normalize_database_name;
+use super::mysql;
 use super::postgresql;
 use super::sqlite;
 
@@ -162,17 +163,14 @@ impl DatabaseRuntime {
 				format!("Database `{database_name}` is not configured at runtime.")
 			})?;
 			let session = match database.backend() {
+				DatabaseBackend::MySql => {
+					Box::new(mysql::MySqlSession::open(database_name, database.connection_string())?) as Box<dyn DatabaseDriver>
+				}
 				DatabaseBackend::PostgreSql => {
 					Box::new(postgresql::PostgreSqlSession::open(database_name, database.connection_string())?) as Box<dyn DatabaseDriver>
 				}
 				DatabaseBackend::Sqlite => {
 					Box::new(sqlite::SqliteSession::open(database_name, database.connection_string())?) as Box<dyn DatabaseDriver>
-				}
-				backend => {
-					return Err(format!(
-						"Runtime database execution is not implemented yet for the `{}` backend.",
-						backend.name(),
-					));
 				}
 			};
 			self.sessions.insert(normalized_name.clone(), session);
@@ -231,7 +229,7 @@ mod tests {
 	}
 
 	#[test]
-	fn reports_missing_runtime_driver_at_the_session_boundary() {
+	fn reports_invalid_mysql_connection_string_at_the_session_boundary() {
 		let config = RuntimeDatabaseConfig::new()
 			.with_database_connection_string("ExampleDb", "mysql:server=localhost")
 			.unwrap();
@@ -242,7 +240,7 @@ mod tests {
 
 		assert_eq!(
 			error,
-			"Runtime database execution is not implemented yet for the `mysql` backend.",
+			"MySQL connection string for database `ExampleDb` must use `mysql://user:password@host/database` format.",
 		);
 	}
 

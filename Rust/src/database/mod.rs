@@ -1,4 +1,5 @@
 mod config;
+mod mysql;
 mod postgresql;
 mod records;
 mod runtime;

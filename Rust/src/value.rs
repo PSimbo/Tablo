@@ -301,6 +301,66 @@ impl Decimal {
 		Self::from_parts(coefficient, scale)
 	}
 
+	pub fn from_database_text(value: &str) -> Result<Self, String> {
+		let invalid = || format!("Invalid database decimal value `{value}`.");
+		let (mantissa, exponent) = match value.split_once(['e', 'E']) {
+			Some((mantissa, exponent)) => {
+				if exponent.contains(['e', 'E']) {
+					return Err(invalid());
+				}
+
+				let exponent = exponent.parse::<i32>().map_err(|_| invalid())?;
+				(mantissa, exponent)
+			}
+			None => (value, 0),
+		};
+		let (negative, mantissa) = match mantissa.as_bytes().first() {
+			Some(b'-') => (true, &mantissa[1..]),
+			Some(b'+') => (false, &mantissa[1..]),
+			_ => (false, mantissa),
+		};
+		let (whole, fractional) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+
+		if (whole.is_empty() && fractional.is_empty())
+			|| !whole.chars().all(|ch| ch.is_ascii_digit())
+			|| !fractional.chars().all(|ch| ch.is_ascii_digit())
+		{
+			return Err(invalid());
+		}
+
+		let mut digits = format!("{whole}{fractional}");
+		let scale = fractional.len() as i32 - exponent;
+
+		if scale < 0 {
+			let appended_zeros = scale.unsigned_abs() as usize;
+
+			if digits.len().saturating_add(appended_zeros) > Self::MAX_PRECISION as usize {
+				return Err(format!("Database decimal value `{value}` exceeds the supported precision."));
+			}
+
+			digits.push_str(&"0".repeat(appended_zeros));
+		}
+
+		let coefficient = digits.parse::<i128>().map_err(|_| {
+			format!("Database decimal value `{value}` exceeds the supported precision.")
+		})?;
+		let coefficient = if negative {
+			coefficient.checked_neg().ok_or_else(|| {
+				format!("Database decimal value `{value}` exceeds the supported precision.")
+			})?
+		}
+		else {
+			coefficient
+		};
+		let scale = u8::try_from(scale.max(0)).map_err(|_| {
+			format!("Database decimal value `{value}` exceeds the supported precision.")
+		})?;
+
+		Self::from_parts(coefficient, scale).map_err(|_| {
+			format!("Database decimal value `{value}` exceeds the supported precision.")
+		})
+	}
+
 	pub fn from_integer(value: i64) -> Self {
 		Self::from_parts(value as i128, 0).unwrap()
 	}
@@ -792,8 +852,8 @@ pub fn database_record_field_runtime_value(
 		},
 		DataType::Dec => match value {
 			DatabaseValue::Integer(value) => Ok(Value::Decimal(Decimal::from_integer(*value))),
-			DatabaseValue::Real(value) => Ok(Value::Decimal(Decimal::from_literal(value)?)),
-			DatabaseValue::Text(value) => Ok(Value::Decimal(Decimal::from_literal(value)?)),
+			DatabaseValue::Real(value) => Ok(Value::Decimal(Decimal::from_database_text(value)?)),
+			DatabaseValue::Text(value) => Ok(Value::Decimal(Decimal::from_database_text(value)?)),
 			other => Err(format!(
 				"Cannot convert database value `{}` to `dec`.",
 				database_value_name(other),
@@ -1136,6 +1196,18 @@ mod tests {
 	}
 
 	#[test]
+	fn converts_database_null_to_nullable_value() {
+		assert_eq!(
+			database_record_field_runtime_value(
+				&DatabaseValue::Null,
+				&DataType::Nullable(Box::new(DataType::Text)),
+				true,
+			).unwrap(),
+			Value::Null,
+		);
+	}
+
+	#[test]
 	fn converts_database_text_to_boolean() {
 		assert_eq!(
 			database_record_field_runtime_value(&DatabaseValue::Text(String::from("true")), &DataType::Bool, false).unwrap(),
@@ -1185,6 +1257,19 @@ mod tests {
 		let decimal = Decimal::from_literal("1.25").unwrap().negated();
 
 		assert_eq!(decimal.to_string(), "-1.25");
+	}
+
+	#[test]
+	fn parses_database_decimal_with_exponent() {
+		assert_eq!(Decimal::from_database_text("1.25e3").unwrap().to_string(), "1250");
+		assert_eq!(Decimal::from_database_text("1.25e-3").unwrap().to_string(), "0.00125");
+	}
+
+	#[test]
+	fn parses_database_decimal_without_fractional_part() {
+		let decimal = Decimal::from_database_text("12345678901234567890123456789012345678").unwrap();
+
+		assert_eq!(decimal.to_string(), "12345678901234567890123456789012345678");
 	}
 
 	#[test]

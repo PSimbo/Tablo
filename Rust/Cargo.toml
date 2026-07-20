@@ -26,6 +26,7 @@ path = "src/bin/tablolsp.rs"
 [dependencies]
 clap = { version = "4.5.60", features = ["derive"] }
 colored = "3"
+mysql = { version = "28", default-features = false, features = ["minimal-rust", "native-tls"] }
 native-tls = "0.2"
 postgres = "0.19"
 postgres-native-tls = "0.5"
