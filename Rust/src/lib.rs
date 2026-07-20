@@ -2967,7 +2967,7 @@ mod tests {
 
 		match error {
 			TabloError::Compile(compile_error) => {
-				assert_eq!(compile_error.message, "Function `disp` is not yet supported in lowered database query expressions.");
+				assert_eq!(compile_error.message, "Function `disp` is not supported in `sqlite` database query expressions.");
 			}
 			other => panic!("expected compile error, found {other:?}"),
 		}
@@ -3000,6 +3000,27 @@ mod tests {
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Cannot assign a value of type `bool` to a variable of type `int`."),
 			position: 13,
+		}));
+	}
+
+	#[test]
+	fn reports_unsupported_postgresql_query_expression_at_its_source_position() {
+		let source = "with exampledb;\ncount Customers where len(Name) > 0";
+		let error = compile_snippet_with_schema_fixture_and_backends(
+			source,
+			r#"
+				database ExampleDb;
+				schema Public;
+				create table Customers (
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::PostgreSql)],
+		).unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Function `len` is not supported in `postgresql` database query expressions."),
+			position: source.find("len").unwrap(),
 		}));
 	}
 

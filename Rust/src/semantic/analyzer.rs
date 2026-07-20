@@ -2302,13 +2302,12 @@ impl SemanticAnalyzer {
 		table: &TableReference,
 		backend: DatabaseBackend,
 	) -> Result<QueryExpr, CompileError> {
-		let _ = backend;
-
 		match expression {
 			Expr::Array(_) => Err(self.compile_error(
 				expression.position(),
-				String::from(
-					"Array literals are only supported as the first argument to `contains(...)` in lowered database query expressions.",
+				format!(
+					"Array literals are only supported as the first argument to `contains(...)` in `{}` database query expressions.",
+					backend.name(),
 				),
 			)),
 			Expr::Binary(BinaryExpr { left, operator, right, .. }) => {
@@ -2324,8 +2323,12 @@ impl SemanticAnalyzer {
 			Expr::Call(CallExpr { arguments, callee, .. }) => {
 				let Some(built_in) = BuiltInFunction::from_name(&callee.name) else {
 					return Err(self.compile_error(
-						expression.position(),
-						format!("Function `{}` is not yet supported in lowered database query expressions.", callee.name),
+						callee.position,
+						format!(
+							"Function `{}` is not supported in `{}` database query expressions.",
+							callee.name,
+							backend.name(),
+						),
 					));
 				};
 
@@ -2340,7 +2343,7 @@ impl SemanticAnalyzer {
 							return Err(self.compile_error(
 								expression.position(),
 								String::from(
-									"Built-in function `contains` is only supported for `[text]` array arguments in lowered database query expressions.",
+									"Built-in function `contains` is only supported for `[text]` array arguments in database query expressions.",
 								),
 							));
 						}
@@ -2355,7 +2358,7 @@ impl SemanticAnalyzer {
 							return Err(self.compile_error(
 								expression.position(),
 								String::from(
-									"Built-in function `contains` is only supported for `[text]` array arguments in lowered database query expressions.",
+									"Built-in function `contains` is only supported for `[text]` array arguments in database query expressions.",
 								),
 							));
 						}
@@ -2370,7 +2373,7 @@ impl SemanticAnalyzer {
 							return Err(self.compile_error(
 								expression.position(),
 								format!(
-									"Built-in function `{}` is not yet supported for array arguments in lowered database query expressions.",
+									"Built-in function `{}` is not yet supported for array arguments in database query expressions.",
 									built_in.name(),
 								),
 							));
@@ -2385,8 +2388,12 @@ impl SemanticAnalyzer {
 					| BuiltInFunction::Second => {}
 					_ => {
 						return Err(self.compile_error(
-							expression.position(),
-							format!("Function `{}` is not yet supported in lowered database query expressions.", callee.name),
+							callee.position,
+							format!(
+								"Function `{}` is not supported in `{}` database query expressions.",
+								callee.name,
+								backend.name(),
+							),
 						));
 					}
 				}
@@ -2460,7 +2467,10 @@ impl SemanticAnalyzer {
 			})),
 			_ => Err(self.compile_error(
 				expression.position(),
-				String::from("This expression form cannot yet be lowered into a database query."),
+				format!(
+					"This expression cannot be used in a `{}` database query.",
+					backend.name(),
+				),
 			)),
 		}
 	}
@@ -2523,7 +2533,7 @@ impl SemanticAnalyzer {
 
 		Err(self.compile_error(
 			field_access.position,
-			String::from("Only chained local object or record-pointer field access and simple `table.field` access may be lowered into a database query."),
+			String::from("Only chained local object or record-pointer field access and simple `table.field` access may be used in a database query."),
 		))
 	}
 
@@ -4095,7 +4105,7 @@ fn query_lowering_error_message(error: QueryLoweringError) -> String {
 	match error {
 		QueryLoweringError::UnsupportedBuiltIn { backend, built_in } => {
 			format!(
-				"Function `{}` is not supported in lowered `{}` database query expressions.",
+				"Function `{}` is not supported in `{}` database query expressions.",
 				built_in.name(),
 				backend.name(),
 			)
