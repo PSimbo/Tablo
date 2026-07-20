@@ -1710,6 +1710,49 @@ mod tests {
 	}
 
 	#[test]
+	fn compiles_postgresql_grouped_for_query_through_normal_compiler_path() {
+		let (program, _) = compile_snippet_with_schema_fixture_and_backends(
+			concat!(
+				"with exampledb;\n",
+				"var requiredActive: bool = true;\n",
+				"var maxRows: int = 5;\n",
+				"for rec customer in Customers where Active == requiredActive ",
+				"group by trim(Country) as country limit maxRows { }\n",
+				"0",
+			),
+			r#"
+				database ExampleDb;
+				schema Public;
+				create table Customers (
+					Id int primary key,
+					Name text not null,
+					Country text not null,
+					Active bool not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::PostgreSql)],
+		).unwrap();
+
+		let LoweredBackendQuery::Sql(query) = &program.queries()[0];
+		assert_eq!(query.dialect, SqlDialect::PostgreSql);
+		assert_eq!(
+			query.statement,
+			concat!(
+				"SELECT \"Customers\".\"Active\", \"Customers\".\"Country\", ",
+				"\"Customers\".\"Id\", \"Customers\".\"Name\", TRIM(\"Customers\".\"Country\") ",
+				"FROM \"Public\".\"Customers\" WHERE (\"Customers\".\"Active\" = $1) ",
+				"ORDER BY TRIM(\"Customers\".\"Country\") LIMIT GREATEST(($2), 0)",
+			),
+		);
+		let SqlQueryResultShape::RecordPointerArray(columns) = &query.result_shape else {
+			panic!("Expected record-pointer array query result metadata.");
+		};
+		assert_eq!(columns.len(), 4);
+		assert_eq!(query.group_by.len(), 1);
+		assert_eq!(query.group_by[0].key_names, vec![String::from("country")]);
+	}
+
+	#[test]
 	fn compiles_source_text_to_object_file() {
 		let output_path = unique_test_output_path("compiles_source_text_to_object_file");
 		compile("fn Main(args: [text]) int { return 1 + 2; }", &output_path).unwrap();

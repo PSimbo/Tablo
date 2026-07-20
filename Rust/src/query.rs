@@ -247,6 +247,7 @@ pub fn lower_find_query(plan: &QueryFindPlan) -> Result<LoweredBackendQuery, Que
 
 pub fn lower_for_query(plan: &QueryForPlan) -> Result<LoweredBackendQuery, QueryLoweringError> {
 	match plan.backend {
+		DatabaseBackend::PostgreSql => postgresql::lower_for(plan).map(LoweredBackendQuery::Sql),
 		DatabaseBackend::Sqlite => sqlite::lower_for(plan).map(LoweredBackendQuery::Sql),
 		backend => Err(QueryLoweringError::UnsupportedBackend { backend }),
 	}
@@ -468,6 +469,86 @@ mod tests {
 			schema_name: String::from("Public"),
 			statement: String::from(
 				"SELECT \"Customers\".\"Id\", \"Customers\".\"Name\" FROM \"Public\".\"Customers\" WHERE (\"Customers\".\"Active\" = $1) ORDER BY \"Customers\".\"Name\" DESC LIMIT 1"
+			),
+			table_name: String::from("Customers"),
+		}));
+	}
+
+	#[test]
+	fn lowers_postgresql_grouped_for_record_plan_with_limit() {
+		let record_columns = vec![QueryResultColumn {
+			column_name: String::from("Id"),
+			data_type: DataType::Int,
+			is_nullable: false,
+			is_primary_key: true,
+		}];
+		let query = QueryForPlan {
+			backend: DatabaseBackend::PostgreSql,
+			database_name: String::from("ExampleDb"),
+			filter: Some(QueryExpr::Binary(QueryBinaryExpr {
+				left: Box::new(QueryExpr::Column(QueryColumnReference {
+					column_name: String::from("Active"),
+					data_type: DataType::Bool,
+					table_name: String::from("Customers"),
+				})),
+				operator: QueryBinaryOperator::Equal,
+				right: Box::new(QueryExpr::Parameter(QueryParameter {
+					data_type: DataType::Bool,
+					field_path: vec![],
+					slot: 4,
+				})),
+			})),
+			group_by: vec![QueryGroupByItem {
+				alias: Some(String::from("country")),
+				data_type: DataType::Text,
+				expression: QueryExpr::BuiltInCall(QueryBuiltInCall {
+					arguments: vec![QueryExpr::Column(QueryColumnReference {
+						column_name: String::from("Country"),
+						data_type: DataType::Text,
+						table_name: String::from("Customers"),
+					})],
+					built_in: BuiltInFunction::Trim,
+				}),
+				key_names: vec![String::from("country")],
+			}],
+			limit: Some(QueryExpr::Parameter(QueryParameter {
+				data_type: DataType::Int,
+				field_path: vec![],
+				slot: 5,
+			})),
+			order_by: vec![],
+			record_columns: record_columns.clone(),
+			schema_is_implicit: false,
+			schema_name: String::from("Public"),
+			table_name: String::from("Customers"),
+		}.lower_to_backend().unwrap();
+
+		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
+			database_name: String::from("ExampleDb"),
+			dialect: SqlDialect::PostgreSql,
+			group_by: vec![SqlGroupByItem {
+				data_type: DataType::Text,
+				key_names: vec![String::from("country")],
+			}],
+			parameters: vec![
+				SqlParameter {
+					data_type: DataType::Bool,
+					field_path: vec![],
+					index: 1,
+					slot: 4,
+				},
+				SqlParameter {
+					data_type: DataType::Int,
+					field_path: vec![],
+					index: 2,
+					slot: 5,
+				},
+			],
+			result_shape: SqlQueryResultShape::RecordPointerArray(record_columns),
+			schema_is_implicit: false,
+			schema_name: String::from("Public"),
+			statement: String::from(
+				"SELECT \"Customers\".\"Id\", TRIM(\"Customers\".\"Country\") FROM \"Public\".\"Customers\" WHERE (\"Customers\".\"Active\" = $1) ORDER BY TRIM(\"Customers\".\"Country\") LIMIT GREATEST(($2), 0)"
 			),
 			table_name: String::from("Customers"),
 		}));
