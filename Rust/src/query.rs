@@ -10,6 +10,7 @@ use crate::value::TimeTz;
 use crate::value::Timestamp;
 use crate::value::TimestampTz;
 
+mod postgresql;
 mod sqlite;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -21,6 +22,7 @@ pub enum LoweredBackendQuery {
 pub enum QueryBinaryOperator {
 	Add,
 	And,
+	Concatenate,
 	Divide,
 	Equal,
 	GreaterThan,
@@ -229,6 +231,7 @@ pub struct SqlQuery {
 
 pub fn lower_count_query(plan: &QueryCountPlan) -> Result<LoweredBackendQuery, QueryLoweringError> {
 	match plan.backend {
+		DatabaseBackend::PostgreSql => postgresql::lower_count(plan).map(LoweredBackendQuery::Sql),
 		DatabaseBackend::Sqlite => sqlite::lower_count(plan).map(LoweredBackendQuery::Sql),
 		backend => Err(QueryLoweringError::UnsupportedBackend { backend }),
 	}
@@ -312,6 +315,143 @@ mod tests {
 		fn lower_to_backend(&self) -> Result<LoweredBackendQuery, super::QueryLoweringError> {
 			lower_for_query(self)
 		}
+	}
+
+	#[test]
+	fn lowers_postgresql_contains_with_array_literal_to_in_expression() {
+		let query = QueryCountPlan {
+			backend: DatabaseBackend::PostgreSql,
+			database_name: String::from("ExampleDb"),
+			filter: Some(QueryExpr::BuiltInCall(QueryBuiltInCall {
+				arguments: vec![
+					QueryExpr::ArrayLiteral(vec![
+						QueryExpr::Literal(QueryLiteral::Text(String::from("ALPHA"))),
+						QueryExpr::Literal(QueryLiteral::Text(String::from("BRAVO"))),
+					]),
+					QueryExpr::Column(QueryColumnReference {
+						column_name: String::from("Code"),
+						data_type: DataType::Text,
+						table_name: String::from("Items"),
+					}),
+				],
+				built_in: BuiltInFunction::Contains,
+			})),
+			schema_is_implicit: true,
+			schema_name: String::from("public"),
+			table_name: String::from("Items"),
+		}.lower_to_backend().unwrap();
+
+		let LoweredBackendQuery::Sql(query) = query;
+		assert_eq!(
+			query.statement,
+			"SELECT COUNT(*) FROM \"Items\" WHERE (\"Items\".\"Code\" IN ('ALPHA', 'BRAVO'))",
+		);
+	}
+
+	#[test]
+	fn lowers_postgresql_count_plan_with_numbered_parameters() {
+		let query = QueryCountPlan {
+			backend: DatabaseBackend::PostgreSql,
+			database_name: String::from("ExampleDb"),
+			filter: Some(QueryExpr::Binary(QueryBinaryExpr {
+				left: Box::new(QueryExpr::Binary(QueryBinaryExpr {
+					left: Box::new(QueryExpr::Column(QueryColumnReference {
+						column_name: String::from("Id"),
+						data_type: DataType::Int,
+						table_name: String::from("Customers"),
+					})),
+					operator: QueryBinaryOperator::Equal,
+					right: Box::new(QueryExpr::Parameter(QueryParameter {
+						data_type: DataType::Int,
+						field_path: vec![String::from("MinimumId")],
+						slot: 3,
+					})),
+				})),
+				operator: QueryBinaryOperator::And,
+				right: Box::new(QueryExpr::Binary(QueryBinaryExpr {
+					left: Box::new(QueryExpr::Column(QueryColumnReference {
+						column_name: String::from("Active"),
+						data_type: DataType::Bool,
+						table_name: String::from("Customers"),
+					})),
+					operator: QueryBinaryOperator::Equal,
+					right: Box::new(QueryExpr::Literal(QueryLiteral::Boolean(true))),
+				})),
+			})),
+			schema_is_implicit: false,
+			schema_name: String::from("Reporting"),
+			table_name: String::from("Customers"),
+		}.lower_to_backend().unwrap();
+
+		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
+			database_name: String::from("ExampleDb"),
+			dialect: SqlDialect::PostgreSql,
+			group_by: vec![],
+			parameters: vec![
+				SqlParameter {
+					data_type: DataType::Int,
+					field_path: vec![String::from("MinimumId")],
+					index: 1,
+					slot: 3,
+				},
+			],
+			result_shape: SqlQueryResultShape::IntegerScalar,
+			schema_is_implicit: false,
+			schema_name: String::from("Reporting"),
+			statement: String::from(
+				"SELECT COUNT(*) FROM \"Reporting\".\"Customers\" WHERE ((\"Customers\".\"Id\" = $1) AND (\"Customers\".\"Active\" = TRUE))"
+			),
+			table_name: String::from("Customers"),
+		}));
+	}
+
+	#[test]
+	fn lowers_postgresql_text_and_temporal_expressions() {
+		let query = QueryCountPlan {
+			backend: DatabaseBackend::PostgreSql,
+			database_name: String::from("ExampleDb"),
+			filter: Some(QueryExpr::Binary(QueryBinaryExpr {
+				left: Box::new(QueryExpr::Binary(QueryBinaryExpr {
+					left: Box::new(QueryExpr::Binary(QueryBinaryExpr {
+						left: Box::new(QueryExpr::BuiltInCall(QueryBuiltInCall {
+							arguments: vec![QueryExpr::Column(QueryColumnReference {
+								column_name: String::from("Name"),
+								data_type: DataType::Text,
+								table_name: String::from("Customers"),
+							})],
+							built_in: BuiltInFunction::Trim,
+						})),
+						operator: QueryBinaryOperator::Concatenate,
+						right: Box::new(QueryExpr::Literal(QueryLiteral::Text(String::from(" Ltd.")))),
+					})),
+					operator: QueryBinaryOperator::Equal,
+					right: Box::new(QueryExpr::Literal(QueryLiteral::Text(String::from("Acme Ltd.")))),
+				})),
+				operator: QueryBinaryOperator::And,
+				right: Box::new(QueryExpr::Binary(QueryBinaryExpr {
+					left: Box::new(QueryExpr::BuiltInCall(QueryBuiltInCall {
+						arguments: vec![QueryExpr::Column(QueryColumnReference {
+							column_name: String::from("Created"),
+							data_type: DataType::Date,
+							table_name: String::from("Customers"),
+						})],
+						built_in: BuiltInFunction::Year,
+					})),
+					operator: QueryBinaryOperator::GreaterThanOrEqual,
+					right: Box::new(QueryExpr::Literal(QueryLiteral::Integer(2020))),
+				})),
+			})),
+			schema_is_implicit: true,
+			schema_name: String::from("public"),
+			table_name: String::from("Customers"),
+		}.lower_to_backend().unwrap();
+
+		let LoweredBackendQuery::Sql(query) = query;
+		assert_eq!(query.dialect, SqlDialect::PostgreSql);
+		assert_eq!(
+			query.statement,
+			"SELECT COUNT(*) FROM \"Customers\" WHERE (((TRIM(\"Customers\".\"Name\") || ' Ltd.') = 'Acme Ltd.') AND (CAST(TRUNC(EXTRACT(YEAR FROM \"Customers\".\"Created\")) AS BIGINT) >= 2020))",
+		);
 	}
 
 	#[test]

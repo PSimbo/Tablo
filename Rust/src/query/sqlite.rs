@@ -217,6 +217,7 @@ fn lower_expression(expression: &QueryExpr, parameters: &mut Vec<SqlParameter>) 
 			let operator = match binary.operator {
 				QueryBinaryOperator::Add => "+",
 				QueryBinaryOperator::And => "AND",
+				QueryBinaryOperator::Concatenate => "||",
 				QueryBinaryOperator::Divide => "/",
 				QueryBinaryOperator::Equal => "=",
 				QueryBinaryOperator::GreaterThan => ">",

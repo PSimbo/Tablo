@@ -1231,6 +1231,8 @@ mod tests {
 	use crate::database::RuntimeDatabaseConfig;
 	use crate::object_file::read_program_from_path;
 	use crate::object_file::write_program_to_path;
+	use crate::query::LoweredBackendQuery;
+	use crate::query::SqlDialect;
 	use crate::schema::DatabaseBackend;
 	use crate::schema::SchemaCatalog;
 	use crate::schema_fixture::read_schema_catalog_from_str;
@@ -1642,6 +1644,29 @@ mod tests {
 		let _ = std::fs::remove_file(&database_path);
 
 		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn compiles_postgresql_count_query_through_normal_compiler_path() {
+		let (program, _) = compile_snippet_with_schema_fixture_and_backends(
+			"with exampledb;\nvar minimumId: int = 10;\ncount customers where id >= minimumId",
+			r#"
+				database ExampleDb;
+				schema Public;
+				create table Customers (
+					Id int not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::PostgreSql)],
+		).unwrap();
+
+		let LoweredBackendQuery::Sql(query) = &program.queries()[0];
+		assert_eq!(query.dialect, SqlDialect::PostgreSql);
+		assert_eq!(
+			query.statement,
+			"SELECT COUNT(*) FROM \"Public\".\"Customers\" WHERE (\"Customers\".\"Id\" >= $1)",
+		);
+		assert_eq!(query.parameters.len(), 1);
 	}
 
 	#[test]

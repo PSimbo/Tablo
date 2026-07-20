@@ -2262,8 +2262,16 @@ impl SemanticAnalyzer {
 		})
 	}
 
-	fn lower_query_binary_operator(&self, operator: BinaryOperator) -> QueryBinaryOperator {
+	fn lower_query_binary_operator(
+		&self,
+		operator: BinaryOperator,
+		result_type: &DataType,
+	) -> QueryBinaryOperator {
 		match operator {
+			BinaryOperator::Add if matches!(
+				result_type.without_nullability(),
+				DataType::Array(_) | DataType::Text
+			) => QueryBinaryOperator::Concatenate,
 			BinaryOperator::Add => QueryBinaryOperator::Add,
 			BinaryOperator::And => QueryBinaryOperator::And,
 			BinaryOperator::Divide => QueryBinaryOperator::Divide,
@@ -2296,11 +2304,15 @@ impl SemanticAnalyzer {
 					"Array literals are only supported as the first argument to `contains(...)` in lowered database query expressions.",
 				),
 			)),
-			Expr::Binary(BinaryExpr { left, operator, right, .. }) => Ok(QueryExpr::Binary(QueryBinaryExpr {
-				left: Box::new(self.lower_query_expression(left, table, backend)?),
-				operator: self.lower_query_binary_operator(*operator),
-				right: Box::new(self.lower_query_expression(right, table, backend)?),
-			})),
+			Expr::Binary(BinaryExpr { left, operator, right, .. }) => {
+				let result_type = self.infer_query_expression_type(expression, table)?;
+
+				Ok(QueryExpr::Binary(QueryBinaryExpr {
+					left: Box::new(self.lower_query_expression(left, table, backend)?),
+					operator: self.lower_query_binary_operator(*operator, &result_type),
+					right: Box::new(self.lower_query_expression(right, table, backend)?),
+				}))
+			}
 			Expr::Boolean(boolean) => Ok(QueryExpr::Literal(QueryLiteral::Boolean(boolean.value))),
 			Expr::Call(CallExpr { arguments, callee, .. }) => {
 				let Some(built_in) = BuiltInFunction::from_name(&callee.name) else {
@@ -4042,6 +4054,7 @@ fn query_binary_operator_name(operator: QueryBinaryOperator) -> &'static str {
 	match operator {
 		QueryBinaryOperator::Add => "+",
 		QueryBinaryOperator::And => "and",
+		QueryBinaryOperator::Concatenate => "+",
 		QueryBinaryOperator::Divide => "/",
 		QueryBinaryOperator::Equal => "=",
 		QueryBinaryOperator::GreaterThan => ">",
@@ -4633,6 +4646,46 @@ mod tests {
 			schema_name: String::from("Main"),
 			table_name: String::from("InnerTable"),
 		});
+	}
+
+	#[test]
+	fn lowers_text_addition_in_query_expression_as_concatenation() {
+		let mut schema = read_schema_catalog_from_str(
+			r#"
+				database ExampleDb;
+				schema Public implicit;
+				create table Customers (
+					Name text not null
+				);
+			"#,
+		).unwrap();
+		schema.database_mut("ExampleDb").unwrap().set_backend(DatabaseBackend::PostgreSql);
+		let count = parse_count_expression("count customers where name + ' Ltd.' == expectedName");
+		let mut analyzer = SemanticAnalyzer::new();
+		analyzer.current_schema_catalog = Some(schema);
+		analyzer.semantic_program.active_databases = vec![String::from("exampledb")];
+		analyzer.enter_scope();
+		analyzer.declare_local(
+			String::from("expectedName"),
+			LocalBinding {
+				declaration_position: 7,
+				data_type: DataType::Text,
+				is_const: false,
+				slot: 7,
+			},
+		);
+
+		let query = analyzer.lower_count_query(&count).unwrap();
+		let QueryExpr::Binary(comparison) = query.filter.as_ref().unwrap() else {
+			panic!("Expected comparison expression.");
+		};
+		let QueryExpr::Binary(concatenation) = comparison.left.as_ref() else {
+			panic!("Expected concatenation expression.");
+		};
+
+		assert_eq!(query.backend, DatabaseBackend::PostgreSql);
+		assert_eq!(comparison.operator, QueryBinaryOperator::Equal);
+		assert_eq!(concatenation.operator, QueryBinaryOperator::Concatenate);
 	}
 
 	#[test]
