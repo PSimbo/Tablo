@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::database::RuntimeDatabaseConfig;
 use crate::schema::SchemaCatalog;
 use crate::schema_fixture::read_schema_catalog_from_path as read_schema_fixture_catalog_from_path;
-use crate::vm::RuntimeDatabaseConfig;
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct RuntimeConfigError {
@@ -58,7 +58,7 @@ impl RuntimeConfigFile {
 					database_name,
 				),
 			})?;
-			let backend = database_backend_from_connection_string(connection_string).map_err(|message| RuntimeConfigError {
+			let backend = crate::schema::DatabaseBackend::from_connection_string(connection_string).map_err(|message| RuntimeConfigError {
 				message: format!("Invalid connection string for database `{database_name}`: {message}"),
 			})?;
 			database.set_backend(backend);
@@ -99,19 +99,6 @@ pub fn read_schema_catalog_from_runtime_config_path(path: impl AsRef<Path>) -> R
 	let base_directory = path.parent().unwrap_or_else(|| Path::new("."));
 
 	config_file.into_schema_catalog(base_directory)
-}
-
-fn database_backend_from_connection_string(connection_string: &str) -> Result<crate::schema::DatabaseBackend, String> {
-	let (scheme, _) = connection_string.split_once(':').ok_or_else(|| {
-		String::from("Connection string must use the form `<backend>:<value>`.")
-	})?;
-
-	match scheme.trim().to_ascii_lowercase().as_str() {
-		"mysql" => Ok(crate::schema::DatabaseBackend::MySql),
-		"postgres" | "postgresql" => Ok(crate::schema::DatabaseBackend::PostgreSql),
-		"sqlite" => Ok(crate::schema::DatabaseBackend::Sqlite),
-		other => Err(format!("unsupported backend `{other}`.")),
-	}
 }
 
 fn resolve_config_path(base_directory: &Path, configured_path: &str) -> PathBuf {
@@ -206,8 +193,6 @@ fn schema_error_message(error: crate::schema::SchemaError) -> String {
 
 #[cfg(test)]
 mod tests {
-	use std::path::Path;
-
 	use super::RuntimeConfigError;
 	use super::read_runtime_database_config_from_str;
 	use super::read_schema_catalog_from_runtime_config_path;
@@ -224,12 +209,12 @@ mod tests {
 		).unwrap();
 
 		assert_eq!(
-			config.sqlite_database_path("exampledb"),
-			Some(Path::new("data/example.sqlite")),
+			config.database("exampledb").unwrap().connection_string(),
+			"sqlite:data/example.sqlite",
 		);
 		assert_eq!(
-			config.sqlite_database_path("ArchiveDb"),
-			Some(Path::new(":memory:")),
+			config.database("ArchiveDb").unwrap().connection_string(),
+			"sqlite::memory:",
 		);
 	}
 
@@ -268,22 +253,17 @@ mod tests {
 	}
 
 	#[test]
-	fn rejects_invalid_connection_string_from_runtime_config() {
-		let error = read_runtime_database_config_from_str(
+	fn preserves_postgresql_connection_config() {
+		let config = read_runtime_database_config_from_str(
 			r#"
 				[databases]
 				ExampleDb = "postgresql:host=localhost"
 			"#,
-		).unwrap_err();
+		).unwrap();
+		let database = config.database("ExampleDb").unwrap();
 
-		assert_eq!(
-			error,
-			RuntimeConfigError {
-				message: String::from(
-					"Connection string for database `ExampleDb` uses unsupported backend `postgresql`."
-				),
-			},
-		);
+		assert_eq!(database.backend(), crate::schema::DatabaseBackend::PostgreSql);
+		assert_eq!(database.connection_string(), "postgresql:host=localhost");
 	}
 
 	#[test]

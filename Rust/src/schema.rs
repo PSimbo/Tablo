@@ -7,6 +7,29 @@ pub enum DatabaseBackend {
 	Sqlite,
 }
 
+impl DatabaseBackend {
+	pub fn from_connection_string(connection_string: &str) -> Result<Self, String> {
+		let (scheme, _) = connection_string.split_once(':').ok_or_else(|| {
+			String::from("Connection string must use the form `<backend>:<value>`.")
+		})?;
+
+		match scheme.trim().to_ascii_lowercase().as_str() {
+			"mysql" => Ok(Self::MySql),
+			"postgres" | "postgresql" => Ok(Self::PostgreSql),
+			"sqlite" => Ok(Self::Sqlite),
+			other => Err(format!("unsupported backend `{other}`.")),
+		}
+	}
+
+	pub fn name(self) -> &'static str {
+		match self {
+			Self::MySql => "mysql",
+			Self::PostgreSql => "postgresql",
+			Self::Sqlite => "sqlite",
+		}
+	}
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SchemaDataType {
 	Array(Box<SchemaDataType>),

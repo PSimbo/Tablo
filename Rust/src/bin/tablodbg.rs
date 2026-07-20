@@ -20,7 +20,7 @@ use tablo::object_file::read_program_from_path;
 use tablo::runtime_config::read_runtime_database_config_from_path;
 use tablo::value::RecordFieldValue;
 use tablo::value::Value;
-use tablo::value::sqlite_record_field_runtime_value;
+use tablo::value::database_record_field_runtime_value;
 use tablo::vm::VirtualMachine;
 use tablo::vm::VmError;
 use tablo::vm::VmStackFrame;
@@ -648,11 +648,11 @@ impl DapServer {
 fn debugger_value_for_record_field(field: &RecordFieldValue) -> Result<Value, String> {
 	match field {
 		RecordFieldValue::Materialized(value) => Ok(value.clone()),
-		RecordFieldValue::DeferredSqlite {
+		RecordFieldValue::Deferred {
 			data_type,
 			is_nullable,
 			value,
-		} => sqlite_record_field_runtime_value(value, data_type, *is_nullable),
+		} => database_record_field_runtime_value(value, data_type, *is_nullable),
 	}
 }
 
@@ -1152,7 +1152,7 @@ mod tests {
 	use serde_json::Value as JsonValue;
 	use tablo::ast::DataType;
 	use tablo::ast::RecordPointerType;
-	use tablo::value::DeferredSqliteValue;
+	use tablo::value::DatabaseValue;
 	use tablo::value::RecordFieldValue;
 	use tablo::value::RecordPointerValue;
 	use tablo::value::Value;
@@ -1215,10 +1215,10 @@ mod tests {
 		let mut fields = BTreeMap::new();
 		fields.insert(
 			String::from("address1"),
-			RecordFieldValue::DeferredSqlite {
+			RecordFieldValue::Deferred {
 				data_type: DataType::Text,
 				is_nullable: true,
-				value: DeferredSqliteValue::Null,
+				value: DatabaseValue::Null,
 			},
 		);
 		fields.insert(

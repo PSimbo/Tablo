@@ -97,6 +97,8 @@ const OPCODE_UPDATE_RECORD_IF_CHANGED: u8 = OPCODE_UPDATE_RECORD + 1;
 const OPCODE_XOR: u8 = OPCODE_UPDATE_RECORD_IF_CHANGED + 1;
 const QUERY_KIND_SQL: u8 = 1;
 const SQL_DIALECT_SQLITE: u8 = 1;
+const SQL_DIALECT_POSTGRESQL: u8 = 2;
+const SQL_DIALECT_MYSQL: u8 = 3;
 const SQL_RESULT_INTEGER_SCALAR: u8 = 1;
 const SQL_RESULT_RECORD_POINTER: u8 = SQL_RESULT_INTEGER_SCALAR + 1;
 const SQL_RESULT_RECORD_POINTER_ARRAY: u8 = SQL_RESULT_RECORD_POINTER + 1;
@@ -509,19 +511,19 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_PUSH_INTEGER => Ok(Instruction::PushInteger(self.read_i64()?)),
 			OPCODE_PUSH_NULL => Ok(Instruction::PushNull),
 			OPCODE_PUSH_TEXT => Ok(Instruction::PushText(self.read_string()?)),
-			OPCODE_PUSH_TIME => Ok(Instruction::PushTime(crate::value::Time::from_sqlite_text(&self.read_string()?).map_err(|message| ObjectFileError {
+			OPCODE_PUSH_TIME => Ok(Instruction::PushTime(crate::value::Time::from_iso_text(&self.read_string()?).map_err(|message| ObjectFileError {
 				offset: self.offset,
 				message,
 			})?)),
-			OPCODE_PUSH_TIME_TZ => Ok(Instruction::PushTimeTz(crate::value::TimeTz::from_sqlite_text(&self.read_string()?).map_err(|message| ObjectFileError {
+			OPCODE_PUSH_TIME_TZ => Ok(Instruction::PushTimeTz(crate::value::TimeTz::from_iso_text(&self.read_string()?).map_err(|message| ObjectFileError {
 				offset: self.offset,
 				message,
 			})?)),
-			OPCODE_PUSH_TIMESTAMP => Ok(Instruction::PushTimestamp(crate::value::Timestamp::from_sqlite_text(&self.read_string()?).map_err(|message| ObjectFileError {
+			OPCODE_PUSH_TIMESTAMP => Ok(Instruction::PushTimestamp(crate::value::Timestamp::from_iso_text(&self.read_string()?).map_err(|message| ObjectFileError {
 				offset: self.offset,
 				message,
 			})?)),
-			OPCODE_PUSH_TIMESTAMP_TZ => Ok(Instruction::PushTimestampTz(crate::value::TimestampTz::from_sqlite_text(&self.read_string()?).map_err(|message| ObjectFileError {
+			OPCODE_PUSH_TIMESTAMP_TZ => Ok(Instruction::PushTimestampTz(crate::value::TimestampTz::from_iso_text(&self.read_string()?).map_err(|message| ObjectFileError {
 				offset: self.offset,
 				message,
 			})?)),
@@ -605,6 +607,8 @@ impl<'a> ObjectFileReader<'a> {
 		let dialect_offset = self.offset;
 		let dialect = match self.read_u8()? {
 			SQL_DIALECT_SQLITE => SqlDialect::Sqlite,
+			SQL_DIALECT_POSTGRESQL => SqlDialect::PostgreSql,
+			SQL_DIALECT_MYSQL => SqlDialect::MySql,
 			dialect => {
 				return Err(ObjectFileError {
 					offset: dialect_offset,
@@ -1050,6 +1054,8 @@ fn write_lowered_query(bytes: &mut Vec<u8>, query: &LoweredBackendQuery) {
 
 fn write_sql_query(bytes: &mut Vec<u8>, query: &SqlQuery) {
 	bytes.push(match query.dialect {
+		SqlDialect::MySql => SQL_DIALECT_MYSQL,
+		SqlDialect::PostgreSql => SQL_DIALECT_POSTGRESQL,
 		SqlDialect::Sqlite => SQL_DIALECT_SQLITE,
 	});
 	bytes.extend_from_slice(&(query.database_name.len() as u32).to_le_bytes());

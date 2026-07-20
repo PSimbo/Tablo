@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
 use clap::Parser as ClapParser;
+use tablo::database::RuntimeDatabaseConfig;
 use tablo::run_file;
 use tablo::run_file_with_database_config;
 use tablo::runtime_config::read_runtime_database_config_from_path;
 use tablo::utils::existing_child_path;
-use tablo::vm::RuntimeDatabaseConfig;
 
 #[derive(ClapParser, Debug)]
 #[command(name = "tablo")]
@@ -118,8 +118,6 @@ fn resolve_runtime_config_path(config_path: Option<&PathBuf>) -> Result<Option<P
 
 #[cfg(test)]
 mod tests {
-	use std::path::Path;
-
 	use super::build_database_config;
 	use super::default_runtime_config_path;
 	use super::parse_database_mapping;
@@ -131,8 +129,8 @@ mod tests {
 		let config = build_database_config(None, &[String::from("ExampleDb=sqlite:data/example.sqlite")]).unwrap();
 
 		assert_eq!(
-			config.sqlite_database_path("exampledb"),
-			Some(Path::new("data/example.sqlite")),
+			config.database("exampledb").unwrap().connection_string(),
+			"sqlite:data/example.sqlite",
 		);
 	}
 
@@ -154,8 +152,8 @@ mod tests {
 		let _ = std::fs::remove_file(&config_path);
 
 		assert_eq!(
-			config.sqlite_database_path("ExampleDb"),
-			Some(Path::new("data/from-cli.sqlite")),
+			config.database("ExampleDb").unwrap().connection_string(),
+			"sqlite:data/from-cli.sqlite",
 		);
 	}
 

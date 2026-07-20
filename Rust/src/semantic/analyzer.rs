@@ -73,6 +73,9 @@ use crate::query::QueryParameter;
 use crate::query::QueryResultColumn;
 use crate::query::QueryUnaryExpr;
 use crate::query::QueryUnaryOperator;
+use crate::query::lower_count_query;
+use crate::query::lower_find_query;
+use crate::query::lower_for_query;
 use crate::schema::DatabaseBackend;
 use crate::schema::SchemaCatalog;
 use crate::schema::SchemaDataType;
@@ -1013,7 +1016,7 @@ impl SemanticAnalyzer {
 			}
 		}
 
-		let compiled_query = lowered_query.lower_to_backend().map_err(|error| self.compile_error(
+		let compiled_query = lower_count_query(&lowered_query).map_err(|error| self.compile_error(
 			count.position,
 			query_lowering_error_message(error),
 		))?;
@@ -1637,7 +1640,7 @@ impl SemanticAnalyzer {
 			}
 		}
 
-		let compiled_query = lowered_query.lower_to_backend().map_err(|error| self.compile_error(
+		let compiled_query = lower_find_query(&lowered_query).map_err(|error| self.compile_error(
 			find.position,
 			query_lowering_error_message(error),
 		))?;
@@ -3716,7 +3719,7 @@ impl SemanticAnalyzer {
 					}
 				}
 
-				let compiled_query = lowered_query.lower_to_backend().map_err(|error| self.compile_error(
+				let compiled_query = lower_for_query(&lowered_query).map_err(|error| self.compile_error(
 					*position,
 					query_lowering_error_message(error),
 				))?;
@@ -4035,14 +4038,6 @@ impl SemanticAnalyzer {
 	}
 }
 
-fn database_backend_name(backend: DatabaseBackend) -> &'static str {
-	match backend {
-		DatabaseBackend::MySql => "mysql",
-		DatabaseBackend::PostgreSql => "postgresql",
-		DatabaseBackend::Sqlite => "sqlite",
-	}
-}
-
 fn query_binary_operator_name(operator: QueryBinaryOperator) -> &'static str {
 	match operator {
 		QueryBinaryOperator::Add => "+",
@@ -4064,17 +4059,30 @@ fn query_binary_operator_name(operator: QueryBinaryOperator) -> &'static str {
 
 fn query_lowering_error_message(error: QueryLoweringError) -> String {
 	match error {
+		QueryLoweringError::UnsupportedBuiltIn { backend, built_in } => {
+			format!(
+				"Function `{}` is not supported in lowered `{}` database query expressions.",
+				built_in.name(),
+				backend.name(),
+			)
+		}
 		QueryLoweringError::UnsupportedBackend { backend } => {
 			format!(
 				"Database query execution is not implemented yet for the `{}` backend.",
-				database_backend_name(backend),
+				backend.name(),
+			)
+		}
+		QueryLoweringError::UnsupportedExpression { backend, description } => {
+			format!(
+				"Query expression `{description}` is not supported by the `{}` backend.",
+				backend.name(),
 			)
 		}
 		QueryLoweringError::UnsupportedOperator { backend, operator } => {
 			format!(
 				"Database query operator `{}` is not implemented yet for the `{}` backend.",
 				query_binary_operator_name(operator),
-				database_backend_name(backend),
+				backend.name(),
 			)
 		}
 	}

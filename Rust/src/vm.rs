@@ -1,10 +1,4 @@
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-
-use rusqlite::Connection;
-use rusqlite::params_from_iter;
-use rusqlite::types::Value as SqlValue;
-use rusqlite::types::ValueRef as SqlValueRef;
 
 use crate::ast::BinaryOperator;
 use crate::ast::Expr;
@@ -14,33 +8,32 @@ use crate::bytecode::CodeBody;
 use crate::bytecode::Instruction;
 use crate::bytecode::Program;
 use crate::bytecode::SourceLocation;
+use crate::database::DatabaseRuntime;
+use crate::database::RuntimeDatabaseConfig;
 use crate::format_string::NumericFormatPattern;
 use crate::format_string::NumericFormatTarget;
 use crate::format_string::TemporalFormatPattern;
 use crate::format_string::TemporalFormatTarget;
 use crate::query::LoweredBackendQuery;
-use crate::query::QueryResultColumn;
-use crate::query::SqlDialect;
-use crate::query::SqlGroupByItem;
-use crate::query::SqlQuery;
-use crate::query::SqlQueryResultShape;
 use crate::source::SourceText;
 use crate::syntax::lexer::Lexer;
 use crate::syntax::parser::Parser;
 use crate::value::Decimal;
 use crate::value::DecimalRange;
 use crate::value::DecimalRangeIterator;
-use crate::value::DeferredSqliteValue;
 use crate::value::EnumValue as RuntimeEnumValue;
 use crate::value::IntegerRange;
 use crate::value::IntegerRangeIterator;
 use crate::value::IteratorState;
 use crate::value::LocalReference;
 use crate::value::RecordFieldValue;
-use crate::value::RecordGroupBoundary;
 use crate::value::RecordPointerValue;
 use crate::value::Value;
-use crate::value::sqlite_record_field_runtime_value;
+
+pub(crate) enum VmExecutionState {
+	Completed(Option<Value>),
+	Running,
+}
 
 #[derive(Clone, Copy)]
 enum ComparisonKind {
@@ -63,93 +56,17 @@ struct CallFrame {
 	locals: Vec<Value>,
 }
 
-struct LoadedSqliteRecordPointer {
-	fields: BTreeMap<String, RecordFieldValue>,
-	group_keys: Vec<Value>,
-	original_fields: BTreeMap<String, RecordFieldValue>,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct RuntimeDatabaseConfig {
-	sqlite_databases: BTreeMap<String, PathBuf>,
-}
-
-impl RuntimeDatabaseConfig {
-	pub fn new() -> Self {
-		Self::default()
-	}
-
-	pub fn set_database_connection_string(
-		&mut self,
-		database_name: impl Into<String>,
-		connection_string: &str,
-	) -> Result<(), String> {
-		let database_name = database_name.into();
-		let (scheme, value) = connection_string.split_once(':').ok_or_else(|| {
-			format!(
-				"Connection string for database `{database_name}` must use the form `<backend>:<value>`."
-			)
-		})?;
-
-		match scheme.to_ascii_lowercase().as_str() {
-			"sqlite" => {
-				let path = sqlite_path_from_connection_string(&database_name, value)?;
-				self.set_sqlite_database(database_name, path);
-				Ok(())
-			}
-			other => Err(format!(
-				"Connection string for database `{database_name}` uses unsupported backend `{other}`."
-			)),
-		}
-	}
-
-	pub fn set_sqlite_database(&mut self, database_name: impl Into<String>, path: impl Into<PathBuf>) {
-		self.sqlite_databases.insert(normalize_database_name(&database_name.into()), path.into());
-	}
-
-	pub fn sqlite_database_path(&self, database_name: &str) -> Option<&Path> {
-		self.sqlite_databases.get(&normalize_database_name(database_name)).map(PathBuf::as_path)
-	}
-
-	pub fn with_database_connection_string(
-		mut self,
-		database_name: impl Into<String>,
-		connection_string: &str,
-	) -> Result<Self, String> {
-		self.set_database_connection_string(database_name, connection_string)?;
-		Ok(self)
-	}
-
-	pub fn with_sqlite_database(mut self, database_name: impl Into<String>, path: impl Into<PathBuf>) -> Self {
-		self.set_sqlite_database(database_name, path);
-		self
-	}
-}
-
-struct RuntimeDatabaseSession {
-	connection: Connection,
-	transaction_depth: usize,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct RuntimeTransactionScope {
-	savepoint_name: String,
-}
-
-#[derive(Default)]
 pub struct VirtualMachine {
-	database_config: RuntimeDatabaseConfig,
-	database_sessions: BTreeMap<String, RuntimeDatabaseSession>,
+	database_runtime: DatabaseRuntime,
 	finished_result: Option<Option<Value>>,
 	frames: Vec<CallFrame>,
-	next_transaction_id: u64,
 	stack: Vec<Value>,
-	transaction_stack: Vec<RuntimeTransactionScope>,
 }
 
-pub(crate) enum VmExecutionState {
-	Completed(Option<Value>),
-	Running,
+impl Default for VirtualMachine {
+	fn default() -> Self {
+		Self::new()
+	}
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -257,13 +174,10 @@ impl VirtualMachine {
 
 	pub fn new() -> Self {
 		Self {
-			database_config: RuntimeDatabaseConfig::default(),
-			database_sessions: BTreeMap::new(),
+			database_runtime: DatabaseRuntime::new(RuntimeDatabaseConfig::default()),
 			finished_result: None,
 			frames: Vec::new(),
-			next_transaction_id: 0,
 			stack: Vec::new(),
-			transaction_stack: Vec::new(),
 		}
 	}
 
@@ -280,18 +194,16 @@ impl VirtualMachine {
 
 	pub fn with_database_config(database_config: RuntimeDatabaseConfig) -> Self {
 		Self {
-			database_config,
+			database_runtime: DatabaseRuntime::new(database_config),
 			..Self::new()
 		}
 	}
 
 	pub(crate) fn begin_execution(&mut self, _program: &Program) {
 		self.finished_result = None;
-		self.database_sessions.clear();
+		self.database_runtime.reset();
 		self.frames.clear();
-		self.next_transaction_id = 0;
 		self.stack.clear();
-		self.transaction_stack.clear();
 
 		match _program.entry_point() {
 			crate::bytecode::EntryPoint::Code(_) => {
@@ -421,58 +333,13 @@ impl VirtualMachine {
 	}
 
 	fn begin_transaction(&mut self, instruction_index: usize) -> Result<(), VmError> {
-		let savepoint_name = format!("tablo_tx_{}", self.next_transaction_id);
-		self.next_transaction_id += 1;
-		self.transaction_stack.push(RuntimeTransactionScope {
-			savepoint_name,
-		});
-
-		for session in self.database_sessions.values_mut() {
-			sync_runtime_database_session_transactions(
-				session,
-				&self.transaction_stack,
-				instruction_index,
-			)?;
-		}
-
-		Ok(())
+		self.database_runtime.begin_transaction()
+			.map_err(|message| vm_error(instruction_index, message))
 	}
 
 	fn commit_transaction(&mut self, instruction_index: usize) -> Result<(), VmError> {
-		let Some(transaction) = self.transaction_stack.last().cloned() else {
-			return Err(vm_error(
-				instruction_index,
-				String::from("Cannot commit a transaction because no transaction is active."),
-			));
-		};
-		let target_depth = self.transaction_stack.len();
-
-		for session in self.database_sessions.values_mut() {
-			if session.transaction_depth < target_depth {
-				continue;
-			}
-
-			if target_depth == 1 {
-				session.connection.execute_batch("COMMIT").map_err(|error| vm_error(
-					instruction_index,
-					format!("Failed to commit SQLite transaction: {error}"),
-				))?;
-			}
-			else {
-				session.connection.execute_batch(&format!(
-					"RELEASE SAVEPOINT {}",
-					quote_identifier(&transaction.savepoint_name),
-				)).map_err(|error| vm_error(
-					instruction_index,
-					format!("Failed to release SQLite transaction savepoint: {error}"),
-				))?;
-			}
-
-			session.transaction_depth -= 1;
-		}
-
-		self.transaction_stack.pop();
-		Ok(())
+		self.database_runtime.commit_transaction()
+			.map_err(|message| vm_error(instruction_index, message))
 	}
 
 	fn complete_frame(
@@ -508,7 +375,9 @@ impl VirtualMachine {
 			));
 		}
 
-		self.create_sqlite_record(record, instruction_index)
+		self.database_runtime.create_record(record)
+			.map(Value::RecordPointer)
+			.map_err(|message| vm_error(instruction_index, message))
 	}
 
 	fn create_record_if_pending(
@@ -521,51 +390,6 @@ impl VirtualMachine {
 		}
 
 		self.create_record(record, instruction_index)
-	}
-
-	fn create_sqlite_record(
-		&mut self,
-		record: RecordPointerValue,
-		instruction_index: usize,
-	) -> Result<Value, VmError> {
-		let table_source = sqlite_table_source(
-			&record.record_type.schema_name,
-			&record.record_type.table_name,
-			record.schema_is_implicit,
-		);
-		let column_list = record.column_names.iter()
-			.map(|name| quote_identifier(name))
-			.collect::<Vec<_>>()
-			.join(", ");
-		let placeholders = std::iter::repeat("?")
-			.take(record.column_names.len())
-			.collect::<Vec<_>>()
-			.join(", ");
-		let statement = format!("INSERT INTO {table_source} ({column_list}) VALUES ({placeholders})");
-		let parameter_values = record.column_names.iter()
-			.map(|column_name| {
-				let field = record.fields.get(&normalize_record_field_name(column_name)).ok_or(vm_error(
-					instruction_index,
-					format!("Record pointer does not contain a field named `{column_name}`."),
-				))?;
-				let value = resolve_record_field_value(field, instruction_index)?;
-				sqlite_value_from_runtime_value(value, instruction_index)
-			})
-			.collect::<Result<Vec<_>, _>>()?;
-		let connection = self.sqlite_connection_mut(&record.record_type.database_name, instruction_index)?;
-
-		connection.execute(&statement, params_from_iter(parameter_values)).map_err(|error| vm_error(
-			instruction_index,
-			format!("Failed to execute SQLite create statement: {error}"),
-		))?;
-
-		let original_fields = record.fields.clone();
-		Ok(Value::RecordPointer(RecordPointerValue {
-			is_dirty: false,
-			original_fields,
-			persisted: true,
-			..record
-		}))
 	}
 
 	fn current_code_body<'a>(&self, program: &'a Program, frame: &CallFrame) -> &'a CodeBody {
@@ -601,54 +425,9 @@ impl VirtualMachine {
 			));
 		}
 
-		self.delete_sqlite_record(record, instruction_index)
-	}
-
-	fn delete_sqlite_record(
-		&mut self,
-		record: RecordPointerValue,
-		instruction_index: usize,
-	) -> Result<Value, VmError> {
-		let table_source = sqlite_table_source(
-			&record.record_type.schema_name,
-			&record.record_type.table_name,
-			record.schema_is_implicit,
-		);
-		let predicate_column_names = record_identity_column_names(&record);
-		let predicates = predicate_column_names.iter()
-			.map(|name| format!("{} IS ?", quote_identifier(name)))
-			.collect::<Vec<_>>()
-			.join(" AND ");
-		let statement = format!("DELETE FROM {table_source} WHERE {predicates}");
-		let parameter_values = sqlite_original_record_identity_values(
-			&record,
-			&predicate_column_names,
-			instruction_index,
-		)?;
-
-		let connection = self.sqlite_connection_mut(&record.record_type.database_name, instruction_index)?;
-		let affected_rows = connection.execute(&statement, params_from_iter(parameter_values)).map_err(|error| vm_error(
-			instruction_index,
-			format!("Failed to execute SQLite delete statement: {error}"),
-		))?;
-
-		if affected_rows != 1 {
-			return Err(vm_error(
-				instruction_index,
-				format!("SQLite delete expected to affect 1 row, affected {affected_rows}."),
-			));
-		}
-
-		Ok(Value::RecordPointer(RecordPointerValue {
-			exists: false,
-			fields: BTreeMap::new(),
-			is_dirty: false,
-			locked: false,
-			original_fields: BTreeMap::new(),
-			primary_key_column_names: Vec::new(),
-			persisted: false,
-			..record
-		}))
+		self.database_runtime.delete_record(record)
+			.map(Value::RecordPointer)
+			.map_err(|message| vm_error(instruction_index, message))
 	}
 
 	fn enrich_vm_error(&self, program: &Program, mut error: VmError) -> VmError {
@@ -1174,154 +953,15 @@ impl VirtualMachine {
 		locals: &[Value],
 		instruction_index: usize,
 	) -> Result<Value, VmError> {
-		match query {
-			LoweredBackendQuery::Sql(query) => self.execute_sql_query(query, locals, instruction_index),
-		}
-	}
-
-	fn execute_sql_query(
-		&mut self,
-		query: &SqlQuery,
-		locals: &[Value],
-		instruction_index: usize,
-	) -> Result<Value, VmError> {
-		match query.dialect {
-			SqlDialect::Sqlite => self.execute_sqlite_query(query, locals, instruction_index),
-		}
-	}
-
-	fn execute_sqlite_query(
-		&mut self,
-		query: &SqlQuery,
-		locals: &[Value],
-		instruction_index: usize,
-	) -> Result<Value, VmError> {
-		let parameter_values = query.parameters.iter()
-			.map(|parameter| self.sqlite_parameter_value(parameter.slot, &parameter.field_path, locals, instruction_index))
+		let parameters = match query {
+			LoweredBackendQuery::Sql(query) => &query.parameters,
+		};
+		let parameter_values = parameters.iter()
+			.map(|parameter| self.query_parameter_value(parameter.slot, &parameter.field_path, locals, instruction_index))
 			.collect::<Result<Vec<_>, _>>()?;
-		let connection = self.sqlite_connection_mut(&query.database_name, instruction_index)?;
-		let mut statement = connection.prepare(&query.statement).map_err(|error| vm_error(
-			instruction_index,
-			format!("Failed to prepare SQLite query: {error}"),
-		))?;
 
-		match &query.result_shape {
-			SqlQueryResultShape::IntegerScalar => {
-				let result = statement.query_row(params_from_iter(parameter_values), |row| row.get::<_, i64>(0))
-					.map_err(|error| vm_error(
-						instruction_index,
-						format!("Failed to execute SQLite query: {error}"),
-					))?;
-				Ok(Value::Integer(result))
-			}
-			SqlQueryResultShape::RecordPointer(columns) => {
-				let mut rows = statement.query(params_from_iter(parameter_values)).map_err(|error| vm_error(
-					instruction_index,
-					format!("Failed to execute SQLite query: {error}"),
-				))?;
-				let Some(row) = rows.next().map_err(|error| vm_error(
-					instruction_index,
-					format!("Failed to read SQLite query result: {error}"),
-				))? else {
-					return Ok(Value::RecordPointer(RecordPointerValue {
-						column_names: columns.iter().map(|column| column.column_name.clone()).collect(),
-						exists: false,
-						fields: BTreeMap::new(),
-						group_boundaries: BTreeMap::new(),
-						is_dirty: false,
-						locked: false,
-						original_fields: BTreeMap::new(),
-						primary_key_column_names: columns.iter()
-							.filter(|column| column.is_primary_key)
-							.map(|column| column.column_name.clone())
-							.collect(),
-						persisted: false,
-						record_type: crate::ast::RecordPointerType {
-							database_name: query.database_name.clone(),
-							schema_name: query.schema_name.clone(),
-							table_name: query.table_name.clone(),
-						},
-						schema_is_implicit: query.schema_is_implicit,
-					}));
-				};
-				let fields = load_sqlite_record_fields(row, columns, instruction_index)?;
-				let original_fields = fields.clone();
-				Ok(Value::RecordPointer(RecordPointerValue {
-					column_names: columns.iter().map(|column| column.column_name.clone()).collect(),
-					exists: true,
-					fields,
-					group_boundaries: BTreeMap::new(),
-					is_dirty: false,
-					locked: false,
-					original_fields,
-					primary_key_column_names: columns.iter()
-						.filter(|column| column.is_primary_key)
-						.map(|column| column.column_name.clone())
-						.collect(),
-					persisted: true,
-					record_type: crate::ast::RecordPointerType {
-						database_name: query.database_name.clone(),
-						schema_name: query.schema_name.clone(),
-						table_name: query.table_name.clone(),
-					},
-					schema_is_implicit: query.schema_is_implicit,
-				}))
-			}
-			SqlQueryResultShape::RecordPointerArray(columns) => {
-				let mut rows = statement.query(params_from_iter(parameter_values)).map_err(|error| vm_error(
-					instruction_index,
-					format!("Failed to execute SQLite query: {error}"),
-				))?;
-				let mut loaded_records = Vec::new();
-
-				while let Some(row) = rows.next().map_err(|error| vm_error(
-					instruction_index,
-					format!("Failed to read SQLite query result: {error}"),
-				))? {
-					let fields = load_sqlite_record_fields(row, columns, instruction_index)?;
-					let original_fields = fields.clone();
-					let group_keys = load_sqlite_group_key_values(
-						row,
-						columns.len(),
-						&query.group_by,
-						instruction_index,
-					)?;
-					loaded_records.push(LoadedSqliteRecordPointer {
-						fields,
-						group_keys,
-						original_fields,
-					});
-				}
-
-				let mut records = Vec::new();
-				let group_boundaries = sqlite_record_group_boundaries(&loaded_records, &query.group_by);
-
-				for (index, loaded_record) in loaded_records.into_iter().enumerate() {
-					records.push(Value::RecordPointer(RecordPointerValue {
-						column_names: columns.iter().map(|column| column.column_name.clone()).collect(),
-						exists: true,
-						fields: loaded_record.fields,
-						group_boundaries: group_boundaries.get(index).cloned().unwrap_or_default(),
-						is_dirty: false,
-						locked: false,
-						original_fields: loaded_record.original_fields,
-						primary_key_column_names: columns.iter()
-							.filter(|column| column.is_primary_key)
-							.map(|column| column.column_name.clone())
-							.collect(),
-						persisted: true,
-						record_type: crate::ast::RecordPointerType {
-							database_name: query.database_name.clone(),
-							schema_name: query.schema_name.clone(),
-							table_name: query.table_name.clone(),
-						},
-						schema_is_implicit: query.schema_is_implicit,
-					}));
-				}
-
-				Ok(Value::Array(records))
-			}
-		}
+		self.database_runtime.execute_query(query, parameter_values)
+			.map_err(|message| vm_error(instruction_index, message))
 	}
 
 	fn finish_current_frame(&mut self, result: Option<Value>) -> VmExecutionState {
@@ -1367,31 +1007,12 @@ impl VirtualMachine {
 		sequence_name: &str,
 		instruction_index: usize,
 	) -> Result<i64, VmError> {
-		let sequence_source = sqlite_sequence_source(schema_name, schema_is_implicit);
-		let statement = format!(
-			"SELECT seq FROM {sequence_source} WHERE name = ?1"
-		);
-		let connection = self.sqlite_connection_mut(database_name, instruction_index)?;
-
-		let result = connection.query_row(&statement, [sequence_name], |row| {
-			let value = row.get_ref(0)?;
-			sqlite_integer_from_value_ref(value).map_err(|message| {
-				rusqlite::Error::FromSqlConversionFailure(
-					0,
-					value.data_type(),
-					Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, message)),
-				)
-			})
-		});
-
-		match result {
-			Ok(value) => Ok(value),
-			Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
-			Err(error) => Err(vm_error(
-				instruction_index,
-				format!("Failed to read SQLite sequence `{sequence_name}`: {error}"),
-			)),
-		}
+		self.database_runtime.load_sequence_current(
+			database_name,
+			schema_is_implicit,
+			schema_name,
+			sequence_name,
+		).map_err(|message| vm_error(instruction_index, message))
 	}
 
 	fn pop_boolean(&mut self, instruction_index: usize) -> Result<bool, VmError> {
@@ -1495,6 +1116,28 @@ impl VirtualMachine {
 		self.resolve_runtime_value(value, instruction_index)
 	}
 
+	fn query_parameter_value(
+		&self,
+		slot: u32,
+		field_path: &[String],
+		locals: &[Value],
+		instruction_index: usize,
+	) -> Result<Value, VmError> {
+		let value = locals.get(slot as usize).cloned().ok_or(vm_error(
+			instruction_index,
+			format!("Local slot {} has not been initialized.", slot),
+		))?;
+		let value = self.resolve_runtime_value(value, instruction_index)?;
+		let value = if field_path.is_empty() {
+			value
+		}
+		else {
+			load_field_path_value(value, field_path, instruction_index)?
+		};
+
+		Ok(value)
+	}
+
 	fn resolve_runtime_value(&self, value: Value, instruction_index: usize) -> Result<Value, VmError> {
 		match value {
 			Value::Reference(reference) => self.load_reference_value(reference, instruction_index),
@@ -1527,50 +1170,8 @@ impl VirtualMachine {
 	}
 
 	fn rollback_active_transactions(&mut self, instruction_index: usize) -> Result<(), VmError> {
-		let mut first_error = None;
-
-		while let Some(transaction) = self.transaction_stack.last().cloned() {
-			let target_depth = self.transaction_stack.len();
-
-			for session in self.database_sessions.values_mut() {
-				if session.transaction_depth < target_depth {
-					continue;
-				}
-
-				let rollback_result = if target_depth == 1 {
-					session.connection.execute_batch("ROLLBACK").map_err(|error| vm_error(
-						instruction_index,
-						format!("Failed to roll back SQLite transaction: {error}"),
-					))
-				}
-				else {
-					session.connection.execute_batch(&format!(
-						"ROLLBACK TO SAVEPOINT {}; RELEASE SAVEPOINT {}",
-						quote_identifier(&transaction.savepoint_name),
-						quote_identifier(&transaction.savepoint_name),
-					)).map_err(|error| vm_error(
-						instruction_index,
-						format!("Failed to roll back SQLite transaction savepoint: {error}"),
-					))
-				};
-
-				match rollback_result {
-					Ok(()) => session.transaction_depth -= 1,
-					Err(error) => {
-						if first_error.is_none() {
-							first_error = Some(error);
-						}
-					}
-				}
-			}
-
-			self.transaction_stack.pop();
-		}
-
-		match first_error {
-			Some(error) => Err(error),
-			None => Ok(()),
-		}
+		self.database_runtime.rollback_active_transactions()
+			.map_err(|message| vm_error(instruction_index, message))
 	}
 
 	fn run_built_in_function(
@@ -1906,7 +1507,7 @@ impl VirtualMachine {
 			BuiltInFunction::DateCast => match arguments.as_slice() {
 				[Value::Enum(value)] => Ok(Some((*value.backing_value).clone())),
 				[Value::Text(value)] => {
-					let parsed = crate::value::Date::from_sqlite_text(value).map_err(|_| vm_error(
+					let parsed = crate::value::Date::from_iso_text(value).map_err(|_| vm_error(
 						instruction_index,
 						format!("Built-in function `date` could not parse `{value}` as an ISO-8601 date."),
 					))?;
@@ -1940,64 +1541,6 @@ impl VirtualMachine {
 				)),
 			},
 		}
-	}
-
-	fn sqlite_connection_mut(
-		&mut self,
-		database_name: &str,
-		instruction_index: usize,
-	) -> Result<&mut Connection, VmError> {
-		let normalized_name = normalize_database_name(database_name);
-
-		if !self.database_sessions.contains_key(&normalized_name) {
-			let database_path = self.database_config.sqlite_database_path(database_name).ok_or(vm_error(
-				instruction_index,
-				format!("SQLite database `{database_name}` is not configured at runtime."),
-			))?.to_path_buf();
-
-			let connection = Connection::open(&database_path).map_err(|error| vm_error(
-				instruction_index,
-				format!("Failed to open SQLite database `{}`: {error}", database_path.display()),
-			))?;
-
-			self.database_sessions.insert(normalized_name.clone(), RuntimeDatabaseSession {
-				connection,
-				transaction_depth: 0,
-			});
-		}
-
-		let transaction_stack = self.transaction_stack.clone();
-		let session = self.database_sessions.get_mut(&normalized_name)
-			.expect("SQLite database session must exist after initialization.");
-		sync_runtime_database_session_transactions(
-			session,
-			&transaction_stack,
-			instruction_index,
-		)?;
-
-		Ok(&mut session.connection)
-	}
-
-	fn sqlite_parameter_value(
-		&self,
-		slot: u32,
-		field_path: &[String],
-		locals: &[Value],
-		instruction_index: usize,
-	) -> Result<SqlValue, VmError> {
-		let value = locals.get(slot as usize).cloned().ok_or(vm_error(
-			instruction_index,
-			format!("Local slot {} has not been initialized.", slot),
-		))?;
-		let value = self.resolve_runtime_value(value, instruction_index)?;
-		let value = if field_path.is_empty() {
-			value
-		}
-		else {
-			load_field_path_value(value, field_path, instruction_index)?
-		};
-
-		sqlite_value_from_runtime_value(value, instruction_index)
 	}
 
 	fn store_reference_value(&mut self, reference: LocalReference, value: Value, instruction_index: usize) -> Result<(), VmError> {
@@ -2034,27 +1577,13 @@ impl VirtualMachine {
 		value: i64,
 		instruction_index: usize,
 	) -> Result<(), VmError> {
-		let sequence_source = sqlite_sequence_source(schema_name, schema_is_implicit);
-		let update_statement = format!(
-			"UPDATE {sequence_source} SET seq = ?1 WHERE name = ?2"
-		);
-		let connection = self.sqlite_connection_mut(database_name, instruction_index)?;
-		let updated_rows = connection.execute(&update_statement, (&value, sequence_name)).map_err(|error| vm_error(
-			instruction_index,
-			format!("Failed to update SQLite sequence `{sequence_name}`: {error}"),
-		))?;
-
-		if updated_rows == 0 {
-			let insert_statement = format!(
-				"INSERT INTO {sequence_source} (name, seq) VALUES (?1, ?2)"
-			);
-			connection.execute(&insert_statement, (sequence_name, value)).map_err(|error| vm_error(
-				instruction_index,
-				format!("Failed to initialize SQLite sequence `{sequence_name}`: {error}"),
-			))?;
-		}
-
-		Ok(())
+		self.database_runtime.store_sequence_current(
+			database_name,
+			schema_is_implicit,
+			schema_name,
+			sequence_name,
+			value,
+		).map_err(|message| vm_error(instruction_index, message))
 	}
 
 	fn update_record(
@@ -2088,65 +1617,9 @@ impl VirtualMachine {
 			));
 		}
 
-		self.update_sqlite_record(record, instruction_index)
-	}
-
-	fn update_sqlite_record(
-		&mut self,
-		record: RecordPointerValue,
-		instruction_index: usize,
-	) -> Result<Value, VmError> {
-		let table_source = sqlite_table_source(
-			&record.record_type.schema_name,
-			&record.record_type.table_name,
-			record.schema_is_implicit,
-		);
-		let assignments = record.column_names.iter()
-			.map(|name| format!("{} = ?", quote_identifier(name)))
-			.collect::<Vec<_>>()
-			.join(", ");
-		let predicate_column_names = record_identity_column_names(&record);
-		let predicates = predicate_column_names.iter()
-			.map(|name| format!("{} IS ?", quote_identifier(name)))
-			.collect::<Vec<_>>()
-			.join(" AND ");
-		let statement = format!("UPDATE {table_source} SET {assignments} WHERE {predicates}");
-		let mut parameter_values = Vec::with_capacity(record.column_names.len() + predicate_column_names.len());
-
-		for column_name in &record.column_names {
-			let field = record.fields.get(&normalize_record_field_name(column_name)).ok_or(vm_error(
-				instruction_index,
-				format!("Record pointer does not contain a field named `{column_name}`."),
-			))?;
-			let value = resolve_record_field_value(field, instruction_index)?;
-			parameter_values.push(sqlite_value_from_runtime_value(value, instruction_index)?);
-		}
-
-		parameter_values.extend(sqlite_original_record_identity_values(
-			&record,
-			&predicate_column_names,
-			instruction_index,
-		)?);
-
-		let connection = self.sqlite_connection_mut(&record.record_type.database_name, instruction_index)?;
-		let affected_rows = connection.execute(&statement, params_from_iter(parameter_values)).map_err(|error| vm_error(
-			instruction_index,
-			format!("Failed to execute SQLite update statement: {error}"),
-		))?;
-
-		if affected_rows != 1 {
-			return Err(vm_error(
-				instruction_index,
-				format!("SQLite update expected to affect 1 row, affected {affected_rows}."),
-			));
-		}
-
-		let original_fields = record.fields.clone();
-		Ok(Value::RecordPointer(RecordPointerValue {
-			is_dirty: false,
-			original_fields,
-			..record
-		}))
+		self.database_runtime.update_record(record)
+			.map(Value::RecordPointer)
+			.map_err(|message| vm_error(instruction_index, message))
 	}
 }
 
@@ -2376,20 +1849,6 @@ fn count_non_overlapping_substrings(value: &str, substring: &str) -> usize {
 	}
 
 	count
-}
-
-fn deferred_sqlite_value(value: SqlValueRef<'_>) -> Result<DeferredSqliteValue, String> {
-	match value {
-		SqlValueRef::Blob(value) => Ok(DeferredSqliteValue::Blob(value.to_vec())),
-		SqlValueRef::Integer(value) => Ok(DeferredSqliteValue::Integer(value)),
-		SqlValueRef::Null => Ok(DeferredSqliteValue::Null),
-		SqlValueRef::Real(value) => Ok(DeferredSqliteValue::Real(value.to_string())),
-		SqlValueRef::Text(value) => Ok(DeferredSqliteValue::Text(
-			std::str::from_utf8(value)
-				.map_err(|_| String::from("SQLite returned invalid UTF-8 text data."))?
-				.to_string(),
-		)),
-	}
 }
 
 fn divide_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
@@ -2908,52 +2367,6 @@ fn load_range_slice_value(values: Vec<Value>, range: IntegerRange, instruction_i
 	Ok(Value::Array(result))
 }
 
-fn load_sqlite_group_key_values(
-	row: &rusqlite::Row<'_>,
-	column_count: usize,
-	group_by: &[SqlGroupByItem],
-	instruction_index: usize,
-) -> Result<Vec<Value>, VmError> {
-	let mut values = Vec::with_capacity(group_by.len());
-
-	for (index, group_by_item) in group_by.iter().enumerate() {
-		let value = row.get_ref(column_count + index).map_err(|error| vm_error(
-			instruction_index,
-			format!("Failed to read SQLite grouping column: {error}"),
-		))?;
-		let deferred = deferred_sqlite_value(value).map_err(|message| vm_error(instruction_index, message))?;
-		values.push(sqlite_record_field_runtime_value(&deferred, &group_by_item.data_type, group_by_item.data_type.is_nullable())
-			.map_err(|message| vm_error(instruction_index, message))?);
-	}
-
-	Ok(values)
-}
-
-fn load_sqlite_record_fields(
-	row: &rusqlite::Row<'_>,
-	columns: &[QueryResultColumn],
-	instruction_index: usize,
-) -> Result<BTreeMap<String, RecordFieldValue>, VmError> {
-	let mut fields = BTreeMap::new();
-
-	for (index, column) in columns.iter().enumerate() {
-		let value = row.get_ref(index).map_err(|error| vm_error(
-			instruction_index,
-			format!("Failed to read SQLite column `{}`: {error}", column.column_name),
-		))?;
-		fields.insert(
-			normalize_record_field_name(&column.column_name),
-			RecordFieldValue::DeferredSqlite {
-				data_type: column.data_type.clone(),
-				is_nullable: column.is_nullable,
-				value: deferred_sqlite_value(value).map_err(|message| vm_error(instruction_index, message))?,
-			},
-		);
-	}
-
-	Ok(fields)
-}
-
 fn load_text_index_value(value: String, index: Value, instruction_index: usize) -> Result<Value, VmError> {
 	let characters: Vec<char> = value.chars().collect();
 
@@ -3159,10 +2572,6 @@ fn negate_value(value: Value) -> Value {
 	}
 }
 
-fn normalize_database_name(name: &str) -> String {
-	name.to_ascii_lowercase()
-}
-
 fn normalize_record_field_name(name: &str) -> String {
 	name.to_ascii_lowercase()
 }
@@ -3190,27 +2599,8 @@ fn pow10_i128(exponent: u32) -> Result<i128, String> {
 	Ok(value)
 }
 
-fn quote_identifier(name: &str) -> String {
-	format!("\"{}\"", name.replace('"', "\"\""))
-}
-
-fn record_identity_column_names(record: &RecordPointerValue) -> Vec<String> {
-	if record.primary_key_column_names.is_empty() {
-		record.column_names.clone()
-	}
-	else {
-		record.primary_key_column_names.clone()
-	}
-}
-
 fn resolve_record_field_value(field: &RecordFieldValue, instruction_index: usize) -> Result<Value, VmError> {
-	match field {
-		RecordFieldValue::Materialized(value) => Ok(value.clone()),
-		RecordFieldValue::DeferredSqlite { data_type, is_nullable, value } => {
-			sqlite_record_field_runtime_value(value, data_type, *is_nullable)
-				.map_err(|message| vm_error(instruction_index, message))
-		}
-	}
+	field.materialize().map_err(|message| vm_error(instruction_index, message))
 }
 
 fn runtime_value_from_constant(constant: &crate::bytecode::Constant) -> Value {
@@ -3220,138 +2610,6 @@ fn runtime_value_from_constant(constant: &crate::bytecode::Constant) -> Value {
 		crate::bytecode::Constant::Decimal(value) => Value::Decimal(value.clone()),
 		crate::bytecode::Constant::Integer(value) => Value::Integer(*value),
 		crate::bytecode::Constant::Text(value) => Value::Text(value.clone()),
-	}
-}
-
-fn sqlite_integer_from_value_ref(value: SqlValueRef<'_>) -> Result<i64, String> {
-	match value {
-		SqlValueRef::Integer(value) => Ok(value),
-		SqlValueRef::Text(value) => {
-			let text = std::str::from_utf8(value)
-				.map_err(|_| String::from("SQLite text value is not valid UTF-8."))?;
-			text.parse::<i64>()
-				.map_err(|_| format!("SQLite value `{text}` cannot be converted to `int`."))
-		}
-		other => Err(format!(
-			"SQLite {} value cannot be converted to `int`.",
-			sqlite_value_ref_type_name(other),
-		)),
-	}
-}
-
-fn sqlite_original_record_identity_values(
-	record: &RecordPointerValue,
-	column_names: &[String],
-	instruction_index: usize,
-) -> Result<Vec<SqlValue>, VmError> {
-	column_names.iter()
-		.map(|column_name| {
-			let field = record.original_fields.get(&normalize_record_field_name(column_name)).ok_or(vm_error(
-				instruction_index,
-				format!("Record pointer is missing original field data for `{column_name}`."),
-			))?;
-			let value = resolve_record_field_value(field, instruction_index)?;
-			sqlite_value_from_runtime_value(value, instruction_index)
-		})
-		.collect()
-}
-
-fn sqlite_path_from_connection_string(database_name: &str, value: &str) -> Result<PathBuf, String> {
-	if value.is_empty() {
-		return Err(format!(
-			"SQLite connection string for database `{database_name}` must include a database path."
-		));
-	}
-
-	if value.starts_with("//") && !value.starts_with("///") {
-		return Err(format!(
-			"SQLite connection string for database `{database_name}` must use `sqlite:/path/to.db`, `sqlite:relative.db`, or `sqlite::memory:`."
-		));
-	}
-
-	let normalized = if value.starts_with("///") {
-		&value[2..]
-	}
-	else {
-		value
-	};
-
-	Ok(PathBuf::from(normalized))
-}
-
-fn sqlite_record_group_boundaries(
-	records: &[LoadedSqliteRecordPointer],
-	group_by: &[SqlGroupByItem],
-) -> Vec<BTreeMap<String, RecordGroupBoundary>> {
-	let mut result = Vec::with_capacity(records.len());
-
-	for index in 0..records.len() {
-		let mut boundaries = BTreeMap::new();
-
-		for group_index in 0..group_by.len() {
-			let first = index == 0
-				|| records[index - 1].group_keys[..=group_index] != records[index].group_keys[..=group_index];
-			let last = index + 1 == records.len()
-				|| records[index + 1].group_keys[..=group_index] != records[index].group_keys[..=group_index];
-
-			for key_name in &group_by[group_index].key_names {
-				boundaries.insert(
-					normalize_record_field_name(key_name),
-					RecordGroupBoundary { first, last },
-				);
-			}
-		}
-
-		result.push(boundaries);
-	}
-
-	result
-}
-
-fn sqlite_sequence_source(schema_name: &str, schema_is_implicit: bool) -> String {
-	if schema_is_implicit {
-		String::from("sqlite_sequence")
-	}
-	else {
-		format!("{}.sqlite_sequence", quote_identifier(schema_name))
-	}
-}
-
-fn sqlite_table_source(schema_name: &str, table_name: &str, schema_is_implicit: bool) -> String {
-	if schema_is_implicit {
-		quote_identifier(table_name)
-	}
-	else {
-		format!("{}.{}", quote_identifier(schema_name), quote_identifier(table_name))
-	}
-}
-
-fn sqlite_value_from_runtime_value(value: Value, instruction_index: usize) -> Result<SqlValue, VmError> {
-	match value {
-		Value::Boolean(value) => Ok(SqlValue::Integer(if value { 1 } else { 0 })),
-		Value::Date(value) => Ok(SqlValue::Text(value.to_string())),
-		Value::Decimal(value) => Ok(SqlValue::Text(value.to_string())),
-		Value::Integer(value) => Ok(SqlValue::Integer(value)),
-		Value::Null => Ok(SqlValue::Null),
-		Value::Text(value) => Ok(SqlValue::Text(value)),
-		Value::Time(value) => Ok(SqlValue::Text(value.to_string())),
-		Value::TimeTz(value) => Ok(SqlValue::Text(value.to_string())),
-		Value::Timestamp(value) => Ok(SqlValue::Text(value.to_string())),
-		Value::TimestampTz(value) => Ok(SqlValue::Text(value.to_string())),
-		other => Err(vm_error(
-			instruction_index,
-			format!("Cannot bind a `{}` value into a SQLite query parameter.", type_name(&other)),
-		)),
-	}
-}
-
-fn sqlite_value_ref_type_name(value: SqlValueRef<'_>) -> &'static str {
-	match value {
-		SqlValueRef::Blob(_) => "blob",
-		SqlValueRef::Integer(_) => "integer",
-		SqlValueRef::Null => "null",
-		SqlValueRef::Real(_) => "real",
-		SqlValueRef::Text(_) => "text",
 	}
 }
 
@@ -3629,35 +2887,6 @@ fn subtract_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<V
 	}
 }
 
-fn sync_runtime_database_session_transactions(
-	session: &mut RuntimeDatabaseSession,
-	transaction_stack: &[RuntimeTransactionScope],
-	instruction_index: usize,
-) -> Result<(), VmError> {
-	while session.transaction_depth < transaction_stack.len() {
-		if session.transaction_depth == 0 {
-			session.connection.execute_batch("BEGIN").map_err(|error| vm_error(
-				instruction_index,
-				format!("Failed to begin SQLite transaction: {error}"),
-			))?;
-		}
-		else {
-			let transaction = &transaction_stack[session.transaction_depth];
-			session.connection.execute_batch(&format!(
-				"SAVEPOINT {}",
-				quote_identifier(&transaction.savepoint_name),
-			)).map_err(|error| vm_error(
-				instruction_index,
-				format!("Failed to create SQLite transaction savepoint: {error}"),
-			))?;
-		}
-
-		session.transaction_depth += 1;
-	}
-
-	Ok(())
-}
-
 fn type_name(value: &Value) -> &'static str {
 	match value {
 		Value::Array(_) => "array",
@@ -3709,7 +2938,6 @@ mod tests {
 	use crate::value::RecordPointerValue;
 	use crate::value::Value;
 
-	use super::RuntimeDatabaseConfig;
 	use super::VirtualMachine;
 	use super::VmError;
 	use super::VmStackFrame;
@@ -3836,30 +3064,6 @@ mod tests {
 	}
 
 	#[test]
-	fn parses_absolute_sqlite_connection_string() {
-		let config = RuntimeDatabaseConfig::new()
-			.with_database_connection_string("ExampleDb", "sqlite:///tmp/example.sqlite")
-			.unwrap();
-
-		assert_eq!(
-			config.sqlite_database_path("ExampleDb"),
-			Some(std::path::Path::new("/tmp/example.sqlite")),
-		);
-	}
-
-	#[test]
-	fn parses_relative_sqlite_connection_string() {
-		let config = RuntimeDatabaseConfig::new()
-			.with_database_connection_string("ExampleDb", "sqlite:db/example.sqlite")
-			.unwrap();
-
-		assert_eq!(
-			config.sqlite_database_path("exampledb"),
-			Some(std::path::Path::new("db/example.sqlite")),
-		);
-	}
-
-	#[test]
 	fn rejects_addition_without_enough_operands() {
 		let program = Program::new(vec![
 			Instruction::PushInteger(1),
@@ -3904,20 +3108,6 @@ mod tests {
 				},
 			],
 		});
-	}
-
-	#[test]
-	fn rejects_invalid_sqlite_connection_string_shape() {
-		let error = RuntimeDatabaseConfig::new()
-			.with_database_connection_string("ExampleDb", "sqlite://example.sqlite")
-			.unwrap_err();
-
-		assert_eq!(
-			error,
-			String::from(
-				"SQLite connection string for database `ExampleDb` must use `sqlite:/path/to.db`, `sqlite:relative.db`, or `sqlite::memory:`."
-			),
-		);
 	}
 
 	#[test]
@@ -4014,18 +3204,6 @@ mod tests {
 				},
 			],
 		});
-	}
-
-	#[test]
-	fn rejects_unsupported_connection_string_backend() {
-		let error = RuntimeDatabaseConfig::new()
-			.with_database_connection_string("ExampleDb", "postgresql:host=localhost")
-			.unwrap_err();
-
-		assert_eq!(
-			error,
-			String::from("Connection string for database `ExampleDb` uses unsupported backend `postgresql`."),
-		);
 	}
 
 	#[test]

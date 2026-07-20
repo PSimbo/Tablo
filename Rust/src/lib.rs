@@ -9,6 +9,7 @@ pub mod builtins;
 pub mod bytecode;
 pub mod compiler;
 pub mod completion;
+pub mod database;
 pub mod debugger;
 pub mod diagnostics;
 pub mod format_string;
@@ -24,10 +25,13 @@ pub mod utils;
 pub mod value;
 pub mod vm;
 
+mod sql;
+
 use bytecode::Program;
 use bytecode::SourceFileDebugInfo;
 use compiler::CompileError;
 use compiler::Compiler;
+use database::RuntimeDatabaseConfig;
 use object_file::ObjectFileError;
 use object_file::read_program_from_path;
 use object_file::write_program_to_path;
@@ -43,7 +47,6 @@ use syntax::parser::ParseError;
 use syntax::parser::Parser;
 use utils::canonicalize_or_original;
 use value::Value;
-use vm::RuntimeDatabaseConfig;
 use vm::VirtualMachine;
 use vm::VmError;
 
@@ -1225,13 +1228,13 @@ mod tests {
 	use rusqlite::Connection;
 
 	use crate::bytecode::Instruction;
+	use crate::database::RuntimeDatabaseConfig;
 	use crate::object_file::read_program_from_path;
 	use crate::object_file::write_program_to_path;
 	use crate::schema::DatabaseBackend;
 	use crate::schema::SchemaCatalog;
 	use crate::schema_fixture::read_schema_catalog_from_str;
 	use crate::value::Value;
-	use crate::vm::RuntimeDatabaseConfig;
 
 	use super::CompilationTarget;
 	use super::TabloError;

@@ -5,7 +5,7 @@ use crate::ast::DataType;
 use crate::ast::RecordPointerType;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum DeferredSqliteValue {
+pub enum DatabaseValue {
 	Blob(Vec<u8>),
 	Integer(i64),
 	Null,
@@ -22,12 +22,23 @@ pub enum IteratorState {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RecordFieldValue {
-	DeferredSqlite {
+	Deferred {
 		data_type: DataType,
 		is_nullable: bool,
-		value: DeferredSqliteValue,
+		value: DatabaseValue,
 	},
 	Materialized(Value),
+}
+
+impl RecordFieldValue {
+	pub fn materialize(&self) -> Result<Value, String> {
+		match self {
+			Self::Deferred { data_type, is_nullable, value } => {
+				database_record_field_runtime_value(value, data_type, *is_nullable)
+			}
+			Self::Materialized(value) => Ok(value.clone()),
+		}
+	}
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -137,6 +148,22 @@ impl Date {
 		}
 	}
 
+	pub fn from_iso_text(value: &str) -> Result<Self, String> {
+		let mut parts = value.split('-');
+		let year = parts.next().ok_or_else(|| format!("Invalid ISO-8601 date value `{value}`."))?;
+		let month = parts.next().ok_or_else(|| format!("Invalid ISO-8601 date value `{value}`."))?;
+		let day = parts.next().ok_or_else(|| format!("Invalid ISO-8601 date value `{value}`."))?;
+
+		if parts.next().is_some() || year.len() != 4 || month.len() != 2 || day.len() != 2 {
+			return Err(format!("Invalid ISO-8601 date value `{value}`."));
+		}
+
+		let year = year.parse::<i32>().map_err(|_| format!("Invalid ISO-8601 date value `{value}`."))?;
+		let month = month.parse::<u8>().map_err(|_| format!("Invalid ISO-8601 date value `{value}`."))?;
+		let day = day.parse::<u8>().map_err(|_| format!("Invalid ISO-8601 date value `{value}`."))?;
+		Self::from_parts(year, month, day).map_err(|_| format!("Invalid ISO-8601 date value `{value}`."))
+	}
+
 	pub fn from_literal(literal: &str) -> Result<Self, String> {
 		let value = literal.strip_prefix('@').ok_or(String::from("Date literals must begin with `@`."))?;
 		let mut parts = value.split('-');
@@ -165,22 +192,6 @@ impl Date {
 		}
 
 		Ok(Self { day, month, year })
-	}
-
-	pub fn from_sqlite_text(value: &str) -> Result<Self, String> {
-		let mut parts = value.split('-');
-		let year = parts.next().ok_or_else(|| format!("Invalid SQLite date value `{value}`."))?;
-		let month = parts.next().ok_or_else(|| format!("Invalid SQLite date value `{value}`."))?;
-		let day = parts.next().ok_or_else(|| format!("Invalid SQLite date value `{value}`."))?;
-
-		if parts.next().is_some() || year.len() != 4 || month.len() != 2 || day.len() != 2 {
-			return Err(format!("Invalid SQLite date value `{value}`."));
-		}
-
-		let year = year.parse::<i32>().map_err(|_| format!("Invalid SQLite date value `{value}`."))?;
-		let month = month.parse::<u8>().map_err(|_| format!("Invalid SQLite date value `{value}`."))?;
-		let day = day.parse::<u8>().map_err(|_| format!("Invalid SQLite date value `{value}`."))?;
-		Self::from_parts(year, month, day).map_err(|_| format!("Invalid SQLite date value `{value}`."))
 	}
 }
 
@@ -506,8 +517,8 @@ impl Time {
 		Ok(Self { inner })
 	}
 
-	pub fn from_sqlite_text(value: &str) -> Result<Self, String> {
-		parse_time_text(value, &format!("Invalid SQLite time value `{value}`."))
+	pub fn from_iso_text(value: &str) -> Result<Self, String> {
+		parse_time_text(value, &format!("Invalid ISO-8601 time value `{value}`."))
 	}
 
 	pub fn hour(&self) -> u8 {
@@ -552,6 +563,12 @@ impl TimeTz {
 		}
 	}
 
+	pub fn from_iso_text(value: &str) -> Result<Self, String> {
+		let (time_text, offset_minutes) = parse_offset_suffix(value, &format!("Invalid ISO-8601 timetz value `{value}`."))?;
+		let time = parse_time_text(time_text, &format!("Invalid ISO-8601 timetz value `{value}`."))?;
+		Self::from_parts(time, offset_minutes)
+	}
+
 	pub fn from_literal(literal: &str) -> Result<Self, String> {
 		let value = literal.strip_prefix('@').ok_or(String::from("Time literals must begin with `@`."))?;
 		let (time_text, offset_minutes) = parse_offset_suffix(value, &format!("Invalid timetz literal `{literal}`."))?;
@@ -565,12 +582,6 @@ impl TimeTz {
 			offset_minutes,
 			time,
 		})
-	}
-
-	pub fn from_sqlite_text(value: &str) -> Result<Self, String> {
-		let (time_text, offset_minutes) = parse_offset_suffix(value, &format!("Invalid SQLite timetz value `{value}`."))?;
-		let time = parse_time_text(time_text, &format!("Invalid SQLite timetz value `{value}`."))?;
-		Self::from_parts(time, offset_minutes)
 	}
 
 	pub fn offset_minutes(&self) -> i16 {
@@ -636,11 +647,19 @@ impl Timestamp {
 		self.date
 	}
 
+	pub fn from_iso_text(value: &str) -> Result<Self, String> {
+		let (date_text, time_text) = split_timestamp_text(value, &format!("Invalid ISO-8601 timestamp value `{value}`."))?;
+		Ok(Self {
+			date: Date::from_iso_text(date_text)?,
+			time: parse_time_text(time_text, &format!("Invalid ISO-8601 timestamp value `{value}`."))?,
+		})
+	}
+
 	pub fn from_literal(literal: &str) -> Result<Self, String> {
 		let value = literal.strip_prefix('@').ok_or(String::from("Timestamp literals must begin with `@`."))?;
 		let (date_text, time_text) = split_timestamp_text(value, &format!("Invalid timestamp literal `{literal}`."))?;
 		Ok(Self {
-			date: Date::from_sqlite_text(date_text)?,
+			date: Date::from_iso_text(date_text)?,
 			time: parse_time_text(time_text, &format!("Invalid timestamp literal `{literal}`."))?,
 		})
 	}
@@ -650,14 +669,6 @@ impl Timestamp {
 			date,
 			time,
 		}
-	}
-
-	pub fn from_sqlite_text(value: &str) -> Result<Self, String> {
-		let (date_text, time_text) = split_timestamp_text(value, &format!("Invalid SQLite timestamp value `{value}`."))?;
-		Ok(Self {
-			date: Date::from_sqlite_text(date_text)?,
-			time: parse_time_text(time_text, &format!("Invalid SQLite timestamp value `{value}`."))?,
-		})
 	}
 
 	pub fn time(&self) -> Time {
@@ -697,10 +708,16 @@ impl TimestampTz {
 		}
 	}
 
+	pub fn from_iso_text(value: &str) -> Result<Self, String> {
+		let (timestamp_text, offset_minutes) = parse_offset_suffix(value, &format!("Invalid ISO-8601 timestamptz value `{value}`."))?;
+		let timestamp = Timestamp::from_iso_text(timestamp_text)?;
+		Self::from_parts(timestamp, offset_minutes)
+	}
+
 	pub fn from_literal(literal: &str) -> Result<Self, String> {
 		let value = literal.strip_prefix('@').ok_or(String::from("Timestamp literals must begin with `@`."))?;
 		let (timestamp_text, offset_minutes) = parse_offset_suffix(value, &format!("Invalid timestamptz literal `{literal}`."))?;
-		let timestamp = Timestamp::from_sqlite_text(timestamp_text)?;
+		let timestamp = Timestamp::from_iso_text(timestamp_text)?;
 		Self::from_parts(timestamp, offset_minutes)
 	}
 
@@ -710,12 +727,6 @@ impl TimestampTz {
 			offset_minutes,
 			timestamp,
 		})
-	}
-
-	pub fn from_sqlite_text(value: &str) -> Result<Self, String> {
-		let (timestamp_text, offset_minutes) = parse_offset_suffix(value, &format!("Invalid SQLite timestamptz value `{value}`."))?;
-		let timestamp = Timestamp::from_sqlite_text(timestamp_text)?;
-		Self::from_parts(timestamp, offset_minutes)
 	}
 
 	pub fn offset_minutes(&self) -> i16 {
@@ -753,85 +764,85 @@ impl PartialOrd for TimestampTz {
 	}
 }
 
-pub fn sqlite_record_field_runtime_value(
-	value: &DeferredSqliteValue,
+pub fn database_record_field_runtime_value(
+	value: &DatabaseValue,
 	data_type: &DataType,
 	is_nullable: bool,
 ) -> Result<Value, String> {
-	if is_nullable && matches!(value, DeferredSqliteValue::Null) {
+	if is_nullable && matches!(value, DatabaseValue::Null) {
 		return Ok(Value::Null);
 	}
 
 	match data_type {
 		DataType::Bool => match value {
-			DeferredSqliteValue::Integer(value) => Ok(Value::Boolean(*value != 0)),
+			DatabaseValue::Integer(value) => Ok(Value::Boolean(*value != 0)),
 			other => Err(format!(
-				"Cannot convert SQLite value `{}` to `bool`.",
-				deferred_sqlite_value_name(other),
+				"Cannot convert database value `{}` to `bool`.",
+				database_value_name(other),
 			)),
 		},
 		DataType::Date => match value {
-			DeferredSqliteValue::Text(value) => Ok(Value::Date(Date::from_sqlite_text(value)?)),
+			DatabaseValue::Text(value) => Ok(Value::Date(Date::from_iso_text(value)?)),
 			other => Err(format!(
-				"Cannot convert SQLite value `{}` to `date`.",
-				deferred_sqlite_value_name(other),
+				"Cannot convert database value `{}` to `date`.",
+				database_value_name(other),
 			)),
 		},
 		DataType::Dec => match value {
-			DeferredSqliteValue::Integer(value) => Ok(Value::Decimal(Decimal::from_integer(*value))),
-			DeferredSqliteValue::Real(value) => Ok(Value::Decimal(Decimal::from_literal(value)?)),
-			DeferredSqliteValue::Text(value) => Ok(Value::Decimal(Decimal::from_literal(value)?)),
+			DatabaseValue::Integer(value) => Ok(Value::Decimal(Decimal::from_integer(*value))),
+			DatabaseValue::Real(value) => Ok(Value::Decimal(Decimal::from_literal(value)?)),
+			DatabaseValue::Text(value) => Ok(Value::Decimal(Decimal::from_literal(value)?)),
 			other => Err(format!(
-				"Cannot convert SQLite value `{}` to `dec`.",
-				deferred_sqlite_value_name(other),
+				"Cannot convert database value `{}` to `dec`.",
+				database_value_name(other),
 			)),
 		},
 		DataType::Int => match value {
-			DeferredSqliteValue::Integer(value) => Ok(Value::Integer(*value)),
+			DatabaseValue::Integer(value) => Ok(Value::Integer(*value)),
 			other => Err(format!(
-				"Cannot convert SQLite value `{}` to `int`.",
-				deferred_sqlite_value_name(other),
+				"Cannot convert database value `{}` to `int`.",
+				database_value_name(other),
 			)),
 		},
-		DataType::Nullable(inner) => sqlite_record_field_runtime_value(value, inner, true),
+		DataType::Nullable(inner) => database_record_field_runtime_value(value, inner, true),
 		DataType::Text => match value {
-			DeferredSqliteValue::Text(value) => Ok(Value::Text(value.clone())),
+			DatabaseValue::Text(value) => Ok(Value::Text(value.clone())),
 			other => Err(format!(
-				"Cannot convert SQLite value `{}` to `text`.",
-				deferred_sqlite_value_name(other),
+				"Cannot convert database value `{}` to `text`.",
+				database_value_name(other),
 			)),
 		},
 		DataType::Time => match value {
-			DeferredSqliteValue::Text(value) => Ok(Value::Time(Time::from_sqlite_text(value)?)),
+			DatabaseValue::Text(value) => Ok(Value::Time(Time::from_iso_text(value)?)),
 			other => Err(format!(
-				"Cannot convert SQLite value `{}` to `time`.",
-				deferred_sqlite_value_name(other),
+				"Cannot convert database value `{}` to `time`.",
+				database_value_name(other),
 			)),
 		},
 		DataType::TimeTz => match value {
-			DeferredSqliteValue::Text(value) => Ok(Value::TimeTz(TimeTz::from_sqlite_text(value)?)),
+			DatabaseValue::Text(value) => Ok(Value::TimeTz(TimeTz::from_iso_text(value)?)),
 			other => Err(format!(
-				"Cannot convert SQLite value `{}` to `timetz`.",
-				deferred_sqlite_value_name(other),
+				"Cannot convert database value `{}` to `timetz`.",
+				database_value_name(other),
 			)),
 		},
 		DataType::Timestamp => match value {
-			DeferredSqliteValue::Text(value) => Ok(Value::Timestamp(Timestamp::from_sqlite_text(value)?)),
+			DatabaseValue::Text(value) => Ok(Value::Timestamp(Timestamp::from_iso_text(value)?)),
 			other => Err(format!(
-				"Cannot convert SQLite value `{}` to `timestamp`.",
-				deferred_sqlite_value_name(other),
+				"Cannot convert database value `{}` to `timestamp`.",
+				database_value_name(other),
 			)),
 		},
 		DataType::TimestampTz => match value {
-			DeferredSqliteValue::Text(value) => Ok(Value::TimestampTz(TimestampTz::from_sqlite_text(value)?)),
+			DatabaseValue::Text(value) => Ok(Value::TimestampTz(TimestampTz::from_iso_text(value)?)),
 			other => Err(format!(
-				"Cannot convert SQLite value `{}` to `timestamptz`.",
-				deferred_sqlite_value_name(other),
+				"Cannot convert database value `{}` to `timestamptz`.",
+				database_value_name(other),
 			)),
 		},
 		other => Err(format!(
-			"SQLite record pointer fields do not yet support runtime conversion to `{}`.",
-			data_type_name_for_sqlite_runtime(other),
+			"Database record pointer fields do not yet support runtime conversion to `{}`.",
+			data_type_name_for_database_runtime(other),
 		)),
 	}
 }
@@ -851,7 +862,7 @@ fn date_to_time_date(date: Date) -> time::Date {
 	time::Date::from_calendar_date(date.year, month, date.day).unwrap()
 }
 
-fn data_type_name_for_sqlite_runtime(data_type: &DataType) -> &'static str {
+fn data_type_name_for_database_runtime(data_type: &DataType) -> &'static str {
 	match data_type {
 		DataType::Any => "any",
 		DataType::Array(_) => "array",
@@ -861,7 +872,7 @@ fn data_type_name_for_sqlite_runtime(data_type: &DataType) -> &'static str {
 		DataType::EmptyArray => "empty array",
 		DataType::Int => "int",
 		DataType::Null => "null",
-		DataType::Nullable(inner) => data_type_name_for_sqlite_runtime(inner),
+		DataType::Nullable(inner) => data_type_name_for_database_runtime(inner),
 		DataType::Object(_) => "object",
 		DataType::Range(_) => "range",
 		DataType::RecordPointer(_) => "record pointer",
@@ -872,6 +883,16 @@ fn data_type_name_for_sqlite_runtime(data_type: &DataType) -> &'static str {
 		DataType::TimestampTz => "timestamptz",
 		DataType::Union(_) => "union",
 		DataType::Void => "void",
+	}
+}
+
+fn database_value_name(value: &DatabaseValue) -> &'static str {
+	match value {
+		DatabaseValue::Blob(_) => "blob",
+		DatabaseValue::Integer(_) => "integer",
+		DatabaseValue::Null => "null",
+		DatabaseValue::Real(_) => "real",
+		DatabaseValue::Text(_) => "text",
 	}
 }
 
@@ -894,16 +915,6 @@ fn decimal_precision(coefficient: i128, scale: u8) -> Result<u8, String> {
 	}
 
 	Ok(precision as u8)
-}
-
-fn deferred_sqlite_value_name(value: &DeferredSqliteValue) -> &'static str {
-	match value {
-		DeferredSqliteValue::Blob(_) => "blob",
-		DeferredSqliteValue::Integer(_) => "integer",
-		DeferredSqliteValue::Null => "null",
-		DeferredSqliteValue::Real(_) => "real",
-		DeferredSqliteValue::Text(_) => "text",
-	}
 }
 
 fn format_offset_minutes(offset_minutes: i16) -> String {
