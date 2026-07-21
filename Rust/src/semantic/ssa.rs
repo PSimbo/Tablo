@@ -901,6 +901,45 @@ pub fn analyze_program_local_usage(program: &AstProgram, semantic_program: &Sema
 	}
 }
 
+pub(crate) fn reachable_read_positions(
+	program: &AstProgram,
+	semantic_program: &SemanticProgram,
+) -> BTreeSet<usize> {
+	let ssa_program = analyze_program(program, semantic_program);
+	let mut positions = BTreeSet::new();
+
+	for function in &ssa_program.functions {
+		let mut pending_blocks = vec![function.entry_block];
+		let mut visited_blocks = BTreeSet::new();
+
+		while let Some(block_id) = pending_blocks.pop() {
+			if !visited_blocks.insert(block_id) {
+				continue;
+			}
+			let Some(block) = function.block(block_id) else {
+				continue;
+			};
+
+			for operation in &block.operations {
+				if let SsaOperation::Read { position, .. } = operation {
+					positions.insert(*position);
+				}
+			}
+
+			match block.terminator {
+				SsaTerminator::Branch { else_block, then_block, .. } => {
+					pending_blocks.push(else_block);
+					pending_blocks.push(then_block);
+				}
+				SsaTerminator::Jump { target } => pending_blocks.push(target),
+				SsaTerminator::End | SsaTerminator::Return { .. } => {}
+			}
+		}
+	}
+
+	positions
+}
+
 fn analyze_function_local_usage(
 	function: &FunctionDeclaration,
 	semantic_program: &SemanticProgram,

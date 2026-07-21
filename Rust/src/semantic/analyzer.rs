@@ -109,10 +109,17 @@ pub struct NewRecordLayout {
 pub struct RecordPointerBindingInfo {
 	pub assigned_fields: BTreeSet<String>,
 	pub data_type: RecordPointerType,
+	field_reads: Vec<RecordPointerFieldRead>,
 	pub initialization: RecordPointerInitialization,
 	pub is_mutable: bool,
 	pub origin: RecordPointerOrigin,
 	pub read_fields: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RecordPointerFieldRead {
+	field_name: String,
+	position: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -361,6 +368,7 @@ impl SemanticAnalyzer {
 		self.exit_scope();
 		self.functions.exit_scope();
 		self.enums.exit_scope();
+		self.finalize_record_pointer_field_reads(program);
 
 		Ok(self.semantic_program.clone())
 	}
@@ -784,6 +792,17 @@ impl SemanticAnalyzer {
 		}
 	}
 
+	fn finalize_record_pointer_field_reads(&mut self, program: &AstProgram) {
+		let reachable_positions = super::ssa::reachable_read_positions(program, &self.semantic_program);
+
+		for binding in self.semantic_program.record_pointer_bindings.values_mut() {
+			binding.field_reads.retain(|read| reachable_positions.contains(&read.position));
+			binding.read_fields = binding.field_reads.iter()
+				.map(|read| read.field_name.clone())
+				.collect();
+		}
+	}
+
 	fn group_by_item_key_names(&self, item: &crate::ast::GroupByItem) -> Vec<String> {
 		let mut names = Vec::new();
 
@@ -1161,7 +1180,7 @@ impl SemanticAnalyzer {
 							self.record_record_pointer_assignment(local.declaration_position, &target.fields);
 							if (*operator != AssignmentOperator::Assign || target.fields.len() > 1)
 								&& let Some(field) = target.fields.first() {
-								self.record_record_pointer_read(local.declaration_position, &field.name);
+								self.record_record_pointer_read(local.declaration_position, &field.name, target.object.position);
 							}
 						}
 
@@ -2612,11 +2631,11 @@ impl SemanticAnalyzer {
 		};
 
 		if matches!(local.data_type.without_nullability(), DataType::RecordPointer(_)) {
-			self.record_record_pointer_read(local.declaration_position, &field.name);
+			self.record_record_pointer_read(local.declaration_position, &field.name, base_identifier.position);
 		}
 	}
 
-	fn record_record_pointer_read(&mut self, position: usize, field_name: &str) {
+	fn record_record_pointer_read(&mut self, position: usize, field_name: &str, read_position: usize) {
 		let canonical_name = self.semantic_program.record_pointer_bindings.get(&position)
 			.and_then(|binding| {
 				let schema_catalog = self.current_schema_catalog.as_ref()?;
@@ -2630,7 +2649,13 @@ impl SemanticAnalyzer {
 			return;
 		};
 
-		binding.read_fields.insert(canonical_name);
+		let read = RecordPointerFieldRead {
+			field_name: canonical_name,
+			position: read_position,
+		};
+		if !binding.field_reads.contains(&read) {
+			binding.field_reads.push(read);
+		}
 	}
 
 	fn record_resolved_sequence(
@@ -2698,6 +2723,7 @@ impl SemanticAnalyzer {
 		self.semantic_program.record_pointer_bindings.insert(position, RecordPointerBindingInfo {
 			assigned_fields: BTreeSet::new(),
 			data_type: record_pointer,
+			field_reads: Vec::new(),
 			initialization,
 			is_mutable,
 			origin,
@@ -2928,7 +2954,7 @@ impl SemanticAnalyzer {
 
 		if matches!(local.data_type.without_nullability(), DataType::RecordPointer(_))
 			&& let Some(field) = fields.first() {
-			self.record_record_pointer_read(local.declaration_position, &field.name);
+			self.record_record_pointer_read(local.declaration_position, &field.name, base_identifier.position);
 		}
 
 		let mut current_type = local.data_type.clone();
@@ -5065,5 +5091,43 @@ mod tests {
 		let error = analyzer.analyze_program(&program).unwrap_err();
 
 		assert_eq!(error.message, "Function `Inner` cannot be declared `pub` inside another function.");
+	}
+
+	#[test]
+	fn retains_reads_from_reachable_branches_and_excludes_dead_code() {
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Ignored text not null,
+					Name text not null
+				);
+			"#,
+			"ExampleDb",
+		);
+		let program = parse_program(
+			concat!(
+				"with exampledb;\n",
+				"fn Main(args: [text]) int {\n",
+				"  rec cust = find first Customers;\n",
+				"  var useName: bool = true;\n",
+				"  if useName { displn(cust.Name); } else { var id: int = cust.Id; }\n",
+				"  return 0;\n",
+				"  var ignored: text = cust.Ignored;\n",
+				"}",
+			),
+		);
+		let declaration_position = match &program.functions[0].body.statements[0] {
+			Statement::RecordPointerDeclaration(statement) => statement.position,
+			other => panic!("Expected record pointer declaration, found {other:?}."),
+		};
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap();
+		let binding = semantic_program.record_pointer_binding(declaration_position).unwrap();
+
+		assert_eq!(binding.read_fields, BTreeSet::from([String::from("Id"), String::from("Name")]));
 	}
 }
