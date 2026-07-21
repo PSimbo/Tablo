@@ -6,23 +6,13 @@ use postgres::types::ToSql;
 use postgres_native_tls::MakeTlsConnector;
 
 use crate::ast::DataType;
-use crate::query::QueryResultColumn;
-use crate::query::SqlGroupByItem;
-use crate::query::SqlQuery;
-use crate::query::SqlQueryResultShape;
-use crate::value::DatabaseValue;
-use crate::value::RecordFieldValue;
-use crate::value::RecordPointerValue;
-use crate::value::Value;
-use crate::value::database_record_field_runtime_value;
+use crate::query::*;
+use crate::value::*;
 
-use super::records::LoadedRecord;
-use super::records::empty_record_pointer;
-use super::records::normalize_name;
-use super::records::record_group_boundaries;
-use super::records::record_pointer;
+use super::records::*;
 use super::runtime::DatabaseDriver;
 use super::values::runtime_type_name;
+use super::writes::*;
 
 pub(super) struct PostgreSqlSession {
 	client: Client,
@@ -47,12 +37,20 @@ impl DatabaseDriver for PostgreSqlSession {
 		Err(unsupported_operation("transaction commits"))
 	}
 
-	fn create_record(&mut self, _record: RecordPointerValue) -> Result<RecordPointerValue, String> {
-		Err(unsupported_operation("create statements"))
+	fn create_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String> {
+		let write = create_record_write(&record, WriteDialect::PostgreSql)?;
+		let affected_rows = execute_record_write(&mut self.client, "create", write)?;
+
+		expect_one_affected_row("PostgreSQL", "create", affected_rows)?;
+		Ok(mark_record_created(record))
 	}
 
-	fn delete_record(&mut self, _record: RecordPointerValue) -> Result<RecordPointerValue, String> {
-		Err(unsupported_operation("delete statements"))
+	fn delete_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String> {
+		let write = delete_record_write(&record, WriteDialect::PostgreSql)?;
+		let affected_rows = execute_record_write(&mut self.client, "delete", write)?;
+
+		expect_one_affected_row("PostgreSQL", "delete", affected_rows)?;
+		Ok(mark_record_deleted(record))
 	}
 
 	fn execute_query(&mut self, query: &SqlQuery, parameters: Vec<Value>) -> Result<Value, String> {
@@ -134,8 +132,12 @@ impl DatabaseDriver for PostgreSqlSession {
 		}
 	}
 
-	fn update_record(&mut self, _record: RecordPointerValue) -> Result<RecordPointerValue, String> {
-		Err(unsupported_operation("update statements"))
+	fn update_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String> {
+		let write = update_record_write(&record, WriteDialect::PostgreSql)?;
+		let affected_rows = execute_record_write(&mut self.client, "update", write)?;
+
+		expect_one_affected_row("PostgreSQL", "update", affected_rows)?;
+		Ok(mark_record_updated(record))
 	}
 }
 
@@ -154,6 +156,18 @@ fn client_connection_string<'a>(database_name: &str, connection_string: &'a str)
 	}
 
 	Ok(value)
+}
+
+fn execute_record_write(client: &mut Client, operation: &str, write: RecordWrite) -> Result<u64, String> {
+	let parameters = write.parameters.into_iter()
+		.map(runtime_value_to_postgresql)
+		.collect::<Result<Vec<_>, _>>()?;
+	let parameter_refs = parameters.iter()
+		.map(|value| value as &(dyn ToSql + Sync))
+		.collect::<Vec<_>>();
+
+	client.execute(&write.statement, &parameter_refs)
+		.map_err(|error| format!("Failed to execute PostgreSQL {operation} statement: {error}"))
 }
 
 fn load_group_keys(row: &postgres::Row, column_count: usize, group_by: &[SqlGroupByItem]) -> Result<Vec<Value>, String> {
@@ -229,13 +243,7 @@ fn unsupported_operation(operation: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-	use crate::ast::DataType;
-	use crate::value::Decimal;
-	use crate::value::Value;
-
-	use super::client_connection_string;
-	use super::normalize_temporal_text;
-	use super::runtime_value_to_postgresql;
+	use super::*;
 
 	#[test]
 	fn extracts_keyword_connection_parameters() {

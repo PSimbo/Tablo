@@ -1,5 +1,4 @@
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{ Path, PathBuf };
 
 pub fn canonicalize_or_original(path: &Path) -> PathBuf {
 	std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
@@ -45,14 +44,9 @@ pub fn unique_temp_path(name: &str, extension: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-	use std::path::Path;
-	use std::path::PathBuf;
+	use std::path::{ Path, PathBuf };
 
-	use super::canonicalize_or_original;
-	use super::existing_child_path;
-	use super::file_path_from_document_uri;
-	use super::unique_temp_directory;
-	use super::unique_temp_path;
+	use super::*;
 
 	#[test]
 	fn builds_unique_temp_path_with_extension() {

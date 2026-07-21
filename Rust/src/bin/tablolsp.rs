@@ -1,31 +1,17 @@
 use std::collections::BTreeMap;
 use std::io;
-use std::io::BufRead;
-use std::io::BufReader;
-use std::io::Write;
+use std::io::{ BufRead, BufReader, Write };
 
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use serde_json::json;
 
-use tablo::completion::CompletionItem;
-use tablo::completion::CompletionItemKind;
-use tablo::completion::collect_document_completion_items;
-use tablo::completion::dedupe_completion_items;
-use tablo::completion::default_completion_items;
-use tablo::completion::member_completion_items;
-use tablo::diagnostics::Diagnostic;
-use tablo::diagnostics::diagnostic_at_start;
-use tablo::diagnostics::diagnostic_for_tablo_error;
-use tablo::diagnostics::trailing_whitespace_diagnostics;
-use tablo::diagnostics::unused_variable_diagnostics;
-use tablo::discover_project_config_path;
-use tablo::local_usage_with_source_name;
-use tablo::local_usage_with_source_name_and_schema;
+use tablo::completion::*;
+use tablo::diagnostics::*;
 use tablo::runtime_config::read_schema_catalog_from_runtime_config_path;
-use tablo::source::SourceText;
-use tablo::source::source_offset_for_position;
+use tablo::source::*;
 use tablo::utils::file_path_from_document_uri;
+use tablo::*;
 
 fn main() {
 	let stdin = io::stdin();
@@ -501,15 +487,12 @@ mod tests {
 	use serde_json::json;
 	use serde_json::Value as JsonValue;
 
-	use super::LspServer;
-	use super::OpenDocument;
-	use super::Position;
-	use super::diagnostic_to_json;
-	use super::discover_project_config_path;
 	use tablo::TabloError;
 	use tablo::compiler::CompileError;
 	use tablo::diagnostics::diagnostic_for_tablo_error;
 	use tablo::utils::unique_temp_directory;
+
+	use super::*;
 
 	#[test]
 	fn completion_items_include_document_symbols_before_cursor() {

@@ -1,8 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Display;
 
-use crate::ast::DataType;
-use crate::ast::RecordPointerType;
+use crate::ast::{ DataType, RecordPointerType };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DatabaseValue {
@@ -27,16 +26,25 @@ pub enum RecordFieldValue {
 		is_nullable: bool,
 		value: DatabaseValue,
 	},
-	Materialized(Value),
+	Materialized {
+		data_type: DataType,
+		value: Value,
+	},
 }
 
 impl RecordFieldValue {
+	pub fn data_type(&self) -> &DataType {
+		match self {
+			Self::Deferred { data_type, .. } | Self::Materialized { data_type, .. } => data_type,
+		}
+	}
+
 	pub fn materialize(&self) -> Result<Value, String> {
 		match self {
 			Self::Deferred { data_type, is_nullable, value } => {
 				database_record_field_runtime_value(value, data_type, *is_nullable)
 			}
-			Self::Materialized(value) => Ok(value.clone()),
+			Self::Materialized { value, .. } => Ok(value.clone()),
 		}
 	}
 }
@@ -1179,12 +1187,7 @@ fn write_time_value(
 
 #[cfg(test)]
 mod tests {
-	use crate::ast::DataType;
-
-	use super::DatabaseValue;
-	use super::Decimal;
-	use super::Value;
-	use super::database_record_field_runtime_value;
+	use super::*;
 
 	#[test]
 	fn accepts_38_digit_decimal_literal() {

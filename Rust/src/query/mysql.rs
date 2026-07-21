@@ -1,13 +1,8 @@
 use crate::builtins::BuiltInFunction;
 use crate::schema::DatabaseBackend;
+use crate::sql::quote_mysql_identifier;
 
-use super::QueryBinaryOperator;
-use super::QueryExpr;
-use super::QueryLiteral;
-use super::QueryLoweringError;
-use super::QueryUnaryOperator;
-use super::SqlDialect;
-use super::SqlParameter;
+use super::*;
 use super::sql_renderer::SqlRenderer;
 
 pub(super) struct MySqlRenderer;
@@ -26,7 +21,7 @@ impl SqlRenderer for MySqlRenderer {
 	}
 
 	fn quote_identifier(&self, identifier: &str) -> String {
-		quote_identifier(identifier)
+		quote_mysql_identifier(identifier)
 	}
 }
 
@@ -120,8 +115,8 @@ fn lower_expression(expression: &QueryExpr, parameters: &mut Vec<SqlParameter>) 
 		QueryExpr::BuiltInCall(call) => lower_built_in(call, parameters),
 		QueryExpr::Column(column) => Ok(format!(
 			"{}.{}",
-			quote_identifier(&column.table_name),
-			quote_identifier(&column.column_name),
+			quote_mysql_identifier(&column.table_name),
+			quote_mysql_identifier(&column.column_name),
 		)),
 		QueryExpr::Literal(QueryLiteral::Boolean(value)) => Ok(if *value { String::from("TRUE") } else { String::from("FALSE") }),
 		QueryExpr::Literal(QueryLiteral::Date(value)) => Ok(typed_temporal_literal("DATE", &value.to_string())),
@@ -150,10 +145,6 @@ fn lower_expression(expression: &QueryExpr, parameters: &mut Vec<SqlParameter>) 
 			})
 		}
 	}
-}
-
-fn quote_identifier(identifier: &str) -> String {
-	format!("`{}`", identifier.replace('`', "``"))
 }
 
 fn quote_text_literal(value: &str) -> String {

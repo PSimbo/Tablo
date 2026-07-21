@@ -1,14 +1,9 @@
 use std::collections::BTreeSet;
 
-use crate::bytecode::InstructionSite;
-use crate::bytecode::Program;
-use crate::bytecode::SourceLocation;
+use crate::bytecode::*;
 use crate::database::RuntimeDatabaseConfig;
 use crate::value::Value;
-use crate::vm::VirtualMachine;
-use crate::vm::VmError;
-use crate::vm::VmExecutionState;
-use crate::vm::VmStackFrame;
+use crate::vm::*;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DebuggerStop {
@@ -321,16 +316,7 @@ impl PausedState {
 
 #[cfg(test)]
 mod tests {
-	use crate::bytecode::SourceFileDebugInfo;
-	use crate::compiler::Compiler;
-	use crate::source::SourceText;
-	use crate::syntax::lexer::Lexer;
-	use crate::syntax::parser::Parser;
-	use crate::value::Value;
-
-	use super::DebuggerSession;
-	use super::DebuggerStop;
-	use super::PauseReason;
+	use super::*;
 
 	fn compile_debug_program(source: &str, display_name: &str) -> crate::bytecode::Program {
 		let source_text = SourceText::new(source);

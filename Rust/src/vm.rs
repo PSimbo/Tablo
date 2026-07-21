@@ -1,34 +1,15 @@
 use std::collections::BTreeMap;
 
-use crate::ast::BinaryOperator;
-use crate::ast::Expr;
-use crate::ast::UnaryOperator;
+use crate::ast::*;
 use crate::builtins::BuiltInFunction;
-use crate::bytecode::CodeBody;
-use crate::bytecode::Instruction;
-use crate::bytecode::Program;
-use crate::bytecode::SourceLocation;
-use crate::database::DatabaseRuntime;
-use crate::database::RuntimeDatabaseConfig;
-use crate::format_string::NumericFormatPattern;
-use crate::format_string::NumericFormatTarget;
-use crate::format_string::TemporalFormatPattern;
-use crate::format_string::TemporalFormatTarget;
+use crate::bytecode::*;
+use crate::database::{ DatabaseRuntime, RuntimeDatabaseConfig };
+use crate::format_string::*;
 use crate::query::LoweredBackendQuery;
 use crate::source::SourceText;
 use crate::syntax::lexer::Lexer;
 use crate::syntax::parser::Parser;
-use crate::value::Decimal;
-use crate::value::DecimalRange;
-use crate::value::DecimalRangeIterator;
-use crate::value::EnumValue as RuntimeEnumValue;
-use crate::value::IntegerRange;
-use crate::value::IntegerRangeIterator;
-use crate::value::IteratorState;
-use crate::value::LocalReference;
-use crate::value::RecordFieldValue;
-use crate::value::RecordPointerValue;
-use crate::value::Value;
+use crate::value::*;
 
 pub(crate) enum VmExecutionState {
 	Completed(Option<Value>),
@@ -704,9 +685,17 @@ impl VirtualMachine {
 			}
 			Instruction::MakeRecordPointer {
 				field_names,
+				field_types,
 				record_type,
 				schema_is_implicit,
 			} => {
+				if field_names.len() != field_types.len() {
+					return Err(vm_error(
+						instruction_index,
+						String::from("Record pointer field metadata is inconsistent."),
+					));
+				}
+
 				let mut values = Vec::with_capacity(field_names.len());
 
 				for _ in 0..field_names.len() {
@@ -716,10 +705,13 @@ impl VirtualMachine {
 				values.reverse();
 				let mut fields = BTreeMap::new();
 
-				for (field_name, value) in field_names.iter().zip(values) {
+				for ((field_name, data_type), value) in field_names.iter().zip(field_types).zip(values) {
 					fields.insert(
 						normalize_record_field_name(field_name),
-						RecordFieldValue::Materialized(value),
+						RecordFieldValue::Materialized {
+							data_type: data_type.clone(),
+							value,
+						},
 					);
 				}
 
@@ -820,7 +812,7 @@ impl VirtualMachine {
 				enum_name,
 				variant_name,
 			} => {
-				self.stack.push(Value::Enum(RuntimeEnumValue {
+				self.stack.push(Value::Enum(EnumValue {
 					backing_value: Box::new(runtime_value_from_constant(backing_value)),
 					enum_name: enum_name.clone(),
 					variant_name: variant_name.clone(),
@@ -2695,14 +2687,15 @@ fn store_field_path_into_record_pointer(
 	let mut fields = record.fields;
 
 	if remaining_path.is_empty() {
-		if !fields.contains_key(&normalized_field_name) {
+		let Some(existing_field) = fields.get(&normalized_field_name) else {
 			return Err(vm_error(
 				instruction_index,
 				format!("Record pointer does not contain a field named `{field_name}`."),
 			));
-		}
+		};
+		let data_type = existing_field.data_type().clone();
 
-		fields.insert(normalized_field_name, RecordFieldValue::Materialized(value));
+		fields.insert(normalized_field_name, RecordFieldValue::Materialized { data_type, value });
 		return Ok(Value::RecordPointer(RecordPointerValue {
 			column_names,
 			exists,
@@ -2728,7 +2721,8 @@ fn store_field_path_into_record_pointer(
 		value,
 		instruction_index,
 	)?;
-	fields.insert(normalized_field_name, RecordFieldValue::Materialized(updated_child));
+	let data_type = child.data_type().clone();
+	fields.insert(normalized_field_name, RecordFieldValue::Materialized { data_type, value: updated_child });
 	Ok(Value::RecordPointer(RecordPointerValue {
 		column_names,
 		exists,
@@ -2921,27 +2915,7 @@ fn vm_error(instruction_index: usize, message: String) -> VmError {
 
 #[cfg(test)]
 mod tests {
-	use std::collections::BTreeMap;
-
-	use crate::ast::RecordPointerType;
-	use crate::builtins::BuiltInFunction;
-	use crate::bytecode::CodeBody;
-	use crate::bytecode::CodeBodyDebugInfo;
-	use crate::bytecode::ConstantPool;
-	use crate::bytecode::DebugInfo;
-	use crate::bytecode::Instruction;
-	use crate::bytecode::LocalVariableDebugInfo;
-	use crate::bytecode::Program;
-	use crate::value::Decimal;
-	use crate::value::DecimalRange;
-	use crate::value::RecordFieldValue;
-	use crate::value::RecordPointerValue;
-	use crate::value::Value;
-
-	use super::VirtualMachine;
-	use super::VmError;
-	use super::VmStackFrame;
-	use super::VmVisibleLocal;
+	use super::*;
 
 	#[test]
 	fn captures_visible_locals_in_runtime_stack_frame() {
@@ -3037,7 +3011,10 @@ mod tests {
 						fields: BTreeMap::from([
 							(
 								String::from("name"),
-								RecordFieldValue::Materialized(Value::Text(String::from("Ada"))),
+								RecordFieldValue::Materialized {
+									data_type: DataType::Text,
+									value: Value::Text(String::from("Ada")),
+								},
 							),
 						]),
 						group_boundaries: BTreeMap::new(),

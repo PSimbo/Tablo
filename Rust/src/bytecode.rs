@@ -3,7 +3,7 @@
 // grow into a richer structure once functions, sections, and debug metadata
 // are introduced.
 
-use crate::ast::RecordPointerType;
+use crate::ast::*;
 use crate::builtins::BuiltInFunction;
 use crate::query::LoweredBackendQuery;
 use crate::source::SourceText;
@@ -64,6 +64,7 @@ pub enum Instruction {
 	MakeRange,
 	MakeRecordPointer {
 		field_names: Vec<String>,
+		field_types: Vec<DataType>,
 		record_type: RecordPointerType,
 		schema_is_implicit: bool,
 	},
@@ -597,11 +598,7 @@ impl SourceLocation {
 
 #[cfg(test)]
 mod tests {
-	use super::CodeBody;
-	use super::CompiledFunction;
-	use super::ConstantPool;
-	use super::Instruction;
-	use super::Program;
+	use super::*;
 
 	#[test]
 	fn retains_compiled_functions_alongside_entry_code() {

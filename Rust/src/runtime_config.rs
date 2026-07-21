@@ -193,9 +193,6 @@ fn schema_error_message(error: crate::schema::SchemaError) -> String {
 
 #[cfg(test)]
 mod tests {
-	use super::RuntimeConfigError;
-	use super::read_runtime_database_config_from_str;
-	use super::read_schema_catalog_from_runtime_config_path;
 	use crate::utils::unique_temp_directory;
 
 	#[test]

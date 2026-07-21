@@ -2,57 +2,10 @@
 // semantically validated AST. It still owns local-slot allocation, but most
 // name resolution and type checking now live in `semantic::analyzer`.
 
-use crate::ast::ArrayLiteral;
-use crate::ast::AssignmentExpr;
-use crate::ast::AssignmentOperator;
-use crate::ast::AssignmentTarget;
-use crate::ast::BlockStatement;
-use crate::ast::BooleanLiteral;
-use crate::ast::BreakStatement;
-use crate::ast::CallExpr;
-use crate::ast::ContinueStatement;
-use crate::ast::CreateStatement;
-use crate::ast::DecimalLiteral;
-use crate::ast::DeleteStatement;
-use crate::ast::Expr;
-use crate::ast::FieldAccessExpr;
-use crate::ast::ForRecordStatement;
-use crate::ast::ForStatement;
-use crate::ast::FunctionDeclaration;
-use crate::ast::IdentifierExpr;
-use crate::ast::IfCondition;
-use crate::ast::IfStatement;
-use crate::ast::IndexExpr;
-use crate::ast::ObjectConstructionExpr;
-use crate::ast::Program as AstProgram;
-use crate::ast::RangeExpr;
-use crate::ast::RecordPointerDeclaration;
-use crate::ast::ReturnStatement;
-use crate::ast::Statement;
-use crate::ast::TernaryExpr;
-use crate::ast::TextLiteral;
-use crate::ast::TimeLiteral;
-use crate::ast::TimeTzLiteral;
-use crate::ast::TimestampLiteral;
-use crate::ast::TimestampTzLiteral;
-use crate::ast::TransactionStatement;
-use crate::ast::UnaryExpr;
-use crate::ast::UpdateStatement;
-use crate::ast::UseDeclaration;
-use crate::ast::VariableDeclaration;
-use crate::ast::WhileStatement;
-use crate::bytecode::CodeBody;
-use crate::bytecode::CodeBodyDebugInfo;
-use crate::bytecode::CompiledFunction;
-use crate::bytecode::DebugInfo;
-use crate::bytecode::Instruction;
-use crate::bytecode::LocalVariableDebugInfo;
-use crate::bytecode::Program;
+use crate::ast::*;
+use crate::bytecode::*;
 use crate::schema::SchemaCatalog;
-use crate::semantic::analyzer::EnumValue;
-use crate::semantic::analyzer::RecordPointerInitialization;
-use crate::semantic::analyzer::SemanticAnalyzer;
-use crate::semantic::analyzer::SemanticProgram;
+use crate::semantic::analyzer::*;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompileError {
@@ -525,6 +478,7 @@ impl Compiler {
 
 				self.emit(emission, Instruction::MakeRecordPointer {
 					field_names: layout.columns.iter().map(|column| column.name.clone()).collect(),
+					field_types: layout.columns.iter().map(|column| column.data_type.clone()).collect(),
 					record_type: layout.record_type.clone(),
 					schema_is_implicit: layout.schema_is_implicit,
 				}, debug_position.unwrap_or(new_expression.position));
@@ -1530,39 +1484,7 @@ fn statement_position(statement: &Statement) -> usize {
 
 #[cfg(test)]
 mod tests {
-	use crate::ast::ArrayLiteral;
-	use crate::ast::AssignmentExpr;
-	use crate::ast::AssignmentOperator;
-	use crate::ast::AssignmentTarget;
-	use crate::ast::BinaryExpr;
-	use crate::ast::BinaryOperator;
-	use crate::ast::BlockStatement;
-	use crate::ast::BooleanLiteral;
-	use crate::ast::BreakStatement;
-	use crate::ast::CallArgument;
-	use crate::ast::CallExpr;
-	use crate::ast::ContinueStatement;
-	use crate::ast::DataType;
-	use crate::ast::DecimalLiteral;
-	use crate::ast::Expr;
-	use crate::ast::ForStatement;
-	use crate::ast::IdentifierExpr;
-	use crate::ast::IfCondition;
-	use crate::ast::IfStatement;
-	use crate::ast::IntegerLiteral;
-	use crate::ast::Program as AstProgram;
-	use crate::ast::RangeExpr;
-	use crate::ast::Statement;
-	use crate::ast::TernaryExpr;
-	use crate::ast::TextLiteral;
-	use crate::ast::UnaryExpr;
-	use crate::ast::UnaryOperator;
-	use crate::ast::VariableDeclaration;
-	use crate::ast::WhileStatement;
-	use crate::bytecode::Instruction;
-	use crate::value::Decimal;
-
-	use super::Compiler;
+	use super::*;
 
 	#[test]
 	fn compiles_addition_in_post_order() {

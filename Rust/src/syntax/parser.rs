@@ -1,75 +1,7 @@
-use crate::ast::ArrayIndexAssignmentTarget;
-use crate::ast::ArrayLiteral;
-use crate::ast::AssignmentExpr;
-use crate::ast::AssignmentOperator;
-use crate::ast::AssignmentTarget;
-use crate::ast::BinaryExpr;
-use crate::ast::BinaryOperator;
-use crate::ast::BlockStatement;
-use crate::ast::BooleanLiteral;
-use crate::ast::BreakStatement;
-use crate::ast::CallArgument;
-use crate::ast::CallExpr;
-use crate::ast::ContinueStatement;
-use crate::ast::CountExpr;
-use crate::ast::CreateStatement;
-use crate::ast::DataType;
-use crate::ast::DateLiteral;
-use crate::ast::DecimalLiteral;
-use crate::ast::DeleteStatement;
-use crate::ast::EnumDeclaration;
-use crate::ast::EnumVariantDeclaration;
-use crate::ast::Expr;
-use crate::ast::FieldAccessExpr;
-use crate::ast::FindExpr;
-use crate::ast::FindKind;
-use crate::ast::ForRecordStatement;
-use crate::ast::ForStatement;
-use crate::ast::FunctionDeclaration;
-use crate::ast::FunctionParameter;
-use crate::ast::FunctionParameterType;
-use crate::ast::GroupByItem;
-use crate::ast::IdentifierExpr;
-use crate::ast::IfCondition;
-use crate::ast::IfStatement;
-use crate::ast::IndexExpr;
-use crate::ast::IntegerLiteral;
-use crate::ast::NewExpr;
-use crate::ast::NullLiteral;
-use crate::ast::ObjectConstructionExpr;
-use crate::ast::ObjectConstructionField;
-use crate::ast::ObjectDeclaration;
-use crate::ast::ObjectDeclarationShape;
-use crate::ast::ObjectFieldAssignmentTarget;
-use crate::ast::ObjectFieldDeclaration;
-use crate::ast::OrderByDirection;
-use crate::ast::OrderByItem;
-use crate::ast::Program;
-use crate::ast::RangeExpr;
-use crate::ast::RecordPointerDeclaration;
-use crate::ast::ReturnStatement;
-use crate::ast::SequenceReference;
-use crate::ast::Statement;
-use crate::ast::TableReference;
-use crate::ast::TernaryExpr;
-use crate::ast::TextLiteral;
-use crate::ast::TimeLiteral;
-use crate::ast::TimeTzLiteral;
-use crate::ast::TimestampLiteral;
-use crate::ast::TimestampTzLiteral;
-use crate::ast::TransactionStatement;
-use crate::ast::UnaryExpr;
-use crate::ast::UnaryOperator;
-use crate::ast::UpdateStatement;
-use crate::ast::UseDeclaration;
-use crate::ast::VariableDeclaration;
-use crate::ast::Visibility;
-use crate::ast::WhileStatement;
-use crate::ast::WithDeclaration;
+use crate::ast::*;
 use crate::value::Decimal;
 
-use super::token::Token;
-use super::token::TokenKind;
+use super::token::{ Token, TokenKind };
 
 pub struct Parser {
 	allow_object_construction_infix: bool,
@@ -114,7 +46,7 @@ impl Parser {
 		Ok(expression)
 	}
 
-	pub fn parse_program(&mut self) -> Result<Program, ParseError> {
+	pub fn parse_program(&mut self) -> Result<AstProgram, ParseError> {
 		let mut functions = Vec::new();
 		let mut objects = Vec::new();
 		let mut statements = Vec::new();
@@ -154,7 +86,7 @@ impl Parser {
 
 		self.expect_end_of_file()?;
 
-		Ok(Program {
+		Ok(AstProgram {
 			functions,
 			objects,
 			result,
@@ -2329,79 +2261,7 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
-	use crate::ast::ArrayIndexAssignmentTarget;
-	use crate::ast::ArrayLiteral;
-	use crate::ast::AssignmentExpr;
-	use crate::ast::AssignmentOperator;
-	use crate::ast::AssignmentTarget;
-	use crate::ast::BinaryExpr;
-	use crate::ast::BinaryOperator;
-	use crate::ast::BlockStatement;
-	use crate::ast::BooleanLiteral;
-	use crate::ast::BreakStatement;
-	use crate::ast::CallArgument;
-	use crate::ast::CallExpr;
-	use crate::ast::ContinueStatement;
-	use crate::ast::CountExpr;
-	use crate::ast::CreateStatement;
-	use crate::ast::DataType;
-	use crate::ast::DateLiteral;
-	use crate::ast::DecimalLiteral;
-	use crate::ast::DeleteStatement;
-	use crate::ast::EnumDeclaration;
-	use crate::ast::EnumVariantDeclaration;
-	use crate::ast::Expr;
-	use crate::ast::FieldAccessExpr;
-	use crate::ast::FindExpr;
-	use crate::ast::FindKind;
-	use crate::ast::ForRecordStatement;
-	use crate::ast::ForStatement;
-	use crate::ast::FunctionDeclaration;
-	use crate::ast::FunctionParameter;
-	use crate::ast::FunctionParameterType;
-	use crate::ast::GroupByItem;
-	use crate::ast::IdentifierExpr;
-	use crate::ast::IfCondition;
-	use crate::ast::IfStatement;
-	use crate::ast::IndexExpr;
-	use crate::ast::IntegerLiteral;
-	use crate::ast::NewExpr;
-	use crate::ast::NullLiteral;
-	use crate::ast::ObjectConstructionExpr;
-	use crate::ast::ObjectConstructionField;
-	use crate::ast::ObjectDeclaration;
-	use crate::ast::ObjectDeclarationShape;
-	use crate::ast::ObjectFieldAssignmentTarget;
-	use crate::ast::ObjectFieldDeclaration;
-	use crate::ast::OrderByDirection;
-	use crate::ast::OrderByItem;
-	use crate::ast::Program;
-	use crate::ast::RangeExpr;
-	use crate::ast::RecordPointerDeclaration;
-	use crate::ast::ReturnStatement;
-	use crate::ast::SequenceReference;
-	use crate::ast::Statement;
-	use crate::ast::TableReference;
-	use crate::ast::TernaryExpr;
-	use crate::ast::TextLiteral;
-	use crate::ast::TimeLiteral;
-	use crate::ast::TimeTzLiteral;
-	use crate::ast::TimestampLiteral;
-	use crate::ast::TimestampTzLiteral;
-	use crate::ast::TransactionStatement;
-	use crate::ast::UnaryExpr;
-	use crate::ast::UnaryOperator;
-	use crate::ast::UpdateStatement;
-	use crate::ast::UseDeclaration;
-	use crate::ast::VariableDeclaration;
-	use crate::ast::Visibility;
-	use crate::ast::WhileStatement;
-	use crate::ast::WithDeclaration;
-	use crate::source::SourceText;
-	use crate::value::Decimal;
-
-	use super::super::lexer::Lexer;
-	use super::Parser;
+	use super::*;
 
 	fn normalize_assignment_target(target: AssignmentTarget) -> AssignmentTarget {
 		match target {
@@ -2720,8 +2580,8 @@ mod tests {
 		}
 	}
 
-	fn normalize_program(program: Program) -> Program {
-		Program {
+	fn normalize_program(program: AstProgram) -> AstProgram {
+		AstProgram {
 			functions: program.functions.into_iter().map(normalize_function_declaration).collect(),
 			objects: program.objects.into_iter().map(normalize_object_declaration).collect(),
 			result: program.result.map(normalize_expr),
@@ -2848,7 +2708,7 @@ mod tests {
 		normalize_expr(parser.parse_expression().unwrap())
 	}
 
-	fn parse_program(source: &str) -> Program {
+	fn parse_program(source: &str) -> AstProgram {
 		let mut lexer = Lexer::new(SourceText::new(source));
 		let tokens = lexer.tokenize().unwrap();
 		let mut parser = Parser::new(tokens);

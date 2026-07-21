@@ -1,16 +1,11 @@
 use std::collections::BTreeMap;
 
-use crate::query::LoweredBackendQuery;
-use crate::query::SqlQuery;
+use crate::query::{ LoweredBackendQuery, SqlQuery };
 use crate::schema::DatabaseBackend;
-use crate::value::RecordPointerValue;
-use crate::value::Value;
+use crate::value::{ RecordPointerValue, Value };
 
-use super::config::RuntimeDatabaseConfig;
-use super::config::normalize_database_name;
-use super::mysql;
-use super::postgresql;
-use super::sqlite;
+use super::config::*;
+use super::{ mysql, postgresql, sqlite };
 
 pub(super) trait DatabaseDriver {
 	fn commit_transaction(&mut self, target_depth: usize, savepoint_name: &str) -> Result<(), String>;
@@ -206,13 +201,7 @@ struct TransactionScope {
 
 #[cfg(test)]
 mod tests {
-	use crate::query::LoweredBackendQuery;
-	use crate::query::SqlDialect;
-	use crate::query::SqlQuery;
-	use crate::query::SqlQueryResultShape;
-
-	use super::DatabaseRuntime;
-	use super::RuntimeDatabaseConfig;
+	use super::*;
 
 	#[test]
 	fn rejects_execution_when_compiled_and_configured_backends_differ() {

@@ -1,30 +1,18 @@
 use std::collections::BTreeMap;
 
-use mysql::Conn;
-use mysql::Opts;
-use mysql::Params;
-use mysql::Row;
+use mysql::{ Conn, Opts, OptsBuilder, Params, Row };
 use mysql::Value as MySqlValue;
+use mysql::consts::CapabilityFlags;
 use mysql::prelude::Queryable;
 
 use crate::ast::DataType;
-use crate::query::QueryResultColumn;
-use crate::query::SqlGroupByItem;
-use crate::query::SqlQuery;
-use crate::query::SqlQueryResultShape;
-use crate::value::DatabaseValue;
-use crate::value::RecordFieldValue;
-use crate::value::RecordPointerValue;
-use crate::value::Value;
-use crate::value::database_record_field_runtime_value;
+use crate::query::*;
+use crate::value::*;
 
-use super::records::LoadedRecord;
-use super::records::empty_record_pointer;
-use super::records::normalize_name;
-use super::records::record_group_boundaries;
-use super::records::record_pointer;
+use super::records::*;
 use super::runtime::DatabaseDriver;
 use super::values::runtime_type_name;
+use super::writes::*;
 
 pub(super) struct MySqlSession {
 	connection: Conn,
@@ -36,6 +24,8 @@ impl MySqlSession {
 		let options = Opts::from_url(url).map_err(|error| {
 			format!("MySQL database `{database_name}` has an invalid runtime connection string: {error}")
 		})?;
+		let options = OptsBuilder::from_opts(options)
+			.additional_capabilities(CapabilityFlags::CLIENT_FOUND_ROWS);
 		let connection = Conn::new(options).map_err(|error| {
 			format!("Failed to connect to MySQL database `{database_name}`: {error}")
 		})?;
@@ -49,12 +39,20 @@ impl DatabaseDriver for MySqlSession {
 		Err(unsupported_operation("transaction commits"))
 	}
 
-	fn create_record(&mut self, _record: RecordPointerValue) -> Result<RecordPointerValue, String> {
-		Err(unsupported_operation("create statements"))
+	fn create_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String> {
+		let write = create_record_write(&record, WriteDialect::MySql)?;
+		let affected_rows = execute_record_write(&mut self.connection, "create", write)?;
+
+		expect_one_affected_row("MySQL", "create", affected_rows)?;
+		Ok(mark_record_created(record))
 	}
 
-	fn delete_record(&mut self, _record: RecordPointerValue) -> Result<RecordPointerValue, String> {
-		Err(unsupported_operation("delete statements"))
+	fn delete_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String> {
+		let write = delete_record_write(&record, WriteDialect::MySql)?;
+		let affected_rows = execute_record_write(&mut self.connection, "delete", write)?;
+
+		expect_one_affected_row("MySQL", "delete", affected_rows)?;
+		Ok(mark_record_deleted(record))
 	}
 
 	fn execute_query(&mut self, query: &SqlQuery, parameters: Vec<Value>) -> Result<Value, String> {
@@ -132,8 +130,12 @@ impl DatabaseDriver for MySqlSession {
 		}
 	}
 
-	fn update_record(&mut self, _record: RecordPointerValue) -> Result<RecordPointerValue, String> {
-		Err(unsupported_operation("update statements"))
+	fn update_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String> {
+		let write = update_record_write(&record, WriteDialect::MySql)?;
+		let affected_rows = execute_record_write(&mut self.connection, "update", write)?;
+
+		expect_one_affected_row("MySQL", "update", affected_rows)?;
+		Ok(mark_record_updated(record))
 	}
 }
 
@@ -186,6 +188,16 @@ fn database_value(value: &MySqlValue, data_type: &DataType) -> Result<DatabaseVa
 			.map(DatabaseValue::Integer)
 			.map_err(|_| format!("MySQL unsigned integer `{value}` exceeds the range of Tablo `int`.")),
 	}
+}
+
+fn execute_record_write(connection: &mut Conn, operation: &str, write: RecordWrite) -> Result<u64, String> {
+	let parameters = write.parameters.into_iter()
+		.map(runtime_value_to_mysql)
+		.collect::<Result<Vec<_>, _>>()?;
+
+	connection.exec_drop(&write.statement, Params::Positional(parameters))
+		.map_err(|error| format!("Failed to execute MySQL {operation} statement: {error}"))?;
+	Ok(connection.affected_rows())
 }
 
 fn format_mysql_time(hour: u8, minute: u8, second: u8, microsecond: u32) -> String {
@@ -279,13 +291,7 @@ fn unsupported_operation(operation: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-	use crate::ast::DataType;
-	use crate::value::Decimal;
-	use crate::value::Value;
-
-	use super::connection_url;
-	use super::database_value;
-	use super::runtime_value_to_mysql;
+	use super::*;
 
 	#[test]
 	fn accepts_standard_mysql_url() {

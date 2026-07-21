@@ -1,13 +1,6 @@
 use crate::builtins::BuiltInFunction;
-use crate::schema::ResolvedTable;
-use crate::schema::SchemaCatalog;
-use crate::schema::SchemaDataType;
-use crate::source::find_matching_paren;
-use crate::source::is_identifier_char;
-use crate::source::read_identifier;
-use crate::source::skip_comment;
-use crate::source::skip_string_literal;
-use crate::source::skip_whitespace;
+use crate::schema::*;
+use crate::source::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompletionItemKind {
@@ -1301,11 +1294,7 @@ fn strip_wrapping_parentheses(source: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-	use crate::schema_fixture::read_schema_catalog_from_str;
-
-	use super::collect_document_completion_items;
-	use super::default_completion_items;
-	use super::member_completion_items;
+	use super::*;
 
 	#[test]
 	fn completion_items_dedupe_labels() {

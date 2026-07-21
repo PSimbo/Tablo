@@ -1,8 +1,6 @@
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
+use std::collections::{ BTreeMap, BTreeSet };
 use std::fmt::Display;
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{ Path, PathBuf };
 
 pub mod ast;
 pub mod builtins;
@@ -27,28 +25,19 @@ pub mod vm;
 
 mod sql;
 
-use bytecode::Program;
-use bytecode::SourceFileDebugInfo;
-use compiler::CompileError;
-use compiler::Compiler;
+use bytecode::*;
+use compiler::{ CompileError , Compiler };
 use database::RuntimeDatabaseConfig;
-use object_file::ObjectFileError;
-use object_file::read_program_from_path;
-use object_file::write_program_to_path;
+use object_file::*;
 use schema::SchemaCatalog;
 use semantic::analyzer::SemanticAnalyzer;
-use semantic::ssa::FunctionLocalUsage;
-use semantic::ssa::ProgramLocalUsage;
-use semantic::ssa::analyze_program_local_usage;
+use semantic::ssa::*;
 use source::SourceText;
-use syntax::lexer::LexError;
-use syntax::lexer::Lexer;
-use syntax::parser::ParseError;
-use syntax::parser::Parser;
+use syntax::lexer::{ LexError, Lexer };
+use syntax::parser::{ ParseError, Parser };
 use utils::canonicalize_or_original;
 use value::Value;
-use vm::VirtualMachine;
-use vm::VmError;
+use vm::{ VirtualMachine, VmError };
 
 const EXTERNAL_SOURCE_DIAGNOSTIC_PREFIX: &str = "__tablo_external_diagnostic__";
 
@@ -144,7 +133,7 @@ struct LinkedModule {
 struct LinkedProgram {
 	function_source_files: Vec<SourceFileDebugInfo>,
 	function_source_indices: Vec<u32>,
-	program: ast::Program,
+	program: ast::AstProgram,
 	root_source_file: SourceFileDebugInfo,
 	top_level_function_source_names: Vec<String>,
 }
@@ -158,7 +147,7 @@ struct ModuleLinker {
 impl ModuleLinker {
 	fn collect_import_bindings(
 		&mut self,
-		program: &ast::Program,
+		program: &ast::AstProgram,
 		base_directory: &Path,
 	) -> Result<BTreeMap<String, String>, CompileError> {
 		let mut import_bindings = BTreeMap::new();
@@ -496,7 +485,7 @@ fn attach_source_debug_info(program: &mut Program, linked_program: &LinkedProgra
 	}
 }
 
-fn build_top_level_function_renames(program: &ast::Program, module_id: u32) -> BTreeMap<String, String> {
+fn build_top_level_function_renames(program: &ast::AstProgram, module_id: u32) -> BTreeMap<String, String> {
 	program.functions.iter()
 		.map(|function| {
 			(
@@ -511,7 +500,7 @@ fn canonical_module_key(module_path: &Path) -> PathBuf {
 	canonicalize_or_original(module_path)
 }
 
-fn collect_function_source_indices(program: &ast::Program, source_file_index: u32) -> Vec<u32> {
+fn collect_function_source_indices(program: &ast::AstProgram, source_file_index: u32) -> Vec<u32> {
 	let mut source_indices = Vec::new();
 
 	for function in &program.functions {
@@ -531,7 +520,7 @@ fn collect_local_function_names(statements: &[ast::Statement]) -> Vec<String> {
 }
 
 fn compile_ast_program_with_schema_and_analyzer(
-	program: &ast::Program,
+	program: &ast::AstProgram,
 	target: CompilationTarget,
 	schema_catalog: Option<&SchemaCatalog>,
 	mut analyzer: SemanticAnalyzer,
@@ -662,7 +651,7 @@ fn filter_root_source_local_usage(local_usage: ProgramLocalUsage, linked_program
 	}
 }
 
-fn first_nested_use_position(program: &ast::Program) -> Option<usize> {
+fn first_nested_use_position(program: &ast::AstProgram) -> Option<usize> {
 	for function in &program.functions {
 		if let Some(position) = first_use_in_statements(&function.body.statements) {
 			return Some(position);
@@ -743,7 +732,7 @@ fn first_use_in_statements(statements: &[ast::Statement]) -> Option<usize> {
 	None
 }
 
-fn first_use_statement(program: &ast::Program) -> Option<&ast::UseDeclaration> {
+fn first_use_statement(program: &ast::AstProgram) -> Option<&ast::UseDeclaration> {
 	for statement in &program.statements {
 		if let ast::Statement::Use(use_declaration) = statement {
 			return Some(use_declaration);
@@ -777,7 +766,7 @@ fn format_source_location(location: &bytecode::SourceLocation, include_body_name
 }
 
 fn link_program_modules(
-	program: &ast::Program,
+	program: &ast::AstProgram,
 	source: &SourceText,
 	source_name: Option<&str>,
 ) -> Result<LinkedProgram, CompileError> {
@@ -894,7 +883,7 @@ fn merge_with_declarations(
 	merged
 }
 
-fn parse_source_text(source: &SourceText) -> Result<ast::Program, TabloError> {
+fn parse_source_text(source: &SourceText) -> Result<ast::AstProgram, TabloError> {
 	let mut lexer = Lexer::new(source.clone());
 	let tokens = lexer.tokenize().map_err(TabloError::Lex)?;
 	let mut parser = Parser::new(tokens);
@@ -1112,7 +1101,7 @@ fn unmangled_export_name(name: &str, top_level_renames: &BTreeMap<String, String
 		.find_map(|(original, renamed)| if renamed == name { Some(original.clone()) } else { None })
 }
 
-fn validate_module_graph(program: &ast::Program, source_name: Option<&str>) -> Result<(), CompileError> {
+fn validate_module_graph(program: &ast::AstProgram, source_name: Option<&str>) -> Result<(), CompileError> {
 	if let Some(position) = first_nested_use_position(program) {
 		return Err(CompileError {
 			message: String::from("Nested `use` declarations are not yet supported during module resolution."),
@@ -1138,7 +1127,7 @@ fn validate_module_graph(program: &ast::Program, source_name: Option<&str>) -> R
 }
 
 fn validate_module_imports_in_program(
-	program: &ast::Program,
+	program: &ast::AstProgram,
 	base_directory: &Path,
 	visited: &mut BTreeSet<PathBuf>,
 ) -> Result<(), CompileError> {
@@ -1222,32 +1211,7 @@ fn validate_module_imports_in_program(
 
 #[cfg(test)]
 mod tests {
-	use std::fs;
-	use std::path::PathBuf;
-
-	use rusqlite::Connection;
-
-	use crate::bytecode::Instruction;
-	use crate::database::RuntimeDatabaseConfig;
-	use crate::object_file::read_program_from_path;
-	use crate::object_file::write_program_to_path;
-	use crate::query::LoweredBackendQuery;
-	use crate::query::SqlDialect;
-	use crate::query::SqlQueryResultShape;
-	use crate::schema::DatabaseBackend;
-	use crate::schema::SchemaCatalog;
-	use crate::schema_fixture::read_schema_catalog_from_str;
-	use crate::value::Value;
-
-	use super::CompilationTarget;
-	use super::TabloError;
-	use super::compile;
-	use super::compile_source_to_program_with_name_and_schema;
-	use super::compile_with_source_name;
-	use super::run;
-	use super::run_file;
-	use super::run_program;
-	use super::run_program_with_database_config;
+	use super::*;
 
 	fn compile_snippet_to_object_file(source: &str, output_path: &std::path::Path) -> Result<(), TabloError> {
 		let program = compile_source_to_program_with_name_and_schema(source, None, CompilationTarget::Snippet, None)?;

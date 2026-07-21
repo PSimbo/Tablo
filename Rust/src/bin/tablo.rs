@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
 use clap::Parser as ClapParser;
+
 use tablo::database::RuntimeDatabaseConfig;
-use tablo::run_file;
-use tablo::run_file_with_database_config;
 use tablo::runtime_config::read_runtime_database_config_from_path;
 use tablo::utils::existing_child_path;
+use tablo::*;
 
 #[derive(ClapParser, Debug)]
 #[command(name = "tablo")]
@@ -118,11 +118,7 @@ fn resolve_runtime_config_path(config_path: Option<&PathBuf>) -> Result<Option<P
 
 #[cfg(test)]
 mod tests {
-	use super::build_database_config;
-	use super::default_runtime_config_path;
-	use super::parse_database_mapping;
-	use tablo::utils::unique_temp_directory;
-	use tablo::utils::unique_temp_path;
+	use super::*;
 
 	#[test]
 	fn builds_runtime_database_config_from_cli_mappings() {

@@ -1,15 +1,10 @@
 use crate::ast::DataType;
 use crate::builtins::BuiltInFunction;
 use crate::schema::DatabaseBackend;
+use crate::sql::postgresql_type_name;
 use crate::sql::quote_identifier as quote_ansi_identifier;
 
-use super::QueryBinaryOperator;
-use super::QueryExpr;
-use super::QueryLiteral;
-use super::QueryLoweringError;
-use super::QueryUnaryOperator;
-use super::SqlDialect;
-use super::SqlParameter;
+use super::*;
 use super::sql_renderer::SqlRenderer;
 
 pub(super) struct PostgreSqlRenderer;
@@ -167,21 +162,12 @@ fn lower_expression(expression: &QueryExpr, parameters: &mut Vec<SqlParameter>) 
 }
 
 fn postgresql_parameter(index: u32, data_type: &DataType) -> Result<String, QueryLoweringError> {
-	let data_type = data_type.without_nullability();
-	let sql_type = match data_type {
-		DataType::Bool => "BOOLEAN",
-		DataType::Date => "DATE",
-		DataType::Dec => "NUMERIC",
-		DataType::Int => "BIGINT",
-		DataType::Text => "TEXT",
-		DataType::Time => "TIME",
-		DataType::TimeTz => "TIME WITH TIME ZONE",
-		DataType::Timestamp => "TIMESTAMP",
-		DataType::TimestampTz => "TIMESTAMP WITH TIME ZONE",
-		other => {
+	let sql_type = match postgresql_type_name(data_type) {
+		Some(sql_type) => sql_type,
+		None => {
 			return Err(QueryLoweringError::UnsupportedExpression {
 				backend: DatabaseBackend::PostgreSql,
-				description: format!("parameter of type `{}`", other.name()),
+				description: format!("parameter of type `{}`", data_type.name()),
 			});
 		}
 	};

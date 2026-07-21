@@ -6,25 +6,14 @@ use rusqlite::params_from_iter;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::types::ValueRef;
 
-use crate::query::QueryResultColumn;
-use crate::query::SqlGroupByItem;
-use crate::query::SqlQuery;
-use crate::query::SqlQueryResultShape;
+use crate::query::*;
 use crate::sql::quote_identifier;
-use crate::sql::table_source;
-use crate::value::DatabaseValue;
-use crate::value::RecordFieldValue;
-use crate::value::RecordPointerValue;
-use crate::value::Value;
-use crate::value::database_record_field_runtime_value;
+use crate::value::*;
 
-use super::records::LoadedRecord;
-use super::records::empty_record_pointer;
-use super::records::normalize_name;
-use super::records::record_group_boundaries;
-use super::records::record_pointer;
+use super::records::*;
 use super::runtime::DatabaseDriver;
 use super::values::runtime_type_name;
+use super::writes::*;
 
 pub(super) struct SqliteSession {
 	connection: Connection,
@@ -65,57 +54,27 @@ impl DatabaseDriver for SqliteSession {
 	}
 
 	fn create_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String> {
-		let table_source = table_source(&record.record_type.schema_name, &record.record_type.table_name, record.schema_is_implicit);
-		let column_list = record.column_names.iter().map(|name| quote_identifier(name)).collect::<Vec<_>>().join(", ");
-		let placeholders = std::iter::repeat("?").take(record.column_names.len()).collect::<Vec<_>>().join(", ");
-		let statement = format!("INSERT INTO {table_source} ({column_list}) VALUES ({placeholders})");
-		let parameter_values = record.column_names.iter()
-			.map(|column_name| {
-				let field = record.fields.get(&normalize_name(column_name)).ok_or_else(|| {
-					format!("Record pointer does not contain a field named `{column_name}`.")
-				})?;
-				runtime_value_to_sqlite(field.materialize()?)
-			})
+		let write = create_record_write(&record, WriteDialect::Sqlite)?;
+		let parameter_values = write.parameters.into_iter()
+			.map(runtime_value_to_sqlite)
 			.collect::<Result<Vec<_>, _>>()?;
-
-		self.connection.execute(&statement, params_from_iter(parameter_values))
+		let affected_rows = self.connection.execute(&write.statement, params_from_iter(parameter_values))
 			.map_err(|error| format!("Failed to execute SQLite create statement: {error}"))?;
-		let original_fields = record.fields.clone();
 
-		Ok(RecordPointerValue {
-			is_dirty: false,
-			original_fields,
-			persisted: true,
-			..record
-		})
+		expect_one_affected_row("SQLite", "create", affected_rows as u64)?;
+		Ok(mark_record_created(record))
 	}
 
 	fn delete_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String> {
-		let table_source = table_source(&record.record_type.schema_name, &record.record_type.table_name, record.schema_is_implicit);
-		let predicate_column_names = identity_column_names(&record);
-		let predicates = predicate_column_names.iter()
-			.map(|name| format!("{} IS ?", quote_identifier(name)))
-			.collect::<Vec<_>>()
-			.join(" AND ");
-		let statement = format!("DELETE FROM {table_source} WHERE {predicates}");
-		let parameter_values = original_identity_values(&record, &predicate_column_names)?;
-		let affected_rows = self.connection.execute(&statement, params_from_iter(parameter_values))
+		let write = delete_record_write(&record, WriteDialect::Sqlite)?;
+		let parameter_values = write.parameters.into_iter()
+			.map(runtime_value_to_sqlite)
+			.collect::<Result<Vec<_>, _>>()?;
+		let affected_rows = self.connection.execute(&write.statement, params_from_iter(parameter_values))
 			.map_err(|error| format!("Failed to execute SQLite delete statement: {error}"))?;
 
-		if affected_rows != 1 {
-			return Err(format!("SQLite delete expected to affect 1 row, affected {affected_rows}."));
-		}
-
-		Ok(RecordPointerValue {
-			exists: false,
-			fields: BTreeMap::new(),
-			is_dirty: false,
-			locked: false,
-			original_fields: BTreeMap::new(),
-			primary_key_column_names: Vec::new(),
-			persisted: false,
-			..record
-		})
+		expect_one_affected_row("SQLite", "delete", affected_rows as u64)?;
+		Ok(mark_record_deleted(record))
 	}
 
 	fn execute_query(&mut self, query: &SqlQuery, parameters: Vec<Value>) -> Result<Value, String> {
@@ -246,30 +205,15 @@ impl DatabaseDriver for SqliteSession {
 	}
 
 	fn update_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String> {
-		let table_source = table_source(&record.record_type.schema_name, &record.record_type.table_name, record.schema_is_implicit);
-		let assignments = record.column_names.iter().map(|name| format!("{} = ?", quote_identifier(name))).collect::<Vec<_>>().join(", ");
-		let predicate_column_names = identity_column_names(&record);
-		let predicates = predicate_column_names.iter().map(|name| format!("{} IS ?", quote_identifier(name))).collect::<Vec<_>>().join(" AND ");
-		let statement = format!("UPDATE {table_source} SET {assignments} WHERE {predicates}");
-		let mut parameter_values = Vec::with_capacity(record.column_names.len() + predicate_column_names.len());
-
-		for column_name in &record.column_names {
-			let field = record.fields.get(&normalize_name(column_name)).ok_or_else(|| {
-				format!("Record pointer does not contain a field named `{column_name}`.")
-			})?;
-			parameter_values.push(runtime_value_to_sqlite(field.materialize()?)?);
-		}
-
-		parameter_values.extend(original_identity_values(&record, &predicate_column_names)?);
-		let affected_rows = self.connection.execute(&statement, params_from_iter(parameter_values))
+		let write = update_record_write(&record, WriteDialect::Sqlite)?;
+		let parameter_values = write.parameters.into_iter()
+			.map(runtime_value_to_sqlite)
+			.collect::<Result<Vec<_>, _>>()?;
+		let affected_rows = self.connection.execute(&write.statement, params_from_iter(parameter_values))
 			.map_err(|error| format!("Failed to execute SQLite update statement: {error}"))?;
 
-		if affected_rows != 1 {
-			return Err(format!("SQLite update expected to affect 1 row, affected {affected_rows}."));
-		}
-
-		let original_fields = record.fields.clone();
-		Ok(RecordPointerValue { is_dirty: false, original_fields, ..record })
+		expect_one_affected_row("SQLite", "update", affected_rows as u64)?;
+		Ok(mark_record_updated(record))
 	}
 }
 
@@ -282,10 +226,6 @@ fn database_value(value: ValueRef<'_>) -> Result<DatabaseValue, String> {
 		ValueRef::Text(value) => Ok(DatabaseValue::Text(std::str::from_utf8(value)
 			.map_err(|_| String::from("SQLite returned invalid UTF-8 text data."))?.to_string())),
 	}
-}
-
-fn identity_column_names(record: &RecordPointerValue) -> Vec<String> {
-	if record.primary_key_column_names.is_empty() { record.column_names.clone() } else { record.primary_key_column_names.clone() }
 }
 
 fn load_group_keys(row: &rusqlite::Row<'_>, column_count: usize, group_by: &[SqlGroupByItem]) -> Result<Vec<Value>, String> {
@@ -309,15 +249,6 @@ fn load_record_fields(row: &rusqlite::Row<'_>, columns: &[QueryResultColumn]) ->
 	}
 
 	Ok(fields)
-}
-
-fn original_identity_values(record: &RecordPointerValue, column_names: &[String]) -> Result<Vec<SqlValue>, String> {
-	column_names.iter().map(|column_name| {
-		let field = record.original_fields.get(&normalize_name(column_name)).ok_or_else(|| {
-			format!("Record pointer is missing original field data for `{column_name}`.")
-		})?;
-		runtime_value_to_sqlite(field.materialize()?)
-	}).collect()
 }
 
 fn path_from_connection_string(database_name: &str, connection_string: &str) -> Result<PathBuf, String> {

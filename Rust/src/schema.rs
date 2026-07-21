@@ -677,16 +677,7 @@ fn normalize_name(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-	use super::ColumnSchema;
-	use super::DatabaseNamespace;
-	use super::DatabaseSchema;
-	use super::ResolvedSequence;
-	use super::ResolvedTable;
-	use super::SchemaCatalog;
-	use super::SchemaDataType;
-	use super::SchemaError;
-	use super::SequenceSchema;
-	use super::TableSchema;
+	use super::*;
 
 	fn resolved_names(resolved: ResolvedTable<'_>) -> (String, String, String) {
 		(

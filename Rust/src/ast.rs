@@ -238,6 +238,15 @@ pub struct AssignmentExpr {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AstProgram {
+	pub functions: Vec<FunctionDeclaration>,
+	pub objects: Vec<ObjectDeclaration>,
+	pub result: Option<Expr>,
+	pub statements: Vec<Statement>,
+	pub with_declarations: Vec<WithDeclaration>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BinaryExpr {
 	pub left: Box<Expr>,
 	pub operator: BinaryOperator,
@@ -484,15 +493,6 @@ pub struct OrderByItem {
 	pub direction: OrderByDirection,
 	pub expression: Expr,
 	pub position: usize,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Program {
-	pub functions: Vec<FunctionDeclaration>,
-	pub objects: Vec<ObjectDeclaration>,
-	pub result: Option<Expr>,
-	pub statements: Vec<Statement>,
-	pub with_declarations: Vec<WithDeclaration>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

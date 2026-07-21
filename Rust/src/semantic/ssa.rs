@@ -1,21 +1,6 @@
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
+use std::collections::{ BTreeMap, BTreeSet };
 
-use crate::ast::AssignmentOperator;
-use crate::ast::AssignmentTarget;
-use crate::ast::BlockStatement;
-use crate::ast::Expr;
-use crate::ast::ForRecordStatement;
-use crate::ast::ForStatement;
-use crate::ast::FunctionDeclaration;
-use crate::ast::FunctionParameter;
-use crate::ast::IfCondition;
-use crate::ast::IdentifierExpr;
-use crate::ast::Program;
-use crate::ast::RecordPointerDeclaration;
-use crate::ast::Statement;
-use crate::ast::VariableDeclaration;
-use crate::ast::WhileStatement;
+use crate::ast::*;
 
 use super::analyzer::SemanticProgram;
 
@@ -883,7 +868,7 @@ impl SsaProgram {
 	}
 }
 
-pub fn analyze_program(program: &Program, semantic_program: &SemanticProgram) -> SsaProgram {
+pub fn analyze_program(program: &AstProgram, semantic_program: &SemanticProgram) -> SsaProgram {
 	let mut functions = Vec::new();
 
 	for function in &program.functions {
@@ -899,7 +884,7 @@ pub fn analyze_program(program: &Program, semantic_program: &SemanticProgram) ->
 	}
 }
 
-pub fn analyze_program_local_usage(program: &Program, semantic_program: &SemanticProgram) -> ProgramLocalUsage {
+pub fn analyze_program_local_usage(program: &AstProgram, semantic_program: &SemanticProgram) -> ProgramLocalUsage {
 	let ssa_program = analyze_program(program, semantic_program);
 	let mut functions = Vec::new();
 
@@ -1288,16 +1273,7 @@ fn collect_variable_declaration(
 
 #[cfg(test)]
 mod tests {
-	use crate::semantic::analyzer::SemanticAnalyzer;
-	use crate::source::SourceText;
-	use crate::syntax::lexer::Lexer;
-	use crate::syntax::parser::Parser;
-
-	use super::LocalDeclarationKind;
-	use super::SsaOperation;
-	use super::SsaWriteKind;
-	use super::analyze_program;
-	use super::analyze_program_local_usage;
+	use super::*;
 
 	fn analyze_source(source: &str) -> super::SsaProgram {
 		let program = parse_program(source);
@@ -1313,7 +1289,7 @@ mod tests {
 		analyze_program_local_usage(&program, &semantic_program)
 	}
 
-	fn parse_program(source: &str) -> crate::ast::Program {
+	fn parse_program(source: &str) -> crate::ast::AstProgram {
 		let mut lexer = Lexer::new(SourceText::new(source));
 		let tokens = lexer.tokenize().unwrap();
 		let mut parser = Parser::new(tokens);

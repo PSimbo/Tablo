@@ -1,14 +1,7 @@
-use crate::ast::DataType;
-use crate::ast::FindKind;
-use crate::ast::OrderByDirection;
+use crate::ast::*;
 use crate::builtins::BuiltInFunction;
 use crate::schema::DatabaseBackend;
-use crate::value::Date;
-use crate::value::Decimal;
-use crate::value::Time;
-use crate::value::TimeTz;
-use crate::value::Timestamp;
-use crate::value::TimestampTz;
+use crate::value::*;
 
 mod mysql;
 mod postgresql;
@@ -268,37 +261,7 @@ pub(super) fn effective_find_order_direction(kind: FindKind, direction: OrderByD
 
 #[cfg(test)]
 mod tests {
-	use crate::ast::DataType;
-	use crate::ast::FindKind;
-	use crate::ast::OrderByDirection;
-	use crate::builtins::BuiltInFunction;
-	use crate::schema::DatabaseBackend;
-	use crate::value::Decimal;
-
-	use super::LoweredBackendQuery;
-	use super::QueryBinaryExpr;
-	use super::QueryBinaryOperator;
-	use super::QueryBuiltInCall;
-	use super::QueryColumnReference;
-	use super::QueryCountPlan;
-	use super::QueryExpr;
-	use super::QueryFindPlan;
-	use super::QueryForPlan;
-	use super::QueryGroupByItem;
-	use super::QueryLiteral;
-	use super::QueryOrderByItem;
-	use super::QueryParameter;
-	use super::QueryResultColumn;
-	use super::QueryUnaryExpr;
-	use super::QueryUnaryOperator;
-	use super::SqlDialect;
-	use super::SqlGroupByItem;
-	use super::SqlParameter;
-	use super::SqlQuery;
-	use super::SqlQueryResultShape;
-	use super::lower_count_query;
-	use super::lower_find_query;
-	use super::lower_for_query;
+	use super::*;
 
 	trait TestQueryPlan {
 		fn lower_to_backend(&self) -> Result<LoweredBackendQuery, super::QueryLoweringError>;

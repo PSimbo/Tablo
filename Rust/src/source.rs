@@ -410,15 +410,7 @@ fn short_display_name(source_name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-	use super::SourceText;
-	use super::find_matching_paren;
-	use super::local_name_span;
-	use super::read_identifier;
-	use super::skip_comment;
-	use super::skip_string_literal;
-	use super::skip_whitespace;
-	use super::source_offset_for_position;
-	use super::token_span_at_position;
+	use super::*;
 
 	#[test]
 	fn formats_diagnostic_with_line_and_column() {

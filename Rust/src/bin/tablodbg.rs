@@ -1,7 +1,5 @@
 use std::collections::BTreeMap;
-use std::io::BufRead;
-use std::io::BufReader;
-use std::io::Write;
+use std::io::{ BufRead, BufReader, Write };
 use std::path::PathBuf;
 
 use clap::Parser as ClapParser;
@@ -9,21 +7,14 @@ use colored::Colorize;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use serde_json::json;
+
 use tablo::TabloError;
-use tablo::bytecode::Program;
-use tablo::bytecode::SourceLocation;
-use tablo::debugger::DebuggerSession;
-use tablo::debugger::DebuggerStop;
-use tablo::debugger::InstructionBreakpoint;
-use tablo::debugger::PauseReason;
+use tablo::bytecode::*;
+use tablo::debugger::*;
 use tablo::object_file::read_program_from_path;
 use tablo::runtime_config::read_runtime_database_config_from_path;
-use tablo::value::RecordFieldValue;
-use tablo::value::Value;
-use tablo::value::database_record_field_runtime_value;
-use tablo::vm::VirtualMachine;
-use tablo::vm::VmError;
-use tablo::vm::VmStackFrame;
+use tablo::value::*;
+use tablo::vm::*;
 
 #[derive(ClapParser, Debug)]
 #[command(name = "tablodbg")]
@@ -647,7 +638,7 @@ impl DapServer {
 
 fn debugger_value_for_record_field(field: &RecordFieldValue) -> Result<Value, String> {
 	match field {
-		RecordFieldValue::Materialized(value) => Ok(value.clone()),
+		RecordFieldValue::Materialized { value, .. } => Ok(value.clone()),
 		RecordFieldValue::Deferred {
 			data_type,
 			is_nullable,
@@ -1147,20 +1138,7 @@ fn run_debug_loop(program: &Program, session: &mut DebuggerSession<'_>, mut stop
 
 #[cfg(test)]
 mod tests {
-	use std::collections::BTreeMap;
-
-	use serde_json::Value as JsonValue;
-	use tablo::ast::DataType;
-	use tablo::ast::RecordPointerType;
-	use tablo::value::DatabaseValue;
-	use tablo::value::RecordFieldValue;
-	use tablo::value::RecordPointerValue;
-	use tablo::value::Value;
-	use tablo::vm::VmError;
-	use tablo::vm::VmStackFrame;
-	use tablo::vm::VmVisibleLocal;
-
-	use super::DapServer;
+	use super::*;
 
 	#[test]
 	fn evaluates_watch_expression_in_dap_server() {
@@ -1223,7 +1201,10 @@ mod tests {
 		);
 		fields.insert(
 			String::from("id"),
-			RecordFieldValue::Materialized(Value::Integer(2)),
+			RecordFieldValue::Materialized {
+				data_type: DataType::Int,
+				value: Value::Integer(2),
+			},
 		);
 
 		let value = Value::RecordPointer(RecordPointerValue {

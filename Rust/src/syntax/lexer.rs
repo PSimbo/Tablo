@@ -1,7 +1,6 @@
 use crate::source::SourceText;
 
-use super::token::Token;
-use super::token::TokenKind;
+use super::token::{ Token, TokenKind };
 
 #[derive(Clone, Copy)]
 struct MultilineStringLayout {
@@ -826,10 +825,7 @@ fn trim_multiline_string(value: &str, trim_count: usize, first_line_padding: usi
 
 #[cfg(test)]
 mod tests {
-	use crate::source::SourceText;
-
-	use super::Lexer;
-	use super::TokenKind;
+	use super::*;
 
 	#[test]
 	fn preserves_first_line_indentation_in_multiline_string() {

@@ -1,12 +1,6 @@
 use std::path::Path;
 
-use crate::schema::ColumnSchema;
-use crate::schema::DatabaseNamespace;
-use crate::schema::DatabaseSchema;
-use crate::schema::SchemaCatalog;
-use crate::schema::SchemaDataType;
-use crate::schema::SchemaError;
-use crate::schema::TableSchema;
+use crate::schema::*;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum SchemaTokenKind {
@@ -606,10 +600,7 @@ fn tokenize_schema_text(source: &str) -> Vec<SchemaToken> {
 
 #[cfg(test)]
 mod tests {
-	use crate::schema::SchemaDataType;
-
-	use super::SchemaFixtureError;
-	use super::read_schema_catalog_from_str;
+	use super::*;
 
 	#[test]
 	fn accepts_inline_primary_key_marker_in_sql_like_schema() {

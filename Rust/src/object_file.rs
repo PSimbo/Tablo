@@ -7,23 +7,8 @@ use std::path::Path;
 
 use crate::ast::DataType;
 use crate::builtins::BuiltInFunction;
-use crate::bytecode::CodeBody;
-use crate::bytecode::CodeBodyDebugInfo;
-use crate::bytecode::CompiledFunction;
-use crate::bytecode::ConstantPool;
-use crate::bytecode::DebugInfo;
-use crate::bytecode::EntryPoint;
-use crate::bytecode::Instruction;
-use crate::bytecode::LocalVariableDebugInfo;
-use crate::bytecode::Program;
-use crate::bytecode::SourceFileDebugInfo;
-use crate::query::LoweredBackendQuery;
-use crate::query::QueryResultColumn;
-use crate::query::SqlDialect;
-use crate::query::SqlGroupByItem;
-use crate::query::SqlParameter;
-use crate::query::SqlQuery;
-use crate::query::SqlQueryResultShape;
+use crate::bytecode::*;
+use crate::query::*;
 use crate::value::Decimal;
 
 const MAGIC_BYTES: [u8; 4] = *b"TBO0";
@@ -472,6 +457,16 @@ impl<'a> ObjectFileReader<'a> {
 			}
 			OPCODE_MAKE_RECORD_POINTER => Ok(Instruction::MakeRecordPointer {
 				field_names: self.read_string_vec()?,
+				field_types: {
+					let field_count = self.read_u32()? as usize;
+					let mut field_types = Vec::with_capacity(field_count);
+
+					for _ in 0..field_count {
+						field_types.push(self.read_data_type()?);
+					}
+
+					field_types
+				},
 				record_type: crate::ast::RecordPointerType {
 					database_name: self.read_string()?,
 					schema_name: self.read_string()?,
@@ -886,6 +881,7 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 		Instruction::MakeRange => bytes.push(OPCODE_MAKE_RANGE),
 		Instruction::MakeRecordPointer {
 			field_names,
+			field_types,
 			record_type,
 			schema_is_implicit,
 		} => {
@@ -895,6 +891,11 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			for field_name in field_names {
 				bytes.extend_from_slice(&(field_name.len() as u32).to_le_bytes());
 				bytes.extend_from_slice(field_name.as_bytes());
+			}
+			bytes.extend_from_slice(&(field_types.len() as u32).to_le_bytes());
+
+			for field_type in field_types {
+				write_data_type(bytes, field_type);
 			}
 
 			bytes.extend_from_slice(&(record_type.database_name.len() as u32).to_le_bytes());
@@ -1278,16 +1279,7 @@ impl ObjectFileLayout {
 
 #[cfg(test)]
 mod tests {
-	use crate::builtins::BuiltInFunction;
-	use crate::bytecode::CodeBody;
-	use crate::bytecode::CompiledFunction;
-	use crate::bytecode::ConstantPool;
-	use crate::bytecode::Instruction;
-	use crate::bytecode::Program;
-
-	use super::ObjectFileError;
-	use super::read_program;
-	use super::write_program;
+	use super::*;
 
 	#[test]
 	fn rejects_invalid_magic_bytes() {
@@ -1384,6 +1376,29 @@ mod tests {
 	fn round_trips_delete_program_bytes() {
 		let program = Program::new(vec![
 			Instruction::DeleteRecord,
+		]);
+
+		let bytes = write_program(&program);
+		let decoded = read_program(&bytes).unwrap();
+
+		assert_eq!(decoded, program);
+	}
+
+	#[test]
+	fn round_trips_new_record_field_types() {
+		let program = Program::new(vec![
+			Instruction::PushInteger(0),
+			Instruction::PushNull,
+			Instruction::MakeRecordPointer {
+				field_names: vec![String::from("Id"), String::from("Name")],
+				field_types: vec![DataType::Int, DataType::Text.into_nullable()],
+				record_type: RecordPointerType {
+					database_name: String::from("ExampleDb"),
+					schema_name: String::from("Main"),
+					table_name: String::from("Customers"),
+				},
+				schema_is_implicit: true,
+			},
 		]);
 
 		let bytes = write_program(&program);

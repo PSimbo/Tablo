@@ -1,9 +1,6 @@
 use crate::TabloError;
-use crate::semantic::ssa::LocalDeclarationKind;
-use crate::semantic::ssa::ProgramLocalUsage;
-use crate::source::SourceText;
-use crate::source::local_name_span;
-use crate::source::token_span_at_position;
+use crate::semantic::ssa::*;
+use crate::source::*;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Diagnostic {
@@ -197,11 +194,7 @@ fn diagnostic_for_columns(
 
 #[cfg(test)]
 mod tests {
-	use crate::TabloError;
-	use crate::compiler::CompileError;
-
-	use super::diagnostic_for_tablo_error;
-	use super::trailing_whitespace_diagnostics;
+	use super::*;
 
 	#[test]
 	fn highlights_full_span_for_assignment_type_error_on_string_literal() {

@@ -1,85 +1,12 @@
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
+use std::collections::{ BTreeMap, BTreeSet };
 
-use crate::ast::AssignmentExpr;
-use crate::ast::AssignmentOperator;
-use crate::ast::AssignmentTarget;
-use crate::ast::BinaryExpr;
-use crate::ast::BinaryOperator;
-use crate::ast::BlockStatement;
-use crate::ast::BreakStatement;
-use crate::ast::CallArgument;
-use crate::ast::CallExpr;
-use crate::ast::ContinueStatement;
-use crate::ast::CountExpr;
-use crate::ast::CreateStatement;
-use crate::ast::DataType;
-use crate::ast::DeleteStatement;
-use crate::ast::EnumDeclaration;
-use crate::ast::Expr;
-use crate::ast::FieldAccessExpr;
-use crate::ast::FindExpr;
-use crate::ast::ForRecordStatement;
-use crate::ast::ForStatement;
-use crate::ast::FunctionDeclaration;
-use crate::ast::FunctionParameter;
-use crate::ast::FunctionParameterType;
-use crate::ast::IdentifierExpr;
-use crate::ast::IfCondition;
-use crate::ast::IfStatement;
-use crate::ast::IndexExpr;
-use crate::ast::NewExpr;
-use crate::ast::ObjectConstructionExpr;
-use crate::ast::ObjectDeclaration;
-use crate::ast::Program;
-use crate::ast::RangeExpr;
-use crate::ast::RecordPointerDeclaration;
-use crate::ast::RecordPointerType;
-use crate::ast::ReturnStatement;
-use crate::ast::SequenceReference;
-use crate::ast::Statement;
-use crate::ast::TableReference;
-use crate::ast::TernaryExpr;
-use crate::ast::TransactionStatement;
-use crate::ast::UnaryExpr;
-use crate::ast::UnaryOperator;
-use crate::ast::UpdateStatement;
-use crate::ast::UseDeclaration;
-use crate::ast::VariableDeclaration;
-use crate::ast::Visibility;
-use crate::ast::WhileStatement;
-use crate::ast::WithDeclaration;
+use crate::ast::*;
 use crate::builtins::BuiltInFunction;
 use crate::bytecode::Constant;
 use crate::compiler::CompileError;
-use crate::format_string::NumericFormatPattern;
-use crate::format_string::NumericFormatTarget;
-use crate::format_string::TemporalFormatPattern;
-use crate::format_string::TemporalFormatTarget;
-use crate::query::LoweredBackendQuery;
-use crate::query::QueryBinaryExpr;
-use crate::query::QueryBinaryOperator;
-use crate::query::QueryBuiltInCall;
-use crate::query::QueryColumnReference;
-use crate::query::QueryCountPlan;
-use crate::query::QueryExpr;
-use crate::query::QueryFindPlan;
-use crate::query::QueryForPlan;
-use crate::query::QueryGroupByItem;
-use crate::query::QueryLiteral;
-use crate::query::QueryLoweringError;
-use crate::query::QueryOrderByItem;
-use crate::query::QueryParameter;
-use crate::query::QueryResultColumn;
-use crate::query::QueryUnaryExpr;
-use crate::query::QueryUnaryOperator;
-use crate::query::lower_count_query;
-use crate::query::lower_find_query;
-use crate::query::lower_for_query;
-use crate::schema::DatabaseBackend;
-use crate::schema::SchemaCatalog;
-use crate::schema::SchemaDataType;
-use crate::schema::SchemaError;
+use crate::format_string::*;
+use crate::query::*;
+use crate::schema::*;
 
 use super::scope::ScopeStack;
 
@@ -374,13 +301,13 @@ impl SemanticAnalyzer {
 		}
 	}
 
-	pub fn analyze_program(&mut self, program: &Program) -> Result<SemanticProgram, CompileError> {
+	pub fn analyze_program(&mut self, program: &AstProgram) -> Result<SemanticProgram, CompileError> {
 		self.analyze_program_with_schema(program, None)
 	}
 
 	pub fn analyze_program_with_schema(
 		&mut self,
-		program: &Program,
+		program: &AstProgram,
 		schema_catalog: Option<&SchemaCatalog>,
 	) -> Result<SemanticProgram, CompileError> {
 		self.current_non_null_assumptions.clear();
@@ -434,13 +361,13 @@ impl SemanticAnalyzer {
 		Ok(self.semantic_program.clone())
 	}
 
-	pub fn analyze_standalone_program(&mut self, program: &Program) -> Result<SemanticProgram, CompileError> {
+	pub fn analyze_standalone_program(&mut self, program: &AstProgram) -> Result<SemanticProgram, CompileError> {
 		self.analyze_standalone_program_with_schema(program, None)
 	}
 
 	pub fn analyze_standalone_program_with_schema(
 		&mut self,
-		program: &Program,
+		program: &AstProgram,
 		schema_catalog: Option<&SchemaCatalog>,
 	) -> Result<SemanticProgram, CompileError> {
 		let semantic_program = self.analyze_program_with_schema(program, schema_catalog)?;
@@ -467,7 +394,7 @@ impl SemanticAnalyzer {
 		self.top_level_function_source_names = source_names;
 	}
 
-	pub fn validate_program(&mut self, program: &Program) -> Result<(), CompileError> {
+	pub fn validate_program(&mut self, program: &AstProgram) -> Result<(), CompileError> {
 		self.analyze_program(program).map(|_| ())
 	}
 
@@ -3419,7 +3346,7 @@ impl SemanticAnalyzer {
 		}
 	}
 
-	fn validate_main_entry_point(&self, program: &Program, main_function: &FunctionDeclaration) -> Result<(), CompileError> {
+	fn validate_main_entry_point(&self, program: &AstProgram, main_function: &FunctionDeclaration) -> Result<(), CompileError> {
 		if let Some(statement) = program.statements.iter().find(|statement| !matches!(statement, Statement::EnumDeclaration(_) | Statement::Use(_))) {
 			return Err(self.compile_error(
 				statement_position(statement),
@@ -4172,35 +4099,7 @@ fn statement_position(statement: &Statement) -> usize {
 
 #[cfg(test)]
 mod tests {
-	use std::collections::BTreeSet;
-
-	use crate::ast::BlockStatement;
-	use crate::ast::Expr;
-	use crate::ast::IdentifierExpr;
-	use crate::ast::IfCondition;
-	use crate::ast::IfStatement;
-	use crate::ast::RecordPointerType;
-	use crate::ast::Statement;
-	use crate::ast::TernaryExpr;
-	use crate::builtins::BuiltInFunction;
-	use crate::query::QueryBinaryExpr;
-	use crate::query::QueryBinaryOperator;
-	use crate::query::QueryBuiltInCall;
-	use crate::query::QueryColumnReference;
-	use crate::query::QueryCountPlan;
-	use crate::query::QueryExpr;
-	use crate::query::QueryLiteral;
-	use crate::query::QueryParameter;
-	use crate::schema::DatabaseBackend;
-	use crate::schema_fixture::read_schema_catalog_from_str;
-	use crate::source::SourceText;
-	use crate::syntax::lexer::Lexer;
-	use crate::syntax::parser::Parser;
-
-	use super::DataType;
-	use super::LocalBinding;
-	use super::RecordPointerOrigin;
-	use super::SemanticAnalyzer;
+	use super::*;
 
 	fn parse_count_expression(source: &str) -> crate::ast::CountExpr {
 		match parse_expression(source) {
@@ -4224,7 +4123,7 @@ mod tests {
 		}
 	}
 
-	fn parse_program(source: &str) -> crate::ast::Program {
+	fn parse_program(source: &str) -> crate::ast::AstProgram {
 		let mut lexer = Lexer::new(SourceText::new(source));
 		let tokens = lexer.tokenize().unwrap();
 		let mut parser = Parser::new(tokens);
