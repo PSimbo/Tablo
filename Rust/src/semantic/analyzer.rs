@@ -112,10 +112,23 @@ pub struct RecordPointerBindingInfo {
 	escape_positions: BTreeSet<usize>,
 	pub escapes_analysis: bool,
 	field_reads: Vec<RecordPointerFieldRead>,
+	identity_requires_all_fields: bool,
+	pub identity_fields: BTreeSet<String>,
 	pub initialization: RecordPointerInitialization,
 	pub is_mutable: bool,
 	pub origin: RecordPointerOrigin,
 	pub read_fields: BTreeSet<String>,
+}
+
+impl RecordPointerBindingInfo {
+	// None means that field-list minimization is unsafe and the complete row is required.
+	pub fn required_query_fields(&self) -> Option<BTreeSet<String>> {
+		if self.escapes_analysis || self.identity_requires_all_fields {
+			return None;
+		}
+
+		Some(self.read_fields.union(&self.identity_fields).cloned().collect())
+	}
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2620,6 +2633,34 @@ impl SemanticAnalyzer {
 		}
 	}
 
+	fn record_pointer_identity_requirements(
+		&self,
+		record_pointer: &RecordPointerType,
+	) -> (BTreeSet<String>, bool) {
+		let Some(schema_catalog) = self.current_schema_catalog.as_ref() else {
+			return (BTreeSet::new(), true);
+		};
+		let Some(database) = schema_catalog.database(&record_pointer.database_name) else {
+			return (BTreeSet::new(), true);
+		};
+		let Some(schema) = database.schema(&record_pointer.schema_name) else {
+			return (BTreeSet::new(), true);
+		};
+		let Some(table) = schema.table(&record_pointer.table_name) else {
+			return (BTreeSet::new(), true);
+		};
+		let identity_fields = table.primary_key_columns().into_iter()
+			.map(|column| column.name().to_string())
+			.collect::<BTreeSet<_>>();
+
+		if identity_fields.is_empty() {
+			(BTreeSet::new(), true)
+		}
+		else {
+			(identity_fields, false)
+		}
+	}
+
 	fn record_record_pointer_assignment(&mut self, position: usize, field_path: &[crate::ast::IdentifierExpr]) {
 		let Some(binding) = self.semantic_program.record_pointer_bindings.get_mut(&position) else {
 			return;
@@ -2752,12 +2793,22 @@ impl SemanticAnalyzer {
 		is_mutable: bool,
 		origin: RecordPointerOrigin,
 	) {
+		let (identity_fields, identity_requires_all_fields) = if is_mutable
+			&& initialization == RecordPointerInitialization::Existing {
+			self.record_pointer_identity_requirements(&record_pointer)
+		}
+		else {
+			(BTreeSet::new(), false)
+		};
+
 		self.semantic_program.record_pointer_bindings.insert(position, RecordPointerBindingInfo {
 			assigned_fields: BTreeSet::new(),
 			data_type: record_pointer,
 			escape_positions: BTreeSet::new(),
 			escapes_analysis: false,
 			field_reads: Vec::new(),
+			identity_requires_all_fields,
+			identity_fields,
 			initialization,
 			is_mutable,
 			origin,
@@ -4385,6 +4436,32 @@ mod tests {
 	}
 
 	#[test]
+	fn immutable_record_pointers_do_not_require_identity_fields() {
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (Id int not null primary key, Name text not null);
+			"#,
+			"ExampleDb",
+		);
+		let program = parse_program(
+			"with exampledb;\nfn Main(args: [text]) int { rec cust = find first Customers; displn(cust.Name); return 0; }"
+		);
+		let declaration_position = match &program.functions[0].body.statements[0] {
+			Statement::RecordPointerDeclaration(statement) => statement.position,
+			other => panic!("Expected record pointer declaration, found {other:?}."),
+		};
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap();
+		let binding = semantic_program.record_pointer_binding(declaration_position).unwrap();
+
+		assert!(binding.identity_fields.is_empty());
+		assert_eq!(binding.required_query_fields(), Some(BTreeSet::from([String::from("Name")])));
+	}
+
+	#[test]
 	fn infers_exists_call_type_for_record_pointer() {
 		let expression = parse_expression("exists(cust)");
 		let mut analyzer = SemanticAnalyzer::new();
@@ -4869,6 +4946,71 @@ mod tests {
 			schema_name: String::from("Main"),
 			table_name: String::from("Customers"),
 		});
+	}
+
+	#[test]
+	fn mutable_record_loops_without_primary_keys_require_complete_rows() {
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table AuditLog (Category text not null, Message text not null);
+			"#,
+			"ExampleDb",
+		);
+		let program = parse_program(
+			"with exampledb;\nfn Main(args: [text]) int { for rec mut entry in AuditLog { delete entry; } return 0; }"
+		);
+		let variable_position = match &program.functions[0].body.statements[0] {
+			Statement::ForRecord(statement) => statement.variable.position,
+			other => panic!("Expected record-pointer loop, found {other:?}."),
+		};
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap();
+		let binding = semantic_program.record_pointer_binding(variable_position).unwrap();
+
+		assert!(binding.identity_fields.is_empty());
+		assert_eq!(binding.required_query_fields(), None);
+	}
+
+	#[test]
+	fn preserves_composite_primary_key_fields_for_mutable_record_pointers() {
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table OrderLines (
+					OrderId int not null primary key,
+					LineId int not null primary key,
+					Description text not null
+				);
+			"#,
+			"ExampleDb",
+		);
+		let program = parse_program(
+			concat!(
+				"with exampledb;\n",
+				"fn Main(args: [text]) int {\n",
+				"  rec mut line = find first OrderLines;\n",
+				"  line.Description = 'Updated';\n",
+				"  update line;\n",
+				"  return 0;\n",
+				"}",
+			),
+		);
+		let declaration_position = match &program.functions[0].body.statements[0] {
+			Statement::RecordPointerDeclaration(statement) => statement.position,
+			other => panic!("Expected record pointer declaration, found {other:?}."),
+		};
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap();
+		let binding = semantic_program.record_pointer_binding(declaration_position).unwrap();
+		let identity_fields = BTreeSet::from([String::from("LineId"), String::from("OrderId")]);
+
+		assert_eq!(binding.identity_fields, identity_fields);
+		assert_eq!(binding.required_query_fields(), Some(identity_fields));
 	}
 
 	#[test]
