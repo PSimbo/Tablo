@@ -25,6 +25,12 @@ pub(super) fn empty_record_pointer(query: &SqlQuery, columns: &[QueryResultColum
 	}
 }
 
+pub(super) fn known_record_schema(layout: &QueryRecordLayout) -> Result<&[QueryResultColumn], String> {
+	layout.known_schema().ok_or_else(|| {
+		String::from("Runtime-determined database query schemas are not yet supported.")
+	})
+}
+
 pub(super) fn locked_record_pointer(query: &SqlQuery, columns: &[QueryResultColumn]) -> RecordPointerValue {
 	RecordPointerValue {
 		column_names: columns.iter().map(|column| column.column_name.clone()).collect(),
@@ -89,6 +95,12 @@ pub(super) fn record_pointer(
 		record_type: record_pointer_type(query),
 		schema_is_implicit: query.schema_is_implicit,
 	}
+}
+
+pub(super) fn selected_record_columns(layout: &QueryRecordLayout) -> Result<Vec<QueryResultColumn>, String> {
+	layout.selected_known_columns().ok_or_else(|| {
+		String::from("Runtime-determined database query field lists are not yet supported.")
+	})
 }
 
 fn primary_key_column_names(columns: &[QueryResultColumn]) -> Vec<String> {

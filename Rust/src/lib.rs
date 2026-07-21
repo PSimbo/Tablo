@@ -1707,9 +1707,10 @@ mod tests {
 				"ORDER BY `Customers`.`Name` DESC LIMIT 1",
 			),
 		);
-		let SqlQueryResultShape::RecordPointer(columns) = &query.result_shape else {
+		let SqlQueryResultShape::RecordPointer(layout) = &query.result_shape else {
 			panic!("Expected record-pointer query result metadata.");
 		};
+		let columns = layout.known_schema().expect("Expected a statically known record schema.");
 		assert!(columns.iter().any(|column| column.column_name == "Id" && column.is_primary_key));
 	}
 
@@ -1813,9 +1814,10 @@ mod tests {
 				"ORDER BY \"Customers\".\"Name\" DESC LIMIT 1",
 			),
 		);
-		let SqlQueryResultShape::RecordPointer(columns) = &query.result_shape else {
+		let SqlQueryResultShape::RecordPointer(layout) = &query.result_shape else {
 			panic!("Expected record-pointer query result metadata.");
 		};
+		let columns = layout.known_schema().expect("Expected a statically known record schema.");
 		assert_eq!(columns.len(), 3);
 		assert!(columns.iter().any(|column| column.column_name == "Id" && column.is_primary_key));
 	}
@@ -1856,9 +1858,10 @@ mod tests {
 				"ORDER BY TRIM(\"Customers\".\"Country\") LIMIT CAST(CAST($2 AS TEXT) AS BIGINT)",
 			),
 		);
-		let SqlQueryResultShape::RecordPointerArray(columns) = &query.result_shape else {
+		let SqlQueryResultShape::RecordPointerArray(layout) = &query.result_shape else {
 			panic!("Expected record-pointer array query result metadata.");
 		};
+		let columns = layout.known_schema().expect("Expected a statically known record schema.");
 		assert_eq!(columns.len(), 4);
 		assert_eq!(query.group_by.len(), 1);
 		assert_eq!(query.group_by[0].key_names, vec![String::from("country")]);

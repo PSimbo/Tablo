@@ -73,10 +73,11 @@ pub(super) fn lower_find(
 ) -> Result<SqlQuery, QueryLoweringError> {
 	let mut parameters = Vec::new();
 	let table_source = renderer.table_source(&plan.schema_name, &plan.table_name, plan.schema_is_implicit);
-	let select_columns = plan.record_columns.iter()
+	let selected_columns = selected_columns(renderer, &plan.record_layout)?;
+	let select_columns = selected_columns.iter()
 		.map(|column| renderer.result_column(&plan.table_name, &column.column_name, &column.data_type))
-		.collect::<Vec<_>>()
-		.join(", ");
+		.collect::<Vec<_>>();
+	let select_columns = if select_columns.is_empty() { String::from("1") } else { select_columns.join(", ") };
 	let mut statement = format!("SELECT {select_columns} FROM {table_source}");
 
 	if let Some(filter) = &plan.filter {
@@ -108,7 +109,7 @@ pub(super) fn lower_find(
 		group_by: vec![],
 		lock_mode: plan.lock_mode,
 		parameters,
-		result_shape: SqlQueryResultShape::RecordPointer(plan.record_columns.clone()),
+		result_shape: SqlQueryResultShape::RecordPointer(plan.record_layout.clone()),
 		schema_is_implicit: plan.schema_is_implicit,
 		schema_name: plan.schema_name.clone(),
 		statement,
@@ -122,12 +123,17 @@ pub(super) fn lower_for(
 ) -> Result<SqlQuery, QueryLoweringError> {
 	let mut parameters = Vec::new();
 	let table_source = renderer.table_source(&plan.schema_name, &plan.table_name, plan.schema_is_implicit);
-	let mut select_columns = plan.record_columns.iter()
+	let selected_columns = selected_columns(renderer, &plan.record_layout)?;
+	let mut select_columns = selected_columns.iter()
 		.map(|column| renderer.result_column(&plan.table_name, &column.column_name, &column.data_type))
 		.collect::<Vec<_>>();
 
 	for item in &plan.group_by {
 		select_columns.push(renderer.result_expression(&item.expression, &item.data_type, &mut parameters)?);
+	}
+
+	if select_columns.is_empty() {
+		select_columns.push(String::from("1"));
 	}
 
 	let mut statement = format!("SELECT {} FROM {table_source}", select_columns.join(", "));
@@ -183,10 +189,20 @@ pub(super) fn lower_for(
 			.collect(),
 		lock_mode: plan.lock_mode,
 		parameters,
-		result_shape: SqlQueryResultShape::RecordPointerArray(plan.record_columns.clone()),
+		result_shape: SqlQueryResultShape::RecordPointerArray(plan.record_layout.clone()),
 		schema_is_implicit: plan.schema_is_implicit,
 		schema_name: plan.schema_name.clone(),
 		statement,
 		table_name: plan.table_name.clone(),
+	})
+}
+
+fn selected_columns(
+	renderer: &impl SqlRenderer,
+	layout: &QueryRecordLayout,
+) -> Result<Vec<QueryResultColumn>, QueryLoweringError> {
+	layout.selected_known_columns().ok_or_else(|| QueryLoweringError::UnsupportedExpression {
+		backend: renderer.dialect().backend(),
+		description: String::from("runtime-determined query field selection"),
 	})
 }

@@ -7,8 +7,11 @@ use super::records::locked_record_pointer;
 
 pub(super) fn lock_conflict_result(query: &SqlQuery) -> Option<Value> {
 	match &query.result_shape {
-		SqlQueryResultShape::RecordPointer(columns) => {
-			Some(Value::RecordPointer(locked_record_pointer(query, columns)))
+		SqlQueryResultShape::RecordPointer(layout) => {
+			Some(Value::RecordPointer(locked_record_pointer(
+				query,
+				layout.known_schema().unwrap_or_default(),
+			)))
 		}
 		_ => None,
 	}
@@ -80,7 +83,7 @@ mod tests {
 	#[test]
 	fn represents_single_record_lock_conflict_as_locked_existing_pointer() {
 		let mut query = test_query(SqlDialect::PostgreSql, RecordLockMode::UpdateNoWait);
-		query.result_shape = SqlQueryResultShape::RecordPointer(vec![]);
+		query.result_shape = SqlQueryResultShape::RecordPointer(QueryRecordLayout::all_known(vec![]));
 		query.table_name = String::from("Customers");
 
 		let Some(Value::RecordPointer(record)) = lock_conflict_result(&query) else {

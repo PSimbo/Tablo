@@ -116,25 +116,29 @@ impl DatabaseDriver for SqliteSession {
 					.map_err(|error| format!("Failed to execute SQLite query: {error}"))?;
 				Ok(Value::Integer(result))
 			}
-			SqlQueryResultShape::RecordPointer(columns) => {
+			SqlQueryResultShape::RecordPointer(layout) => {
+				let schema = known_record_schema(layout)?;
+				let selected_columns = selected_record_columns(layout)?;
 				let mut rows = statement.query(params_from_iter(parameters))
 					.map_err(|error| format!("Failed to execute SQLite query: {error}"))?;
 				let Some(row) = rows.next().map_err(|error| format!("Failed to read SQLite query result: {error}"))? else {
-					return Ok(Value::RecordPointer(empty_record_pointer(query, columns)));
+					return Ok(Value::RecordPointer(empty_record_pointer(query, schema)));
 				};
-				let fields = load_record_fields(row, columns)?;
+				let fields = load_record_fields(row, &selected_columns)?;
 				let original_fields = fields.clone();
-				Ok(Value::RecordPointer(record_pointer(query, columns, fields, original_fields, BTreeMap::new())))
+				Ok(Value::RecordPointer(record_pointer(query, schema, fields, original_fields, BTreeMap::new())))
 			}
-			SqlQueryResultShape::RecordPointerArray(columns) => {
+			SqlQueryResultShape::RecordPointerArray(layout) => {
+				let schema = known_record_schema(layout)?;
+				let selected_columns = selected_record_columns(layout)?;
 				let mut rows = statement.query(params_from_iter(parameters))
 					.map_err(|error| format!("Failed to execute SQLite query: {error}"))?;
 				let mut loaded_records = Vec::new();
 
 				while let Some(row) = rows.next().map_err(|error| format!("Failed to read SQLite query result: {error}"))? {
-					let fields = load_record_fields(row, columns)?;
+					let fields = load_record_fields(row, &selected_columns)?;
 					loaded_records.push(LoadedRecord {
-						group_keys: load_group_keys(row, columns.len(), &query.group_by)?,
+						group_keys: load_group_keys(row, selected_columns.len(), &query.group_by)?,
 						original_fields: fields.clone(),
 						fields,
 					});
@@ -144,7 +148,7 @@ impl DatabaseDriver for SqliteSession {
 				let records = loaded_records.into_iter().enumerate()
 					.map(|(index, loaded)| Value::RecordPointer(record_pointer(
 						query,
-						columns,
+						schema,
 						loaded.fields,
 						loaded.original_fields,
 						boundaries.get(index).cloned().unwrap_or_default(),
@@ -341,6 +345,8 @@ mod tests {
 
 	use super::*;
 
+	use crate::ast::DataType;
+
 	#[test]
 	fn advances_sqlite_sequence_stored_as_text() {
 		let connection = Connection::open_in_memory().unwrap();
@@ -386,6 +392,52 @@ mod tests {
 			.query_map([], |row| row.get::<_, i64>(0)).unwrap()
 			.collect::<Result<Vec<_>, _>>().unwrap();
 		assert_eq!(ids, vec![1]);
+	}
+
+	#[test]
+	fn loads_selected_fields_while_preserving_complete_record_schema() {
+		let connection = Connection::open_in_memory().unwrap();
+		connection.execute_batch(
+			"CREATE TABLE Customers (Id INTEGER PRIMARY KEY, Name TEXT NOT NULL); INSERT INTO Customers VALUES (1, 'Acme');",
+		).unwrap();
+		let mut session = SqliteSession { connection, transactions: TransactionState::default() };
+		let query = SqlQuery {
+			database_name: String::from("ExampleDb"),
+			dialect: SqlDialect::Sqlite,
+			group_by: vec![],
+			lock_mode: RecordLockMode::None,
+			parameters: vec![],
+			result_shape: SqlQueryResultShape::RecordPointer(QueryRecordLayout {
+				schema: QueryRecordSchema::Known(vec![
+					QueryResultColumn {
+						column_name: String::from("Id"),
+						data_type: DataType::Int,
+						is_nullable: false,
+						is_primary_key: true,
+					},
+					QueryResultColumn {
+						column_name: String::from("Name"),
+						data_type: DataType::Text,
+						is_nullable: false,
+						is_primary_key: false,
+					},
+				]),
+				selection: QueryColumnSelection::Indices(vec![1]),
+			}),
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
+			statement: String::from("SELECT Name FROM Customers LIMIT 1"),
+			table_name: String::from("Customers"),
+		};
+
+		let Value::RecordPointer(record) = session.execute_query(&query, vec![]).unwrap() else {
+			panic!("Expected a record pointer.");
+		};
+
+		assert_eq!(record.column_names, vec![String::from("Id"), String::from("Name")]);
+		assert_eq!(record.primary_key_column_names, vec![String::from("Id")]);
+		assert!(!record.fields.contains_key("id"));
+		assert_eq!(record.fields.get("name").unwrap().materialize().unwrap(), Value::Text(String::from("Acme")));
 	}
 
 	#[test]

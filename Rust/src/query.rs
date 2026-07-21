@@ -34,6 +34,13 @@ pub enum QueryBinaryOperator {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum QueryColumnSelection {
+	All,
+	Indices(Vec<u32>),
+	RuntimeDetermined,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum QueryExpr {
 	ArrayLiteral(Vec<QueryExpr>),
 	Binary(QueryBinaryExpr),
@@ -77,6 +84,12 @@ pub enum QueryLoweringError {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum QueryRecordSchema {
+	Known(Vec<QueryResultColumn>),
+	RuntimeDetermined,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum QueryUnaryOperator {
 	Negate,
 	Not,
@@ -110,8 +123,8 @@ impl SqlDialect {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SqlQueryResultShape {
 	IntegerScalar,
-	RecordPointer(Vec<QueryResultColumn>),
-	RecordPointerArray(Vec<QueryResultColumn>),
+	RecordPointer(QueryRecordLayout),
+	RecordPointerArray(QueryRecordLayout),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -152,7 +165,7 @@ pub struct QueryFindPlan {
 	pub kind: FindKind,
 	pub lock_mode: RecordLockMode,
 	pub order_by: Vec<QueryOrderByItem>,
-	pub record_columns: Vec<QueryResultColumn>,
+	pub record_layout: QueryRecordLayout,
 	pub schema_is_implicit: bool,
 	pub schema_name: String,
 	pub table_name: String,
@@ -167,7 +180,7 @@ pub struct QueryForPlan {
 	pub limit: Option<QueryParameter>,
 	pub lock_mode: RecordLockMode,
 	pub order_by: Vec<QueryOrderByItem>,
-	pub record_columns: Vec<QueryResultColumn>,
+	pub record_layout: QueryRecordLayout,
 	pub schema_is_implicit: bool,
 	pub schema_name: String,
 	pub table_name: String,
@@ -192,6 +205,40 @@ pub struct QueryParameter {
 	pub data_type: DataType,
 	pub field_path: Vec<String>,
 	pub slot: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryRecordLayout {
+	pub schema: QueryRecordSchema,
+	pub selection: QueryColumnSelection,
+}
+
+impl QueryRecordLayout {
+	pub fn all_known(schema: Vec<QueryResultColumn>) -> Self {
+		Self {
+			schema: QueryRecordSchema::Known(schema),
+			selection: QueryColumnSelection::All,
+		}
+	}
+
+	pub fn known_schema(&self) -> Option<&[QueryResultColumn]> {
+		match &self.schema {
+			QueryRecordSchema::Known(columns) => Some(columns),
+			QueryRecordSchema::RuntimeDetermined => None,
+		}
+	}
+
+	pub fn selected_known_columns(&self) -> Option<Vec<QueryResultColumn>> {
+		let schema = self.known_schema()?;
+
+		match &self.selection {
+			QueryColumnSelection::All => Some(schema.to_vec()),
+			QueryColumnSelection::Indices(indices) => indices.iter()
+				.map(|index| schema.get(*index as usize).cloned())
+				.collect(),
+			QueryColumnSelection::RuntimeDetermined => None,
+		}
+	}
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -296,6 +343,37 @@ mod tests {
 		}
 	}
 
+	fn all_columns(columns: Vec<QueryResultColumn>) -> QueryRecordLayout {
+		QueryRecordLayout::all_known(columns)
+	}
+
+	#[test]
+	fn lowers_empty_record_field_selection_as_constant_projection() {
+		let query = lower_find_query(&QueryFindPlan {
+			backend: DatabaseBackend::Sqlite,
+			database_name: String::from("ExampleDb"),
+			filter: None,
+			kind: FindKind::First,
+			lock_mode: RecordLockMode::None,
+			order_by: vec![],
+			record_layout: QueryRecordLayout {
+				schema: QueryRecordSchema::Known(vec![QueryResultColumn {
+					column_name: String::from("Id"),
+					data_type: DataType::Int,
+					is_nullable: false,
+					is_primary_key: true,
+				}]),
+				selection: QueryColumnSelection::Indices(vec![]),
+			},
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
+			table_name: String::from("Customers"),
+		}).unwrap();
+
+		let LoweredBackendQuery::Sql(query) = query;
+		assert_eq!(query.statement, "SELECT 1 FROM \"Customers\" LIMIT 1");
+	}
+
 	#[test]
 	fn lowers_mysql_count_plan_with_dialect_specific_expressions() {
 		let query = QueryCountPlan {
@@ -384,7 +462,7 @@ mod tests {
 					table_name: String::from("Customers"),
 				}),
 			}],
-			record_columns: record_columns.clone(),
+			record_layout: all_columns(record_columns.clone()),
 			schema_is_implicit: true,
 			schema_name: String::from("Main"),
 			table_name: String::from("Customers"),
@@ -392,7 +470,7 @@ mod tests {
 
 		let LoweredBackendQuery::Sql(query) = query;
 		assert_eq!(query.dialect, SqlDialect::MySql);
-		assert_eq!(query.result_shape, SqlQueryResultShape::RecordPointer(record_columns));
+		assert_eq!(query.result_shape, SqlQueryResultShape::RecordPointer(all_columns(record_columns)));
 		assert_eq!(
 			query.statement,
 			"SELECT `Customers`.`Id` FROM `Customers` ORDER BY `Customers`.`Id` DESC LIMIT 1",
@@ -438,12 +516,12 @@ mod tests {
 			}),
 			lock_mode: RecordLockMode::None,
 			order_by: vec![],
-			record_columns: vec![QueryResultColumn {
+			record_layout: all_columns(vec![QueryResultColumn {
 				column_name: String::from("Id"),
 				data_type: DataType::Int,
 				is_nullable: false,
 				is_primary_key: true,
-			}],
+			}]),
 			schema_is_implicit: false,
 			schema_name: String::from("Inventory"),
 			table_name: String::from("Items"),
@@ -682,7 +760,7 @@ mod tests {
 					table_name: String::from("Customers"),
 				}),
 			}],
-			record_columns: record_columns.clone(),
+			record_layout: all_columns(record_columns.clone()),
 			schema_is_implicit: false,
 			schema_name: String::from("Public"),
 			table_name: String::from("Customers"),
@@ -699,7 +777,7 @@ mod tests {
 				index: 1,
 				slot: 4,
 			}],
-			result_shape: SqlQueryResultShape::RecordPointer(record_columns),
+			result_shape: SqlQueryResultShape::RecordPointer(all_columns(record_columns)),
 			schema_is_implicit: false,
 			schema_name: String::from("Public"),
 			statement: String::from(
@@ -753,7 +831,7 @@ mod tests {
 			}),
 			lock_mode: RecordLockMode::None,
 			order_by: vec![],
-			record_columns: record_columns.clone(),
+			record_layout: all_columns(record_columns.clone()),
 			schema_is_implicit: false,
 			schema_name: String::from("Public"),
 			table_name: String::from("Customers"),
@@ -781,7 +859,7 @@ mod tests {
 					slot: 5,
 				},
 			],
-			result_shape: SqlQueryResultShape::RecordPointerArray(record_columns),
+			result_shape: SqlQueryResultShape::RecordPointerArray(all_columns(record_columns)),
 			schema_is_implicit: false,
 			schema_name: String::from("Public"),
 			statement: String::from(
@@ -838,6 +916,48 @@ mod tests {
 			query.statement,
 			"SELECT COUNT(*) FROM \"Customers\" WHERE (((TRIM(\"Customers\".\"Name\") || ' Ltd.') = 'Acme Ltd.') AND (CAST(TRUNC(EXTRACT(YEAR FROM \"Customers\".\"Created\")) AS BIGINT) >= 2020))",
 		);
+	}
+
+	#[test]
+	fn lowers_selected_columns_without_discarding_record_schema() {
+		let schema = vec![
+			QueryResultColumn {
+				column_name: String::from("Id"),
+				data_type: DataType::Int,
+				is_nullable: false,
+				is_primary_key: true,
+			},
+			QueryResultColumn {
+				column_name: String::from("Name"),
+				data_type: DataType::Text,
+				is_nullable: false,
+				is_primary_key: false,
+			},
+		];
+		let record_layout = QueryRecordLayout {
+			schema: QueryRecordSchema::Known(schema.clone()),
+			selection: QueryColumnSelection::Indices(vec![1]),
+		};
+		let query = lower_find_query(&QueryFindPlan {
+			backend: DatabaseBackend::Sqlite,
+			database_name: String::from("ExampleDb"),
+			filter: None,
+			kind: FindKind::First,
+			lock_mode: RecordLockMode::None,
+			order_by: vec![],
+			record_layout: record_layout.clone(),
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
+			table_name: String::from("Customers"),
+		}).unwrap();
+
+		let LoweredBackendQuery::Sql(query) = query;
+		assert_eq!(query.statement, "SELECT \"Customers\".\"Name\" FROM \"Customers\" LIMIT 1");
+		assert_eq!(query.result_shape, SqlQueryResultShape::RecordPointer(record_layout));
+		let SqlQueryResultShape::RecordPointer(layout) = query.result_shape else {
+			panic!("Expected record pointer result metadata.");
+		};
+		assert_eq!(layout.known_schema(), Some(schema.as_slice()));
 	}
 
 	#[test]
@@ -1093,32 +1213,7 @@ mod tests {
 					}),
 				},
 			],
-			record_columns: vec![
-				QueryResultColumn {
-					column_name: String::from("Id"),
-					data_type: DataType::Int,
-					is_nullable: false,
-					is_primary_key: true,
-				},
-				QueryResultColumn {
-					column_name: String::from("Name"),
-					data_type: DataType::Text,
-					is_nullable: false,
-					is_primary_key: false,
-				},
-			],
-			schema_is_implicit: true,
-			schema_name: String::from("Main"),
-			table_name: String::from("Customers"),
-		}.lower_to_backend().unwrap();
-
-		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
-			database_name: String::from("ExampleDb"),
-			dialect: SqlDialect::Sqlite,
-			group_by: vec![],
-			lock_mode: RecordLockMode::None,
-			parameters: vec![],
-			result_shape: SqlQueryResultShape::RecordPointer(vec![
+			record_layout: all_columns(vec![
 				QueryResultColumn {
 					column_name: String::from("Id"),
 					data_type: DataType::Int,
@@ -1132,6 +1227,31 @@ mod tests {
 					is_primary_key: false,
 				},
 			]),
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
+			table_name: String::from("Customers"),
+		}.lower_to_backend().unwrap();
+
+		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
+			database_name: String::from("ExampleDb"),
+			dialect: SqlDialect::Sqlite,
+			group_by: vec![],
+			lock_mode: RecordLockMode::None,
+			parameters: vec![],
+			result_shape: SqlQueryResultShape::RecordPointer(all_columns(vec![
+				QueryResultColumn {
+					column_name: String::from("Id"),
+					data_type: DataType::Int,
+					is_nullable: false,
+					is_primary_key: true,
+				},
+				QueryResultColumn {
+					column_name: String::from("Name"),
+					data_type: DataType::Text,
+					is_nullable: false,
+					is_primary_key: false,
+				},
+			])),
 			schema_is_implicit: true,
 			schema_name: String::from("Main"),
 			statement: String::from(
@@ -1172,14 +1292,14 @@ mod tests {
 			limit: None,
 			lock_mode: RecordLockMode::None,
 			order_by: vec![],
-			record_columns: vec![
+			record_layout: all_columns(vec![
 				QueryResultColumn {
 					column_name: String::from("Id"),
 					data_type: DataType::Int,
 					is_nullable: false,
 					is_primary_key: true,
 				},
-			],
+			]),
 			schema_is_implicit: true,
 			schema_name: String::from("Main"),
 			table_name: String::from("Customers"),
@@ -1200,14 +1320,14 @@ mod tests {
 			],
 			lock_mode: RecordLockMode::None,
 			parameters: vec![],
-			result_shape: SqlQueryResultShape::RecordPointerArray(vec![
+			result_shape: SqlQueryResultShape::RecordPointerArray(all_columns(vec![
 				QueryResultColumn {
 					column_name: String::from("Id"),
 					data_type: DataType::Int,
 					is_nullable: false,
 					is_primary_key: true,
 				},
-			]),
+			])),
 			schema_is_implicit: true,
 			schema_name: String::from("Main"),
 			statement: String::from(
@@ -1244,32 +1364,7 @@ mod tests {
 					}),
 				},
 			],
-			record_columns: vec![
-				QueryResultColumn {
-					column_name: String::from("Id"),
-					data_type: DataType::Int,
-					is_nullable: false,
-					is_primary_key: true,
-				},
-				QueryResultColumn {
-					column_name: String::from("Name"),
-					data_type: DataType::Text,
-					is_nullable: false,
-					is_primary_key: false,
-				},
-			],
-			schema_is_implicit: true,
-			schema_name: String::from("Main"),
-			table_name: String::from("Customers"),
-		}.lower_to_backend().unwrap();
-
-		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
-			database_name: String::from("ExampleDb"),
-			dialect: SqlDialect::Sqlite,
-			group_by: vec![],
-			lock_mode: RecordLockMode::None,
-			parameters: vec![],
-			result_shape: SqlQueryResultShape::RecordPointerArray(vec![
+			record_layout: all_columns(vec![
 				QueryResultColumn {
 					column_name: String::from("Id"),
 					data_type: DataType::Int,
@@ -1283,6 +1378,31 @@ mod tests {
 					is_primary_key: false,
 				},
 			]),
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
+			table_name: String::from("Customers"),
+		}.lower_to_backend().unwrap();
+
+		assert_eq!(query, LoweredBackendQuery::Sql(SqlQuery {
+			database_name: String::from("ExampleDb"),
+			dialect: SqlDialect::Sqlite,
+			group_by: vec![],
+			lock_mode: RecordLockMode::None,
+			parameters: vec![],
+			result_shape: SqlQueryResultShape::RecordPointerArray(all_columns(vec![
+				QueryResultColumn {
+					column_name: String::from("Id"),
+					data_type: DataType::Int,
+					is_nullable: false,
+					is_primary_key: true,
+				},
+				QueryResultColumn {
+					column_name: String::from("Name"),
+					data_type: DataType::Text,
+					is_nullable: false,
+					is_primary_key: false,
+				},
+			])),
 			schema_is_implicit: true,
 			schema_name: String::from("Main"),
 			statement: String::from(
@@ -1306,14 +1426,14 @@ mod tests {
 			}),
 			lock_mode: RecordLockMode::None,
 			order_by: vec![],
-			record_columns: vec![
+			record_layout: all_columns(vec![
 				QueryResultColumn {
 					column_name: String::from("Id"),
 					data_type: DataType::Int,
 					is_nullable: false,
 					is_primary_key: true,
 				},
-			],
+			]),
 			schema_is_implicit: true,
 			schema_name: String::from("Main"),
 			table_name: String::from("Customers"),
@@ -1332,14 +1452,14 @@ mod tests {
 					slot: 2,
 				},
 			],
-			result_shape: SqlQueryResultShape::RecordPointerArray(vec![
+			result_shape: SqlQueryResultShape::RecordPointerArray(all_columns(vec![
 				QueryResultColumn {
 					column_name: String::from("Id"),
 					data_type: DataType::Int,
 					is_nullable: false,
 					is_primary_key: true,
 				},
-			]),
+			])),
 			schema_is_implicit: true,
 			schema_name: String::from("Main"),
 			statement: String::from(
@@ -1424,7 +1544,7 @@ mod tests {
 			}),
 			lock_mode: RecordLockMode::None,
 			order_by: vec![],
-			record_columns,
+			record_layout: all_columns(record_columns),
 			schema_is_implicit: false,
 			schema_name: String::from("Public"),
 			table_name: String::from("Customers"),

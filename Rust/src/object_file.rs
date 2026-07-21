@@ -12,7 +12,9 @@ use crate::query::*;
 use crate::value::Decimal;
 
 const MAGIC_BYTES: [u8; 4] = *b"TBO0";
-const FORMAT_VERSION: u16 = 1;
+
+const FORMAT_VERSION: u16 = 1; // Leave at 1 until intial development is complete.
+
 const OPCODE_ADD: u8 = 1;
 const OPCODE_ADVANCE_SEQUENCE: u8 = OPCODE_ADD + 1;
 const OPCODE_AND: u8 = OPCODE_ADVANCE_SEQUENCE + 1;
@@ -80,16 +82,27 @@ const OPCODE_SUBTRACT: u8 = OPCODE_STORE_SEQUENCE_CURRENT + 1;
 const OPCODE_UPDATE_RECORD: u8 = OPCODE_SUBTRACT + 1;
 const OPCODE_UPDATE_RECORD_IF_CHANGED: u8 = OPCODE_UPDATE_RECORD + 1;
 const OPCODE_XOR: u8 = OPCODE_UPDATE_RECORD_IF_CHANGED + 1;
+
 const QUERY_KIND_SQL: u8 = 1;
+
 const SQL_DIALECT_SQLITE: u8 = 1;
 const SQL_DIALECT_POSTGRESQL: u8 = 2;
 const SQL_DIALECT_MYSQL: u8 = 3;
+
 const SQL_LOCK_NONE: u8 = 0;
 const SQL_LOCK_UPDATE: u8 = 1;
 const SQL_LOCK_UPDATE_NO_WAIT: u8 = 2;
+
+const SQL_RECORD_SCHEMA_KNOWN: u8 = 1;
+const SQL_RECORD_SCHEMA_RUNTIME: u8 = 2;
+
 const SQL_RESULT_INTEGER_SCALAR: u8 = 1;
-const SQL_RESULT_RECORD_POINTER: u8 = SQL_RESULT_INTEGER_SCALAR + 1;
-const SQL_RESULT_RECORD_POINTER_ARRAY: u8 = SQL_RESULT_RECORD_POINTER + 1;
+const SQL_RESULT_RECORD_POINTER: u8 = 2;
+const SQL_RESULT_RECORD_POINTER_ARRAY: u8 = 3;
+
+const SQL_COLUMN_SELECTION_ALL: u8 = 1;
+const SQL_COLUMN_SELECTION_INDICES: u8 = 2;
+const SQL_COLUMN_SELECTION_RUNTIME: u8 = 3;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectFileError {
@@ -601,6 +614,53 @@ impl<'a> ObjectFileReader<'a> {
 		}
 	}
 
+	fn read_query_record_layout(&mut self) -> Result<QueryRecordLayout, ObjectFileError> {
+		let schema_offset = self.offset;
+		let schema = match self.read_u8()? {
+			SQL_RECORD_SCHEMA_KNOWN => {
+				let column_count = self.read_u32()? as usize;
+				let mut columns = Vec::with_capacity(column_count);
+
+				for _ in 0..column_count {
+					columns.push(QueryResultColumn {
+						column_name: self.read_string()?,
+						data_type: self.read_data_type()?,
+						is_nullable: self.read_bool()?,
+						is_primary_key: self.read_bool()?,
+					});
+				}
+
+				QueryRecordSchema::Known(columns)
+			}
+			SQL_RECORD_SCHEMA_RUNTIME => QueryRecordSchema::RuntimeDetermined,
+			kind => return Err(ObjectFileError {
+				offset: schema_offset,
+				message: format!("Unknown SQL record schema kind {kind}."),
+			}),
+		};
+		let selection_offset = self.offset;
+		let selection = match self.read_u8()? {
+			SQL_COLUMN_SELECTION_ALL => QueryColumnSelection::All,
+			SQL_COLUMN_SELECTION_INDICES => {
+				let index_count = self.read_u32()? as usize;
+				let mut indices = Vec::with_capacity(index_count);
+
+				for _ in 0..index_count {
+					indices.push(self.read_u32()?);
+				}
+
+				QueryColumnSelection::Indices(indices)
+			}
+			SQL_COLUMN_SELECTION_RUNTIME => QueryColumnSelection::RuntimeDetermined,
+			kind => return Err(ObjectFileError {
+				offset: selection_offset,
+				message: format!("Unknown SQL column selection kind {kind}."),
+			}),
+		};
+
+		Ok(QueryRecordLayout { schema, selection })
+	}
+
 	fn read_sql_query(&mut self) -> Result<SqlQuery, ObjectFileError> {
 		let dialect_offset = self.offset;
 		let dialect = match self.read_u8()? {
@@ -630,36 +690,8 @@ impl<'a> ObjectFileReader<'a> {
 		let statement = self.read_string()?;
 		let result_shape = match self.read_u8()? {
 			SQL_RESULT_INTEGER_SCALAR => SqlQueryResultShape::IntegerScalar,
-			SQL_RESULT_RECORD_POINTER => {
-				let column_count = self.read_u32()? as usize;
-				let mut columns = Vec::with_capacity(column_count);
-
-				for _ in 0..column_count {
-					columns.push(QueryResultColumn {
-						column_name: self.read_string()?,
-						data_type: self.read_data_type()?,
-						is_nullable: self.read_bool()?,
-						is_primary_key: self.read_bool()?,
-					});
-				}
-
-				SqlQueryResultShape::RecordPointer(columns)
-			}
-			SQL_RESULT_RECORD_POINTER_ARRAY => {
-				let column_count = self.read_u32()? as usize;
-				let mut columns = Vec::with_capacity(column_count);
-
-				for _ in 0..column_count {
-					columns.push(QueryResultColumn {
-						column_name: self.read_string()?,
-						data_type: self.read_data_type()?,
-						is_nullable: self.read_bool()?,
-						is_primary_key: self.read_bool()?,
-					});
-				}
-
-				SqlQueryResultShape::RecordPointerArray(columns)
-			}
+			SQL_RESULT_RECORD_POINTER => SqlQueryResultShape::RecordPointer(self.read_query_record_layout()?),
+			SQL_RESULT_RECORD_POINTER_ARRAY => SqlQueryResultShape::RecordPointerArray(self.read_query_record_layout()?),
 			kind => {
 				return Err(ObjectFileError {
 					offset: self.offset - 1,
@@ -1084,33 +1116,19 @@ fn write_sql_query(bytes: &mut Vec<u8>, query: &SqlQuery) {
 	bytes.extend_from_slice(query.database_name.as_bytes());
 	bytes.extend_from_slice(&(query.statement.len() as u32).to_le_bytes());
 	bytes.extend_from_slice(query.statement.as_bytes());
+
 	match &query.result_shape {
 		SqlQueryResultShape::IntegerScalar => bytes.push(SQL_RESULT_INTEGER_SCALAR),
-		SqlQueryResultShape::RecordPointer(columns) => {
+		SqlQueryResultShape::RecordPointer(layout) => {
 			bytes.push(SQL_RESULT_RECORD_POINTER);
-			bytes.extend_from_slice(&(columns.len() as u32).to_le_bytes());
-
-			for column in columns {
-				bytes.extend_from_slice(&(column.column_name.len() as u32).to_le_bytes());
-				bytes.extend_from_slice(column.column_name.as_bytes());
-				write_data_type(bytes, &column.data_type);
-				bytes.push(if column.is_nullable { 1 } else { 0 });
-				bytes.push(if column.is_primary_key { 1 } else { 0 });
-			}
+			write_query_record_layout(bytes, layout);
 		}
-		SqlQueryResultShape::RecordPointerArray(columns) => {
+		SqlQueryResultShape::RecordPointerArray(layout) => {
 			bytes.push(SQL_RESULT_RECORD_POINTER_ARRAY);
-			bytes.extend_from_slice(&(columns.len() as u32).to_le_bytes());
-
-			for column in columns {
-				bytes.extend_from_slice(&(column.column_name.len() as u32).to_le_bytes());
-				bytes.extend_from_slice(column.column_name.as_bytes());
-				write_data_type(bytes, &column.data_type);
-				bytes.push(if column.is_nullable { 1 } else { 0 });
-				bytes.push(if column.is_primary_key { 1 } else { 0 });
-			}
+			write_query_record_layout(bytes, layout);
 		}
 	}
+
 	bytes.extend_from_slice(&(query.parameters.len() as u32).to_le_bytes());
 
 	for parameter in &query.parameters {
@@ -1295,6 +1313,37 @@ impl ObjectFileLayout {
 				bytes.extend_from_slice(&local.scope_end().to_le_bytes());
 			}
 		}
+	}
+}
+
+fn write_query_record_layout(bytes: &mut Vec<u8>, layout: &QueryRecordLayout) {
+	match &layout.schema {
+		QueryRecordSchema::Known(columns) => {
+			bytes.push(SQL_RECORD_SCHEMA_KNOWN);
+			bytes.extend_from_slice(&(columns.len() as u32).to_le_bytes());
+
+			for column in columns {
+				bytes.extend_from_slice(&(column.column_name.len() as u32).to_le_bytes());
+				bytes.extend_from_slice(column.column_name.as_bytes());
+				write_data_type(bytes, &column.data_type);
+				bytes.push(if column.is_nullable { 1 } else { 0 });
+				bytes.push(if column.is_primary_key { 1 } else { 0 });
+			}
+		}
+		QueryRecordSchema::RuntimeDetermined => bytes.push(SQL_RECORD_SCHEMA_RUNTIME),
+	}
+
+	match &layout.selection {
+		QueryColumnSelection::All => bytes.push(SQL_COLUMN_SELECTION_ALL),
+		QueryColumnSelection::Indices(indices) => {
+			bytes.push(SQL_COLUMN_SELECTION_INDICES);
+			bytes.extend_from_slice(&(indices.len() as u32).to_le_bytes());
+
+			for index in indices {
+				bytes.extend_from_slice(&index.to_le_bytes());
+			}
+		}
+		QueryColumnSelection::RuntimeDetermined => bytes.push(SQL_COLUMN_SELECTION_RUNTIME),
 	}
 }
 
@@ -1569,14 +1618,61 @@ mod tests {
 	}
 
 	#[test]
+	fn round_trips_runtime_determined_query_record_layout() {
+		let query = SqlQuery {
+			database_name: String::from("ExampleDb"),
+			dialect: SqlDialect::PostgreSql,
+			group_by: vec![],
+			lock_mode: RecordLockMode::None,
+			parameters: vec![],
+			result_shape: SqlQueryResultShape::RecordPointer(QueryRecordLayout {
+				schema: QueryRecordSchema::RuntimeDetermined,
+				selection: QueryColumnSelection::RuntimeDetermined,
+			}),
+			schema_is_implicit: true,
+			schema_name: String::new(),
+			statement: String::from("SELECT * FROM runtime_table"),
+			table_name: String::new(),
+		};
+		let program = Program::from_parts_with_functions_queries_and_debug(
+			ConstantPool::default(),
+			CodeBody::new(vec![Instruction::ExecuteQuery(0)]),
+			vec![],
+			vec![LoweredBackendQuery::Sql(query)],
+			DebugInfo::default(),
+		);
+
+		let decoded = read_program(&write_program(&program)).unwrap();
+
+		assert_eq!(decoded, program);
+	}
+
+	#[test]
 	fn round_trips_sql_query_record_lock_mode() {
+		let record_layout = QueryRecordLayout {
+			schema: QueryRecordSchema::Known(vec![
+				QueryResultColumn {
+					column_name: String::from("Id"),
+					data_type: DataType::Int,
+					is_nullable: false,
+					is_primary_key: true,
+				},
+				QueryResultColumn {
+					column_name: String::from("Name"),
+					data_type: DataType::Text,
+					is_nullable: false,
+					is_primary_key: false,
+				},
+			]),
+			selection: QueryColumnSelection::Indices(vec![1]),
+		};
 		let query = SqlQuery {
 			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::PostgreSql,
 			group_by: vec![],
 			lock_mode: RecordLockMode::UpdateNoWait,
 			parameters: vec![],
-			result_shape: SqlQueryResultShape::RecordPointer(vec![]),
+			result_shape: SqlQueryResultShape::RecordPointer(record_layout),
 			schema_is_implicit: true,
 			schema_name: String::from("Public"),
 			statement: String::from("SELECT 1"),

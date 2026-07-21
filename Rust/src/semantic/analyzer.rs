@@ -2085,13 +2085,13 @@ impl SemanticAnalyzer {
 	}
 
 	fn lower_find_query(&mut self, find: &FindExpr) -> Result<QueryFindPlan, CompileError> {
-		let (backend, database_name, schema_name, schema_is_implicit, table_name, record_column_schemas) = {
+		let (backend, database_name, schema_name, schema_is_implicit, table_name, schema_column_definitions) = {
 			let resolved_table = self.resolve_table_reference(&find.table)?;
 			let primary_key_columns = resolved_table.table().primary_key_columns()
 				.into_iter()
 				.map(|column| column.name().to_string())
 				.collect::<BTreeSet<_>>();
-			let record_column_schemas = resolved_table.table().columns()
+			let schema_column_definitions = resolved_table.table().columns()
 				.map(|column| (
 					column.name().to_string(),
 					column.data_type().clone(),
@@ -2105,10 +2105,10 @@ impl SemanticAnalyzer {
 				resolved_table.schema().name().to_string(),
 				resolved_table.schema().is_implicit(),
 				resolved_table.table().name().to_string(),
-				record_column_schemas,
+				schema_column_definitions,
 			)
 		};
-		let record_columns = record_column_schemas.into_iter()
+		let schema_columns = schema_column_definitions.into_iter()
 			.map(|(column_name, schema_type, is_nullable, is_primary_key)| Ok(QueryResultColumn {
 				column_name,
 				data_type: self.data_type_from_schema_type(&schema_type)?,
@@ -2133,7 +2133,7 @@ impl SemanticAnalyzer {
 			kind: find.kind,
 			lock_mode: self.find_lock_mode,
 			order_by,
-			record_columns,
+			record_layout: QueryRecordLayout::all_known(schema_columns),
 			schema_is_implicit,
 			schema_name,
 			table_name,
@@ -2145,13 +2145,13 @@ impl SemanticAnalyzer {
 		for_record: &ForRecordStatement,
 		limit: Option<QueryParameter>,
 	) -> Result<QueryForPlan, CompileError> {
-		let (backend, database_name, schema_name, schema_is_implicit, table_name, record_column_schemas) = {
+		let (backend, database_name, schema_name, schema_is_implicit, table_name, schema_column_definitions) = {
 			let resolved_table = self.resolve_table_reference(&for_record.table)?;
 			let primary_key_columns = resolved_table.table().primary_key_columns()
 				.into_iter()
 				.map(|column| column.name().to_string())
 				.collect::<BTreeSet<_>>();
-			let record_column_schemas = resolved_table.table().columns()
+			let schema_column_definitions = resolved_table.table().columns()
 				.map(|column| (
 					column.name().to_string(),
 					column.data_type().clone(),
@@ -2165,10 +2165,10 @@ impl SemanticAnalyzer {
 				resolved_table.schema().name().to_string(),
 				resolved_table.schema().is_implicit(),
 				resolved_table.table().name().to_string(),
-				record_column_schemas,
+				schema_column_definitions,
 			)
 		};
-		let record_columns = record_column_schemas.into_iter()
+		let schema_columns = schema_column_definitions.into_iter()
 			.map(|(column_name, schema_type, is_nullable, is_primary_key)| Ok(QueryResultColumn {
 				column_name,
 				data_type: self.data_type_from_schema_type(&schema_type)?,
@@ -2205,7 +2205,7 @@ impl SemanticAnalyzer {
 			limit,
 			lock_mode: if for_record.is_mut { RecordLockMode::Update } else { RecordLockMode::None },
 			order_by,
-			record_columns,
+			record_layout: QueryRecordLayout::all_known(schema_columns),
 			schema_is_implicit,
 			schema_name,
 			table_name,

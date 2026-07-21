@@ -93,21 +93,25 @@ impl DatabaseDriver for MySqlSession {
 				let value = row.as_ref(0).ok_or_else(|| String::from("MySQL scalar query returned an empty row."))?;
 				Ok(Value::Integer(mysql_integer(value)?))
 			}
-			SqlQueryResultShape::RecordPointer(columns) => {
+			SqlQueryResultShape::RecordPointer(layout) => {
+				let schema = known_record_schema(layout)?;
+				let selected_columns = selected_record_columns(layout)?;
 				let Some(row) = rows.first() else {
-					return Ok(Value::RecordPointer(empty_record_pointer(query, columns)));
+					return Ok(Value::RecordPointer(empty_record_pointer(query, schema)));
 				};
-				let fields = load_record_fields(row, columns)?;
+				let fields = load_record_fields(row, &selected_columns)?;
 				let original_fields = fields.clone();
-				Ok(Value::RecordPointer(record_pointer(query, columns, fields, original_fields, BTreeMap::new())))
+				Ok(Value::RecordPointer(record_pointer(query, schema, fields, original_fields, BTreeMap::new())))
 			}
-			SqlQueryResultShape::RecordPointerArray(columns) => {
+			SqlQueryResultShape::RecordPointerArray(layout) => {
+				let schema = known_record_schema(layout)?;
+				let selected_columns = selected_record_columns(layout)?;
 				let mut loaded_records = Vec::with_capacity(rows.len());
 
 				for row in &rows {
-					let fields = load_record_fields(row, columns)?;
+					let fields = load_record_fields(row, &selected_columns)?;
 					loaded_records.push(LoadedRecord {
-						group_keys: load_group_keys(row, columns.len(), &query.group_by)?,
+						group_keys: load_group_keys(row, selected_columns.len(), &query.group_by)?,
 						original_fields: fields.clone(),
 						fields,
 					});
@@ -117,7 +121,7 @@ impl DatabaseDriver for MySqlSession {
 				let records = loaded_records.into_iter().enumerate()
 					.map(|(index, loaded)| Value::RecordPointer(record_pointer(
 						query,
-						columns,
+						schema,
 						loaded.fields,
 						loaded.original_fields,
 						boundaries.get(index).cloned().unwrap_or_default(),
