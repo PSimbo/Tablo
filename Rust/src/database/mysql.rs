@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use mysql::{ Conn, Opts, OptsBuilder, Params, Row };
+use mysql::{ Conn, Error as MySqlDriverError, Opts, OptsBuilder, Params, Row };
 use mysql::Value as MySqlValue;
 use mysql::consts::CapabilityFlags;
 use mysql::prelude::Queryable;
@@ -11,6 +11,7 @@ use crate::sql::*;
 use crate::value::*;
 
 use super::records::*;
+use super::locking::*;
 use super::runtime::DatabaseDriver;
 use super::transactions::*;
 use super::values::runtime_type_name;
@@ -72,8 +73,19 @@ impl DatabaseDriver for MySqlSession {
 		let parameters = parameters.into_iter()
 			.map(runtime_value_to_mysql)
 			.collect::<Result<Vec<_>, _>>()?;
-		let rows = self.connection.exec::<Row, _, _>(&query.statement, Params::Positional(parameters))
-			.map_err(|error| format!("Failed to execute MySQL query: {error}"))?;
+		let transaction_active = self.transactions.is_active();
+		let statement = query_statement(query, transaction_active);
+		let rows = match self.connection.exec::<Row, _, _>(statement.as_ref(), Params::Positional(parameters)) {
+			Ok(rows) => rows,
+			Err(error) if transaction_active
+				&& query.lock_mode == RecordLockMode::UpdateNoWait
+				&& !is_lock_available(&error) => {
+				return lock_conflict_result(query).ok_or_else(|| {
+					String::from("MySQL reported a record-lock conflict for a query that does not return one record pointer.")
+				});
+			}
+			Err(error) => return Err(format!("Failed to execute MySQL query: {error}")),
+		};
 
 		match &query.result_shape {
 			SqlQueryResultShape::IntegerScalar => {
@@ -244,6 +256,10 @@ fn format_mysql_timestamp(
 	format!("{year:04}-{month:02}-{day:02}T{}", format_mysql_time(hour, minute, second, microsecond))
 }
 
+fn is_lock_available(error: &MySqlDriverError) -> bool {
+	!matches!(error, MySqlDriverError::MySqlError(error) if error.code == 3572)
+}
+
 fn load_group_keys(row: &Row, column_count: usize, group_by: &[SqlGroupByItem]) -> Result<Vec<Value>, String> {
 	group_by.iter().enumerate().map(|(index, item)| {
 		let value = row.as_ref(column_count + index).ok_or_else(|| String::from("MySQL result is missing a grouping column."))?;
@@ -338,6 +354,17 @@ mod tests {
 			database_value(&mysql::Value::Date(2026, 7, 20, 14, 30, 12, 340_000), &DataType::Timestamp).unwrap(),
 			crate::value::DatabaseValue::Text(String::from("2026-07-20T14:30:12.34")),
 		);
+	}
+
+	#[test]
+	fn identifies_mysql_nowait_lock_error() {
+		let error = MySqlDriverError::MySqlError(mysql::MySqlError {
+			code: 3572,
+			message: String::from("Do not wait for lock."),
+			state: String::from("HY000"),
+		});
+
+		assert!(!is_lock_available(&error));
 	}
 
 	#[test]

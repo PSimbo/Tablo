@@ -82,6 +82,14 @@ pub enum QueryUnaryOperator {
 	Not,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RecordLockMode {
+	#[default]
+	None,
+	Update,
+	UpdateNoWait,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SqlDialect {
 	MySql,
@@ -142,6 +150,7 @@ pub struct QueryFindPlan {
 	pub database_name: String,
 	pub filter: Option<QueryExpr>,
 	pub kind: FindKind,
+	pub lock_mode: RecordLockMode,
 	pub order_by: Vec<QueryOrderByItem>,
 	pub record_columns: Vec<QueryResultColumn>,
 	pub schema_is_implicit: bool,
@@ -156,6 +165,7 @@ pub struct QueryForPlan {
 	pub filter: Option<QueryExpr>,
 	pub group_by: Vec<QueryGroupByItem>,
 	pub limit: Option<QueryParameter>,
+	pub lock_mode: RecordLockMode,
 	pub order_by: Vec<QueryOrderByItem>,
 	pub record_columns: Vec<QueryResultColumn>,
 	pub schema_is_implicit: bool,
@@ -217,6 +227,7 @@ pub struct SqlQuery {
 	pub database_name: String,
 	pub dialect: SqlDialect,
 	pub group_by: Vec<SqlGroupByItem>,
+	pub lock_mode: RecordLockMode,
 	pub parameters: Vec<SqlParameter>,
 	pub result_shape: SqlQueryResultShape,
 	pub schema_is_implicit: bool,
@@ -334,6 +345,7 @@ mod tests {
 			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::MySql,
 			group_by: vec![],
+			lock_mode: RecordLockMode::None,
 			parameters: vec![SqlParameter {
 				data_type: DataType::Int,
 				field_path: vec![],
@@ -363,6 +375,7 @@ mod tests {
 			database_name: String::from("ExampleDb"),
 			filter: None,
 			kind: FindKind::Last,
+			lock_mode: RecordLockMode::None,
 			order_by: vec![QueryOrderByItem {
 				direction: OrderByDirection::Ascending,
 				expression: QueryExpr::Column(QueryColumnReference {
@@ -423,6 +436,7 @@ mod tests {
 				field_path: vec![],
 				slot: 8,
 			}),
+			lock_mode: RecordLockMode::None,
 			order_by: vec![],
 			record_columns: vec![QueryResultColumn {
 				column_name: String::from("Id"),
@@ -607,6 +621,7 @@ mod tests {
 			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::PostgreSql,
 			group_by: vec![],
+			lock_mode: RecordLockMode::None,
 			parameters: vec![
 				SqlParameter {
 					data_type: DataType::Int,
@@ -658,6 +673,7 @@ mod tests {
 				})),
 			})),
 			kind: FindKind::Last,
+			lock_mode: RecordLockMode::None,
 			order_by: vec![QueryOrderByItem {
 				direction: OrderByDirection::Ascending,
 				expression: QueryExpr::Column(QueryColumnReference {
@@ -676,6 +692,7 @@ mod tests {
 			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::PostgreSql,
 			group_by: vec![],
+			lock_mode: RecordLockMode::None,
 			parameters: vec![SqlParameter {
 				data_type: DataType::Bool,
 				field_path: vec![],
@@ -734,6 +751,7 @@ mod tests {
 				field_path: vec![],
 				slot: 5,
 			}),
+			lock_mode: RecordLockMode::None,
 			order_by: vec![],
 			record_columns: record_columns.clone(),
 			schema_is_implicit: false,
@@ -748,6 +766,7 @@ mod tests {
 				data_type: DataType::Text,
 				key_names: vec![String::from("country")],
 			}],
+			lock_mode: RecordLockMode::None,
 			parameters: vec![
 				SqlParameter {
 					data_type: DataType::Bool,
@@ -851,6 +870,7 @@ mod tests {
 			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::Sqlite,
 			group_by: vec![],
+			lock_mode: RecordLockMode::None,
 			parameters: vec![],
 			result_shape: SqlQueryResultShape::IntegerScalar,
 			schema_is_implicit: true,
@@ -890,6 +910,7 @@ mod tests {
 			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::Sqlite,
 			group_by: vec![],
+			lock_mode: RecordLockMode::None,
 			parameters: vec![],
 			result_shape: SqlQueryResultShape::IntegerScalar,
 			schema_is_implicit: true,
@@ -940,6 +961,7 @@ mod tests {
 			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::Sqlite,
 			group_by: vec![],
+			lock_mode: RecordLockMode::None,
 			parameters: vec![],
 			result_shape: SqlQueryResultShape::IntegerScalar,
 			schema_is_implicit: true,
@@ -993,6 +1015,7 @@ mod tests {
 			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::Sqlite,
 			group_by: vec![],
+			lock_mode: RecordLockMode::None,
 			parameters: vec![
 				SqlParameter {
 					data_type: DataType::Int,
@@ -1032,6 +1055,7 @@ mod tests {
 			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::Sqlite,
 			group_by: vec![],
+			lock_mode: RecordLockMode::None,
 			parameters: vec![],
 			result_shape: SqlQueryResultShape::IntegerScalar,
 			schema_is_implicit: false,
@@ -1058,6 +1082,7 @@ mod tests {
 				right: Box::new(QueryExpr::Literal(QueryLiteral::Boolean(true))),
 			})),
 			kind: FindKind::Last,
+			lock_mode: RecordLockMode::None,
 			order_by: vec![
 				QueryOrderByItem {
 					direction: OrderByDirection::Ascending,
@@ -1091,6 +1116,7 @@ mod tests {
 			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::Sqlite,
 			group_by: vec![],
+			lock_mode: RecordLockMode::None,
 			parameters: vec![],
 			result_shape: SqlQueryResultShape::RecordPointer(vec![
 				QueryResultColumn {
@@ -1144,6 +1170,7 @@ mod tests {
 				},
 			],
 			limit: None,
+			lock_mode: RecordLockMode::None,
 			order_by: vec![],
 			record_columns: vec![
 				QueryResultColumn {
@@ -1171,6 +1198,7 @@ mod tests {
 					key_names: vec![String::from("City")],
 				},
 			],
+			lock_mode: RecordLockMode::None,
 			parameters: vec![],
 			result_shape: SqlQueryResultShape::RecordPointerArray(vec![
 				QueryResultColumn {
@@ -1205,6 +1233,7 @@ mod tests {
 			})),
 			group_by: vec![],
 			limit: None,
+			lock_mode: RecordLockMode::None,
 			order_by: vec![
 				QueryOrderByItem {
 					direction: OrderByDirection::Descending,
@@ -1238,6 +1267,7 @@ mod tests {
 			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::Sqlite,
 			group_by: vec![],
+			lock_mode: RecordLockMode::None,
 			parameters: vec![],
 			result_shape: SqlQueryResultShape::RecordPointerArray(vec![
 				QueryResultColumn {
@@ -1274,6 +1304,7 @@ mod tests {
 				field_path: vec![],
 				slot: 2,
 			}),
+			lock_mode: RecordLockMode::None,
 			order_by: vec![],
 			record_columns: vec![
 				QueryResultColumn {
@@ -1292,6 +1323,7 @@ mod tests {
 			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::Sqlite,
 			group_by: vec![],
+			lock_mode: RecordLockMode::None,
 			parameters: vec![
 				SqlParameter {
 					data_type: DataType::Int,
@@ -1341,6 +1373,7 @@ mod tests {
 			database_name: String::from("ExampleDb"),
 			dialect: SqlDialect::Sqlite,
 			group_by: vec![],
+			lock_mode: RecordLockMode::None,
 			parameters: vec![
 				SqlParameter {
 					data_type: DataType::Date,
@@ -1389,6 +1422,7 @@ mod tests {
 				field_path: vec![],
 				slot: 4,
 			}),
+			lock_mode: RecordLockMode::None,
 			order_by: vec![],
 			record_columns,
 			schema_is_implicit: false,

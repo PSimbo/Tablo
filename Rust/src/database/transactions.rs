@@ -37,6 +37,10 @@ impl TransactionState {
 		Ok(())
 	}
 
+	pub fn is_active(&self) -> bool {
+		self.depth > 0
+	}
+
 	pub fn rollback(
 		&mut self,
 		target_depth: usize,

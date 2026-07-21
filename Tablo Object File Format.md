@@ -72,7 +72,7 @@ This identifies the file as a Tablo object file.
 Format Version
 --------------
 
-At the time of writing, the current format version is still `1`.
+At the time of writing, the current format version is still `1`. This is likely to remain unchanged during initial development. There should be no expectation that an object file compiled with a previous build of the compiler shall be compatible with the current VM.
 
 The presence of a version field allows future implementations to reject object
 files using an unsupported format. While Tablo is still in an early stage,

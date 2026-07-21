@@ -1,4 +1,5 @@
 mod config;
+mod locking;
 mod mysql;
 mod postgresql;
 mod records;

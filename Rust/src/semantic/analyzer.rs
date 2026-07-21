@@ -39,6 +39,7 @@ pub struct SemanticAnalyzer {
 	current_schema_catalog: Option<SchemaCatalog>,
 	current_source_name: Option<String>,
 	enums: ScopeStack<EnumBinding>,
+	find_lock_mode: RecordLockMode,
 	function_depth: usize,
 	functions: ScopeStack<FunctionSignature>,
 	group_boundary_contexts: Vec<GroupBoundaryContext>,
@@ -288,6 +289,7 @@ impl SemanticAnalyzer {
 			current_schema_catalog: None,
 			current_source_name: None,
 			enums: ScopeStack::default(),
+			find_lock_mode: RecordLockMode::None,
 			function_depth: 0,
 			functions: ScopeStack::default(),
 			group_boundary_contexts: Vec::new(),
@@ -314,6 +316,7 @@ impl SemanticAnalyzer {
 		self.current_return_type = None;
 		self.functions = ScopeStack::default();
 		self.enums = ScopeStack::default();
+		self.find_lock_mode = RecordLockMode::None;
 		self.group_boundary_contexts.clear();
 		self.locals = ScopeStack::default();
 		self.function_depth = 0;
@@ -1539,6 +1542,18 @@ impl SemanticAnalyzer {
 		result
 	}
 
+	fn infer_expression_type_with_find_lock_mode(
+		&mut self,
+		expression: &Expr,
+		lock_mode: RecordLockMode,
+	) -> Result<DataType, CompileError> {
+		let previous_lock_mode = self.find_lock_mode;
+		self.find_lock_mode = lock_mode;
+		let result = self.infer_expression_type(expression);
+		self.find_lock_mode = previous_lock_mode;
+		result
+	}
+
 	fn infer_find_expression_type(&mut self, find: &FindExpr) -> Result<DataType, CompileError> {
 		let lowered_query = self.lower_find_query(find)?;
 		let record_pointer = {
@@ -2116,6 +2131,7 @@ impl SemanticAnalyzer {
 			database_name,
 			filter,
 			kind: find.kind,
+			lock_mode: self.find_lock_mode,
 			order_by,
 			record_columns,
 			schema_is_implicit,
@@ -2187,6 +2203,7 @@ impl SemanticAnalyzer {
 			filter,
 			group_by,
 			limit,
+			lock_mode: if for_record.is_mut { RecordLockMode::Update } else { RecordLockMode::None },
 			order_by,
 			record_columns,
 			schema_is_implicit,
@@ -3840,7 +3857,10 @@ impl SemanticAnalyzer {
 					));
 				}
 
-				let initial_type = self.infer_expression_type(initial_value)?;
+				let initial_type = self.infer_expression_type_with_find_lock_mode(
+					initial_value,
+					if *is_mut { RecordLockMode::UpdateNoWait } else { RecordLockMode::None },
+				)?;
 				let DataType::RecordPointer(_) = initial_type.without_nullability() else {
 					return Err(self.compile_error(
 						initial_value.position(),

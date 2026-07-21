@@ -84,6 +84,9 @@ const QUERY_KIND_SQL: u8 = 1;
 const SQL_DIALECT_SQLITE: u8 = 1;
 const SQL_DIALECT_POSTGRESQL: u8 = 2;
 const SQL_DIALECT_MYSQL: u8 = 3;
+const SQL_LOCK_NONE: u8 = 0;
+const SQL_LOCK_UPDATE: u8 = 1;
+const SQL_LOCK_UPDATE_NO_WAIT: u8 = 2;
 const SQL_RESULT_INTEGER_SCALAR: u8 = 1;
 const SQL_RESULT_RECORD_POINTER: u8 = SQL_RESULT_INTEGER_SCALAR + 1;
 const SQL_RESULT_RECORD_POINTER_ARRAY: u8 = SQL_RESULT_RECORD_POINTER + 1;
@@ -611,6 +614,18 @@ impl<'a> ObjectFileReader<'a> {
 				});
 			}
 		};
+		let lock_mode_offset = self.offset;
+		let lock_mode = match self.read_u8()? {
+			SQL_LOCK_NONE => RecordLockMode::None,
+			SQL_LOCK_UPDATE => RecordLockMode::Update,
+			SQL_LOCK_UPDATE_NO_WAIT => RecordLockMode::UpdateNoWait,
+			mode => {
+				return Err(ObjectFileError {
+					offset: lock_mode_offset,
+					message: format!("Unknown SQL record lock mode {mode}."),
+				});
+			}
+		};
 		let database_name = self.read_string()?;
 		let statement = self.read_string()?;
 		let result_shape = match self.read_u8()? {
@@ -677,6 +692,7 @@ impl<'a> ObjectFileReader<'a> {
 			database_name,
 			dialect,
 			group_by,
+			lock_mode,
 			parameters,
 			result_shape,
 			schema_is_implicit: self.read_bool()?,
@@ -1058,6 +1074,11 @@ fn write_sql_query(bytes: &mut Vec<u8>, query: &SqlQuery) {
 		SqlDialect::MySql => SQL_DIALECT_MYSQL,
 		SqlDialect::PostgreSql => SQL_DIALECT_POSTGRESQL,
 		SqlDialect::Sqlite => SQL_DIALECT_SQLITE,
+	});
+	bytes.push(match query.lock_mode {
+		RecordLockMode::None => SQL_LOCK_NONE,
+		RecordLockMode::Update => SQL_LOCK_UPDATE,
+		RecordLockMode::UpdateNoWait => SQL_LOCK_UPDATE_NO_WAIT,
 	});
 	bytes.extend_from_slice(&(query.database_name.len() as u32).to_le_bytes());
 	bytes.extend_from_slice(query.database_name.as_bytes());
@@ -1543,6 +1564,33 @@ mod tests {
 
 		let bytes = write_program(&program);
 		let decoded = read_program(&bytes).unwrap();
+
+		assert_eq!(decoded, program);
+	}
+
+	#[test]
+	fn round_trips_sql_query_record_lock_mode() {
+		let query = SqlQuery {
+			database_name: String::from("ExampleDb"),
+			dialect: SqlDialect::PostgreSql,
+			group_by: vec![],
+			lock_mode: RecordLockMode::UpdateNoWait,
+			parameters: vec![],
+			result_shape: SqlQueryResultShape::RecordPointer(vec![]),
+			schema_is_implicit: true,
+			schema_name: String::from("Public"),
+			statement: String::from("SELECT 1"),
+			table_name: String::from("Example"),
+		};
+		let program = Program::from_parts_with_functions_queries_and_debug(
+			ConstantPool::default(),
+			CodeBody::new(vec![Instruction::ExecuteQuery(0)]),
+			vec![],
+			vec![LoweredBackendQuery::Sql(query)],
+			DebugInfo::default(),
+		);
+
+		let decoded = read_program(&write_program(&program)).unwrap();
 
 		assert_eq!(decoded, program);
 	}

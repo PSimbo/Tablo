@@ -1680,7 +1680,7 @@ mod tests {
 			concat!(
 				"with exampledb;\n",
 				"var requiredActive: bool = true;\n",
-				"rec customer = find last Customers ",
+				"rec mut customer = find last Customers ",
 				"where Active == requiredActive order by Name asc;\n",
 				"0",
 			),
@@ -1698,6 +1698,7 @@ mod tests {
 
 		let LoweredBackendQuery::Sql(query) = &program.queries()[0];
 		assert_eq!(query.dialect, SqlDialect::MySql);
+		assert_eq!(query.lock_mode, RecordLockMode::UpdateNoWait);
 		assert_eq!(
 			query.statement,
 			concat!(
@@ -1719,7 +1720,7 @@ mod tests {
 				"with exampledb;\n",
 				"var requiredActive: bool = true;\n",
 				"var maxRows: int = 5;\n",
-				"for rec customer in Customers where Active == requiredActive ",
+				"for rec mut customer in Customers where Active == requiredActive ",
 				"group by trim(Country) as country limit maxRows { }\n",
 				"0",
 			),
@@ -1738,6 +1739,7 @@ mod tests {
 
 		let LoweredBackendQuery::Sql(query) = &program.queries()[0];
 		assert_eq!(query.dialect, SqlDialect::MySql);
+		assert_eq!(query.lock_mode, RecordLockMode::Update);
 		assert_eq!(
 			query.statement,
 			concat!(
@@ -1769,6 +1771,7 @@ mod tests {
 
 		let LoweredBackendQuery::Sql(query) = &program.queries()[0];
 		assert_eq!(query.dialect, SqlDialect::PostgreSql);
+		assert_eq!(query.lock_mode, RecordLockMode::None);
 		assert_eq!(
 			query.statement,
 			"SELECT COUNT(*) FROM \"Public\".\"Customers\" WHERE (\"Customers\".\"Id\" >= CAST(CAST($1 AS TEXT) AS BIGINT))",
@@ -1800,6 +1803,7 @@ mod tests {
 
 		let LoweredBackendQuery::Sql(query) = &program.queries()[0];
 		assert_eq!(query.dialect, SqlDialect::PostgreSql);
+		assert_eq!(query.lock_mode, RecordLockMode::None);
 		assert_eq!(
 			query.statement,
 			concat!(

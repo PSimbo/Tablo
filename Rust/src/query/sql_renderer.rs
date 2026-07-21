@@ -57,6 +57,7 @@ pub(super) fn lower_count(
 		database_name: plan.database_name.clone(),
 		dialect: renderer.dialect(),
 		group_by: vec![],
+		lock_mode: RecordLockMode::None,
 		parameters,
 		result_shape: SqlQueryResultShape::IntegerScalar,
 		schema_is_implicit: plan.schema_is_implicit,
@@ -105,6 +106,7 @@ pub(super) fn lower_find(
 		database_name: plan.database_name.clone(),
 		dialect: renderer.dialect(),
 		group_by: vec![],
+		lock_mode: plan.lock_mode,
 		parameters,
 		result_shape: SqlQueryResultShape::RecordPointer(plan.record_columns.clone()),
 		schema_is_implicit: plan.schema_is_implicit,
@@ -179,6 +181,7 @@ pub(super) fn lower_for(
 				key_names: item.key_names.clone(),
 			})
 			.collect(),
+		lock_mode: plan.lock_mode,
 		parameters,
 		result_shape: SqlQueryResultShape::RecordPointerArray(plan.record_columns.clone()),
 		schema_is_implicit: plan.schema_is_implicit,

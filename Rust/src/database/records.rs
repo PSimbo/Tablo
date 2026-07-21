@@ -25,6 +25,22 @@ pub(super) fn empty_record_pointer(query: &SqlQuery, columns: &[QueryResultColum
 	}
 }
 
+pub(super) fn locked_record_pointer(query: &SqlQuery, columns: &[QueryResultColumn]) -> RecordPointerValue {
+	RecordPointerValue {
+		column_names: columns.iter().map(|column| column.column_name.clone()).collect(),
+		exists: true,
+		fields: BTreeMap::new(),
+		group_boundaries: BTreeMap::new(),
+		is_dirty: false,
+		locked: true,
+		original_fields: BTreeMap::new(),
+		primary_key_column_names: primary_key_column_names(columns),
+		persisted: true,
+		record_type: record_pointer_type(query),
+		schema_is_implicit: query.schema_is_implicit,
+	}
+}
+
 pub(super) fn normalize_name(name: &str) -> String {
 	name.to_ascii_lowercase()
 }

@@ -1012,6 +1012,14 @@ When a record pointer's fields are modified, by default the changes are not comm
 
 If a record is deleted via its record pointer, the deletion is committed to the database at the point at which the `delete` keyword appears. From that point on, the record pointer may not be used to access field data and calling `exists()` on the record pointer will return `false`.
 
+#### Record Pointers and Database Locks
+
+Record pointer mutability (i.e. whether the `mut` keyword was used in acquiring the record pointer) determines both whether the record pointer may be used to modify the record and whether its query may request a database update lock. An immutable record pointer never requests an update lock. A mutable record pointer only requests an update lock when its query is executed within a `transaction` block. Outside of a transaction, no update lock is requested. However, via use of the `mut` keyword, database changes are permitted through the record pointer even without the lock. This does not guarantee that a subsequent database write using the record pointer will succeed: another database operation may hold a conflicting lock, in which case the change may wait or fail according to the locking behavior of the database backend.
+
+For database backends that support row-level locking, a mutable `find` query within a transaction attempts to acquire an update lock without waiting. If the selected record is already locked, the result is a locked record pointer as described under "Find Statements". A mutable query-based `for` loop instead waits for matching locked records to become available. It does not silently omit these records from the iteration. A deadlock, lock timeout, or other database failure produces a runtime error and causes the active transaction to be rolled back.
+
+Database locks are held according to the lifetime of the active transaction, not the lexical lifetime of an individual record pointer. Leaving the record pointer's scope does not release its lock while the transaction remains active. For backends without row-level locking, including SQLite, record pointers never enter the locked state and `locked()` always returns `false`. Other database write contentions may still produce a runtime database error.
+
 ### For Loops
 
 When a `for` loop's loop variable is preceded by the `rec` keyword, the `for` loop represents a database query. A record pointer is assigned to the loop variable for each iteration.
@@ -1078,7 +1086,7 @@ Note that Tablo is free to implement the database query logic in whichever way i
 
 Local values captured for use as database-query parameters are resolved when the query begins execution, not re-evaluated during later iterations of that same query. This means that if the body of a query-based `for` loop mutates a variable or object field that was referenced by the query expression, the active query does not observe those changes part-way through its own execution. Programmers should therefore avoid relying on such mutations to affect the remainder of the current query. This area of the language may be tightened or made more explicit in a future revision.
 
-For database backends that support record locking, the `for` loop will include locked records if the loop variable is immutable but exclude locked records if the loop variable is mutable. If required, the lock state of a record may be determined using the `locked()` function.
+An immutable query-based `for` loop does not request update locks and includes records that are locked for update by another transaction when the database backend permits ordinary reads of those records. A mutable query-based `for` loop acquires update locks while inside a transaction. If another transaction already holds a required record lock, the loop waits for that lock rather than silently excluding the record. Any backend lock timeout or deadlock is a runtime error.
 
 ### Find Statements
 
@@ -1094,12 +1102,12 @@ The following query syntax is valid for `find` statements:
 * `where` clause
 * `order by` clause
 
-When assigning the result of a `find` expression to a record pointer, it may be that no record can be assigned. This may be for one of two reasons:
+When assigning the result of a mutable `find` expression within a transaction to a record pointer, it may be that no record can be assigned. This may be for one of two reasons:
 
 1. No matching record exists, or
 2. A matching record exists but is locked
 
-When no result can be assigned to the record pointer, it ends up in one of two "nullish" states. If no matching record could be found, this may be checked with `exists()` (returns `true` if the record exists but is locked). If a matching record exists but is locked, this may be checked with `locked()` (returns `false` if no matching record was found). For database backends that do not support record locking, the `locked()` function always returns false. Calling the `locked()` function on a read-only record pointer produces a compiler warning. If a record both exists and is not locked then it is not nullish and the record pointer may be used as the condition for an `if` statement, where it evaluates to `true`.
+When no result can be assigned to the record pointer, it ends up in one of two "nullish" states. If no matching record could be found, this may be checked with `exists()` (returns `true` if the record exists but is locked). If a matching record exists but is locked, this may be checked with `locked()` (returns `false` if no matching record was found). Immutable `find` queries and queries executed outside a transaction do not request update locks, so their record pointers do not enter the locked state. For database backends that do not support record locking, the `locked()` function always returns false. Calling the `locked()` function on a read-only record pointer produces a compiler warning. If a record both exists and is not locked then it is not nullish and the record pointer may be used as the condition for an `if` statement, where it evaluates to `true`.
 
 ~~~
 {
@@ -1220,6 +1228,8 @@ Each `transaction { ... }` block introduces a transaction boundary.
 If a `transaction { ... }` block is entered while no transaction is active, a new transaction begins.
 
 If a `transaction { ... }` block is entered while another transaction is already active, the inner block creates a nested rollback boundary within the enclosing transaction. If the inner block fails or is cancelled, changes made since entering the inner block are rolled back. If the inner block succeeds, its changes remain part of the enclosing transaction, but they are still rolled back if the enclosing transaction later fails.
+
+An outer transaction and all transaction blocks nested within it may access at most one configured database. The first database operation performed within the transaction selects that database for the complete transaction scope. Attempting to access a different database before the outer transaction ends is an error, including when that access occurs through a function call. A later, independent transaction may select a different database.
 
 ~~~
 transaction {

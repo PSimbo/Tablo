@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use native_tls::TlsConnector;
 use postgres::Client;
+use postgres::error::SqlState;
 use postgres::types::ToSql;
 use postgres_native_tls::MakeTlsConnector;
 
@@ -11,6 +12,7 @@ use crate::sql::*;
 use crate::value::*;
 
 use super::records::*;
+use super::locking::*;
 use super::runtime::DatabaseDriver;
 use super::transactions::*;
 use super::values::runtime_type_name;
@@ -18,6 +20,7 @@ use super::writes::*;
 
 pub(super) struct PostgreSqlSession {
 	client: Client,
+	next_lock_probe_id: u64,
 	transactions: TransactionState,
 }
 
@@ -33,6 +36,7 @@ impl PostgreSqlSession {
 
 		Ok(Self {
 			client,
+			next_lock_probe_id: 0,
 			transactions: TransactionState::default(),
 		})
 	}
@@ -50,7 +54,7 @@ impl DatabaseDriver for PostgreSqlSession {
 	}
 
 	fn commit_transaction(&mut self, target_depth: usize, savepoint_name: &str) -> Result<(), String> {
-		let Self { client, transactions } = self;
+		let Self { client, transactions, .. } = self;
 		transactions.commit(target_depth, savepoint_name, |command| {
 			execute_transaction_command(client, command)
 		})
@@ -79,8 +83,42 @@ impl DatabaseDriver for PostgreSqlSession {
 		let parameter_refs = parameters.iter()
 			.map(|value| value as &(dyn ToSql + Sync))
 			.collect::<Vec<_>>();
-		let rows = self.client.query(&query.statement, &parameter_refs)
-			.map_err(|error| format!("Failed to execute PostgreSQL query: {error}"))?;
+		let transaction_active = self.transactions.is_active();
+		let statement = query_statement(query, transaction_active);
+		let lock_probe = if transaction_active && query.lock_mode == RecordLockMode::UpdateNoWait {
+			let savepoint_name = format!("tablo_lock_probe_{}", self.next_lock_probe_id);
+			self.next_lock_probe_id += 1;
+			self.client.batch_execute(&format!("SAVEPOINT {savepoint_name}"))
+				.map_err(|error| format!("Failed to start PostgreSQL record-lock probe: {error}"))?;
+			Some(savepoint_name)
+		}
+		else {
+			None
+		};
+		let rows = match self.client.query(statement.as_ref(), &parameter_refs) {
+			Ok(rows) => {
+				if let Some(savepoint_name) = &lock_probe {
+					self.client.batch_execute(&format!("RELEASE SAVEPOINT {savepoint_name}"))
+						.map_err(|error| format!("Failed to complete PostgreSQL record-lock probe: {error}"))?;
+				}
+				rows
+			}
+			Err(error) if transaction_active
+				&& query.lock_mode == RecordLockMode::UpdateNoWait
+				&& error.code() == Some(&SqlState::LOCK_NOT_AVAILABLE) => {
+				let savepoint_name = lock_probe.as_ref()
+					.expect("PostgreSQL non-waiting lock query must have an internal savepoint.");
+				self.client.batch_execute(&format!(
+					"ROLLBACK TO SAVEPOINT {savepoint_name}; RELEASE SAVEPOINT {savepoint_name}"
+				)).map_err(|recovery_error| {
+					format!("Failed to recover from PostgreSQL record-lock conflict: {recovery_error}")
+				})?;
+				return lock_conflict_result(query).ok_or_else(|| {
+					String::from("PostgreSQL reported a record-lock conflict for a query that does not return one record pointer.")
+				});
+			}
+			Err(error) => return Err(format!("Failed to execute PostgreSQL query: {error}")),
+		};
 
 		match &query.result_shape {
 			SqlQueryResultShape::IntegerScalar => {
@@ -136,7 +174,7 @@ impl DatabaseDriver for PostgreSqlSession {
 	}
 
 	fn rollback_transaction(&mut self, target_depth: usize, savepoint_name: &str) -> Result<(), String> {
-		let Self { client, transactions } = self;
+		let Self { client, transactions, .. } = self;
 		transactions.rollback(target_depth, savepoint_name, |command| {
 			execute_transaction_command(client, command)
 		})
@@ -158,7 +196,7 @@ impl DatabaseDriver for PostgreSqlSession {
 	}
 
 	fn sync_transactions(&mut self, transaction_names: &[String]) -> Result<(), String> {
-		let Self { client, transactions } = self;
+		let Self { client, transactions, .. } = self;
 		transactions.synchronize(transaction_names, |command| {
 			execute_transaction_command(client, command)
 		})

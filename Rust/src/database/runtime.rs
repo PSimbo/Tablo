@@ -47,8 +47,11 @@ impl DatabaseRuntime {
 	pub(crate) fn begin_transaction(&mut self) -> Result<(), String> {
 		let savepoint_name = format!("tablo_tx_{}", self.next_transaction_id);
 		self.next_transaction_id += 1;
-		self.transactions.push(TransactionScope { savepoint_name });
-		self.sync_transactions()
+		self.transactions.push(TransactionScope {
+			database_name: None,
+			savepoint_name,
+		});
+		Ok(())
 	}
 
 	pub(crate) fn commit_transaction(&mut self) -> Result<(), String> {
@@ -57,7 +60,10 @@ impl DatabaseRuntime {
 		})?;
 		let target_depth = self.transactions.len();
 
-		for session in self.sessions.values_mut() {
+		if let Some(database_name) = self.transaction_database_name() {
+			let database_key = normalize_database_name(&database_name);
+			let session = self.sessions.get_mut(&database_key)
+				.expect("Transaction database session must exist after its first use.");
 			session.commit_transaction(target_depth, &transaction.savepoint_name)?;
 		}
 
@@ -127,7 +133,10 @@ impl DatabaseRuntime {
 		while let Some(transaction) = self.transactions.last().cloned() {
 			let target_depth = self.transactions.len();
 
-			for session in self.sessions.values_mut() {
+			if let Some(database_name) = self.transaction_database_name() {
+				let database_key = normalize_database_name(&database_name);
+				let session = self.sessions.get_mut(&database_key)
+					.expect("Transaction database session must exist after its first use.");
 				let result = session.rollback_transaction(target_depth, &transaction.savepoint_name);
 
 				if let Err(error) = result {
@@ -161,8 +170,19 @@ impl DatabaseRuntime {
 		self.session_mut(&record.record_type.database_name)?.update_record(record)
 	}
 
+	fn claim_transaction_database(&mut self, database_name: &str) {
+		let Some(transaction) = self.transactions.first_mut() else {
+			return;
+		};
+
+		if transaction.database_name.is_none() {
+			transaction.database_name = Some(database_name.to_string());
+		}
+	}
+
 	fn session_mut(&mut self, database_name: &str) -> Result<&mut Box<dyn DatabaseDriver>, String> {
 		let normalized_name = normalize_database_name(database_name);
+		self.validate_transaction_database(database_name)?;
 
 		if !self.sessions.contains_key(&normalized_name) {
 			let database = self.config.database(database_name).ok_or_else(|| {
@@ -181,6 +201,7 @@ impl DatabaseRuntime {
 			};
 			self.sessions.insert(normalized_name.clone(), session);
 		}
+		self.claim_transaction_database(database_name);
 
 		let transactions = self.transactions.iter()
 			.map(|transaction| transaction.savepoint_name.clone())
@@ -192,13 +213,20 @@ impl DatabaseRuntime {
 		Ok(session)
 	}
 
-	fn sync_transactions(&mut self) -> Result<(), String> {
-		let transactions = self.transactions.iter()
-			.map(|transaction| transaction.savepoint_name.clone())
-			.collect::<Vec<_>>();
+	fn transaction_database_name(&self) -> Option<String> {
+		self.transactions.first()
+			.and_then(|transaction| transaction.database_name.clone())
+	}
 
-		for session in self.sessions.values_mut() {
-			session.sync_transactions(&transactions)?;
+	fn validate_transaction_database(&self, database_name: &str) -> Result<(), String> {
+		let Some(active_database_name) = self.transaction_database_name() else {
+			return Ok(());
+		};
+
+		if normalize_database_name(&active_database_name) != normalize_database_name(database_name) {
+			return Err(format!(
+				"Transaction cannot access database `{database_name}` because it already accesses database `{active_database_name}`. Transactions spanning multiple databases are not supported.",
+			));
 		}
 
 		Ok(())
@@ -207,6 +235,7 @@ impl DatabaseRuntime {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TransactionScope {
+	database_name: Option<String>,
 	savepoint_name: String,
 }
 
@@ -215,6 +244,41 @@ mod tests {
 	use super::*;
 
 	use crate::query::*;
+
+	#[test]
+	fn allows_sequential_transactions_to_use_different_databases() {
+		let config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("PrimaryDb", ":memory:")
+			.with_sqlite_database("ArchiveDb", ":memory:");
+		let mut runtime = DatabaseRuntime::new(config);
+
+		runtime.begin_transaction().unwrap();
+		runtime.execute_query(&LoweredBackendQuery::Sql(test_query_for_database("PrimaryDb", SqlDialect::Sqlite)), vec![]).unwrap();
+		runtime.commit_transaction().unwrap();
+		runtime.begin_transaction().unwrap();
+		runtime.execute_query(&LoweredBackendQuery::Sql(test_query_for_database("ArchiveDb", SqlDialect::Sqlite)), vec![]).unwrap();
+		runtime.commit_transaction().unwrap();
+	}
+
+	#[test]
+	fn ignores_previously_opened_database_sessions_when_transaction_begins() {
+		let config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("PrimaryDb", ":memory:")
+			.with_sqlite_database("ArchiveDb", ":memory:");
+		let mut runtime = DatabaseRuntime::new(config);
+		runtime.execute_query(&LoweredBackendQuery::Sql(test_query_for_database("PrimaryDb", SqlDialect::Sqlite)), vec![]).unwrap();
+		runtime.execute_query(&LoweredBackendQuery::Sql(test_query_for_database("ArchiveDb", SqlDialect::Sqlite)), vec![]).unwrap();
+
+		runtime.begin_transaction().unwrap();
+		runtime.execute_query(&LoweredBackendQuery::Sql(test_query_for_database("PrimaryDb", SqlDialect::Sqlite)), vec![]).unwrap();
+		let error = runtime.execute_query(
+			&LoweredBackendQuery::Sql(test_query_for_database("ArchiveDb", SqlDialect::Sqlite)),
+			vec![],
+		).unwrap_err();
+		runtime.rollback_active_transactions().unwrap();
+
+		assert!(error.contains("Transactions spanning multiple databases are not supported."));
+	}
 
 	#[test]
 	fn rejects_execution_when_compiled_and_configured_backends_differ() {
@@ -227,6 +291,28 @@ mod tests {
 		assert_eq!(
 			error,
 			"Compiled query uses the `postgresql` backend, but database `ExampleDb` is configured for `sqlite`.",
+		);
+	}
+
+	#[test]
+	fn rejects_second_database_within_nested_transaction_scope() {
+		let config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("PrimaryDb", ":memory:")
+			.with_sqlite_database("ArchiveDb", ":memory:");
+		let mut runtime = DatabaseRuntime::new(config);
+		runtime.begin_transaction().unwrap();
+		runtime.execute_query(&LoweredBackendQuery::Sql(test_query_for_database("PrimaryDb", SqlDialect::Sqlite)), vec![]).unwrap();
+		runtime.begin_transaction().unwrap();
+
+		let error = runtime.execute_query(
+			&LoweredBackendQuery::Sql(test_query_for_database("ArchiveDb", SqlDialect::Sqlite)),
+			vec![],
+		).unwrap_err();
+		runtime.rollback_active_transactions().unwrap();
+
+		assert_eq!(
+			error,
+			"Transaction cannot access database `ArchiveDb` because it already accesses database `PrimaryDb`. Transactions spanning multiple databases are not supported.",
 		);
 	}
 
@@ -246,11 +332,30 @@ mod tests {
 		);
 	}
 
+	#[test]
+	fn rolls_back_empty_transaction_after_first_database_fails_to_open() {
+		let mut runtime = DatabaseRuntime::new(RuntimeDatabaseConfig::new());
+		runtime.begin_transaction().unwrap();
+
+		let error = runtime.execute_query(
+			&LoweredBackendQuery::Sql(test_query_for_database("MissingDb", SqlDialect::Sqlite)),
+			vec![],
+		).unwrap_err();
+
+		assert_eq!(error, "Database `MissingDb` is not configured at runtime.");
+		runtime.rollback_active_transactions().unwrap();
+	}
+
 	fn test_query(dialect: SqlDialect) -> SqlQuery {
+		test_query_for_database("ExampleDb", dialect)
+	}
+
+	fn test_query_for_database(database_name: &str, dialect: SqlDialect) -> SqlQuery {
 		SqlQuery {
-			database_name: String::from("ExampleDb"),
+			database_name: database_name.to_string(),
 			dialect,
 			group_by: vec![],
+			lock_mode: RecordLockMode::None,
 			parameters: vec![],
 			result_shape: SqlQueryResultShape::IntegerScalar,
 			schema_is_implicit: true,
