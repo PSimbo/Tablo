@@ -1702,7 +1702,7 @@ mod tests {
 		assert_eq!(
 			query.statement,
 			concat!(
-				"SELECT `Customers`.`Active`, `Customers`.`Id`, `Customers`.`Name` ",
+				"SELECT `Customers`.`Id` ",
 				"FROM `Reporting`.`Customers` WHERE (`Customers`.`Active` = ?) ",
 				"ORDER BY `Customers`.`Name` DESC LIMIT 1",
 			),
@@ -1712,6 +1712,10 @@ mod tests {
 		};
 		let columns = layout.known_schema().expect("Expected a statically known record schema.");
 		assert!(columns.iter().any(|column| column.column_name == "Id" && column.is_primary_key));
+		assert_eq!(
+			layout.selected_known_columns().unwrap().iter().map(|column| column.column_name.as_str()).collect::<Vec<_>>(),
+			vec!["Id"],
+		);
 	}
 
 	#[test]
@@ -1744,8 +1748,7 @@ mod tests {
 		assert_eq!(
 			query.statement,
 			concat!(
-				"SELECT `Customers`.`Active`, `Customers`.`Country`, ",
-				"`Customers`.`Id`, `Customers`.`Name`, TRIM(`Customers`.`Country`) ",
+				"SELECT `Customers`.`Id`, TRIM(`Customers`.`Country`) ",
 				"FROM `Reporting`.`Customers` WHERE (`Customers`.`Active` = ?) ",
 				"ORDER BY TRIM(`Customers`.`Country`) LIMIT ?",
 			),
@@ -1754,6 +1757,13 @@ mod tests {
 		assert_eq!(query.parameters[0].index, 1);
 		assert_eq!(query.parameters[1].index, 2);
 		assert_eq!(query.group_by[0].key_names, vec![String::from("country")]);
+		let SqlQueryResultShape::RecordPointerArray(layout) = &query.result_shape else {
+			panic!("Expected record-pointer array query result metadata.");
+		};
+		assert_eq!(
+			layout.selected_known_columns().unwrap().iter().map(|column| column.column_name.as_str()).collect::<Vec<_>>(),
+			vec!["Id"],
+		);
 	}
 
 	#[test]
@@ -1808,8 +1818,7 @@ mod tests {
 		assert_eq!(
 			query.statement,
 			concat!(
-				"SELECT CAST(\"Customers\".\"Active\" AS TEXT), CAST(\"Customers\".\"Id\" AS TEXT), ",
-				"CAST(\"Customers\".\"Name\" AS TEXT) FROM \"Public\".\"Customers\" ",
+				"SELECT 1 FROM \"Public\".\"Customers\" ",
 				"WHERE (\"Customers\".\"Active\" = CAST(CAST($1 AS TEXT) AS BOOLEAN)) ",
 				"ORDER BY \"Customers\".\"Name\" DESC LIMIT 1",
 			),
@@ -1820,6 +1829,7 @@ mod tests {
 		let columns = layout.known_schema().expect("Expected a statically known record schema.");
 		assert_eq!(columns.len(), 3);
 		assert!(columns.iter().any(|column| column.column_name == "Id" && column.is_primary_key));
+		assert!(layout.selected_known_columns().unwrap().is_empty());
 	}
 
 	#[test]
@@ -1851,9 +1861,7 @@ mod tests {
 		assert_eq!(
 			query.statement,
 			concat!(
-				"SELECT CAST(\"Customers\".\"Active\" AS TEXT), CAST(\"Customers\".\"Country\" AS TEXT), ",
-				"CAST(\"Customers\".\"Id\" AS TEXT), CAST(\"Customers\".\"Name\" AS TEXT), ",
-				"CAST(TRIM(\"Customers\".\"Country\") AS TEXT) FROM \"Public\".\"Customers\" ",
+				"SELECT CAST(TRIM(\"Customers\".\"Country\") AS TEXT) FROM \"Public\".\"Customers\" ",
 				"WHERE (\"Customers\".\"Active\" = CAST(CAST($1 AS TEXT) AS BOOLEAN)) ",
 				"ORDER BY TRIM(\"Customers\".\"Country\") LIMIT CAST(CAST($2 AS TEXT) AS BIGINT)",
 			),
@@ -1863,6 +1871,7 @@ mod tests {
 		};
 		let columns = layout.known_schema().expect("Expected a statically known record schema.");
 		assert_eq!(columns.len(), 4);
+		assert!(layout.selected_known_columns().unwrap().is_empty());
 		assert_eq!(query.group_by.len(), 1);
 		assert_eq!(query.group_by[0].key_names, vec![String::from("country")]);
 	}
@@ -1892,6 +1901,40 @@ mod tests {
 
 		assert_eq!(run_program(&program).unwrap(), Some(Value::Integer(3)));
 		assert!(schema.database("exampledb").is_some());
+	}
+
+	#[test]
+	fn compiles_sqlite_for_record_query_with_minimized_field_list() {
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			concat!(
+				"with exampledb;\n",
+				"fn Main(args: [text]) int {\n",
+				"  for rec customer in Customers { displn(customer.Name); }\n",
+				"  return 0;\n",
+				"}",
+			),
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null primary key,
+					Name text not null,
+					Notes text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+
+		let LoweredBackendQuery::Sql(query) = &program.queries()[0];
+		assert_eq!(query.dialect, SqlDialect::Sqlite);
+		assert_eq!(query.statement, "SELECT \"Customers\".\"Name\" FROM \"Customers\"");
+		let SqlQueryResultShape::RecordPointerArray(layout) = &query.result_shape else {
+			panic!("Expected record-pointer array query result metadata.");
+		};
+		assert_eq!(
+			layout.selected_known_columns().unwrap().iter().map(|column| column.column_name.as_str()).collect::<Vec<_>>(),
+			vec!["Name"],
+		);
 	}
 
 	#[test]
@@ -5444,23 +5487,33 @@ mod tests {
 			r#"
 				CREATE TABLE Customers (
 					Id INTEGER NOT NULL,
-					Name TEXT NOT NULL
+					Name TEXT NOT NULL,
+					Notes TEXT NOT NULL
 				);
-				INSERT INTO Customers (Id, Name) VALUES (12, 'Ada');
+				INSERT INTO Customers (Id, Name, Notes) VALUES (12, 'Ada', 'Keep');
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    rec mut cust = find first Customers where Id == 12;\n    cust.Name = 'Grace';\n    update cust;\n    return count Customers where Id == 12 and Name == 'Grace';\n}",
+			"with exampledb;\nfn Main(args: [text]) int {\n    rec mut cust = find first Customers where Id == 12;\n    cust.Name = 'Grace';\n    update cust;\n    return count Customers where Id == 12 and Name == 'Grace' and Notes == 'Keep';\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
 				create table Customers (
 					Id int not null primary key,
-					Name text not null
+					Name text not null,
+					Notes text not null
 				);
 			"#,
 			&[("ExampleDb", DatabaseBackend::Sqlite)],
 		).unwrap();
+		let LoweredBackendQuery::Sql(find_query) = &program.queries()[0];
+		let SqlQueryResultShape::RecordPointer(layout) = &find_query.result_shape else {
+			panic!("Expected record-pointer query result metadata.");
+		};
+		assert_eq!(
+			layout.selected_known_columns().unwrap().iter().map(|column| column.column_name.as_str()).collect::<Vec<_>>(),
+			vec!["Id", "Name"],
+		);
 		let database_config = RuntimeDatabaseConfig::new()
 			.with_sqlite_database("ExampleDb", &database_path);
 		let result = run_program_with_database_config(&program, database_config).unwrap();

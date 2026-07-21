@@ -1191,7 +1191,7 @@ mod tests {
 	}
 
 	#[test]
-	fn expands_record_pointer_fields_in_variables_view() {
+	fn expands_only_available_record_pointer_fields_in_variables_view() {
 		let mut fields = BTreeMap::new();
 		fields.insert(
 			String::from("address1"),
@@ -1210,7 +1210,7 @@ mod tests {
 		);
 
 		let value = Value::RecordPointer(RecordPointerValue {
-			column_names: vec![String::from("Address1"), String::from("Id")],
+			column_names: vec![String::from("Address1"), String::from("Id"), String::from("Name")],
 			exists: true,
 			fields,
 			group_boundaries: BTreeMap::new(),
@@ -1236,5 +1236,8 @@ mod tests {
 		assert_eq!(variables[1].get("name"), Some(&JsonValue::String(String::from("id"))));
 		assert_eq!(variables[1].get("value"), Some(&JsonValue::String(String::from("2"))));
 		assert_eq!(variables[1].get("type"), Some(&JsonValue::String(String::from("int"))));
+		assert!(!variables.iter().any(|variable| {
+			variable.get("name") == Some(&JsonValue::String(String::from("name")))
+		}));
 	}
 }

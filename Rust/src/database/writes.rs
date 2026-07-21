@@ -99,10 +99,11 @@ pub(super) fn mark_record_updated(mut record: RecordPointerValue) -> RecordPoint
 
 pub(super) fn update_record_write(record: &RecordPointerValue, dialect: WriteDialect) -> Result<RecordWrite, String> {
 	let identity_columns = identity_column_names(record);
-	let mut parameters = Vec::with_capacity(record.column_names.len() + identity_columns.len());
-	let mut assignments = Vec::with_capacity(record.column_names.len());
+	let assignment_columns = update_assignment_column_names(record);
+	let mut parameters = Vec::with_capacity(assignment_columns.len() + identity_columns.len());
+	let mut assignments = Vec::with_capacity(assignment_columns.len());
 
-	for column_name in &record.column_names {
+	for column_name in assignment_columns {
 		let field = record_field(&record.fields, column_name)?;
 		parameters.push(field.materialize()?);
 		assignments.push(format!(
@@ -186,6 +187,30 @@ fn table_source(record: &RecordPointerValue, dialect: WriteDialect) -> String {
 			quoted_identifier(dialect, &record.record_type.schema_name),
 			table_name,
 		)
+	}
+}
+
+fn update_assignment_column_names(record: &RecordPointerValue) -> Vec<&String> {
+	let available_columns = record.column_names.iter()
+		.filter(|column_name| record.fields.contains_key(&normalize_name(column_name)))
+		.collect::<Vec<_>>();
+
+	if !record.is_dirty {
+		return available_columns;
+	}
+
+	let changed_columns = available_columns.iter().copied()
+		.filter(|column_name| {
+			let normalized_name = normalize_name(column_name);
+			record.fields.get(&normalized_name) != record.original_fields.get(&normalized_name)
+		})
+		.collect::<Vec<_>>();
+
+	if changed_columns.is_empty() {
+		available_columns
+	}
+	else {
+		changed_columns
 	}
 }
 
@@ -309,5 +334,22 @@ mod tests {
 			},
 			schema_is_implicit: false,
 		}
+	}
+
+	#[test]
+	fn updates_only_changed_fields_on_partially_loaded_records() {
+		let mut record = test_record();
+		record.column_names.push(String::from("Notes"));
+		record.fields.insert(
+			String::from("name"),
+			RecordFieldValue::Materialized {
+				data_type: DataType::Text,
+				value: Value::Text(String::from("Updated")),
+			},
+		);
+		let write = update_record_write(&record, WriteDialect::Sqlite).unwrap();
+
+		assert_eq!(write.statement, "UPDATE \"app\".\"Customers\" SET \"Name\" = ? WHERE \"Id\" IS ?");
+		assert_eq!(write.parameters, vec![Value::Text(String::from("Updated")), Value::Integer(1)]);
 	}
 }

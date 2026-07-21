@@ -111,12 +111,14 @@ pub struct RecordPointerBindingInfo {
 	pub data_type: RecordPointerType,
 	escape_positions: BTreeSet<usize>,
 	pub escapes_analysis: bool,
+	field_assignments: Vec<RecordPointerFieldAssignment>,
 	field_reads: Vec<RecordPointerFieldRead>,
 	identity_requires_all_fields: bool,
 	pub identity_fields: BTreeSet<String>,
 	pub initialization: RecordPointerInitialization,
 	pub is_mutable: bool,
 	pub origin: RecordPointerOrigin,
+	query_position: Option<usize>,
 	pub read_fields: BTreeSet<String>,
 }
 
@@ -127,8 +129,16 @@ impl RecordPointerBindingInfo {
 			return None;
 		}
 
-		Some(self.read_fields.union(&self.identity_fields).cloned().collect())
+		let mut fields = self.read_fields.union(&self.identity_fields).cloned().collect::<BTreeSet<_>>();
+		fields.extend(self.assigned_fields.iter().filter_map(|path| path.split('.').next().map(String::from)));
+		Some(fields)
 	}
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RecordPointerFieldAssignment {
+	field_path: String,
+	position: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -383,7 +393,8 @@ impl SemanticAnalyzer {
 		self.exit_scope();
 		self.functions.exit_scope();
 		self.enums.exit_scope();
-		self.finalize_record_pointer_field_reads(program);
+		self.finalize_record_pointer_usage(program);
+		self.apply_record_pointer_field_selections()?;
 
 		Ok(self.semantic_program.clone())
 	}
@@ -423,6 +434,78 @@ impl SemanticAnalyzer {
 
 	pub fn validate_program(&mut self, program: &AstProgram) -> Result<(), CompileError> {
 		self.analyze_program(program).map(|_| ())
+	}
+
+	fn apply_query_field_selection(
+		layout: &mut QueryRecordLayout,
+		required_fields: Option<&BTreeSet<String>>,
+	) {
+		let Some(required_fields) = required_fields else {
+			layout.selection = QueryColumnSelection::All;
+			return;
+		};
+		let QueryRecordSchema::Known(columns) = &layout.schema else {
+			layout.selection = QueryColumnSelection::RuntimeDetermined;
+			return;
+		};
+		let mut indices = Vec::with_capacity(required_fields.len());
+
+		for field_name in required_fields {
+			let Some(index) = columns.iter().position(|column| column.column_name.eq_ignore_ascii_case(field_name)) else {
+				layout.selection = QueryColumnSelection::All;
+				return;
+			};
+			indices.push(index as u32);
+		}
+
+		indices.sort_unstable();
+		indices.dedup();
+		layout.selection = QueryColumnSelection::Indices(indices);
+	}
+
+	fn apply_record_pointer_field_selections(&mut self) -> Result<(), CompileError> {
+		let mut requirements = BTreeMap::<usize, Option<BTreeSet<String>>>::new();
+
+		for binding in self.semantic_program.record_pointer_bindings.values() {
+			let Some(query_position) = binding.query_position else {
+				continue;
+			};
+			let fields = binding.required_query_fields();
+
+			requirements.entry(query_position)
+				.and_modify(|existing| {
+					if let (Some(existing), Some(fields)) = (existing.as_mut(), fields.as_ref()) {
+						existing.extend(fields.iter().cloned());
+					}
+					else {
+						*existing = None;
+					}
+				})
+				.or_insert(fields);
+		}
+
+		for (query_position, required_fields) in requirements {
+			if let Some(plan) = self.semantic_program.lowered_find_queries.get_mut(&query_position) {
+				Self::apply_query_field_selection(&mut plan.record_layout, required_fields.as_ref());
+				let plan = plan.clone();
+				let compiled_query = lower_find_query(&plan).map_err(|error| self.compile_error(
+					query_position,
+					query_lowering_error_message(error),
+				))?;
+				self.semantic_program.compiled_find_queries.insert(query_position, compiled_query);
+			}
+			else if let Some(plan) = self.semantic_program.lowered_for_record_queries.get_mut(&query_position) {
+				Self::apply_query_field_selection(&mut plan.record_layout, required_fields.as_ref());
+				let plan = plan.clone();
+				let compiled_query = lower_for_query(&plan).map_err(|error| self.compile_error(
+					query_position,
+					query_lowering_error_message(error),
+				))?;
+				self.semantic_program.compiled_for_record_queries.insert(query_position, compiled_query);
+			}
+		}
+
+		Ok(())
 	}
 
 	fn assignment_result_type(
@@ -807,12 +890,16 @@ impl SemanticAnalyzer {
 		}
 	}
 
-	fn finalize_record_pointer_field_reads(&mut self, program: &AstProgram) {
+	fn finalize_record_pointer_usage(&mut self, program: &AstProgram) {
 		let reachable_positions = super::ssa::reachable_read_positions(program, &self.semantic_program);
 
 		for binding in self.semantic_program.record_pointer_bindings.values_mut() {
 			binding.escape_positions.retain(|position| reachable_positions.contains(position));
 			binding.escapes_analysis = !binding.escape_positions.is_empty();
+			binding.field_assignments.retain(|assignment| reachable_positions.contains(&assignment.position));
+			binding.assigned_fields = binding.field_assignments.iter()
+				.map(|assignment| assignment.field_path.clone())
+				.collect();
 			binding.field_reads.retain(|read| reachable_positions.contains(&read.position));
 			binding.read_fields = binding.field_reads.iter()
 				.map(|read| read.field_name.clone())
@@ -1199,7 +1286,11 @@ impl SemanticAnalyzer {
 						}
 
 						if matches!(local.data_type.without_nullability(), DataType::RecordPointer(_)) {
-							self.record_record_pointer_assignment(local.declaration_position, &target.fields);
+							self.record_record_pointer_assignment(
+								local.declaration_position,
+								&target.fields,
+								target.object.position,
+							);
 							if (*operator != AssignmentOperator::Assign || target.fields.len() > 1)
 								&& let Some(field) = target.fields.first() {
 								self.record_record_pointer_read(local.declaration_position, &field.name, target.object.position);
@@ -2661,13 +2752,24 @@ impl SemanticAnalyzer {
 		}
 	}
 
-	fn record_record_pointer_assignment(&mut self, position: usize, field_path: &[crate::ast::IdentifierExpr]) {
+	fn record_record_pointer_assignment(
+		&mut self,
+		position: usize,
+		field_path: &[crate::ast::IdentifierExpr],
+		assignment_position: usize,
+	) {
 		let Some(binding) = self.semantic_program.record_pointer_bindings.get_mut(&position) else {
 			return;
 		};
 
 		let path = field_path.iter().map(|field| field.name.as_str()).collect::<Vec<_>>().join(".");
-		binding.assigned_fields.insert(path);
+		let assignment = RecordPointerFieldAssignment {
+			field_path: path,
+			position: assignment_position,
+		};
+		if !binding.field_assignments.contains(&assignment) {
+			binding.field_assignments.push(assignment);
+		}
 	}
 
 	fn record_record_pointer_escape(&mut self, expression: &Expr) {
@@ -2792,6 +2894,7 @@ impl SemanticAnalyzer {
 		initialization: RecordPointerInitialization,
 		is_mutable: bool,
 		origin: RecordPointerOrigin,
+		query_position: Option<usize>,
 	) {
 		let (identity_fields, identity_requires_all_fields) = if is_mutable
 			&& initialization == RecordPointerInitialization::Existing {
@@ -2806,12 +2909,14 @@ impl SemanticAnalyzer {
 			data_type: record_pointer,
 			escape_positions: BTreeSet::new(),
 			escapes_analysis: false,
+			field_assignments: Vec::new(),
 			field_reads: Vec::new(),
 			identity_requires_all_fields,
 			identity_fields,
 			initialization,
 			is_mutable,
 			origin,
+			query_position,
 			read_fields: BTreeSet::new(),
 		});
 	}
@@ -3486,6 +3591,7 @@ impl SemanticAnalyzer {
 				RecordPointerInitialization::Existing,
 				true,
 				RecordPointerOrigin::Parameter,
+				None,
 			);
 		}
 		self.declare_local(parameter.name.clone(), LocalBinding {
@@ -3923,6 +4029,7 @@ impl SemanticAnalyzer {
 					RecordPointerInitialization::Existing,
 					*is_mut,
 					RecordPointerOrigin::ForLoop,
+					Some(*position),
 				);
 				self.declare_local(variable.name.clone(), LocalBinding {
 					declaration_position: variable.position,
@@ -3991,6 +4098,10 @@ impl SemanticAnalyzer {
 							RecordPointerInitialization::Existing,
 							false,
 							RecordPointerOrigin::IfBinding,
+							match initial_value {
+								Expr::Find(find) => Some(find.position),
+								_ => None,
+							},
 						);
 						self.declare_local(name.clone(), LocalBinding {
 							declaration_position: *position,
@@ -4051,6 +4162,10 @@ impl SemanticAnalyzer {
 					},
 					*is_mut,
 					RecordPointerOrigin::VariableDeclaration,
+					match initial_value {
+						Expr::Find(find) => Some(find.position),
+						_ => None,
+					},
 				);
 				self.declare_local(name.clone(), LocalBinding {
 					declaration_position: *position,
@@ -4961,8 +5076,8 @@ mod tests {
 		let program = parse_program(
 			"with exampledb;\nfn Main(args: [text]) int { for rec mut entry in AuditLog { delete entry; } return 0; }"
 		);
-		let variable_position = match &program.functions[0].body.statements[0] {
-			Statement::ForRecord(statement) => statement.variable.position,
+		let (query_position, variable_position) = match &program.functions[0].body.statements[0] {
+			Statement::ForRecord(statement) => (statement.position, statement.variable.position),
 			other => panic!("Expected record-pointer loop, found {other:?}."),
 		};
 		let mut analyzer = SemanticAnalyzer::new();
@@ -4972,6 +5087,10 @@ mod tests {
 
 		assert!(binding.identity_fields.is_empty());
 		assert_eq!(binding.required_query_fields(), None);
+		assert_eq!(
+			semantic_program.lowered_for_record_query(query_position).unwrap().record_layout.selection,
+			QueryColumnSelection::All,
+		);
 	}
 
 	#[test]
@@ -5008,9 +5127,14 @@ mod tests {
 		let semantic_program = analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap();
 		let binding = semantic_program.record_pointer_binding(declaration_position).unwrap();
 		let identity_fields = BTreeSet::from([String::from("LineId"), String::from("OrderId")]);
+		let required_fields = BTreeSet::from([
+			String::from("Description"),
+			String::from("LineId"),
+			String::from("OrderId"),
+		]);
 
 		assert_eq!(binding.identity_fields, identity_fields);
-		assert_eq!(binding.required_query_fields(), Some(identity_fields));
+		assert_eq!(binding.required_query_fields(), Some(required_fields));
 	}
 
 	#[test]
@@ -5078,7 +5202,7 @@ mod tests {
 			"ExampleDb",
 		);
 		let program = parse_program(
-			"with exampledb;\nfn Main(args: [text]) int { rec mut cust = find first Customers where Id == 1; cust.Name = 'Ada'; return 0; }"
+			"with exampledb;\nfn Main(args: [text]) int { rec mut cust = find first Customers where Id == 1; cust.Name = 'Ada'; return 0; cust.Id = 2; }"
 		);
 		let declaration_position = match &program.functions[0].body.statements[0] {
 			Statement::RecordPointerDeclaration(statement) => statement.position,
@@ -5152,12 +5276,28 @@ mod tests {
 			Statement::RecordPointerDeclaration(statement) => statement.position,
 			other => panic!("Expected record pointer declaration, found {other:?}."),
 		};
+		let first_query_position = match &main_function.body.statements[0] {
+			Statement::RecordPointerDeclaration(RecordPointerDeclaration { initial_value: Expr::Find(find), .. }) => find.position,
+			other => panic!("Expected record pointer initialized by `find`, found {other:?}."),
+		};
+		let second_query_position = match &main_function.body.statements[1] {
+			Statement::RecordPointerDeclaration(RecordPointerDeclaration { initial_value: Expr::Find(find), .. }) => find.position,
+			other => panic!("Expected record pointer initialized by `find`, found {other:?}."),
+		};
 		let mut analyzer = SemanticAnalyzer::new();
 
 		let semantic_program = analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap();
 
 		assert!(semantic_program.record_pointer_binding(first_position).unwrap().escapes_analysis);
 		assert!(semantic_program.record_pointer_binding(second_position).unwrap().escapes_analysis);
+		assert_eq!(
+			semantic_program.lowered_find_query(first_query_position).unwrap().record_layout.selection,
+			QueryColumnSelection::All,
+		);
+		assert_eq!(
+			semantic_program.lowered_find_query(second_query_position).unwrap().record_layout.selection,
+			QueryColumnSelection::All,
+		);
 	}
 
 	#[test]
