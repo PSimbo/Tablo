@@ -8,6 +8,7 @@ use super::config::*;
 use super::{ mysql, postgresql, sqlite };
 
 pub(super) trait DatabaseDriver {
+	fn advance_sequence(&mut self, schema_is_implicit: bool, schema_name: &str, sequence_name: &str) -> Result<i64, String>;
 	fn commit_transaction(&mut self, target_depth: usize, savepoint_name: &str) -> Result<(), String>;
 	fn create_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String>;
 	fn delete_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String>;
@@ -33,6 +34,16 @@ pub(crate) struct DatabaseRuntime {
 }
 
 impl DatabaseRuntime {
+	pub(crate) fn advance_sequence(
+		&mut self,
+		database_name: &str,
+		schema_is_implicit: bool,
+		schema_name: &str,
+		sequence_name: &str,
+	) -> Result<i64, String> {
+		self.session_mut(database_name)?.advance_sequence(schema_is_implicit, schema_name, sequence_name)
+	}
+
 	pub(crate) fn begin_transaction(&mut self) -> Result<(), String> {
 		let savepoint_name = format!("tablo_tx_{}", self.next_transaction_id);
 		self.next_transaction_id += 1;

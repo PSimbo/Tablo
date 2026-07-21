@@ -35,6 +35,10 @@ impl MySqlSession {
 }
 
 impl DatabaseDriver for MySqlSession {
+	fn advance_sequence(&mut self, _schema_is_implicit: bool, _schema_name: &str, sequence_name: &str) -> Result<i64, String> {
+		Err(unsupported_sequence(sequence_name))
+	}
+
 	fn commit_transaction(&mut self, _target_depth: usize, _savepoint_name: &str) -> Result<(), String> {
 		Err(unsupported_operation("transaction commits"))
 	}
@@ -103,8 +107,8 @@ impl DatabaseDriver for MySqlSession {
 		}
 	}
 
-	fn load_sequence_current(&mut self, _schema_is_implicit: bool, _schema_name: &str, _sequence_name: &str) -> Result<i64, String> {
-		Err(unsupported_operation("sequence reads"))
+	fn load_sequence_current(&mut self, _schema_is_implicit: bool, _schema_name: &str, sequence_name: &str) -> Result<i64, String> {
+		Err(unsupported_sequence(sequence_name))
 	}
 
 	fn rollback_transaction(&mut self, _target_depth: usize, _savepoint_name: &str) -> Result<(), String> {
@@ -115,10 +119,10 @@ impl DatabaseDriver for MySqlSession {
 		&mut self,
 		_schema_is_implicit: bool,
 		_schema_name: &str,
-		_sequence_name: &str,
+		sequence_name: &str,
 		_value: i64,
 	) -> Result<(), String> {
-		Err(unsupported_operation("sequence writes"))
+		Err(unsupported_sequence(sequence_name))
 	}
 
 	fn sync_transactions(&mut self, transaction_names: &[String]) -> Result<(), String> {
@@ -289,6 +293,10 @@ fn unsupported_operation(operation: &str) -> String {
 	format!("MySQL {operation} are not implemented yet.")
 }
 
+fn unsupported_sequence(sequence_name: &str) -> String {
+	format!("MySQL does not support standalone sequence `{sequence_name}`.")
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -341,6 +349,14 @@ mod tests {
 		let error = database_value(&mysql::Value::UInt(i64::MAX as u64 + 1), &DataType::Int).unwrap_err();
 
 		assert_eq!(error, "MySQL unsigned integer `9223372036854775808` exceeds the range of Tablo `int`.");
+	}
+
+	#[test]
+	fn reports_that_standalone_sequences_are_unsupported() {
+		assert_eq!(
+			unsupported_sequence("InvoiceNumber"),
+			"MySQL does not support standalone sequence `InvoiceNumber`.",
+		);
 	}
 
 	#[test]

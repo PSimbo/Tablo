@@ -7,6 +7,7 @@ use postgres_native_tls::MakeTlsConnector;
 
 use crate::ast::DataType;
 use crate::query::*;
+use crate::sql::*;
 use crate::value::*;
 
 use super::records::*;
@@ -33,6 +34,16 @@ impl PostgreSqlSession {
 }
 
 impl DatabaseDriver for PostgreSqlSession {
+	fn advance_sequence(&mut self, schema_is_implicit: bool, schema_name: &str, sequence_name: &str) -> Result<i64, String> {
+		let sequence = sequence_source(schema_name, sequence_name, schema_is_implicit);
+		let row = self.client.query_one(
+			"SELECT nextval(CAST(CAST($1 AS TEXT) AS regclass))",
+			&[&sequence],
+		).map_err(|error| format!("Failed to advance PostgreSQL sequence `{sequence_name}`: {error}"))?;
+
+		row.try_get(0).map_err(|error| format!("Failed to read PostgreSQL sequence `{sequence_name}` value: {error}"))
+	}
+
 	fn commit_transaction(&mut self, _target_depth: usize, _savepoint_name: &str) -> Result<(), String> {
 		Err(unsupported_operation("transaction commits"))
 	}
@@ -105,8 +116,15 @@ impl DatabaseDriver for PostgreSqlSession {
 		}
 	}
 
-	fn load_sequence_current(&mut self, _schema_is_implicit: bool, _schema_name: &str, _sequence_name: &str) -> Result<i64, String> {
-		Err(unsupported_operation("sequence reads"))
+	fn load_sequence_current(&mut self, schema_is_implicit: bool, schema_name: &str, sequence_name: &str) -> Result<i64, String> {
+		let statement = format!(
+			"SELECT last_value FROM {}",
+			sequence_source(schema_name, sequence_name, schema_is_implicit),
+		);
+		let row = self.client.query_one(&statement, &[])
+			.map_err(|error| format!("Failed to read PostgreSQL sequence `{sequence_name}`: {error}"))?;
+
+		row.try_get(0).map_err(|error| format!("Failed to read PostgreSQL sequence `{sequence_name}` value: {error}"))
 	}
 
 	fn rollback_transaction(&mut self, _target_depth: usize, _savepoint_name: &str) -> Result<(), String> {
@@ -115,12 +133,17 @@ impl DatabaseDriver for PostgreSqlSession {
 
 	fn store_sequence_current(
 		&mut self,
-		_schema_is_implicit: bool,
-		_schema_name: &str,
-		_sequence_name: &str,
-		_value: i64,
+		schema_is_implicit: bool,
+		schema_name: &str,
+		sequence_name: &str,
+		value: i64,
 	) -> Result<(), String> {
-		Err(unsupported_operation("sequence writes"))
+		let sequence = sequence_source(schema_name, sequence_name, schema_is_implicit);
+		self.client.query_one(
+			"SELECT setval(CAST(CAST($1 AS TEXT) AS regclass), $2, TRUE)",
+			&[&sequence, &value],
+		).map_err(|error| format!("Failed to set PostgreSQL sequence `{sequence_name}`: {error}"))?;
+		Ok(())
 	}
 
 	fn sync_transactions(&mut self, transaction_names: &[String]) -> Result<(), String> {
@@ -223,6 +246,15 @@ fn runtime_value_to_postgresql(value: Value) -> Result<Option<String>, String> {
 	}
 }
 
+fn sequence_source(schema_name: &str, sequence_name: &str, schema_is_implicit: bool) -> String {
+	if schema_is_implicit {
+		quote_identifier(sequence_name)
+	}
+	else {
+		format!("{}.{}", quote_identifier(schema_name), quote_identifier(sequence_name))
+	}
+}
+
 fn text_database_value(
 	row: &postgres::Row,
 	index: usize,
@@ -280,6 +312,15 @@ mod tests {
 		assert_eq!(
 			client_connection_string("ExampleDb", "postgresql://tablo@localhost/example").unwrap(),
 			"postgresql://tablo@localhost/example",
+		);
+	}
+
+	#[test]
+	fn quotes_postgresql_sequence_sources() {
+		assert_eq!(sequence_source("", "InvoiceNumber", true), "\"InvoiceNumber\"");
+		assert_eq!(
+			sequence_source("Accounting", "invoice\"number", false),
+			"\"Accounting\".\"invoice\"\"number\"",
 		);
 	}
 

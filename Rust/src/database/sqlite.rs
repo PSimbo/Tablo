@@ -35,6 +35,44 @@ impl SqliteSession {
 }
 
 impl DatabaseDriver for SqliteSession {
+	fn advance_sequence(&mut self, schema_is_implicit: bool, schema_name: &str, sequence_name: &str) -> Result<i64, String> {
+		let sequence_source = sequence_source(schema_name, schema_is_implicit);
+		let statement = format!(
+			"UPDATE {} SET seq = CAST(seq AS INTEGER) + 1 WHERE name = ?1 AND CAST(seq AS INTEGER) < ?2 RETURNING seq",
+			sequence_source,
+		);
+		let advance_existing = |connection: &Connection| connection.query_row(&statement, (sequence_name, i64::MAX), |row| {
+			read_sqlite_integer(row, 0)
+		});
+
+		match advance_existing(&self.connection) {
+			Ok(value) => Ok(value),
+			Err(rusqlite::Error::QueryReturnedNoRows) => {
+				let initialize_statement = format!(
+					"INSERT INTO {sequence_source} (name, seq) SELECT ?1, 1 WHERE NOT EXISTS (SELECT 1 FROM {sequence_source} WHERE name = ?1) RETURNING seq",
+				);
+				match self.connection.query_row(&initialize_statement, [sequence_name], |row| read_sqlite_integer(row, 0)) {
+					Ok(value) => Ok(value),
+					Err(rusqlite::Error::QueryReturnedNoRows) => match advance_existing(&self.connection) {
+						Ok(value) => Ok(value),
+						Err(rusqlite::Error::QueryReturnedNoRows) => {
+							let current = self.load_sequence_current(schema_is_implicit, schema_name, sequence_name)?;
+							if current == i64::MAX {
+								Err(format!("Advancing SQLite sequence `{sequence_name}` would overflow the supported `int` range."))
+							}
+							else {
+								Err(format!("SQLite sequence `{sequence_name}` changed concurrently and could not be advanced."))
+							}
+						}
+						Err(error) => Err(format!("Failed to advance SQLite sequence `{sequence_name}`: {error}")),
+					},
+					Err(error) => Err(format!("Failed to initialize SQLite sequence `{sequence_name}`: {error}")),
+				}
+			}
+			Err(error) => Err(format!("Failed to advance SQLite sequence `{sequence_name}`: {error}")),
+		}
+	}
+
 	fn commit_transaction(&mut self, target_depth: usize, savepoint_name: &str) -> Result<(), String> {
 		if self.transaction_depth < target_depth {
 			return Ok(());
@@ -129,14 +167,7 @@ impl DatabaseDriver for SqliteSession {
 
 	fn load_sequence_current(&mut self, schema_is_implicit: bool, schema_name: &str, sequence_name: &str) -> Result<i64, String> {
 		let statement = format!("SELECT seq FROM {} WHERE name = ?1", sequence_source(schema_name, schema_is_implicit));
-		let result = self.connection.query_row(&statement, [sequence_name], |row| {
-			let value = row.get_ref(0)?;
-			sqlite_integer(value).map_err(|message| rusqlite::Error::FromSqlConversionFailure(
-				0,
-				value.data_type(),
-				Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, message)),
-			))
-		});
+		let result = self.connection.query_row(&statement, [sequence_name], |row| read_sqlite_integer(row, 0));
 
 		match result {
 			Ok(value) => Ok(value),
@@ -271,6 +302,15 @@ fn path_from_connection_string(database_name: &str, connection_string: &str) -> 
 	Ok(PathBuf::from(if value.starts_with("///") { &value[2..] } else { value }))
 }
 
+fn read_sqlite_integer(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<i64> {
+	let value = row.get_ref(index)?;
+	sqlite_integer(value).map_err(|message| rusqlite::Error::FromSqlConversionFailure(
+		index,
+		value.data_type(),
+		Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, message)),
+	))
+}
+
 fn runtime_value_to_sqlite(value: Value) -> Result<SqlValue, String> {
 	match value {
 		Value::Boolean(value) => Ok(SqlValue::Integer(if value { 1 } else { 0 })),
@@ -316,7 +356,35 @@ fn sqlite_type_name(value: ValueRef<'_>) -> &'static str {
 mod tests {
 	use std::path::Path;
 
-	use super::path_from_connection_string;
+	use super::*;
+
+	#[test]
+	fn advances_sqlite_sequence_stored_as_text() {
+		let connection = Connection::open_in_memory().unwrap();
+		connection.execute_batch(
+			r#"
+				CREATE TABLE InvoiceNumber (Id INTEGER PRIMARY KEY AUTOINCREMENT);
+				INSERT INTO InvoiceNumber DEFAULT VALUES;
+				UPDATE sqlite_sequence SET seq = CAST('41' AS TEXT) WHERE name = 'InvoiceNumber';
+			"#,
+		).unwrap();
+		let mut session = SqliteSession { connection, transaction_depth: 0 };
+
+		assert_eq!(session.advance_sequence(true, "", "InvoiceNumber").unwrap(), 42);
+		assert_eq!(session.load_sequence_current(true, "", "InvoiceNumber").unwrap(), 42);
+	}
+
+	#[test]
+	fn atomically_initializes_missing_sqlite_sequence() {
+		let connection = Connection::open_in_memory().unwrap();
+		connection.execute_batch(
+			"CREATE TABLE InvoiceNumber (Id INTEGER PRIMARY KEY AUTOINCREMENT);",
+		).unwrap();
+		let mut session = SqliteSession { connection, transaction_depth: 0 };
+
+		assert_eq!(session.advance_sequence(true, "", "InvoiceNumber").unwrap(), 1);
+		assert_eq!(session.load_sequence_current(true, "", "InvoiceNumber").unwrap(), 1);
+	}
 
 	#[test]
 	fn parses_absolute_connection_path() {
@@ -341,6 +409,25 @@ mod tests {
 		assert_eq!(
 			error,
 			"SQLite connection string for database `ExampleDb` must use `sqlite:/path/to.db`, `sqlite:relative.db`, or `sqlite::memory:`.",
+		);
+	}
+
+	#[test]
+	fn rejects_sqlite_sequence_overflow() {
+		let connection = Connection::open_in_memory().unwrap();
+		connection.execute_batch(&format!(
+			r#"
+				CREATE TABLE InvoiceNumber (Id INTEGER PRIMARY KEY AUTOINCREMENT);
+				INSERT INTO InvoiceNumber DEFAULT VALUES;
+				UPDATE sqlite_sequence SET seq = {} WHERE name = 'InvoiceNumber';
+			"#,
+			i64::MAX,
+		)).unwrap();
+		let mut session = SqliteSession { connection, transaction_depth: 0 };
+
+		assert_eq!(
+			session.advance_sequence(true, "", "InvoiceNumber").unwrap_err(),
+			"Advancing SQLite sequence `InvoiceNumber` would overflow the supported `int` range.",
 		);
 	}
 }

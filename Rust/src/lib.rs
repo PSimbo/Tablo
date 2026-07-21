@@ -1211,6 +1211,10 @@ fn validate_module_imports_in_program(
 
 #[cfg(test)]
 mod tests {
+	use std::fs;
+
+	use rusqlite::Connection;
+
 	use super::*;
 
 	fn compile_snippet_to_object_file(source: &str, output_path: &std::path::Path) -> Result<(), TabloError> {
@@ -2681,6 +2685,27 @@ mod tests {
 			message: String::from("Standalone Tablo programs must define `fn Main(args: [text]) int`."),
 			position: 0,
 		}));
+	}
+
+	#[test]
+	fn rejects_mysql_sequence_references_during_compilation() {
+		let error = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]) int { return seqnext(InvoiceNumber); }",
+			r#"
+				database ExampleDb;
+				schema Reporting;
+				create sequence InvoiceNumber;
+			"#,
+			&[("ExampleDb", DatabaseBackend::MySql)],
+		).unwrap_err();
+
+		match error {
+			TabloError::Compile(error) => assert_eq!(
+				error.message,
+				"Sequence `InvoiceNumber` cannot be used because database `ExampleDb` uses MySQL, which does not support standalone sequences.",
+			),
+			other => panic!("Expected compile error, found {other:?}."),
+		}
 	}
 
 	#[test]

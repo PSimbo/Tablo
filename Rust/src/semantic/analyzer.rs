@@ -2905,12 +2905,14 @@ impl SemanticAnalyzer {
 				String::from("Database sequences require schema metadata, but none was supplied."),
 			))?;
 
-			return schema_catalog.resolve_database_schema_sequence(
+			let resolved = schema_catalog.resolve_database_schema_sequence(
 				&self.semantic_program.active_databases.iter().map(String::as_str).collect::<Vec<_>>(),
 				&resolved.database_name,
 				&resolved.schema_name,
 				&resolved.sequence_name,
-			).map_err(|error| self.schema_error_to_compile_error(sequence.position, error));
+			).map_err(|error| self.schema_error_to_compile_error(sequence.position, error))?;
+			self.validate_sequence_backend(sequence.position, &resolved)?;
+			return Ok(resolved);
 		}
 
 		let schema_catalog = self.current_schema_catalog.as_ref().ok_or(self.compile_error(
@@ -2938,6 +2940,7 @@ impl SemanticAnalyzer {
 			}),
 		}.map_err(|error| self.schema_error_to_compile_error(sequence.position, error))?;
 
+		self.validate_sequence_backend(sequence.position, &resolved)?;
 		Ok(resolved)
 	}
 
@@ -3140,12 +3143,15 @@ impl SemanticAnalyzer {
 		let active_databases = self.semantic_program.active_databases.iter().map(String::as_str).collect::<Vec<_>>();
 
 		match schema_catalog.resolve_sequence(&active_databases, name) {
-			Ok(resolved) => Ok(Some(ResolvedSequenceReference {
-				database_name: resolved.database().name().to_string(),
-				schema_is_implicit: resolved.schema().is_implicit(),
-				schema_name: resolved.schema().name().to_string(),
-				sequence_name: resolved.sequence().name().to_string(),
-			})),
+			Ok(resolved) => {
+				self.validate_sequence_backend(position, &resolved)?;
+				Ok(Some(ResolvedSequenceReference {
+					database_name: resolved.database().name().to_string(),
+					schema_is_implicit: resolved.schema().is_implicit(),
+					schema_name: resolved.schema().name().to_string(),
+					sequence_name: resolved.sequence().name().to_string(),
+				}))
+			}
 			Err(SchemaError::UnknownSequence { .. }) => Ok(None),
 			Err(error) => Err(self.schema_error_to_compile_error(position, error)),
 		}
@@ -3450,6 +3456,25 @@ impl SemanticAnalyzer {
 					}
 				}
 			}
+		}
+
+		Ok(())
+	}
+
+	fn validate_sequence_backend(
+		&self,
+		position: usize,
+		resolved: &crate::schema::ResolvedSequence<'_>,
+	) -> Result<(), CompileError> {
+		if resolved.database().backend() == DatabaseBackend::MySql {
+			return Err(self.compile_error(
+				position,
+				format!(
+					"Sequence `{}` cannot be used because database `{}` uses MySQL, which does not support standalone sequences.",
+					resolved.sequence().name(),
+					resolved.database().name(),
+				),
+			));
 		}
 
 		Ok(())

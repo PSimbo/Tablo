@@ -291,26 +291,12 @@ impl VirtualMachine {
 		sequence_name: &str,
 		instruction_index: usize,
 	) -> Result<i64, VmError> {
-		let current = self.load_sequence_current(
+		self.database_runtime.advance_sequence(
 			database_name,
 			schema_is_implicit,
 			schema_name,
 			sequence_name,
-			instruction_index,
-		)?;
-		let next = current.checked_add(1).ok_or(vm_error(
-			instruction_index,
-			format!("Advancing sequence `{sequence_name}` would overflow the supported `int` range."),
-		))?;
-		self.store_sequence_current(
-			database_name,
-			schema_is_implicit,
-			schema_name,
-			sequence_name,
-			next,
-			instruction_index,
-		)?;
-		Ok(next)
+		).map_err(|message| vm_error(instruction_index, message))
 	}
 
 	fn begin_transaction(&mut self, instruction_index: usize) -> Result<(), VmError> {

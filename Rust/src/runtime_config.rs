@@ -193,7 +193,9 @@ fn schema_error_message(error: crate::schema::SchemaError) -> String {
 
 #[cfg(test)]
 mod tests {
-	use crate::utils::unique_temp_directory;
+	use crate::utils::*;
+
+	use super::*;
 
 	#[test]
 	fn loads_runtime_database_config_from_toml() {
