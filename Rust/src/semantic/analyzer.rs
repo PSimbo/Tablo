@@ -4126,6 +4126,11 @@ fn statement_position(statement: &Statement) -> usize {
 mod tests {
 	use super::*;
 
+	use crate::schema_fixture::*;
+	use crate::source::*;
+	use crate::syntax::lexer::*;
+	use crate::syntax::parser::*;
+
 	fn parse_count_expression(source: &str) -> crate::ast::CountExpr {
 		match parse_expression(source) {
 			Expr::Count(count) => count,

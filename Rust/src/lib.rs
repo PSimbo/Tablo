@@ -1217,6 +1217,10 @@ mod tests {
 
 	use super::*;
 
+	use crate::query::*;
+	use crate::schema::*;
+	use crate::schema_fixture::*;
+
 	fn compile_snippet_to_object_file(source: &str, output_path: &std::path::Path) -> Result<(), TabloError> {
 		let program = compile_source_to_program_with_name_and_schema(source, None, CompilationTarget::Snippet, None)?;
 		write_program_to_path(output_path, &program).map_err(TabloError::ObjectFile)

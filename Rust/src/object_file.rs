@@ -1281,6 +1281,8 @@ impl ObjectFileLayout {
 mod tests {
 	use super::*;
 
+	use crate::ast::*;
+
 	#[test]
 	fn rejects_invalid_magic_bytes() {
 		let error = read_program(b"NOPE").unwrap_err();

@@ -1140,6 +1140,8 @@ fn run_debug_loop(program: &Program, session: &mut DebuggerSession<'_>, mut stop
 mod tests {
 	use super::*;
 
+	use tablo::ast::*;
+
 	#[test]
 	fn evaluates_watch_expression_in_dap_server() {
 		let frame = VmStackFrame {

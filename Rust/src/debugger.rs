@@ -318,6 +318,11 @@ impl PausedState {
 mod tests {
 	use super::*;
 
+	use crate::compiler::*;
+	use crate::source::*;
+	use crate::syntax::lexer::*;
+	use crate::syntax::parser::*;
+
 	fn compile_debug_program(source: &str, display_name: &str) -> crate::bytecode::Program {
 		let source_text = SourceText::new(source);
 		let mut lexer = Lexer::new(source_text.clone());

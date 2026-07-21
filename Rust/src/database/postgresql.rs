@@ -12,11 +12,13 @@ use crate::value::*;
 
 use super::records::*;
 use super::runtime::DatabaseDriver;
+use super::transactions::*;
 use super::values::runtime_type_name;
 use super::writes::*;
 
 pub(super) struct PostgreSqlSession {
 	client: Client,
+	transactions: TransactionState,
 }
 
 impl PostgreSqlSession {
@@ -29,7 +31,10 @@ impl PostgreSqlSession {
 			format!("Failed to connect to PostgreSQL database `{database_name}`: {error}")
 		})?;
 
-		Ok(Self { client })
+		Ok(Self {
+			client,
+			transactions: TransactionState::default(),
+		})
 	}
 }
 
@@ -44,8 +49,11 @@ impl DatabaseDriver for PostgreSqlSession {
 		row.try_get(0).map_err(|error| format!("Failed to read PostgreSQL sequence `{sequence_name}` value: {error}"))
 	}
 
-	fn commit_transaction(&mut self, _target_depth: usize, _savepoint_name: &str) -> Result<(), String> {
-		Err(unsupported_operation("transaction commits"))
+	fn commit_transaction(&mut self, target_depth: usize, savepoint_name: &str) -> Result<(), String> {
+		let Self { client, transactions } = self;
+		transactions.commit(target_depth, savepoint_name, |command| {
+			execute_transaction_command(client, command)
+		})
 	}
 
 	fn create_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String> {
@@ -127,8 +135,11 @@ impl DatabaseDriver for PostgreSqlSession {
 		row.try_get(0).map_err(|error| format!("Failed to read PostgreSQL sequence `{sequence_name}` value: {error}"))
 	}
 
-	fn rollback_transaction(&mut self, _target_depth: usize, _savepoint_name: &str) -> Result<(), String> {
-		Err(unsupported_operation("transaction rollbacks"))
+	fn rollback_transaction(&mut self, target_depth: usize, savepoint_name: &str) -> Result<(), String> {
+		let Self { client, transactions } = self;
+		transactions.rollback(target_depth, savepoint_name, |command| {
+			execute_transaction_command(client, command)
+		})
 	}
 
 	fn store_sequence_current(
@@ -147,12 +158,10 @@ impl DatabaseDriver for PostgreSqlSession {
 	}
 
 	fn sync_transactions(&mut self, transaction_names: &[String]) -> Result<(), String> {
-		if transaction_names.is_empty() {
-			Ok(())
-		}
-		else {
-			Err(unsupported_operation("transactions"))
-		}
+		let Self { client, transactions } = self;
+		transactions.synchronize(transaction_names, |command| {
+			execute_transaction_command(client, command)
+		})
 	}
 
 	fn update_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String> {
@@ -191,6 +200,12 @@ fn execute_record_write(client: &mut Client, operation: &str, write: RecordWrite
 
 	client.execute(&write.statement, &parameter_refs)
 		.map_err(|error| format!("Failed to execute PostgreSQL {operation} statement: {error}"))
+}
+
+fn execute_transaction_command(client: &mut Client, command: TransactionCommand) -> Result<(), String> {
+	let statement = transaction_statement(&command);
+	client.batch_execute(&statement)
+		.map_err(|error| format!("Failed to execute PostgreSQL transaction command `{statement}`: {error}"))
 }
 
 fn load_group_keys(row: &postgres::Row, column_count: usize, group_by: &[SqlGroupByItem]) -> Result<Vec<Value>, String> {
@@ -269,8 +284,15 @@ fn text_database_value(
 	})
 }
 
-fn unsupported_operation(operation: &str) -> String {
-	format!("PostgreSQL {operation} are not implemented yet.")
+fn transaction_statement(command: &TransactionCommand) -> String {
+	match command {
+		TransactionCommand::Begin => String::from("BEGIN"),
+		TransactionCommand::Commit => String::from("COMMIT"),
+		TransactionCommand::ReleaseSavepoint(name) => format!("RELEASE SAVEPOINT {}", quote_identifier(name)),
+		TransactionCommand::Rollback => String::from("ROLLBACK"),
+		TransactionCommand::RollbackToSavepoint(name) => format!("ROLLBACK TO SAVEPOINT {}", quote_identifier(name)),
+		TransactionCommand::Savepoint(name) => format!("SAVEPOINT {}", quote_identifier(name)),
+	}
 }
 
 #[cfg(test)]
@@ -332,6 +354,25 @@ mod tests {
 			error,
 			"PostgreSQL connection string for database `ExampleDb` must include connection parameters.",
 		);
+	}
+
+	#[test]
+	fn renders_postgresql_transaction_commands() {
+		assert_eq!(transaction_statement(&TransactionCommand::Begin), "BEGIN");
+		assert_eq!(
+			transaction_statement(&TransactionCommand::Savepoint(String::from("tablo_tx_1"))),
+			"SAVEPOINT \"tablo_tx_1\"",
+		);
+		assert_eq!(
+			transaction_statement(&TransactionCommand::RollbackToSavepoint(String::from("tablo_tx_1"))),
+			"ROLLBACK TO SAVEPOINT \"tablo_tx_1\"",
+		);
+		assert_eq!(
+			transaction_statement(&TransactionCommand::ReleaseSavepoint(String::from("tablo_tx_1"))),
+			"RELEASE SAVEPOINT \"tablo_tx_1\"",
+		);
+		assert_eq!(transaction_statement(&TransactionCommand::Commit), "COMMIT");
+		assert_eq!(transaction_statement(&TransactionCommand::Rollback), "ROLLBACK");
 	}
 
 	#[test]

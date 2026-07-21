@@ -2261,6 +2261,10 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
+	use crate::ast::AstProgram as Program;
+	use crate::source::*;
+	use crate::syntax::lexer::*;
+
 	use super::*;
 
 	fn normalize_assignment_target(target: AssignmentTarget) -> AssignmentTarget {

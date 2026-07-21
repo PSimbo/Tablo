@@ -4,6 +4,7 @@ mod postgresql;
 mod records;
 mod runtime;
 mod sqlite;
+mod transactions;
 mod values;
 mod writes;
 

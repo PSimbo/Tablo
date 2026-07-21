@@ -120,6 +120,8 @@ fn resolve_runtime_config_path(config_path: Option<&PathBuf>) -> Result<Option<P
 mod tests {
 	use super::*;
 
+	use tablo::utils::*;
+
 	#[test]
 	fn builds_runtime_database_config_from_cli_mappings() {
 		let config = build_database_config(None, &[String::from("ExampleDb=sqlite:data/example.sqlite")]).unwrap();

@@ -1275,6 +1275,11 @@ fn collect_variable_declaration(
 mod tests {
 	use super::*;
 
+	use crate::semantic::analyzer::*;
+	use crate::source::*;
+	use crate::syntax::lexer::*;
+	use crate::syntax::parser::*;
+
 	fn analyze_source(source: &str) -> super::SsaProgram {
 		let program = parse_program(source);
 		let mut analyzer = SemanticAnalyzer::new();

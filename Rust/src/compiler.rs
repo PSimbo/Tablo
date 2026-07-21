@@ -1486,6 +1486,8 @@ fn statement_position(statement: &Statement) -> usize {
 mod tests {
 	use super::*;
 
+	use crate::value::*;
+
 	#[test]
 	fn compiles_addition_in_post_order() {
 		let expression = Expr::Binary(BinaryExpr {

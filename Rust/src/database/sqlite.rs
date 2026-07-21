@@ -12,12 +12,13 @@ use crate::value::*;
 
 use super::records::*;
 use super::runtime::DatabaseDriver;
+use super::transactions::*;
 use super::values::runtime_type_name;
 use super::writes::*;
 
 pub(super) struct SqliteSession {
 	connection: Connection,
-	transaction_depth: usize,
+	transactions: TransactionState,
 }
 
 impl SqliteSession {
@@ -29,7 +30,7 @@ impl SqliteSession {
 
 		Ok(Self {
 			connection,
-			transaction_depth: 0,
+			transactions: TransactionState::default(),
 		})
 	}
 }
@@ -74,21 +75,10 @@ impl DatabaseDriver for SqliteSession {
 	}
 
 	fn commit_transaction(&mut self, target_depth: usize, savepoint_name: &str) -> Result<(), String> {
-		if self.transaction_depth < target_depth {
-			return Ok(());
-		}
-
-		if target_depth == 1 {
-			self.connection.execute_batch("COMMIT")
-				.map_err(|error| format!("Failed to commit SQLite transaction: {error}"))?;
-		}
-		else {
-			self.connection.execute_batch(&format!("RELEASE SAVEPOINT {}", quote_identifier(savepoint_name)))
-				.map_err(|error| format!("Failed to release SQLite transaction savepoint: {error}"))?;
-		}
-
-		self.transaction_depth -= 1;
-		Ok(())
+		let Self { connection, transactions } = self;
+		transactions.commit(target_depth, savepoint_name, |command| {
+			execute_transaction_command(connection, command)
+		})
 	}
 
 	fn create_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String> {
@@ -177,22 +167,10 @@ impl DatabaseDriver for SqliteSession {
 	}
 
 	fn rollback_transaction(&mut self, target_depth: usize, savepoint_name: &str) -> Result<(), String> {
-		if self.transaction_depth < target_depth {
-			return Ok(());
-		}
-
-		if target_depth == 1 {
-			self.connection.execute_batch("ROLLBACK")
-				.map_err(|error| format!("Failed to roll back SQLite transaction: {error}"))?;
-		}
-		else {
-			let savepoint = quote_identifier(savepoint_name);
-			self.connection.execute_batch(&format!("ROLLBACK TO SAVEPOINT {savepoint}; RELEASE SAVEPOINT {savepoint}"))
-				.map_err(|error| format!("Failed to roll back SQLite transaction savepoint: {error}"))?;
-		}
-
-		self.transaction_depth -= 1;
-		Ok(())
+		let Self { connection, transactions } = self;
+		transactions.rollback(target_depth, savepoint_name, |command| {
+			execute_transaction_command(connection, command)
+		})
 	}
 
 	fn store_sequence_current(
@@ -217,22 +195,10 @@ impl DatabaseDriver for SqliteSession {
 	}
 
 	fn sync_transactions(&mut self, transaction_names: &[String]) -> Result<(), String> {
-		while self.transaction_depth < transaction_names.len() {
-			if self.transaction_depth == 0 {
-				self.connection.execute_batch("BEGIN")
-					.map_err(|error| format!("Failed to begin SQLite transaction: {error}"))?;
-			}
-			else {
-				self.connection.execute_batch(&format!(
-					"SAVEPOINT {}",
-					quote_identifier(&transaction_names[self.transaction_depth]),
-				)).map_err(|error| format!("Failed to create SQLite transaction savepoint: {error}"))?;
-			}
-
-			self.transaction_depth += 1;
-		}
-
-		Ok(())
+		let Self { connection, transactions } = self;
+		transactions.synchronize(transaction_names, |command| {
+			execute_transaction_command(connection, command)
+		})
 	}
 
 	fn update_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String> {
@@ -257,6 +223,12 @@ fn database_value(value: ValueRef<'_>) -> Result<DatabaseValue, String> {
 		ValueRef::Text(value) => Ok(DatabaseValue::Text(std::str::from_utf8(value)
 			.map_err(|_| String::from("SQLite returned invalid UTF-8 text data."))?.to_string())),
 	}
+}
+
+fn execute_transaction_command(connection: &mut Connection, command: TransactionCommand) -> Result<(), String> {
+	let statement = transaction_statement(&command);
+	connection.execute_batch(&statement)
+		.map_err(|error| format!("Failed to execute SQLite transaction command `{statement}`: {error}"))
 }
 
 fn load_group_keys(row: &rusqlite::Row<'_>, column_count: usize, group_by: &[SqlGroupByItem]) -> Result<Vec<Value>, String> {
@@ -352,6 +324,17 @@ fn sqlite_type_name(value: ValueRef<'_>) -> &'static str {
 	}
 }
 
+fn transaction_statement(command: &TransactionCommand) -> String {
+	match command {
+		TransactionCommand::Begin => String::from("BEGIN"),
+		TransactionCommand::Commit => String::from("COMMIT"),
+		TransactionCommand::ReleaseSavepoint(name) => format!("RELEASE SAVEPOINT {}", quote_identifier(name)),
+		TransactionCommand::Rollback => String::from("ROLLBACK"),
+		TransactionCommand::RollbackToSavepoint(name) => format!("ROLLBACK TO SAVEPOINT {}", quote_identifier(name)),
+		TransactionCommand::Savepoint(name) => format!("SAVEPOINT {}", quote_identifier(name)),
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use std::path::Path;
@@ -368,7 +351,7 @@ mod tests {
 				UPDATE sqlite_sequence SET seq = CAST('41' AS TEXT) WHERE name = 'InvoiceNumber';
 			"#,
 		).unwrap();
-		let mut session = SqliteSession { connection, transaction_depth: 0 };
+		let mut session = SqliteSession { connection, transactions: TransactionState::default() };
 
 		assert_eq!(session.advance_sequence(true, "", "InvoiceNumber").unwrap(), 42);
 		assert_eq!(session.load_sequence_current(true, "", "InvoiceNumber").unwrap(), 42);
@@ -380,10 +363,46 @@ mod tests {
 		connection.execute_batch(
 			"CREATE TABLE InvoiceNumber (Id INTEGER PRIMARY KEY AUTOINCREMENT);",
 		).unwrap();
-		let mut session = SqliteSession { connection, transaction_depth: 0 };
+		let mut session = SqliteSession { connection, transactions: TransactionState::default() };
 
 		assert_eq!(session.advance_sequence(true, "", "InvoiceNumber").unwrap(), 1);
 		assert_eq!(session.load_sequence_current(true, "", "InvoiceNumber").unwrap(), 1);
+	}
+
+	#[test]
+	fn commits_outer_work_after_rolling_back_inner_savepoint() {
+		let connection = Connection::open_in_memory().unwrap();
+		connection.execute_batch("CREATE TABLE Events (Id INTEGER NOT NULL);").unwrap();
+		let mut session = SqliteSession { connection, transactions: TransactionState::default() };
+
+		session.sync_transactions(&[String::from("outer")]).unwrap();
+		session.connection.execute("INSERT INTO Events (Id) VALUES (1)", []).unwrap();
+		session.sync_transactions(&[String::from("outer"), String::from("inner")]).unwrap();
+		session.connection.execute("INSERT INTO Events (Id) VALUES (2)", []).unwrap();
+		session.rollback_transaction(2, "inner").unwrap();
+		session.commit_transaction(1, "outer").unwrap();
+
+		let ids = session.connection.prepare("SELECT Id FROM Events ORDER BY Id").unwrap()
+			.query_map([], |row| row.get::<_, i64>(0)).unwrap()
+			.collect::<Result<Vec<_>, _>>().unwrap();
+		assert_eq!(ids, vec![1]);
+	}
+
+	#[test]
+	fn outer_rollback_discards_committed_inner_savepoint_work() {
+		let connection = Connection::open_in_memory().unwrap();
+		connection.execute_batch("CREATE TABLE Events (Id INTEGER NOT NULL);").unwrap();
+		let mut session = SqliteSession { connection, transactions: TransactionState::default() };
+
+		session.sync_transactions(&[String::from("outer")]).unwrap();
+		session.connection.execute("INSERT INTO Events (Id) VALUES (1)", []).unwrap();
+		session.sync_transactions(&[String::from("outer"), String::from("inner")]).unwrap();
+		session.connection.execute("INSERT INTO Events (Id) VALUES (2)", []).unwrap();
+		session.commit_transaction(2, "inner").unwrap();
+		session.rollback_transaction(1, "outer").unwrap();
+
+		let count = session.connection.query_row("SELECT COUNT(*) FROM Events", [], |row| row.get::<_, i64>(0)).unwrap();
+		assert_eq!(count, 0);
 	}
 
 	#[test]
@@ -423,7 +442,7 @@ mod tests {
 			"#,
 			i64::MAX,
 		)).unwrap();
-		let mut session = SqliteSession { connection, transaction_depth: 0 };
+		let mut session = SqliteSession { connection, transactions: TransactionState::default() };
 
 		assert_eq!(
 			session.advance_sequence(true, "", "InvoiceNumber").unwrap_err(),

@@ -196,6 +196,8 @@ fn diagnostic_for_columns(
 mod tests {
 	use super::*;
 
+	use crate::compiler::*;
+
 	#[test]
 	fn highlights_full_span_for_assignment_type_error_on_string_literal() {
 		let source = "fn Main(args: [text]) int { var x: int = 'abc'; return 0; }";

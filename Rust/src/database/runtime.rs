@@ -214,6 +214,8 @@ struct TransactionScope {
 mod tests {
 	use super::*;
 
+	use crate::query::*;
+
 	#[test]
 	fn rejects_execution_when_compiled_and_configured_backends_differ() {
 		let config = RuntimeDatabaseConfig::new().with_sqlite_database("ExampleDb", ":memory:");

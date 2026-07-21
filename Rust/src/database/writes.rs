@@ -193,6 +193,9 @@ fn table_source(record: &RecordPointerValue, dialect: WriteDialect) -> String {
 mod tests {
 	use super::*;
 
+	use crate::ast::*;
+	use crate::value::*;
+
 	#[test]
 	fn deleted_record_no_longer_references_persisted_data() {
 		let record = mark_record_deleted(test_record());

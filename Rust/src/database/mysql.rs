@@ -7,15 +7,18 @@ use mysql::prelude::Queryable;
 
 use crate::ast::DataType;
 use crate::query::*;
+use crate::sql::*;
 use crate::value::*;
 
 use super::records::*;
 use super::runtime::DatabaseDriver;
+use super::transactions::*;
 use super::values::runtime_type_name;
 use super::writes::*;
 
 pub(super) struct MySqlSession {
 	connection: Conn,
+	transactions: TransactionState,
 }
 
 impl MySqlSession {
@@ -30,7 +33,10 @@ impl MySqlSession {
 			format!("Failed to connect to MySQL database `{database_name}`: {error}")
 		})?;
 
-		Ok(Self { connection })
+		Ok(Self {
+			connection,
+			transactions: TransactionState::default(),
+		})
 	}
 }
 
@@ -39,8 +45,11 @@ impl DatabaseDriver for MySqlSession {
 		Err(unsupported_sequence(sequence_name))
 	}
 
-	fn commit_transaction(&mut self, _target_depth: usize, _savepoint_name: &str) -> Result<(), String> {
-		Err(unsupported_operation("transaction commits"))
+	fn commit_transaction(&mut self, target_depth: usize, savepoint_name: &str) -> Result<(), String> {
+		let Self { connection, transactions } = self;
+		transactions.commit(target_depth, savepoint_name, |command| {
+			execute_transaction_command(connection, command)
+		})
 	}
 
 	fn create_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String> {
@@ -111,8 +120,11 @@ impl DatabaseDriver for MySqlSession {
 		Err(unsupported_sequence(sequence_name))
 	}
 
-	fn rollback_transaction(&mut self, _target_depth: usize, _savepoint_name: &str) -> Result<(), String> {
-		Err(unsupported_operation("transaction rollbacks"))
+	fn rollback_transaction(&mut self, target_depth: usize, savepoint_name: &str) -> Result<(), String> {
+		let Self { connection, transactions } = self;
+		transactions.rollback(target_depth, savepoint_name, |command| {
+			execute_transaction_command(connection, command)
+		})
 	}
 
 	fn store_sequence_current(
@@ -126,12 +138,10 @@ impl DatabaseDriver for MySqlSession {
 	}
 
 	fn sync_transactions(&mut self, transaction_names: &[String]) -> Result<(), String> {
-		if transaction_names.is_empty() {
-			Ok(())
-		}
-		else {
-			Err(unsupported_operation("transactions"))
-		}
+		let Self { connection, transactions } = self;
+		transactions.synchronize(transaction_names, |command| {
+			execute_transaction_command(connection, command)
+		})
 	}
 
 	fn update_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String> {
@@ -202,6 +212,12 @@ fn execute_record_write(connection: &mut Conn, operation: &str, write: RecordWri
 	connection.exec_drop(&write.statement, Params::Positional(parameters))
 		.map_err(|error| format!("Failed to execute MySQL {operation} statement: {error}"))?;
 	Ok(connection.affected_rows())
+}
+
+fn execute_transaction_command(connection: &mut Conn, command: TransactionCommand) -> Result<(), String> {
+	let statement = transaction_statement(&command);
+	connection.query_drop(&statement)
+		.map_err(|error| format!("Failed to execute MySQL transaction command `{statement}`: {error}"))
 }
 
 fn format_mysql_time(hour: u8, minute: u8, second: u8, microsecond: u32) -> String {
@@ -289,8 +305,15 @@ fn runtime_value_to_mysql(value: Value) -> Result<MySqlValue, String> {
 	}
 }
 
-fn unsupported_operation(operation: &str) -> String {
-	format!("MySQL {operation} are not implemented yet.")
+fn transaction_statement(command: &TransactionCommand) -> String {
+	match command {
+		TransactionCommand::Begin => String::from("START TRANSACTION"),
+		TransactionCommand::Commit => String::from("COMMIT"),
+		TransactionCommand::ReleaseSavepoint(name) => format!("RELEASE SAVEPOINT {}", quote_mysql_identifier(name)),
+		TransactionCommand::Rollback => String::from("ROLLBACK"),
+		TransactionCommand::RollbackToSavepoint(name) => format!("ROLLBACK TO SAVEPOINT {}", quote_mysql_identifier(name)),
+		TransactionCommand::Savepoint(name) => format!("SAVEPOINT {}", quote_mysql_identifier(name)),
+	}
 }
 
 fn unsupported_sequence(sequence_name: &str) -> String {
@@ -349,6 +372,25 @@ mod tests {
 		let error = database_value(&mysql::Value::UInt(i64::MAX as u64 + 1), &DataType::Int).unwrap_err();
 
 		assert_eq!(error, "MySQL unsigned integer `9223372036854775808` exceeds the range of Tablo `int`.");
+	}
+
+	#[test]
+	fn renders_mysql_transaction_commands() {
+		assert_eq!(transaction_statement(&TransactionCommand::Begin), "START TRANSACTION");
+		assert_eq!(
+			transaction_statement(&TransactionCommand::Savepoint(String::from("tablo_tx_1"))),
+			"SAVEPOINT `tablo_tx_1`",
+		);
+		assert_eq!(
+			transaction_statement(&TransactionCommand::RollbackToSavepoint(String::from("tablo_tx_1"))),
+			"ROLLBACK TO SAVEPOINT `tablo_tx_1`",
+		);
+		assert_eq!(
+			transaction_statement(&TransactionCommand::ReleaseSavepoint(String::from("tablo_tx_1"))),
+			"RELEASE SAVEPOINT `tablo_tx_1`",
+		);
+		assert_eq!(transaction_statement(&TransactionCommand::Commit), "COMMIT");
+		assert_eq!(transaction_statement(&TransactionCommand::Rollback), "ROLLBACK");
 	}
 
 	#[test]

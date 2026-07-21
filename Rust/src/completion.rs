@@ -1296,6 +1296,8 @@ fn strip_wrapping_parentheses(source: &str) -> &str {
 mod tests {
 	use super::*;
 
+	use crate::schema_fixture::*;
+
 	#[test]
 	fn completion_items_dedupe_labels() {
 		let items = default_completion_items();
