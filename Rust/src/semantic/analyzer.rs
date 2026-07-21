@@ -112,6 +112,7 @@ pub struct RecordPointerBindingInfo {
 	pub initialization: RecordPointerInitialization,
 	pub is_mutable: bool,
 	pub origin: RecordPointerOrigin,
+	pub read_fields: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1158,6 +1159,10 @@ impl SemanticAnalyzer {
 
 						if matches!(local.data_type.without_nullability(), DataType::RecordPointer(_)) {
 							self.record_record_pointer_assignment(local.declaration_position, &target.fields);
+							if (*operator != AssignmentOperator::Assign || target.fields.len() > 1)
+								&& let Some(field) = target.fields.first() {
+								self.record_record_pointer_read(local.declaration_position, &field.name);
+							}
 						}
 
 						let value_type = self.infer_expression_type(value)?;
@@ -1267,6 +1272,8 @@ impl SemanticAnalyzer {
 					self.record_resolved_sequence(expression.position(), &resolved_sequence);
 					return Ok(DataType::Int);
 				}
+
+				self.record_record_pointer_field_access_read(expression);
 
 				let object_type = self.infer_expression_type(object)?;
 				let object_type = object_type.without_nullability().clone();
@@ -2590,6 +2597,42 @@ impl SemanticAnalyzer {
 		binding.assigned_fields.insert(path);
 	}
 
+	fn record_record_pointer_field_access_read(&mut self, expression: &Expr) {
+		let Expr::FieldAccess(field_access) = expression else {
+			return;
+		};
+		let Some((base_identifier, fields)) = self.query_field_access_chain(field_access) else {
+			return;
+		};
+		let Some(field) = fields.first() else {
+			return;
+		};
+		let Some(local) = self.lookup_local(&base_identifier.name) else {
+			return;
+		};
+
+		if matches!(local.data_type.without_nullability(), DataType::RecordPointer(_)) {
+			self.record_record_pointer_read(local.declaration_position, &field.name);
+		}
+	}
+
+	fn record_record_pointer_read(&mut self, position: usize, field_name: &str) {
+		let canonical_name = self.semantic_program.record_pointer_bindings.get(&position)
+			.and_then(|binding| {
+				let schema_catalog = self.current_schema_catalog.as_ref()?;
+				let database = schema_catalog.database(&binding.data_type.database_name)?;
+				let schema = database.schema(&binding.data_type.schema_name)?;
+				let table = schema.table(&binding.data_type.table_name)?;
+				table.column(field_name).map(|column| column.name().to_string())
+			})
+			.unwrap_or_else(|| field_name.to_string());
+		let Some(binding) = self.semantic_program.record_pointer_bindings.get_mut(&position) else {
+			return;
+		};
+
+		binding.read_fields.insert(canonical_name);
+	}
+
 	fn record_resolved_sequence(
 		&mut self,
 		position: usize,
@@ -2658,6 +2701,7 @@ impl SemanticAnalyzer {
 			initialization,
 			is_mutable,
 			origin,
+			read_fields: BTreeSet::new(),
 		});
 	}
 
@@ -2881,6 +2925,11 @@ impl SemanticAnalyzer {
 			format!("Variable `{}` is not declared in this scope.", base_identifier.name),
 		))?;
 		self.semantic_program.identifier_slots.insert(base_identifier.position, local.slot);
+
+		if matches!(local.data_type.without_nullability(), DataType::RecordPointer(_))
+			&& let Some(field) = fields.first() {
+			self.record_record_pointer_read(local.declaration_position, &field.name);
+		}
 
 		let mut current_type = local.data_type.clone();
 		let mut field_path = Vec::with_capacity(fields.len());
@@ -4727,6 +4776,57 @@ mod tests {
 	}
 
 	#[test]
+	fn records_compound_record_pointer_assignment_as_read_and_write() {
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (Id int not null, Name text not null);
+			"#,
+			"ExampleDb",
+		);
+		let program = parse_program(
+			"with exampledb;\nfn Main(args: [text]) int { rec mut cust = find first Customers; cust.Name += ' Ltd.'; return 0; }"
+		);
+		let declaration_position = match &program.functions[0].body.statements[0] {
+			Statement::RecordPointerDeclaration(statement) => statement.position,
+			other => panic!("Expected record pointer declaration, found {other:?}."),
+		};
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap();
+		let binding = semantic_program.record_pointer_binding(declaration_position).unwrap();
+
+		assert_eq!(binding.assigned_fields, BTreeSet::from([String::from("Name")]));
+		assert_eq!(binding.read_fields, BTreeSet::from([String::from("Name")]));
+	}
+
+	#[test]
+	fn records_for_loop_record_pointer_field_reads() {
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (Id int not null, Name text not null);
+			"#,
+			"ExampleDb",
+		);
+		let program = parse_program(
+			"with exampledb;\nfn Main(args: [text]) int { for rec cust in Customers { displn(cust.Name); } return 0; }"
+		);
+		let variable_position = match &program.functions[0].body.statements[0] {
+			Statement::ForRecord(statement) => statement.variable.position,
+			other => panic!("Expected record-pointer loop, found {other:?}."),
+		};
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap();
+		let binding = semantic_program.record_pointer_binding(variable_position).unwrap();
+
+		assert_eq!(binding.read_fields, BTreeSet::from([String::from("Name")]));
+	}
+
+	#[test]
 	fn records_record_pointer_assignment_metadata_for_local_declaration() {
 		let schema = sqlite_test_schema(
 			r#"
@@ -4754,6 +4854,61 @@ mod tests {
 		assert_eq!(binding.origin, RecordPointerOrigin::VariableDeclaration);
 		assert!(binding.is_mutable);
 		assert_eq!(binding.assigned_fields, BTreeSet::from([String::from("Name")]));
+		assert!(binding.read_fields.is_empty());
+	}
+
+	#[test]
+	fn records_record_pointer_field_read_used_as_query_parameter() {
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (Id int not null);
+				create table Orders (Id int not null, CustomerId int not null);
+			"#,
+			"ExampleDb",
+		);
+		let program = parse_program(
+			"with exampledb;\nfn Main(args: [text]) int { rec cust = find first Customers; rec ord = find first Orders where CustomerId == cust.Id; return 0; }"
+		);
+		let declaration_position = match &program.functions[0].body.statements[0] {
+			Statement::RecordPointerDeclaration(statement) => statement.position,
+			other => panic!("Expected record pointer declaration, found {other:?}."),
+		};
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap();
+		let binding = semantic_program.record_pointer_binding(declaration_position).unwrap();
+
+		assert_eq!(binding.read_fields, BTreeSet::from([String::from("Id")]));
+	}
+
+	#[test]
+	fn records_direct_record_pointer_field_reads() {
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			"ExampleDb",
+		);
+		let program = parse_program(
+			"with exampledb;\nfn Main(args: [text]) int { rec cust = find first Customers; displn(cust.name); return cust.Id; }"
+		);
+		let declaration_position = match &program.functions[0].body.statements[0] {
+			Statement::RecordPointerDeclaration(statement) => statement.position,
+			other => panic!("Expected record pointer declaration, found {other:?}."),
+		};
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap();
+		let binding = semantic_program.record_pointer_binding(declaration_position).unwrap();
+
+		assert_eq!(binding.read_fields, BTreeSet::from([String::from("Id"), String::from("Name")]));
 	}
 
 	#[test]
