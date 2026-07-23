@@ -47,6 +47,7 @@ pub struct SemanticAnalyzer {
 	loop_depth: usize,
 	next_function_index: u32,
 	next_local_slot: u32,
+	query_optimizations_disabled: bool,
 	root_source_name: Option<String>,
 	semantic_program: SemanticProgram,
 	top_level_function_source_names: Vec<String>,
@@ -320,27 +321,6 @@ impl SemanticProgram {
 }
 
 impl SemanticAnalyzer {
-	pub fn new() -> Self {
-		Self {
-			current_non_null_assumptions: Vec::new(),
-			current_return_type: None,
-			current_schema_catalog: None,
-			current_source_name: None,
-			enums: ScopeStack::default(),
-			find_lock_mode: RecordLockMode::None,
-			function_depth: 0,
-			functions: ScopeStack::default(),
-			group_boundary_contexts: Vec::new(),
-			locals: ScopeStack::default(),
-			loop_depth: 0,
-			next_function_index: 0,
-			next_local_slot: 0,
-			root_source_name: None,
-			semantic_program: SemanticProgram::default(),
-			top_level_function_source_names: Vec::new(),
-		}
-	}
-
 	pub fn analyze_program(&mut self, program: &AstProgram) -> Result<SemanticProgram, CompileError> {
 		self.analyze_program_with_schema(program, None)
 	}
@@ -448,6 +428,9 @@ impl SemanticAnalyzer {
 					}),
 			}
 		});
+		if self.query_optimizations_disabled {
+			query_plan.disable_optimizations();
+		}
 		self.semantic_program.query_plan = query_plan;
 
 		Ok(self.semantic_program.clone())
@@ -476,6 +459,32 @@ impl SemanticAnalyzer {
 		semantic_program.entry_point_function_index = semantic_program.function_declaration_target(main_function.position);
 		semantic_program.entry_point_position = Some(main_function.position);
 		Ok(semantic_program)
+	}
+
+	pub fn new() -> Self {
+		Self {
+			current_non_null_assumptions: Vec::new(),
+			current_return_type: None,
+			current_schema_catalog: None,
+			current_source_name: None,
+			enums: ScopeStack::default(),
+			find_lock_mode: RecordLockMode::None,
+			function_depth: 0,
+			functions: ScopeStack::default(),
+			group_boundary_contexts: Vec::new(),
+			locals: ScopeStack::default(),
+			loop_depth: 0,
+			next_function_index: 0,
+			next_local_slot: 0,
+			query_optimizations_disabled: false,
+			root_source_name: None,
+			semantic_program: SemanticProgram::default(),
+			top_level_function_source_names: Vec::new(),
+		}
+	}
+
+	pub fn set_query_optimizations_enabled(&mut self, enabled: bool) {
+		self.query_optimizations_disabled = !enabled;
 	}
 
 	pub fn set_root_source_name(&mut self, source_name: Option<String>) {

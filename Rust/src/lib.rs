@@ -1240,6 +1240,24 @@ mod tests {
 		Ok((program, schema))
 	}
 
+	fn compile_standalone_with_query_optimizations(
+		source: &str,
+		schema: &SchemaCatalog,
+		query_optimizations_enabled: bool,
+	) -> Result<(crate::bytecode::Program, crate::semantic::analyzer::SemanticProgram), TabloError> {
+		let source = SourceText::new(source);
+		let ast_program = parse_source_text(&source)?;
+		let mut analyzer = SemanticAnalyzer::new();
+		analyzer.set_query_optimizations_enabled(query_optimizations_enabled);
+		let semantic_program = analyzer.analyze_standalone_program_with_schema(&ast_program, Some(schema))
+			.map_err(TabloError::Compile)?;
+		let program = Compiler::new()
+			.compile_program_with_existing_semantics(&ast_program, &semantic_program)
+			.map_err(TabloError::Compile)?;
+
+		Ok((program, semantic_program))
+	}
+
 	fn compile_standalone_with_schema_fixture_and_backends(
 		source: &str,
 		schema_fixture: &str,
@@ -2372,6 +2390,79 @@ mod tests {
 			error.to_string(),
 			"Runtime error: Array index 2 is out of bounds for length 1.\nStack trace:\n  at inner (<source>:3:12)\n  at Main (<source>:6:15)"
 		);
+	}
+
+	#[test]
+	fn planned_query_execution_matches_optimizations_disabled_baseline() {
+		let database_path = create_sqlite_test_database(
+			"planned_query_execution_matches_optimizations_disabled_baseline",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL
+				);
+				CREATE TABLE Orders (
+					Id INTEGER NOT NULL,
+					CustomerId INTEGER NOT NULL
+				);
+				INSERT INTO Customers (Id) VALUES (1), (2);
+				INSERT INTO Orders (Id, CustomerId) VALUES
+					(10, 1),
+					(11, 1),
+					(20, 2);
+			"#,
+		);
+		let schema = schema_catalog_from_fixture_with_backends(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null
+				);
+				create table Orders (
+					Id int not null,
+					CustomerId int not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let source = concat!(
+			"with exampledb;\n",
+			"fn Main(args: [text]) int {\n",
+			"  for rec customer in Customers order by Id {\n",
+			"    var orderCount: int = count Orders where CustomerId == customer.Id;\n",
+			"    rec firstOrder = find first Orders where CustomerId == customer.Id order by Id;\n",
+			"    for rec customerOrder in Orders where CustomerId == customer.Id order by Id {\n",
+			"      return orderCount + customerOrder.Id;\n",
+			"    }\n",
+			"  }\n",
+			"  return -1;\n",
+			"}",
+		);
+		let (planned_program, planned_semantics) =
+			compile_standalone_with_query_optimizations(source, &schema, true).unwrap();
+		let (unoptimized_program, unoptimized_semantics) =
+			compile_standalone_with_query_optimizations(source, &schema, false).unwrap();
+		let planned_candidates = planned_semantics.query_plan().queries().iter()
+			.filter(|query| !query.optimization_opportunities.is_empty())
+			.collect::<Vec<_>>();
+
+		assert_eq!(planned_candidates.len(), 3);
+		assert!(planned_candidates.iter().all(|query| {
+			query.execution.independent_reason() == Some(PlannedQueryIndependentReason::NoSupportedStrategy)
+		}));
+		assert!(unoptimized_semantics.query_plan().queries().iter().all(|query| {
+			query.optimization_opportunities.is_empty()
+				&& query.execution.independent_reason() == Some(PlannedQueryIndependentReason::OptimizationsDisabled)
+		}));
+
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let planned_result = run_program_with_database_config(&planned_program, database_config.clone()).unwrap();
+		let unoptimized_result = run_program_with_database_config(&unoptimized_program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(planned_result, Some(Value::Integer(12)));
+		assert_eq!(unoptimized_result, planned_result);
 	}
 
 	#[test]
@@ -4982,7 +5073,6 @@ mod tests {
 
 		assert_eq!(result, Some(Value::Integer(2)));
 	}
-
 
 	#[test]
 	fn runs_sqlite_for_record_query_loop() {

@@ -42,6 +42,7 @@ pub enum PlannedQueryIndependentReason {
 	AnalysisIncomplete,
 	NoOptimizationOpportunity,
 	NoSupportedStrategy,
+	OptimizationsDisabled,
 	SemanticEquivalenceNotProven,
 }
 
@@ -132,6 +133,15 @@ impl ProgramQueryPlan {
 
 	pub fn query(&self, id: PlannedQueryId) -> Option<&PlannedQuery> {
 		self.queries.get(id.0)
+	}
+
+	pub(crate) fn disable_optimizations(&mut self) {
+		for query in &mut self.queries {
+			query.optimization_opportunities.clear();
+			query.execution = PlannedQueryExecution::Independent {
+				reason: PlannedQueryIndependentReason::OptimizationsDisabled,
+			};
+		}
 	}
 
 	pub(crate) fn populate_analyzed_metadata(
