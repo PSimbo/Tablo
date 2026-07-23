@@ -40,6 +40,7 @@ impl PlannedQueryExecution {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlannedQueryIndependentReason {
 	AnalysisIncomplete,
+	BackendStrategyUnavailable,
 	NoOptimizationOpportunity,
 	NoSupportedStrategy,
 	OptimizationsDisabled,
@@ -90,6 +91,7 @@ pub enum PlannedQueryResultCardinality {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlannedQuery {
+	pub backend_capabilities: Option<PlannedQueryBackendCapabilities>,
 	pub body_may_exit_early: bool,
 	pub body_may_have_side_effects: bool,
 	pub captured_parameters: Vec<PlannedQueryParameter>,
@@ -108,6 +110,11 @@ pub struct PlannedQuery {
 	pub result_semantics: Option<PlannedQueryResultSemantics>,
 	pub transaction_scopes: Vec<PlannedTransactionScopeId>,
 	record_binding_position: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PlannedQueryBackendCapabilities {
+	pub merge_correlated_count: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -185,6 +192,7 @@ impl ProgramQueryPlan {
 					source: PlannedQueryParameterSource::Local,
 				})
 				.collect();
+			query.backend_capabilities = Some(metadata.backend_capabilities);
 			query.database_name = Some(metadata.database_name);
 			query.expressions_are_infallible = Some(metadata.expressions_are_infallible);
 			query.is_read_only = Some(metadata.is_read_only);
@@ -230,8 +238,19 @@ impl ProgramQueryPlan {
 						PlannedQueryOptimizationOpportunity::MergeCorrelatedCountWith { .. },
 					)
 				});
+			if let Some(PlannedQueryOptimizationStrategy::MergeCorrelatedCountWith {
+				query: enclosing_query,
+			}) = query.proven_optimization {
+				if query.backend_capabilities.is_some_and(|capabilities| capabilities.merge_correlated_count) {
+					query.execution = PlannedQueryExecution::MergeWith {
+						query: enclosing_query,
+					};
+					continue;
+				}
+			}
+
 			let reason = if query.proven_optimization.is_some() {
-				PlannedQueryIndependentReason::NoSupportedStrategy
+				PlannedQueryIndependentReason::BackendStrategyUnavailable
 			}
 			else if has_correlated_count_opportunity {
 				PlannedQueryIndependentReason::SemanticEquivalenceNotProven
@@ -349,6 +368,7 @@ impl ProgramQueryPlan {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AnalyzedQueryMetadata {
+	pub backend_capabilities: PlannedQueryBackendCapabilities,
 	pub captured_parameters: Vec<QueryParameter>,
 	pub database_name: String,
 	pub expressions_are_infallible: bool,
@@ -375,6 +395,7 @@ impl QueryPlanBuilder {
 	) -> PlannedQueryId {
 		let id = PlannedQueryId(self.queries.len());
 		self.queries.push(PlannedQuery {
+			backend_capabilities: None,
 			body_may_exit_early: false,
 			body_may_have_side_effects: false,
 			captured_parameters: Vec::new(),
@@ -804,6 +825,7 @@ mod tests {
 		plan.populate_analyzed_metadata(|kind, position, _| {
 			if position == outer_loop.position {
 				return Some(AnalyzedQueryMetadata {
+					backend_capabilities: PlannedQueryBackendCapabilities::default(),
 					captured_parameters: Vec::new(),
 					database_name: String::from("Primary"),
 					expressions_are_infallible: true,
@@ -821,6 +843,7 @@ mod tests {
 
 			if position == inner_loop.position {
 				return Some(AnalyzedQueryMetadata {
+					backend_capabilities: PlannedQueryBackendCapabilities::default(),
 					captured_parameters: vec![QueryParameter {
 						data_type: DataType::Int,
 						field_path: vec![String::from("Id")],
@@ -932,6 +955,7 @@ mod tests {
 
 		assert_eq!(plan.queries().len(), 4);
 		assert_eq!(plan.query(outer_query.id), Some(&PlannedQuery {
+			backend_capabilities: None,
 			body_may_exit_early: false,
 			body_may_have_side_effects: false,
 			captured_parameters: Vec::new(),
@@ -960,5 +984,96 @@ mod tests {
 			query.execution.independent_reason()
 				== Some(PlannedQueryIndependentReason::AnalysisIncomplete)
 		}));
+	}
+
+	#[test]
+	fn selects_correlated_count_merge_only_when_backend_supports_it() {
+		let program = parse_program(
+			concat!(
+				"fn Main(args: [text]) int {\n",
+				"  for rec customer in Customers {\n",
+				"    var orderCount: int = count Orders where CustomerId == customer.Id;\n",
+				"  }\n",
+				"  return 0;\n",
+				"}",
+			),
+		);
+		let Statement::ForRecord(outer_loop) = &program.functions[0].body.statements[0] else {
+			panic!("Expected outer record loop.");
+		};
+		let Statement::VariableDeclaration(VariableDeclaration {
+			initial_value: Some(Expr::Count(count)),
+			..
+		}) = &outer_loop.body.statements[0] else {
+			panic!("Expected nested count query.");
+		};
+		let build_plan = |merge_correlated_count| {
+			let mut plan = plan_program_queries(&program);
+			plan.populate_analyzed_metadata(|kind, position, _| {
+				let backend_capabilities = PlannedQueryBackendCapabilities {
+					merge_correlated_count,
+				};
+
+				if position == outer_loop.position {
+					return Some(AnalyzedQueryMetadata {
+						backend_capabilities,
+						captured_parameters: Vec::new(),
+						database_name: String::from("ExampleDb"),
+						expressions_are_infallible: true,
+						is_read_only: true,
+						record_slot: Some(1),
+						result_semantics: PlannedQueryResultSemantics {
+							cardinality: PlannedQueryResultCardinality::Many,
+							error_timing: PlannedQueryErrorTiming::AtQueryStart,
+							has_grouping: false,
+							has_limit: false,
+							has_ordering: false,
+						},
+					});
+				}
+
+				if position == count.position {
+					return Some(AnalyzedQueryMetadata {
+						backend_capabilities,
+						captured_parameters: vec![QueryParameter {
+							data_type: DataType::Int,
+							field_path: vec![String::from("Id")],
+							slot: 1,
+						}],
+						database_name: String::from("ExampleDb"),
+						expressions_are_infallible: true,
+						is_read_only: true,
+						record_slot: None,
+						result_semantics: PlannedQueryResultSemantics {
+							cardinality: PlannedQueryResultCardinality::Scalar,
+							error_timing: PlannedQueryErrorTiming::AtQueryStart,
+							has_grouping: false,
+							has_limit: false,
+							has_ordering: false,
+						},
+					});
+				}
+
+				panic!("Unexpected {kind:?} query at position {position}.");
+			});
+			plan
+		};
+		let unsupported_plan = build_plan(false);
+		let supported_plan = build_plan(true);
+		let unsupported_count = query_at_position(&unsupported_plan, count.position);
+		let supported_outer = query_at_position(&supported_plan, outer_loop.position);
+		let supported_count = query_at_position(&supported_plan, count.position);
+
+		assert!(unsupported_count.proven_optimization.is_some());
+		assert_eq!(
+			unsupported_count.execution.independent_reason(),
+			Some(PlannedQueryIndependentReason::BackendStrategyUnavailable),
+		);
+		assert_eq!(
+			supported_count.execution,
+			PlannedQueryExecution::MergeWith {
+				query: supported_outer.id,
+			},
+		);
 	}
 }

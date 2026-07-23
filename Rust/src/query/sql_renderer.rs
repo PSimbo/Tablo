@@ -11,6 +11,10 @@ pub(super) trait SqlRenderer {
 		parameters: &mut Vec<SqlParameter>,
 	) -> Result<String, QueryLoweringError>;
 
+	fn planning_capabilities(&self) -> PlannedQueryBackendCapabilities {
+		PlannedQueryBackendCapabilities::default()
+	}
+
 	fn quote_identifier(&self, identifier: &str) -> String;
 
 	fn result_column(&self, table_name: &str, column_name: &str, _data_type: &DataType) -> String {

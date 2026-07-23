@@ -425,6 +425,16 @@ pub(super) fn effective_find_order_direction(kind: FindKind, direction: OrderByD
 	}
 }
 
+pub(crate) fn query_planning_capabilities(backend: DatabaseBackend) -> PlannedQueryBackendCapabilities {
+	use sql_renderer::SqlRenderer;
+
+	match backend {
+		DatabaseBackend::MySql => mysql::MySqlRenderer.planning_capabilities(),
+		DatabaseBackend::PostgreSql => postgresql::PostgreSqlRenderer.planning_capabilities(),
+		DatabaseBackend::Sqlite => sqlite::SqliteRenderer.planning_capabilities(),
+	}
+}
+
 fn collect_query_parameters(expression: &QueryExpr, parameters: &mut Vec<QueryParameter>) {
 	match expression {
 		QueryExpr::ArrayLiteral(elements) => {

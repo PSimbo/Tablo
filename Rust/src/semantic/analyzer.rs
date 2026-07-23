@@ -395,6 +395,7 @@ impl SemanticAnalyzer {
 			match kind {
 				PlannedQueryKind::Count => self.semantic_program.lowered_count_queries.get(&position)
 					.map(|query| AnalyzedQueryMetadata {
+						backend_capabilities: query_planning_capabilities(query.backend),
 						captured_parameters: query.captured_parameters(),
 						database_name: query.database_name.clone(),
 						expressions_are_infallible: query.expressions_are_infallible(),
@@ -410,6 +411,7 @@ impl SemanticAnalyzer {
 					}),
 				PlannedQueryKind::Find => self.semantic_program.lowered_find_queries.get(&position)
 					.map(|query| AnalyzedQueryMetadata {
+						backend_capabilities: query_planning_capabilities(query.backend),
 						captured_parameters: query.captured_parameters(),
 						database_name: query.database_name.clone(),
 						expressions_are_infallible: query.expressions_are_infallible(),
@@ -425,6 +427,7 @@ impl SemanticAnalyzer {
 					}),
 				PlannedQueryKind::ForRecord => self.semantic_program.lowered_for_record_queries.get(&position)
 					.map(|query| AnalyzedQueryMetadata {
+						backend_capabilities: query_planning_capabilities(query.backend),
 						captured_parameters: query.captured_parameters(),
 						database_name: query.database_name.clone(),
 						expressions_are_infallible: query.expressions_are_infallible(),
@@ -5404,6 +5407,10 @@ mod tests {
 		);
 		assert!(semantic_program.query_for_shape(safe_loop.position).is_some());
 		assert!(semantic_program.query_projected_value_binding(count_position(safe_loop)).is_some());
+		assert_eq!(
+			safe_count.execution.independent_reason(),
+			Some(PlannedQueryIndependentReason::BackendStrategyUnavailable),
+		);
 		assert!(early_exit_parent.body_may_exit_early);
 		assert!(!early_exit_count.optimization_opportunities.is_empty());
 		assert_eq!(early_exit_count.proven_optimization, None);
@@ -5782,7 +5789,7 @@ mod tests {
 		);
 		assert_eq!(
 			count_query.execution.independent_reason(),
-			Some(PlannedQueryIndependentReason::NoSupportedStrategy),
+			Some(PlannedQueryIndependentReason::BackendStrategyUnavailable),
 		);
 		assert_eq!(
 			inner_query.execution.independent_reason(),
