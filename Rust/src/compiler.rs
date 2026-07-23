@@ -392,6 +392,19 @@ impl Compiler {
 					self.emit(emission, Instruction::CallBuiltIn(built_in, arguments.len() as u32), expression_position);
 				}
 				else {
+					if let Some(argument_order) = semantic_program.call_argument_order(expression.position()) {
+						let requires_reordering = argument_order.iter().enumerate()
+							.any(|(parameter_index, argument_index)| parameter_index as u32 != *argument_index);
+
+						if requires_reordering {
+							self.emit(
+								emission,
+								Instruction::ReorderCallArguments(argument_order.to_vec()),
+								expression_position,
+							);
+						}
+					}
+
 					let function_index = semantic_program.call_target(expression.position())
 						.unwrap_or_else(|| panic!("Missing function target for call expression."));
 					self.emit(emission, Instruction::Call(function_index, arguments.len() as u32), expression_position);

@@ -73,7 +73,8 @@ const OPCODE_PUSH_TIME: u8 = OPCODE_PUSH_TEXT + 1;
 const OPCODE_PUSH_TIMESTAMP: u8 = OPCODE_PUSH_TIME + 1;
 const OPCODE_PUSH_TIMESTAMP_TZ: u8 = OPCODE_PUSH_TIMESTAMP + 1;
 const OPCODE_PUSH_TIME_TZ: u8 = OPCODE_PUSH_TIMESTAMP_TZ + 1;
-const OPCODE_RETURN: u8 = OPCODE_PUSH_TIME_TZ + 1;
+const OPCODE_REORDER_CALL_ARGUMENTS: u8 = OPCODE_PUSH_TIME_TZ + 1;
+const OPCODE_RETURN: u8 = OPCODE_REORDER_CALL_ARGUMENTS + 1;
 const OPCODE_RETURN_VOID: u8 = OPCODE_RETURN + 1;
 const OPCODE_STORE_FIELD_PATH: u8 = OPCODE_RETURN_VOID + 1;
 const OPCODE_STORE_INDEX: u8 = OPCODE_STORE_FIELD_PATH + 1;
@@ -540,6 +541,16 @@ impl<'a> ObjectFileReader<'a> {
 				offset: self.offset,
 				message,
 			})?)),
+			OPCODE_REORDER_CALL_ARGUMENTS => {
+				let argument_count = self.read_u32()? as usize;
+				let mut argument_order = Vec::with_capacity(argument_count);
+
+				for _ in 0..argument_count {
+					argument_order.push(self.read_u32()?);
+				}
+
+				Ok(Instruction::ReorderCallArguments(argument_order))
+			}
 			OPCODE_RETURN => Ok(Instruction::Return),
 			OPCODE_RETURN_VOID => Ok(Instruction::ReturnVoid),
 			OPCODE_STORE_FIELD_PATH => Ok(Instruction::StoreFieldPath(self.read_string_vec()?)),
@@ -1045,6 +1056,14 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.push(OPCODE_PUSH_TEXT);
 			bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
 			bytes.extend_from_slice(value.as_bytes());
+		}
+		Instruction::ReorderCallArguments(argument_order) => {
+			bytes.push(OPCODE_REORDER_CALL_ARGUMENTS);
+			bytes.extend_from_slice(&(argument_order.len() as u32).to_le_bytes());
+
+			for argument_index in argument_order {
+				bytes.extend_from_slice(&argument_index.to_le_bytes());
+			}
 		}
 		Instruction::Return => bytes.push(OPCODE_RETURN),
 		Instruction::ReturnVoid => bytes.push(OPCODE_RETURN_VOID),
@@ -1632,6 +1651,21 @@ mod tests {
 			Instruction::PushInteger(0),
 			Instruction::PushInteger(10),
 			Instruction::MakeRange,
+		]);
+
+		let bytes = write_program(&program);
+		let decoded = read_program(&bytes).unwrap();
+
+		assert_eq!(decoded, program);
+	}
+
+	#[test]
+	fn round_trips_program_bytes_with_reordered_call_arguments() {
+		let program = Program::new(vec![
+			Instruction::PushInteger(1),
+			Instruction::PushInteger(2),
+			Instruction::ReorderCallArguments(vec![1, 0]),
+			Instruction::Call(0, 2),
 		]);
 
 		let bytes = write_program(&program);

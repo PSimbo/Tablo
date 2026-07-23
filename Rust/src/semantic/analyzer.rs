@@ -170,6 +170,7 @@ pub struct ResolvedTableReference {
 pub struct SemanticProgram {
 	active_databases: Vec<String>,
 	built_in_call_targets: BTreeMap<usize, BuiltInFunction>,
+	call_argument_order: BTreeMap<usize, Vec<u32>>,
 	call_argument_reference_slots: BTreeMap<usize, Vec<Option<u32>>>,
 	call_return_types: BTreeMap<usize, DataType>,
 	call_targets: BTreeMap<usize, u32>,
@@ -210,6 +211,10 @@ impl SemanticProgram {
 
 	pub fn built_in_call_target(&self, position: usize) -> Option<BuiltInFunction> {
 		self.built_in_call_targets.get(&position).copied()
+	}
+
+	pub fn call_argument_order(&self, position: usize) -> Option<&[u32]> {
+		self.call_argument_order.get(&position).map(Vec::as_slice)
 	}
 
 	pub fn call_argument_reference_slots(&self, position: usize) -> Option<&[Option<u32>]> {
@@ -705,6 +710,43 @@ impl SemanticAnalyzer {
 		else {
 			result
 		})
+	}
+
+	fn bind_call_arguments(
+		&self,
+		signature: &FunctionSignature,
+		arguments: &[CallArgument],
+	) -> Option<Vec<usize>> {
+		if signature.parameters.len() != arguments.len() {
+			return None;
+		}
+
+		let mut argument_order = vec![None; signature.parameters.len()];
+		let mut next_positional_parameter = 0;
+		let mut saw_named_argument = false;
+
+		for (argument_index, argument) in arguments.iter().enumerate() {
+			let parameter_index = if let Some(name) = &argument.name {
+				saw_named_argument = true;
+				signature.parameters.iter().position(|parameter| parameter.name == name.name)?
+			}
+			else {
+				if saw_named_argument {
+					return None;
+				}
+
+				let parameter_index = next_positional_parameter;
+				next_positional_parameter += 1;
+				parameter_index
+			};
+
+			if argument_order.get(parameter_index)?.is_some() {
+				return None;
+			}
+			argument_order[parameter_index] = Some(argument_index);
+		}
+
+		argument_order.into_iter().collect()
 	}
 
 	fn block_guarantees_return(&self, block: &BlockStatement) -> bool {
@@ -1424,13 +1466,6 @@ impl SemanticAnalyzer {
 			}
 			Expr::Boolean(_) => Ok(DataType::Bool),
 			Expr::Call(CallExpr { arguments, callee, .. }) => {
-				if let Some(argument) = arguments.iter().find(|argument| argument.name.is_some()) {
-					return Err(self.compile_error(
-						argument.position,
-						String::from("Named arguments are not yet supported."),
-					));
-				}
-
 				if let Some(signatures) = self.lookup_functions(&callee.name).map(<[FunctionSignature]>::to_vec) {
 					if signatures.len() == 1 && arguments.len() != signatures[0].parameters.len() {
 						return Err(self.compile_error(
@@ -1460,18 +1495,19 @@ impl SemanticAnalyzer {
 					for argument in arguments {
 						argument_types.push(self.infer_expression_type(&argument.value)?);
 					}
-					let signature = self.select_function_overload(
+					let (signature, argument_order) = self.select_function_overload(
 						&callee.name,
 						&signatures,
 						arguments,
 						&argument_types,
 						expression.position(),
 					)?;
-					let mut reference_slots = Vec::with_capacity(arguments.len());
+					let mut reference_slots = vec![None; arguments.len()];
 
-					for ((argument, argument_type), parameter) in arguments.iter()
-						.zip(argument_types.iter())
-						.zip(signature.parameters.iter()) {
+					for (parameter_index, argument_index) in argument_order.iter().enumerate() {
+						let argument = &arguments[*argument_index];
+						let argument_type = &argument_types[*argument_index];
+						let parameter = &signature.parameters[parameter_index];
 						if parameter.is_by_ref {
 							if !argument.is_by_ref {
 								return Err(self.compile_error(
@@ -1492,6 +1528,13 @@ impl SemanticAnalyzer {
 								format!("Variable `{}` is not declared in this scope.", identifier.name),
 							))?;
 
+							if local.is_const {
+								return Err(self.compile_error(
+									argument.position,
+									format!("Constant `{}` cannot be passed by reference.", identifier.name),
+								));
+							}
+
 							if argument_type != &parameter.data_type {
 								return Err(self.compile_error(
 									argument.position,
@@ -1504,7 +1547,7 @@ impl SemanticAnalyzer {
 								));
 							}
 
-							reference_slots.push(Some(local.slot));
+							reference_slots[*argument_index] = Some(local.slot);
 						}
 						else {
 							if argument.is_by_ref {
@@ -1515,7 +1558,6 @@ impl SemanticAnalyzer {
 							}
 
 							self.ensure_assignable(&parameter.data_type, argument_type, argument.value.position())?;
-							reference_slots.push(None);
 						}
 
 						if matches!(parameter.data_type.without_nullability(), DataType::RecordPointer(_)) {
@@ -1524,11 +1566,22 @@ impl SemanticAnalyzer {
 					}
 
 					self.semantic_program.call_targets.insert(expression.position(), signature.function_index);
+					self.semantic_program.call_argument_order.insert(
+						expression.position(),
+						argument_order.into_iter().map(|index| index as u32).collect(),
+					);
 					self.semantic_program.call_argument_reference_slots.insert(expression.position(), reference_slots);
 					self.semantic_program.call_return_types.insert(expression.position(), signature.return_type.clone());
 					Ok(signature.return_type)
 				}
 				else if let Some(built_in) = BuiltInFunction::from_name(&callee.name) {
+					if let Some(argument) = arguments.iter().find(|argument| argument.name.is_some()) {
+						return Err(self.compile_error(
+							argument.position,
+							String::from("Named arguments are not yet supported for built-in functions."),
+						));
+					}
+
 					self.infer_built_in_call_type(built_in, arguments, expression.position())
 				}
 				else {
@@ -2012,13 +2065,6 @@ impl SemanticAnalyzer {
 			}
 			Expr::Boolean(_) => Ok(DataType::Bool),
 			Expr::Call(CallExpr { arguments, callee, .. }) => {
-				if let Some(argument) = arguments.iter().find(|argument| argument.name.is_some()) {
-					return Err(self.compile_error(
-						argument.position,
-						String::from("Named arguments are not yet supported in database queries."),
-					));
-				}
-
 				if let Some(signatures) = self.lookup_functions(&callee.name).map(<[FunctionSignature]>::to_vec) {
 					if signatures.len() == 1 && arguments.len() != signatures[0].parameters.len() {
 						return Err(self.compile_error(
@@ -2055,7 +2101,7 @@ impl SemanticAnalyzer {
 
 						argument_types.push(self.infer_query_expression_type(&argument.value, table)?);
 					}
-					let signature = self.select_function_overload(
+					let (signature, argument_order) = self.select_function_overload(
 						&callee.name,
 						&signatures,
 						arguments,
@@ -2063,15 +2109,23 @@ impl SemanticAnalyzer {
 						expression.position(),
 					)?;
 
-					for ((argument, argument_type), parameter) in arguments.iter()
-						.zip(argument_types.iter())
-						.zip(signature.parameters.iter()) {
+					for (parameter_index, argument_index) in argument_order.iter().enumerate() {
+						let argument = &arguments[*argument_index];
+						let argument_type = &argument_types[*argument_index];
+						let parameter = &signature.parameters[parameter_index];
 						self.ensure_assignable(&parameter.data_type, argument_type, argument.value.position())?;
 					}
 
 					Ok(signature.return_type)
 				}
 				else if let Some(built_in) = BuiltInFunction::from_name(&callee.name) {
+					if let Some(argument) = arguments.iter().find(|argument| argument.name.is_some()) {
+						return Err(self.compile_error(
+							argument.position,
+							String::from("Named arguments are not yet supported for built-in functions in database queries."),
+						));
+					}
+
 					let query_arguments = arguments.iter().map(|argument| CallArgument {
 						is_by_ref: argument.is_by_ref,
 						name: argument.name.clone(),
@@ -3593,18 +3647,23 @@ impl SemanticAnalyzer {
 		arguments: &[CallArgument],
 		argument_types: &[DataType],
 		position: usize,
-	) -> Result<FunctionSignature, CompileError> {
+	) -> Result<(FunctionSignature, Vec<usize>), CompileError> {
 		if signatures.len() == 1 {
-			return Ok(signatures[0].clone());
+			let argument_order = self.bind_call_arguments(&signatures[0], arguments).ok_or(self.compile_error(
+				position,
+				format!("Arguments do not match the parameters of function `{name}`."),
+			))?;
+			return Ok((signatures[0].clone(), argument_order));
 		}
 
 		let candidates = signatures.iter()
-			.filter(|signature| signature.parameters.len() == arguments.len())
-			.filter(|signature| {
-				signature.parameters.iter()
-					.zip(arguments.iter())
-					.zip(argument_types.iter())
-					.all(|((parameter, argument), argument_type)| {
+			.filter_map(|signature| {
+				let argument_order = self.bind_call_arguments(signature, arguments)?;
+				let accepts_types = signature.parameters.iter()
+					.zip(argument_order.iter())
+					.all(|(parameter, argument_index)| {
+						let argument = &arguments[*argument_index];
+						let argument_type = &argument_types[*argument_index];
 						if parameter.is_by_ref != argument.is_by_ref {
 							return false;
 						}
@@ -3615,13 +3674,19 @@ impl SemanticAnalyzer {
 						else {
 							self.is_assignable(&parameter.data_type, argument_type)
 						}
-					})
+					});
+
+				if accepts_types {
+					Some((signature.clone(), argument_order))
+				}
+				else {
+					None
+				}
 			})
-			.cloned()
 			.collect::<Vec<_>>();
 
 		match candidates.as_slice() {
-			[signature] => Ok(signature.clone()),
+			[(signature, argument_order)] => Ok((signature.clone(), argument_order.clone())),
 			[] => Err(self.compile_error(
 				position,
 				format!("No overload of function `{name}` accepts the supplied arguments."),

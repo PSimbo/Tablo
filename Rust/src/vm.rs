@@ -854,6 +854,22 @@ impl VirtualMachine {
 				self.stack.push(Value::TimestampTz(*value));
 				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::ReorderCallArguments(argument_order) => {
+				let arguments = self.pop_call_arguments(argument_order.len(), instruction_index)?;
+				let mut arguments = arguments.into_iter().map(Some).collect::<Vec<_>>();
+
+				for argument_index in argument_order {
+					let argument = arguments.get_mut(*argument_index as usize)
+						.and_then(Option::take)
+						.ok_or_else(|| vm_error(
+							instruction_index,
+							String::from("Invalid call argument order in bytecode."),
+						))?;
+					self.stack.push(argument);
+				}
+
+				Ok(ExecutionOutcome::Continue(None))
+			}
 			Instruction::Return => Ok(ExecutionOutcome::Return(Some(self.pop_value(instruction_index)?))),
 			Instruction::ReturnVoid => Ok(ExecutionOutcome::Return(None)),
 			Instruction::Subtract => {

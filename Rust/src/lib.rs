@@ -3014,6 +3014,19 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_constant_passed_by_reference() {
+		let error = run(
+			"fn Main(args: [text]) int { const value: int = 1; bump(&value); return value; }\n\
+			fn bump(value: &int) void { value += 1; }"
+		).unwrap_err();
+
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+		assert_eq!(error.message, "Constant `value` cannot be passed by reference.");
+	}
+
+	#[test]
 	fn rejects_contains_with_non_text_or_text_array_argument_source_text() {
 		let error = evaluate_snippet("contains(1, 'x')").unwrap_err();
 
@@ -3078,6 +3091,19 @@ mod tests {
 			error.message,
 			"Function overload `choose` duplicates an existing callable signature in this scope.",
 		);
+	}
+
+	#[test]
+	fn rejects_duplicate_named_and_positional_argument_binding() {
+		let error = run(
+			"fn Main(args: [text]) int { return subtract(9, left: 2); }\n\
+			fn subtract(left: int, right: int) int { return left - right; }"
+		).unwrap_err();
+
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+		assert_eq!(error.message, "Arguments do not match the parameters of function `subtract`.");
 	}
 
 	#[test]
@@ -3280,6 +3306,16 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_named_argument_for_built_in_function() {
+		let error = evaluate_snippet("len(value: 'abc')").unwrap_err();
+
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+		assert_eq!(error.message, "Named arguments are not yet supported for built-in functions.");
+	}
+
+	#[test]
 	fn rejects_named_use_of_non_public_function() {
 		let root_path = write_test_source_file(
 			"rejects_named_use_of_non_public_function_root",
@@ -3476,6 +3512,19 @@ mod tests {
 			message: String::from("Database `missingdb` is not present in the supplied schema catalog."),
 			position: 5,
 		}));
+	}
+
+	#[test]
+	fn rejects_unknown_named_argument() {
+		let error = run(
+			"fn Main(args: [text]) int { return subtract(foo: 9, right: 2); }\n\
+			fn subtract(left: int, right: int) int { return left - right; }"
+		).unwrap_err();
+
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+		assert_eq!(error.message, "Arguments do not match the parameters of function `subtract`.");
 	}
 
 	#[test]
@@ -4701,6 +4750,89 @@ mod tests {
 		let result = run("fn Main(args: [text]) int { return 7; }").unwrap();
 
 		assert_eq!(result, Some(Value::Integer(7)));
+	}
+
+	#[test]
+	fn runs_mixed_positional_and_named_arguments() {
+		let result = run(
+			"fn Main(args: [text]) int { return subtract(9, right: 2); }\n\
+			fn subtract(left: int, right: int) int { return left - right; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(7)));
+	}
+
+	#[test]
+	fn runs_named_arguments_in_parameter_order() {
+		let result = run(
+			"fn Main(args: [text]) int { return subtract(right: 2, left: 9); }\n\
+			fn subtract(left: int, right: int) int { return left - right; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(7)));
+	}
+
+	#[test]
+	fn runs_named_arguments_with_source_order_evaluation() {
+		let result = run(
+			"fn Main(args: [text]) int {\n\
+			    var value: int = 0;\n\
+			    return combine(later: next(&value), earlier: next(&value));\n\
+			}\n\
+			fn next(value: &int) int { value += 1; return value; }\n\
+			fn combine(earlier: int, later: int) int { return earlier * 10 + later; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(21)));
+	}
+
+	#[test]
+	fn runs_named_by_reference_arguments() {
+		let result = run(
+			"fn Main(args: [text]) int {\n\
+			    var left: int = 1;\n\
+			    var right: int = 2;\n\
+			    swap(right: &right, left: &left);\n\
+			    return left * 10 + right;\n\
+			}\n\
+			fn swap(left: &int, right: &int) void {\n\
+			    var old_left: int = left;\n\
+			    left = right;\n\
+			    right = old_left;\n\
+			}"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(21)));
+	}
+
+	#[test]
+	fn runs_named_imported_function_overloads() {
+		let root_path = write_test_source_file(
+			"runs_named_imported_function_overloads_root",
+			"main.tablo",
+			"use Convert from './Helpers';\nfn Main(args: [text]) int { return Convert(value: 2) + Convert(value: 'x') + Convert(right: 4, left: 3); }",
+		);
+		let helper_path = root_path.parent().unwrap().join("Helpers.tablo");
+		fs::write(
+			&helper_path,
+			"pub fn Convert(value: int) int { return value; }\n\
+			pub fn Convert(value: text) int { return 10; }\n\
+			pub fn Convert(left: int, right: int) int { return left + right; }",
+		).unwrap();
+
+		let program = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap();
+		let result = run_program(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(19)));
+
+		let _ = fs::remove_file(helper_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
 	}
 
 	#[test]
@@ -5980,6 +6112,46 @@ mod tests {
 		let result = run(standalone_body("var x: int = 0;\nwhile x < 3 { x += 1; }\nreturn x;")).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
+	fn runs_wildcard_imported_function_overloads() {
+		let root_path = write_test_source_file(
+			"runs_wildcard_imported_function_overloads_root",
+			"main.tablo",
+			"use './Helpers';\nfn Main(args: [text]) int { return Convert(value: 2) + Convert(value: 'x'); }",
+		);
+		let helper_path = root_path.parent().unwrap().join("Helpers.tablo");
+		fs::write(
+			&helper_path,
+			"pub fn Convert(value: int) int { return value; }\n\
+			pub fn Convert(value: text) int { return 10; }",
+		).unwrap();
+
+		let program = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap();
+		let result = run_program(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(12)));
+
+		let _ = fs::remove_file(helper_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
+	}
+
+	#[test]
+	fn selects_function_overload_by_named_argument() {
+		let result = run(
+			"fn Main(args: [text]) int { return choose(right: 1); }\n\
+			fn choose(left: int) int { return 10; }\n\
+			fn choose(right: int) int { return 20; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(20)));
 	}
 
 	#[test]

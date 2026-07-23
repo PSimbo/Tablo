@@ -97,6 +97,7 @@ pub enum Instruction {
 	PushTimeTz(crate::value::TimeTz),
 	PushTimestamp(crate::value::Timestamp),
 	PushTimestampTz(crate::value::TimestampTz),
+	ReorderCallArguments(Vec<u32>),
 	Return,
 	ReturnVoid,
 	StoreFieldPath(Vec<String>),
