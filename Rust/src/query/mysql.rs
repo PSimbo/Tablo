@@ -20,6 +20,12 @@ impl SqlRenderer for MySqlRenderer {
 		lower_expression(expression, parameters)
 	}
 
+	fn planning_capabilities(&self) -> PlannedQueryBackendCapabilities {
+		PlannedQueryBackendCapabilities {
+			merge_correlated_count: true,
+		}
+	}
+
 	fn quote_identifier(&self, identifier: &str) -> String {
 		quote_mysql_identifier(identifier)
 	}

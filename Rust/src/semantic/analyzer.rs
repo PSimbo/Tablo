@@ -174,6 +174,7 @@ pub struct SemanticProgram {
 	compiled_count_queries: BTreeMap<usize, LoweredBackendQuery>,
 	compiled_find_queries: BTreeMap<usize, LoweredBackendQuery>,
 	compiled_for_record_queries: BTreeMap<usize, LoweredBackendQuery>,
+	compiled_query_for_shapes: BTreeMap<usize, LoweredQueryForShape>,
 	declaration_slots: BTreeMap<usize, u32>,
 	declaration_types: BTreeMap<usize, DataType>,
 	entry_point_function_index: Option<u32>,
@@ -231,6 +232,10 @@ impl SemanticProgram {
 
 	pub fn compiled_for_record_query(&self, position: usize) -> Option<&LoweredBackendQuery> {
 		self.compiled_for_record_queries.get(&position)
+	}
+
+	pub fn compiled_query_for_shape(&self, position: usize) -> Option<&LoweredQueryForShape> {
+		self.compiled_query_for_shapes.get(&position)
 	}
 
 	pub fn declaration_slot(&self, position: usize) -> Option<u32> {
@@ -448,6 +453,7 @@ impl SemanticAnalyzer {
 			query_plan.disable_optimizations();
 		}
 		self.record_proven_query_shapes(&query_plan)?;
+		self.compile_proven_query_shapes()?;
 		self.semantic_program.query_plan = query_plan;
 
 		Ok(self.semantic_program.clone())
@@ -820,6 +826,22 @@ impl SemanticAnalyzer {
 				.unwrap_or(message),
 			position,
 		}
+	}
+
+	fn compile_proven_query_shapes(&mut self) -> Result<(), CompileError> {
+		let shapes = self.semantic_program.query_for_shapes.iter()
+			.map(|(position, shape)| (*position, shape.clone()))
+			.collect::<Vec<_>>();
+
+		for (position, shape) in shapes {
+			let compiled_shape = lower_for_shape(&shape).map_err(|error| self.compile_error(
+				position,
+				query_lowering_error_message(error),
+			))?;
+			self.semantic_program.compiled_query_for_shapes.insert(position, compiled_shape);
+		}
+
+		Ok(())
 	}
 
 	fn current_scope_contains(&self, name: &str) -> bool {
@@ -5406,10 +5428,13 @@ mod tests {
 			}),
 		);
 		assert!(semantic_program.query_for_shape(safe_loop.position).is_some());
+		assert!(semantic_program.compiled_query_for_shape(safe_loop.position).is_some());
 		assert!(semantic_program.query_projected_value_binding(count_position(safe_loop)).is_some());
 		assert_eq!(
-			safe_count.execution.independent_reason(),
-			Some(PlannedQueryIndependentReason::BackendStrategyUnavailable),
+			safe_count.execution,
+			PlannedQueryExecution::MergeWith {
+				query: safe_parent.id,
+			},
 		);
 		assert!(early_exit_parent.body_may_exit_early);
 		assert!(!early_exit_count.optimization_opportunities.is_empty());
@@ -5788,8 +5813,10 @@ mod tests {
 			Some(PlannedQueryIndependentReason::NoSupportedStrategy),
 		);
 		assert_eq!(
-			count_query.execution.independent_reason(),
-			Some(PlannedQueryIndependentReason::BackendStrategyUnavailable),
+			count_query.execution,
+			PlannedQueryExecution::MergeWith {
+				query: outer_query.id,
+			},
 		);
 		assert_eq!(
 			inner_query.execution.independent_reason(),

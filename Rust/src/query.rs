@@ -136,6 +136,12 @@ pub enum SqlQueryResultShape {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LoweredQueryForShape {
+	pub query: SqlQuery,
+	pub scalar_projections: Vec<SqlScalarProjection>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryBinaryExpr {
 	pub left: Box<QueryExpr>,
 	pub operator: QueryBinaryOperator,
@@ -391,6 +397,13 @@ pub struct SqlQuery {
 	pub table_name: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SqlScalarProjection {
+	pub column_index: u32,
+	pub data_type: DataType,
+	pub value_id: QueryProjectedValueId,
+}
+
 pub fn lower_count_query(plan: &QueryCountPlan) -> Result<LoweredBackendQuery, QueryLoweringError> {
 	match plan.backend {
 		DatabaseBackend::MySql => sql_renderer::lower_count(&mysql::MySqlRenderer, plan).map(LoweredBackendQuery::Sql),
@@ -412,6 +425,14 @@ pub fn lower_for_query(plan: &QueryForPlan) -> Result<LoweredBackendQuery, Query
 		DatabaseBackend::MySql => sql_renderer::lower_for(&mysql::MySqlRenderer, plan).map(LoweredBackendQuery::Sql),
 		DatabaseBackend::PostgreSql => sql_renderer::lower_for(&postgresql::PostgreSqlRenderer, plan).map(LoweredBackendQuery::Sql),
 		DatabaseBackend::Sqlite => sql_renderer::lower_for(&sqlite::SqliteRenderer, plan).map(LoweredBackendQuery::Sql),
+	}
+}
+
+pub fn lower_for_shape(shape: &QueryForShape) -> Result<LoweredQueryForShape, QueryLoweringError> {
+	match shape.query.backend {
+		DatabaseBackend::MySql => sql_renderer::lower_for_shape(&mysql::MySqlRenderer, shape),
+		DatabaseBackend::PostgreSql => sql_renderer::lower_for_shape(&postgresql::PostgreSqlRenderer, shape),
+		DatabaseBackend::Sqlite => sql_renderer::lower_for_shape(&sqlite::SqliteRenderer, shape),
 	}
 }
 
@@ -519,6 +540,94 @@ mod tests {
 
 	fn all_columns(columns: Vec<QueryResultColumn>) -> QueryRecordLayout {
 		QueryRecordLayout::all_known(columns)
+	}
+
+	fn correlated_count_shape(backend: DatabaseBackend) -> QueryForShape {
+		let parameter = QueryParameter {
+			data_type: DataType::Int,
+			field_path: vec![String::from("Id")],
+			slot: 3,
+		};
+
+		QueryForShape {
+			query: QueryForPlan {
+				backend,
+				database_name: String::from("ExampleDb"),
+				filter: None,
+				group_by: vec![],
+				limit: None,
+				lock_mode: RecordLockMode::None,
+				order_by: vec![],
+				record_layout: all_columns(vec![QueryResultColumn {
+					column_name: String::from("Id"),
+					data_type: DataType::Int,
+					is_nullable: false,
+					is_primary_key: true,
+				}]),
+				schema_is_implicit: true,
+				schema_name: String::from("Main"),
+				table_name: String::from("Customers"),
+			},
+			scalar_projections: vec![QueryScalarProjection {
+				expression: QueryScalarProjectionExpression::CorrelatedCount(QueryCorrelatedCount {
+					correlations: vec![QueryCorrelation {
+						outer_field_path: vec![String::from("Id")],
+						parameter: parameter.clone(),
+					}],
+					query: QueryCountPlan {
+						backend,
+						database_name: String::from("ExampleDb"),
+						filter: Some(QueryExpr::Binary(QueryBinaryExpr {
+							left: Box::new(QueryExpr::Column(QueryColumnReference {
+								column_name: String::from("CustomerId"),
+								data_type: DataType::Int,
+								table_name: String::from("Orders"),
+							})),
+							operator: QueryBinaryOperator::Equal,
+							right: Box::new(QueryExpr::Parameter(parameter)),
+						})),
+						schema_is_implicit: true,
+						schema_name: String::from("Main"),
+						table_name: String::from("Orders"),
+					},
+				}),
+				value_id: QueryProjectedValueId(7),
+			}],
+		}
+	}
+
+	#[test]
+	fn lowers_correlated_count_shape_for_all_sql_dialects() {
+		let cases = [
+			(
+				DatabaseBackend::Sqlite,
+				SqlDialect::Sqlite,
+				"SELECT \"__tablo_outer\".\"Id\", (SELECT COUNT(*) FROM \"Orders\" AS \"__tablo_count_7\" WHERE (\"__tablo_count_7\".\"CustomerId\" = \"__tablo_outer\".\"Id\")) AS \"__tablo_projected_7\" FROM \"Customers\" AS \"__tablo_outer\"",
+			),
+			(
+				DatabaseBackend::PostgreSql,
+				SqlDialect::PostgreSql,
+				"SELECT CAST(\"__tablo_outer\".\"Id\" AS TEXT), (SELECT COUNT(*) FROM \"Orders\" AS \"__tablo_count_7\" WHERE (\"__tablo_count_7\".\"CustomerId\" = \"__tablo_outer\".\"Id\")) AS \"__tablo_projected_7\" FROM \"Customers\" AS \"__tablo_outer\"",
+			),
+			(
+				DatabaseBackend::MySql,
+				SqlDialect::MySql,
+				"SELECT `__tablo_outer`.`Id`, (SELECT COUNT(*) FROM `Orders` AS `__tablo_count_7` WHERE (`__tablo_count_7`.`CustomerId` = `__tablo_outer`.`Id`)) AS `__tablo_projected_7` FROM `Customers` AS `__tablo_outer`",
+			),
+		];
+
+		for (backend, dialect, statement) in cases {
+			let lowered = lower_for_shape(&correlated_count_shape(backend)).unwrap();
+
+			assert_eq!(lowered.query.dialect, dialect);
+			assert_eq!(lowered.query.statement, statement);
+			assert!(lowered.query.parameters.is_empty());
+			assert_eq!(lowered.scalar_projections, vec![SqlScalarProjection {
+				column_index: 1,
+				data_type: DataType::Int,
+				value_id: QueryProjectedValueId(7),
+			}]);
+		}
 	}
 
 	#[test]
