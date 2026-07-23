@@ -61,6 +61,10 @@ impl<T> ScopeStack<T> {
 	pub fn lookup(&self, name: &str) -> Option<&T> {
 		self.bindings.get(name).and_then(|bindings| bindings.last())
 	}
+
+	pub fn lookup_mut(&mut self, name: &str) -> Option<&mut T> {
+		self.bindings.get_mut(name).and_then(|bindings| bindings.last_mut())
+	}
 }
 
 #[cfg(test)]
@@ -81,6 +85,21 @@ mod tests {
 
 		scopes.exit_scope();
 		assert_eq!(scopes.lookup("x"), Some(&1));
+	}
+
+	#[test]
+	fn mutates_the_binding_in_the_nearest_scope() {
+		let mut scopes = ScopeStack::default();
+
+		scopes.enter_scope();
+		scopes.declare(String::from("x"), vec![1]);
+		scopes.enter_scope();
+		scopes.declare(String::from("x"), vec![2]);
+		scopes.lookup_mut("x").unwrap().push(3);
+
+		assert_eq!(scopes.lookup("x"), Some(&vec![2, 3]));
+		scopes.exit_scope();
+		assert_eq!(scopes.lookup("x"), Some(&vec![1]));
 	}
 
 	#[test]

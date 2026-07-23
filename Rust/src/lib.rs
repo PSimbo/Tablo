@@ -2875,6 +2875,20 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_ambiguous_positional_overload_call() {
+		let error = run(
+			"fn Main(args: [text]) int { return choose(1); }\n\
+			fn choose(left: int) int { return left; }\n\
+			fn choose(right: int) int { return right; }"
+		).unwrap_err();
+
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+		assert_eq!(error.message, "Call to function `choose` is ambiguous between multiple overloads.");
+	}
+
+	#[test]
 	fn rejects_ambiguous_unqualified_table_in_count_expression() {
 		let error = compile_snippet_with_schema_fixture(
 			"with sales, archive;\ncount customers where true",
@@ -2986,6 +3000,20 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_call_when_no_function_overload_matches() {
+		let error = run(
+			"fn Main(args: [text]) int { return choose(true); }\n\
+			fn choose(value: int) int { return value; }\n\
+			fn choose(value: text) int { return 0; }"
+		).unwrap_err();
+
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+		assert_eq!(error.message, "No overload of function `choose` accepts the supplied arguments.");
+	}
+
+	#[test]
 	fn rejects_contains_with_non_text_or_text_array_argument_source_text() {
 		let error = evaluate_snippet("contains(1, 'x')").unwrap_err();
 
@@ -3033,6 +3061,23 @@ mod tests {
 			message: String::from("Built-in function `disp` does not accept an argument of type `int`."),
 			position: 5,
 		}));
+	}
+
+	#[test]
+	fn rejects_duplicate_function_overload_signature() {
+		let error = run(
+			"fn Main(args: [text]) int { return 0; }\n\
+			fn choose(value: int) int { return value; }\n\
+			fn choose(value: int) text { return 'duplicate'; }"
+		).unwrap_err();
+
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+		assert_eq!(
+			error.message,
+			"Function overload `choose` duplicates an existing callable signature in this scope.",
+		);
 	}
 
 	#[test]
@@ -4726,6 +4771,20 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_nested_function_overloads_that_shadow_outer_functions() {
+		let result = run(
+			"fn choose(value: int) int { return 100; }\n\
+			fn Main(args: [text]) int {\n\
+				fn choose(value: bool) int { return 1; }\n\
+				fn choose(value: text) int { return 2; }\n\
+				return choose(true) + choose('x');\n\
+			}"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
 	fn runs_nested_object_default_construction_source_text() {
 		let result = evaluate_snippet(
 			"obj Address { line1: text = 'Unknown', };\nobj Person { name: text = '', address: Address, };\nvar person: Person = Person { name: 'Alice' };\nperson.address"
@@ -4906,6 +4965,19 @@ mod tests {
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Null));
+	}
+
+	#[test]
+	fn runs_overloaded_function_calls_selected_by_arity_and_type() {
+		let result = run(
+			"fn Main(args: [text]) int { return identify(1) + identify('x') + add(2, 3); }\n\
+			fn identify(value: int) int { return 1; }\n\
+			fn identify(value: text) int { return 10; }\n\
+			fn add(value: int) int { return value; }\n\
+			fn add(left: int, right: int) int { return left + right; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(16)));
 	}
 
 	#[test]
@@ -5908,6 +5980,17 @@ mod tests {
 		let result = run(standalone_body("var x: int = 0;\nwhile x < 3 { x += 1; }\nreturn x;")).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
+	fn selects_function_overloads_by_reference_mode() {
+		let result = run(
+			"fn Main(args: [text]) int { var value: int = 2; return inspect(value) + inspect(&value); }\n\
+			fn inspect(value: int) int { return value; }\n\
+			fn inspect(value: &int) int { value += 1; return value; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(5)));
 	}
 
 	#[test]

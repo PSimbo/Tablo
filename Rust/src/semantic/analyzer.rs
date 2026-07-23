@@ -41,7 +41,7 @@ pub struct SemanticAnalyzer {
 	enums: ScopeStack<EnumBinding>,
 	find_lock_mode: RecordLockMode,
 	function_depth: usize,
-	functions: ScopeStack<FunctionSignature>,
+	functions: ScopeStack<Vec<FunctionSignature>>,
 	group_boundary_contexts: Vec<GroupBoundaryContext>,
 	locals: ScopeStack<LocalBinding>,
 	loop_depth: usize,
@@ -59,10 +59,12 @@ struct EnumBinding {
 	variants: BTreeMap<String, EnumValue>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct FunctionParameterSignature {
 	data_type: DataType,
+	has_default: bool,
 	is_by_ref: bool,
+	is_variadic: bool,
 	name: String,
 }
 
@@ -775,20 +777,15 @@ impl SemanticAnalyzer {
 	}
 
 	fn declare_function_signature(&mut self, function: &FunctionDeclaration) -> Result<(), CompileError> {
-		if self.functions.contains_in_current_scope(&function.name) {
-			return Err(self.compile_error(
-				function.position,
-				format!("Function `{}` is already declared in this scope.", function.name),
-			));
-		}
-
 		let mut parameters = Vec::with_capacity(function.parameters.len());
 
 		for parameter in &function.parameters {
 			let parameter_type = self.resolve_function_parameter_type(parameter)?;
 			parameters.push(FunctionParameterSignature {
 				data_type: parameter_type,
+				has_default: parameter.default_value.is_some(),
 				is_by_ref: parameter.is_by_ref,
+				is_variadic: parameter.is_variadic,
 				name: parameter.name.clone(),
 			});
 		}
@@ -806,11 +803,27 @@ impl SemanticAnalyzer {
 		}
 
 		let function_index = self.next_function_index;
-		self.functions.declare(function.name.clone(), FunctionSignature {
+		let signature = FunctionSignature {
 			function_index,
 			parameters,
 			return_type: function.return_type.clone(),
-		});
+		};
+
+		if self.functions.contains_in_current_scope(&function.name) {
+			let overloads = self.functions.lookup(&function.name).unwrap();
+			if overloads.iter().any(|existing| existing.parameters == signature.parameters) {
+				return Err(self.compile_error(
+					function.position,
+					format!("Function overload `{}` duplicates an existing callable signature in this scope.", function.name),
+				));
+			}
+
+			self.functions.lookup_mut(&function.name).unwrap().push(signature);
+		}
+		else {
+			self.functions.declare(function.name.clone(), vec![signature]);
+		}
+
 		self.semantic_program.function_declaration_targets.insert(function.position, function_index);
 		self.next_function_index += 1;
 		Ok(())
@@ -1418,24 +1431,47 @@ impl SemanticAnalyzer {
 					));
 				}
 
-				if let Some(signature) = self.lookup_function(&callee.name).cloned() {
-					if arguments.len() != signature.parameters.len() {
+				if let Some(signatures) = self.lookup_functions(&callee.name).map(<[FunctionSignature]>::to_vec) {
+					if signatures.len() == 1 && arguments.len() != signatures[0].parameters.len() {
 						return Err(self.compile_error(
 							expression.position(),
 							format!(
 								"Function `{}` expects {} argument(s), found {}.",
 								callee.name,
-								signature.parameters.len(),
+								signatures[0].parameters.len(),
 								arguments.len(),
 							),
 						));
 					}
 
+					if signatures.len() > 1
+						&& !signatures.iter().any(|signature| signature.parameters.len() == arguments.len()) {
+						return Err(self.compile_error(
+							expression.position(),
+							format!(
+								"No overload of function `{}` accepts {} argument(s).",
+								callee.name,
+								arguments.len(),
+							),
+						));
+					}
+
+					let mut argument_types = Vec::with_capacity(arguments.len());
+					for argument in arguments {
+						argument_types.push(self.infer_expression_type(&argument.value)?);
+					}
+					let signature = self.select_function_overload(
+						&callee.name,
+						&signatures,
+						arguments,
+						&argument_types,
+						expression.position(),
+					)?;
 					let mut reference_slots = Vec::with_capacity(arguments.len());
 
-					for (argument, parameter) in arguments.iter().zip(signature.parameters.iter()) {
-						let argument_type = self.infer_expression_type(&argument.value)?;
-
+					for ((argument, argument_type), parameter) in arguments.iter()
+						.zip(argument_types.iter())
+						.zip(signature.parameters.iter()) {
 						if parameter.is_by_ref {
 							if !argument.is_by_ref {
 								return Err(self.compile_error(
@@ -1456,7 +1492,7 @@ impl SemanticAnalyzer {
 								format!("Variable `{}` is not declared in this scope.", identifier.name),
 							))?;
 
-							if argument_type != parameter.data_type {
+							if argument_type != &parameter.data_type {
 								return Err(self.compile_error(
 									argument.position,
 									format!(
@@ -1478,7 +1514,7 @@ impl SemanticAnalyzer {
 								));
 							}
 
-							self.ensure_assignable(&parameter.data_type, &argument_type, argument.value.position())?;
+							self.ensure_assignable(&parameter.data_type, argument_type, argument.value.position())?;
 							reference_slots.push(None);
 						}
 
@@ -1983,20 +2019,33 @@ impl SemanticAnalyzer {
 					));
 				}
 
-				if let Some(signature) = self.lookup_function(&callee.name).cloned() {
-					if arguments.len() != signature.parameters.len() {
+				if let Some(signatures) = self.lookup_functions(&callee.name).map(<[FunctionSignature]>::to_vec) {
+					if signatures.len() == 1 && arguments.len() != signatures[0].parameters.len() {
 						return Err(self.compile_error(
 							expression.position(),
 							format!(
 								"Function `{}` expects {} argument(s), found {}.",
 								callee.name,
-								signature.parameters.len(),
+								signatures[0].parameters.len(),
 								arguments.len(),
 							),
 						));
 					}
 
-					for (argument, parameter) in arguments.iter().zip(signature.parameters.iter()) {
+					if signatures.len() > 1
+						&& !signatures.iter().any(|signature| signature.parameters.len() == arguments.len()) {
+						return Err(self.compile_error(
+							expression.position(),
+							format!(
+								"No overload of function `{}` accepts {} argument(s).",
+								callee.name,
+								arguments.len(),
+							),
+						));
+					}
+
+					let mut argument_types = Vec::with_capacity(arguments.len());
+					for argument in arguments {
 						if argument.is_by_ref {
 							return Err(self.compile_error(
 								argument.position,
@@ -2004,8 +2053,20 @@ impl SemanticAnalyzer {
 							));
 						}
 
-						let argument_type = self.infer_query_expression_type(&argument.value, table)?;
-						self.ensure_assignable(&parameter.data_type, &argument_type, argument.value.position())?;
+						argument_types.push(self.infer_query_expression_type(&argument.value, table)?);
+					}
+					let signature = self.select_function_overload(
+						&callee.name,
+						&signatures,
+						arguments,
+						&argument_types,
+						expression.position(),
+					)?;
+
+					for ((argument, argument_type), parameter) in arguments.iter()
+						.zip(argument_types.iter())
+						.zip(signature.parameters.iter()) {
+						self.ensure_assignable(&parameter.data_type, argument_type, argument.value.position())?;
 					}
 
 					Ok(signature.return_type)
@@ -2304,8 +2365,9 @@ impl SemanticAnalyzer {
 		self.enums.lookup(name)
 	}
 
-	fn lookup_function(&self, name: &str) -> Option<&FunctionSignature> {
+	fn lookup_functions(&self, name: &str) -> Option<&[FunctionSignature]> {
 		self.functions.lookup(name)
+			.map(Vec::as_slice)
 	}
 
 	fn lookup_local(&self, name: &str) -> Option<LocalBinding> {
@@ -3522,6 +3584,53 @@ impl SemanticAnalyzer {
 				format!("Table `{table_name}` is not present in the active databases.")
 			}
 		})
+	}
+
+	fn select_function_overload(
+		&self,
+		name: &str,
+		signatures: &[FunctionSignature],
+		arguments: &[CallArgument],
+		argument_types: &[DataType],
+		position: usize,
+	) -> Result<FunctionSignature, CompileError> {
+		if signatures.len() == 1 {
+			return Ok(signatures[0].clone());
+		}
+
+		let candidates = signatures.iter()
+			.filter(|signature| signature.parameters.len() == arguments.len())
+			.filter(|signature| {
+				signature.parameters.iter()
+					.zip(arguments.iter())
+					.zip(argument_types.iter())
+					.all(|((parameter, argument), argument_type)| {
+						if parameter.is_by_ref != argument.is_by_ref {
+							return false;
+						}
+
+						if parameter.is_by_ref {
+							parameter.data_type == *argument_type
+						}
+						else {
+							self.is_assignable(&parameter.data_type, argument_type)
+						}
+					})
+			})
+			.cloned()
+			.collect::<Vec<_>>();
+
+		match candidates.as_slice() {
+			[signature] => Ok(signature.clone()),
+			[] => Err(self.compile_error(
+				position,
+				format!("No overload of function `{name}` accepts the supplied arguments."),
+			)),
+			_ => Err(self.compile_error(
+				position,
+				format!("Call to function `{name}` is ambiguous between multiple overloads."),
+			)),
+		}
 	}
 
 	fn sequence_reference_from_expression(&self, expression: &Expr) -> Option<SequenceReference> {
