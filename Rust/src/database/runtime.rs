@@ -358,6 +358,7 @@ mod tests {
 			lock_mode: RecordLockMode::None,
 			parameters: vec![],
 			result_shape: SqlQueryResultShape::IntegerScalar,
+			scalar_projections: vec![],
 			schema_is_implicit: true,
 			schema_name: String::from("Main"),
 			statement: String::from("SELECT 1"),

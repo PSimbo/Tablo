@@ -52,6 +52,7 @@ pub enum Instruction {
 	LoadFieldPath(Vec<String>),
 	LoadIndex,
 	LoadLocal(u32),
+	LoadProjectedValue(u32),
 	LoadReference(u32),
 	LoadSequenceCurrent {
 		database_name: String,

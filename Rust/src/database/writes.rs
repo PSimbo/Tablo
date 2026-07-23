@@ -326,6 +326,7 @@ mod tests {
 			locked: false,
 			original_fields: fields,
 			primary_key_column_names: vec![String::from("Id")],
+			projected_values: BTreeMap::new(),
 			persisted: true,
 			record_type: RecordPointerType {
 				database_name: String::from("ExampleDb"),

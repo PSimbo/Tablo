@@ -135,7 +135,14 @@ impl DatabaseDriver for PostgreSqlSession {
 				};
 				let fields = load_record_fields(row, &selected_columns)?;
 				let original_fields = fields.clone();
-				Ok(Value::RecordPointer(record_pointer(query, schema, fields, original_fields, BTreeMap::new())))
+				Ok(Value::RecordPointer(record_pointer(
+					query,
+					schema,
+					fields,
+					original_fields,
+					BTreeMap::new(),
+					BTreeMap::new(),
+				)))
 			}
 			SqlQueryResultShape::RecordPointerArray(layout) => {
 				let schema = known_record_schema(layout)?;
@@ -148,6 +155,7 @@ impl DatabaseDriver for PostgreSqlSession {
 						group_keys: load_group_keys(row, selected_columns.len(), &query.group_by)?,
 						original_fields: fields.clone(),
 						fields,
+						projected_values: load_scalar_projections(row, &query.scalar_projections)?,
 					});
 				}
 
@@ -159,6 +167,7 @@ impl DatabaseDriver for PostgreSqlSession {
 						loaded.fields,
 						loaded.original_fields,
 						boundaries.get(index).cloned().unwrap_or_default(),
+						loaded.projected_values,
 					)))
 					.collect();
 				Ok(Value::Array(records))
@@ -269,6 +278,26 @@ fn load_record_fields(row: &postgres::Row, columns: &[QueryResultColumn]) -> Res
 	}
 
 	Ok(fields)
+}
+
+fn load_scalar_projections(
+	row: &postgres::Row,
+	projections: &[SqlScalarProjection],
+) -> Result<BTreeMap<u32, Value>, String> {
+	projections.iter().map(|projection| {
+		let value = text_database_value(
+			row,
+			projection.column_index as usize,
+			&format!("projected value {}", projection.value_id.0),
+			&projection.data_type,
+		)?;
+		let value = database_record_field_runtime_value(
+			&value,
+			&projection.data_type,
+			projection.data_type.is_nullable(),
+		)?;
+		Ok((projection.value_id.0, value))
+	}).collect()
 }
 
 fn normalize_temporal_text(mut value: String, data_type: &DataType) -> String {

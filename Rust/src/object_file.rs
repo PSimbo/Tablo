@@ -42,7 +42,8 @@ const OPCODE_LOAD_FIELD: u8 = OPCODE_LESS_THAN_OR_EQUAL + 1;
 const OPCODE_LOAD_FIELD_PATH: u8 = OPCODE_LOAD_FIELD + 1;
 const OPCODE_LOAD_INDEX: u8 = OPCODE_LOAD_FIELD_PATH + 1;
 const OPCODE_LOAD_LOCAL: u8 = OPCODE_LOAD_INDEX + 1;
-const OPCODE_LOAD_REFERENCE: u8 = OPCODE_LOAD_LOCAL + 1;
+const OPCODE_LOAD_PROJECTED_VALUE: u8 = OPCODE_LOAD_LOCAL + 1;
+const OPCODE_LOAD_REFERENCE: u8 = OPCODE_LOAD_PROJECTED_VALUE + 1;
 const OPCODE_LOAD_SEQUENCE_CURRENT: u8 = OPCODE_LOAD_REFERENCE + 1;
 const OPCODE_MAKE_ARRAY: u8 = OPCODE_LOAD_SEQUENCE_CURRENT + 1;
 const OPCODE_MAKE_OBJECT: u8 = OPCODE_MAKE_ARRAY + 1;
@@ -453,6 +454,7 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_LOAD_FIELD_PATH => Ok(Instruction::LoadFieldPath(self.read_string_vec()?)),
 			OPCODE_LOAD_INDEX => Ok(Instruction::LoadIndex),
 			OPCODE_LOAD_LOCAL => Ok(Instruction::LoadLocal(self.read_u32()?)),
+			OPCODE_LOAD_PROJECTED_VALUE => Ok(Instruction::LoadProjectedValue(self.read_u32()?)),
 			OPCODE_LOAD_REFERENCE => Ok(Instruction::LoadReference(self.read_u32()?)),
 			OPCODE_LOAD_SEQUENCE_CURRENT => Ok(Instruction::LoadSequenceCurrent {
 				database_name: self.read_string()?,
@@ -719,6 +721,16 @@ impl<'a> ObjectFileReader<'a> {
 				key_names: self.read_string_vec()?,
 			});
 		}
+		let scalar_projection_count = self.read_u32()? as usize;
+		let mut scalar_projections = Vec::with_capacity(scalar_projection_count);
+
+		for _ in 0..scalar_projection_count {
+			scalar_projections.push(SqlScalarProjection {
+				column_index: self.read_u32()?,
+				data_type: self.read_data_type()?,
+				value_id: QueryProjectedValueId(self.read_u32()?),
+			});
+		}
 
 		Ok(SqlQuery {
 			database_name,
@@ -727,6 +739,7 @@ impl<'a> ObjectFileReader<'a> {
 			lock_mode,
 			parameters,
 			result_shape,
+			scalar_projections,
 			schema_is_implicit: self.read_bool()?,
 			schema_name: self.read_string()?,
 			statement,
@@ -898,6 +911,10 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 		Instruction::LoadLocal(slot) => {
 			bytes.push(OPCODE_LOAD_LOCAL);
 			bytes.extend_from_slice(&slot.to_le_bytes());
+		}
+		Instruction::LoadProjectedValue(value_id) => {
+			bytes.push(OPCODE_LOAD_PROJECTED_VALUE);
+			bytes.extend_from_slice(&value_id.to_le_bytes());
 		}
 		Instruction::LoadReference(slot) => {
 			bytes.push(OPCODE_LOAD_REFERENCE);
@@ -1149,6 +1166,12 @@ fn write_sql_query(bytes: &mut Vec<u8>, query: &SqlQuery) {
 			bytes.extend_from_slice(&(key_name.len() as u32).to_le_bytes());
 			bytes.extend_from_slice(key_name.as_bytes());
 		}
+	}
+	bytes.extend_from_slice(&(query.scalar_projections.len() as u32).to_le_bytes());
+	for projection in &query.scalar_projections {
+		bytes.extend_from_slice(&projection.column_index.to_le_bytes());
+		write_data_type(bytes, &projection.data_type);
+		bytes.extend_from_slice(&projection.value_id.0.to_le_bytes());
 	}
 	bytes.push(u8::from(query.schema_is_implicit));
 	bytes.extend_from_slice(&(query.schema_name.len() as u32).to_le_bytes());
@@ -1618,6 +1641,46 @@ mod tests {
 	}
 
 	#[test]
+	fn round_trips_query_scalar_projections_and_projected_value_loads() {
+		let query = SqlQuery {
+			database_name: String::from("ExampleDb"),
+			dialect: SqlDialect::Sqlite,
+			group_by: vec![],
+			lock_mode: RecordLockMode::None,
+			parameters: vec![],
+			result_shape: SqlQueryResultShape::RecordPointerArray(QueryRecordLayout::all_known(vec![
+				QueryResultColumn {
+					column_name: String::from("Id"),
+					data_type: DataType::Int,
+					is_nullable: false,
+					is_primary_key: true,
+				},
+			])),
+			scalar_projections: vec![SqlScalarProjection {
+				column_index: 1,
+				data_type: DataType::Int,
+				value_id: QueryProjectedValueId(4),
+			}],
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
+			statement: String::from("SELECT Id, 2 FROM Customers"),
+			table_name: String::from("Customers"),
+		};
+		let program = Program::from_parts_with_functions_queries_and_debug(
+			ConstantPool::default(),
+			CodeBody::new(vec![
+				Instruction::ExecuteQuery(0),
+				Instruction::LoadProjectedValue(4),
+			]),
+			vec![],
+			vec![LoweredBackendQuery::Sql(query)],
+			DebugInfo::default(),
+		);
+
+		assert_eq!(read_program(&write_program(&program)).unwrap(), program);
+	}
+
+	#[test]
 	fn round_trips_runtime_determined_query_record_layout() {
 		let query = SqlQuery {
 			database_name: String::from("ExampleDb"),
@@ -1629,6 +1692,7 @@ mod tests {
 				schema: QueryRecordSchema::RuntimeDetermined,
 				selection: QueryColumnSelection::RuntimeDetermined,
 			}),
+			scalar_projections: vec![],
 			schema_is_implicit: true,
 			schema_name: String::new(),
 			statement: String::from("SELECT * FROM runtime_table"),
@@ -1673,6 +1737,7 @@ mod tests {
 			lock_mode: RecordLockMode::UpdateNoWait,
 			parameters: vec![],
 			result_shape: SqlQueryResultShape::RecordPointer(record_layout),
+			scalar_projections: vec![],
 			schema_is_implicit: true,
 			schema_name: String::from("Public"),
 			statement: String::from("SELECT 1"),

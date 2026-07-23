@@ -398,6 +398,12 @@ impl Compiler {
 				}
 			}
 			Expr::Count(_) => {
+				if let Some(binding) = semantic_program.query_projected_value_binding(expression.position()) {
+					self.emit(emission, Instruction::LoadLocal(binding.enclosing_record_slot), expression_position);
+					self.emit(emission, Instruction::LoadProjectedValue(binding.value_id.0), expression_position);
+					return;
+				}
+
 				let query = semantic_program.compiled_count_query(expression.position())
 					.unwrap_or_else(|| panic!("Missing compiled database query for count expression."))
 					.clone();
@@ -815,7 +821,8 @@ impl Compiler {
 					*position,
 					String::from("Missing iterator slot for `for rec` statement."),
 				))?;
-				let query = semantic_program.compiled_for_record_query(*position)
+				let query = semantic_program.compiled_query_for_shape(*position)
+					.or_else(|| semantic_program.compiled_for_record_query(*position))
 					.ok_or(self.compile_error(*position, String::from("Missing compiled database query for `for rec` statement.")))?
 					.clone();
 				let query_index = self.compiled_queries.len() as u32;

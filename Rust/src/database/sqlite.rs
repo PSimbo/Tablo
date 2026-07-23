@@ -126,7 +126,14 @@ impl DatabaseDriver for SqliteSession {
 				};
 				let fields = load_record_fields(row, &selected_columns)?;
 				let original_fields = fields.clone();
-				Ok(Value::RecordPointer(record_pointer(query, schema, fields, original_fields, BTreeMap::new())))
+				Ok(Value::RecordPointer(record_pointer(
+					query,
+					schema,
+					fields,
+					original_fields,
+					BTreeMap::new(),
+					BTreeMap::new(),
+				)))
 			}
 			SqlQueryResultShape::RecordPointerArray(layout) => {
 				let schema = known_record_schema(layout)?;
@@ -141,6 +148,7 @@ impl DatabaseDriver for SqliteSession {
 						group_keys: load_group_keys(row, selected_columns.len(), &query.group_by)?,
 						original_fields: fields.clone(),
 						fields,
+						projected_values: load_scalar_projections(row, &query.scalar_projections)?,
 					});
 				}
 
@@ -152,6 +160,7 @@ impl DatabaseDriver for SqliteSession {
 						loaded.fields,
 						loaded.original_fields,
 						boundaries.get(index).cloned().unwrap_or_default(),
+						loaded.projected_values,
 					)))
 					.collect();
 				Ok(Value::Array(records))
@@ -256,6 +265,23 @@ fn load_record_fields(row: &rusqlite::Row<'_>, columns: &[QueryResultColumn]) ->
 	}
 
 	Ok(fields)
+}
+
+fn load_scalar_projections(
+	row: &rusqlite::Row<'_>,
+	projections: &[SqlScalarProjection],
+) -> Result<BTreeMap<u32, Value>, String> {
+	projections.iter().map(|projection| {
+		let value = row.get_ref(projection.column_index as usize)
+			.map_err(|error| format!("Failed to read SQLite projected value {}: {error}", projection.value_id.0))?;
+		let value = database_value(value)?;
+		let value = database_record_field_runtime_value(
+			&value,
+			&projection.data_type,
+			projection.data_type.is_nullable(),
+		)?;
+		Ok((projection.value_id.0, value))
+	}).collect()
 }
 
 fn path_from_connection_string(database_name: &str, connection_string: &str) -> Result<PathBuf, String> {
@@ -395,6 +421,59 @@ mod tests {
 	}
 
 	#[test]
+	fn loads_hidden_scalar_projections_with_record_rows() {
+		let connection = Connection::open_in_memory().unwrap();
+		connection.execute_batch(
+			concat!(
+				"CREATE TABLE Customers (Id INTEGER NOT NULL);",
+				"CREATE TABLE Orders (CustomerId INTEGER NOT NULL);",
+				"INSERT INTO Customers VALUES (1), (2);",
+				"INSERT INTO Orders VALUES (1), (1), (2);",
+			),
+		).unwrap();
+		let mut session = SqliteSession { connection, transactions: TransactionState::default() };
+		let query = SqlQuery {
+			database_name: String::from("ExampleDb"),
+			dialect: SqlDialect::Sqlite,
+			group_by: vec![],
+			lock_mode: RecordLockMode::None,
+			parameters: vec![],
+			result_shape: SqlQueryResultShape::RecordPointerArray(QueryRecordLayout::all_known(vec![
+				QueryResultColumn {
+					column_name: String::from("Id"),
+					data_type: DataType::Int,
+					is_nullable: false,
+					is_primary_key: false,
+				},
+			])),
+			scalar_projections: vec![SqlScalarProjection {
+				column_index: 1,
+				data_type: DataType::Int,
+				value_id: QueryProjectedValueId(7),
+			}],
+			schema_is_implicit: true,
+			schema_name: String::from("Main"),
+			statement: String::from(
+				"SELECT Customers.Id, (SELECT COUNT(*) FROM Orders WHERE Orders.CustomerId = Customers.Id) FROM Customers ORDER BY Customers.Id"
+			),
+			table_name: String::from("Customers"),
+		};
+
+		let Value::Array(records) = session.execute_query(&query, vec![]).unwrap() else {
+			panic!("Expected an array of record pointers.");
+		};
+		let projected_counts = records.iter().map(|value| {
+			let Value::RecordPointer(record) = value else {
+				panic!("Expected a record pointer.");
+			};
+			assert!(!record.fields.contains_key("__tablo_projected_7"));
+			record.projected_values.get(&7).cloned()
+		}).collect::<Vec<_>>();
+
+		assert_eq!(projected_counts, vec![Some(Value::Integer(2)), Some(Value::Integer(1))]);
+	}
+
+	#[test]
 	fn loads_selected_fields_while_preserving_complete_record_schema() {
 		let connection = Connection::open_in_memory().unwrap();
 		connection.execute_batch(
@@ -424,6 +503,7 @@ mod tests {
 				]),
 				selection: QueryColumnSelection::Indices(vec![1]),
 			}),
+			scalar_projections: vec![],
 			schema_is_implicit: true,
 			schema_name: String::from("Main"),
 			statement: String::from("SELECT Name FROM Customers LIMIT 1"),

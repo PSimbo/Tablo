@@ -2130,6 +2130,103 @@ mod tests {
 	}
 
 	#[test]
+	fn executes_merged_correlated_count_with_independent_fallback() {
+		let database_path = create_sqlite_test_database(
+			"executes_merged_correlated_count_with_independent_fallback",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL
+				);
+				CREATE TABLE Orders (
+					CustomerId INTEGER NOT NULL
+				);
+				INSERT INTO Customers (Id) VALUES (1), (2);
+				INSERT INTO Orders (CustomerId) VALUES (1), (1), (2);
+			"#,
+		);
+		let schema = schema_catalog_from_fixture_with_backends(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null
+				);
+				create table Orders (
+					CustomerId int not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let source = concat!(
+			"with exampledb;\n",
+			"fn Main(args: [text]) int {\n",
+			"  for rec customer in Customers order by Id {\n",
+			"    var orderCount: int = count Orders where CustomerId == customer.Id;\n",
+			"    var values: [int] = [10];\n",
+			"    var selected: int = values[orderCount];\n",
+			"  }\n",
+			"  return 0;\n",
+			"}",
+		);
+		let (planned_program, planned_semantics) =
+			compile_standalone_with_query_optimizations(source, &schema, true).unwrap();
+		let (unoptimized_program, _) =
+			compile_standalone_with_query_optimizations(source, &schema, false).unwrap();
+		let planned_main = planned_program.functions()
+			.get(planned_program.entry_function_index().unwrap() as usize)
+			.unwrap();
+		let unoptimized_main = unoptimized_program.functions()
+			.get(unoptimized_program.entry_function_index().unwrap() as usize)
+			.unwrap();
+		let planned_execute_count = planned_main.body().instructions.iter()
+			.filter(|instruction| matches!(instruction, Instruction::ExecuteQuery(_)))
+			.count();
+		let unoptimized_execute_count = unoptimized_main.body().instructions.iter()
+			.filter(|instruction| matches!(instruction, Instruction::ExecuteQuery(_)))
+			.count();
+		let projected_load_count = planned_main.body().instructions.iter()
+			.filter(|instruction| matches!(instruction, Instruction::LoadProjectedValue(_)))
+			.count();
+		let projected_load_index = planned_main.body().instructions.iter()
+			.position(|instruction| matches!(instruction, Instruction::LoadProjectedValue(_)))
+			.unwrap();
+		let projected_load_location = planned_program.debug_location(
+			planned_program.entry_function_index().unwrap() as usize,
+			projected_load_index,
+		).unwrap();
+		let merged_query = planned_program.queries().first().unwrap();
+		let LoweredBackendQuery::Sql(merged_query) = merged_query;
+
+		assert_eq!(planned_program.queries().len(), 1);
+		assert_eq!(unoptimized_program.queries().len(), 2);
+		assert_eq!(planned_execute_count, 1);
+		assert_eq!(unoptimized_execute_count, 2);
+		assert_eq!(projected_load_count, 1);
+		assert_eq!(
+			projected_load_location.column(),
+			source.find("count Orders").unwrap() as u32 + 1,
+		);
+		assert_eq!(merged_query.scalar_projections.len(), 1);
+		assert!(merged_query.statement.contains("SELECT COUNT(*)"));
+		assert!(planned_semantics.query_plan().queries().iter().any(|query| {
+			matches!(query.execution, PlannedQueryExecution::MergeWith { .. })
+		}));
+
+		let round_tripped_program = read_program(&write_program(&planned_program)).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let planned_error = run_program_with_database_config(&round_tripped_program, database_config.clone()).unwrap_err();
+		let unoptimized_error = run_program_with_database_config(&unoptimized_program, database_config).unwrap_err();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(planned_error.to_string(), unoptimized_error.to_string());
+		assert_eq!(
+			planned_error.to_string(),
+			"Runtime error: Array index 2 is out of bounds for length 1.\nStack trace:\n  at Main (line 1, column 223)",
+		);
+	}
+
+	#[test]
 	fn formats_array_index_type_error_with_line_and_column() {
 		let source = standalone_body("var xs: [int] = [1, 2];\nreturn xs['1'];");
 		let error = run(&source).unwrap_err();

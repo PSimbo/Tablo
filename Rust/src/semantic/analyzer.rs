@@ -174,7 +174,7 @@ pub struct SemanticProgram {
 	compiled_count_queries: BTreeMap<usize, LoweredBackendQuery>,
 	compiled_find_queries: BTreeMap<usize, LoweredBackendQuery>,
 	compiled_for_record_queries: BTreeMap<usize, LoweredBackendQuery>,
-	compiled_query_for_shapes: BTreeMap<usize, LoweredQueryForShape>,
+	compiled_query_for_shapes: BTreeMap<usize, LoweredBackendQuery>,
 	declaration_slots: BTreeMap<usize, u32>,
 	declaration_types: BTreeMap<usize, DataType>,
 	entry_point_function_index: Option<u32>,
@@ -234,7 +234,7 @@ impl SemanticProgram {
 		self.compiled_for_record_queries.get(&position)
 	}
 
-	pub fn compiled_query_for_shape(&self, position: usize) -> Option<&LoweredQueryForShape> {
+	pub fn compiled_query_for_shape(&self, position: usize) -> Option<&LoweredBackendQuery> {
 		self.compiled_query_for_shapes.get(&position)
 	}
 
@@ -452,8 +452,8 @@ impl SemanticAnalyzer {
 		if self.query_optimizations_disabled {
 			query_plan.disable_optimizations();
 		}
-		self.record_proven_query_shapes(&query_plan)?;
-		self.compile_proven_query_shapes()?;
+		self.record_selected_query_shapes(&query_plan)?;
+		self.compile_selected_query_shapes()?;
 		self.semantic_program.query_plan = query_plan;
 
 		Ok(self.semantic_program.clone())
@@ -828,7 +828,7 @@ impl SemanticAnalyzer {
 		}
 	}
 
-	fn compile_proven_query_shapes(&mut self) -> Result<(), CompileError> {
+	fn compile_selected_query_shapes(&mut self) -> Result<(), CompileError> {
 		let shapes = self.semantic_program.query_for_shapes.iter()
 			.map(|(position, shape)| (*position, shape.clone()))
 			.collect::<Vec<_>>();
@@ -2854,69 +2854,6 @@ impl SemanticAnalyzer {
 		}
 	}
 
-	fn record_proven_query_shapes(&mut self, query_plan: &ProgramQueryPlan) -> Result<(), CompileError> {
-		for query in query_plan.queries() {
-			let Some(PlannedQueryOptimizationStrategy::MergeCorrelatedCountWith {
-				query: enclosing_query_id,
-			}) = query.proven_optimization else {
-				continue;
-			};
-			let enclosing_query = query_plan.query(enclosing_query_id).ok_or_else(|| {
-				self.compile_error(query.position, String::from("Proven query optimization references an unknown enclosing query."))
-			})?;
-			let enclosing_record_slot = enclosing_query.record_slot.ok_or_else(|| {
-				self.compile_error(query.position, String::from("Proven query optimization requires an enclosing record slot."))
-			})?;
-			let enclosing_for_query = self.semantic_program.lowered_for_record_queries
-				.get(&enclosing_query.position)
-				.cloned()
-				.ok_or_else(|| {
-					self.compile_error(query.position, String::from("Proven query optimization requires an enclosing record query."))
-				})?;
-			let count_query = self.semantic_program.lowered_count_queries
-				.get(&query.position)
-				.cloned()
-				.ok_or_else(|| {
-					self.compile_error(query.position, String::from("Proven count optimization is missing its neutral query plan."))
-				})?;
-			let value_id = QueryProjectedValueId(u32::try_from(query.id.0).map_err(|_| {
-				self.compile_error(query.position, String::from("Program contains too many queries to identify a projected value."))
-			})?);
-			let correlations = query.captured_parameters.iter()
-				.map(|parameter| QueryCorrelation {
-					outer_field_path: parameter.field_path.clone(),
-					parameter: QueryParameter {
-						data_type: parameter.data_type.clone(),
-						field_path: parameter.field_path.clone(),
-						slot: parameter.slot,
-					},
-				})
-				.collect();
-			let shape = self.semantic_program.query_for_shapes
-				.entry(enclosing_query.position)
-				.or_insert_with(|| QueryForShape {
-					query: enclosing_for_query,
-					scalar_projections: Vec::new(),
-				});
-			shape.scalar_projections.push(QueryScalarProjection {
-				expression: QueryScalarProjectionExpression::CorrelatedCount(QueryCorrelatedCount {
-					correlations,
-					query: count_query,
-				}),
-				value_id,
-			});
-			self.semantic_program.query_projected_value_bindings.insert(
-				query.position,
-				QueryProjectedValueBinding {
-					enclosing_record_slot,
-					value_id,
-				},
-			);
-		}
-
-		Ok(())
-	}
-
 	fn record_record_pointer_assignment(
 		&mut self,
 		position: usize,
@@ -3004,6 +2941,69 @@ impl SemanticAnalyzer {
 		resolved: &ResolvedSequenceReference,
 	) {
 		self.semantic_program.resolved_sequences.insert(position, resolved.clone());
+	}
+
+	fn record_selected_query_shapes(&mut self, query_plan: &ProgramQueryPlan) -> Result<(), CompileError> {
+		for query in query_plan.queries() {
+			let PlannedQueryExecution::MergeWith {
+				query: enclosing_query_id,
+			} = query.execution else {
+				continue;
+			};
+			let enclosing_query = query_plan.query(enclosing_query_id).ok_or_else(|| {
+				self.compile_error(query.position, String::from("Proven query optimization references an unknown enclosing query."))
+			})?;
+			let enclosing_record_slot = enclosing_query.record_slot.ok_or_else(|| {
+				self.compile_error(query.position, String::from("Proven query optimization requires an enclosing record slot."))
+			})?;
+			let enclosing_for_query = self.semantic_program.lowered_for_record_queries
+				.get(&enclosing_query.position)
+				.cloned()
+				.ok_or_else(|| {
+					self.compile_error(query.position, String::from("Proven query optimization requires an enclosing record query."))
+				})?;
+			let count_query = self.semantic_program.lowered_count_queries
+				.get(&query.position)
+				.cloned()
+				.ok_or_else(|| {
+					self.compile_error(query.position, String::from("Proven count optimization is missing its neutral query plan."))
+				})?;
+			let value_id = QueryProjectedValueId(u32::try_from(query.id.0).map_err(|_| {
+				self.compile_error(query.position, String::from("Program contains too many queries to identify a projected value."))
+			})?);
+			let correlations = query.captured_parameters.iter()
+				.map(|parameter| QueryCorrelation {
+					outer_field_path: parameter.field_path.clone(),
+					parameter: QueryParameter {
+						data_type: parameter.data_type.clone(),
+						field_path: parameter.field_path.clone(),
+						slot: parameter.slot,
+					},
+				})
+				.collect();
+			let shape = self.semantic_program.query_for_shapes
+				.entry(enclosing_query.position)
+				.or_insert_with(|| QueryForShape {
+					query: enclosing_for_query,
+					scalar_projections: Vec::new(),
+				});
+			shape.scalar_projections.push(QueryScalarProjection {
+				expression: QueryScalarProjectionExpression::CorrelatedCount(QueryCorrelatedCount {
+					correlations,
+					query: count_query,
+				}),
+				value_id,
+			});
+			self.semantic_program.query_projected_value_bindings.insert(
+				query.position,
+				QueryProjectedValueBinding {
+					enclosing_record_slot,
+					value_id,
+				},
+			);
+		}
+
+		Ok(())
 	}
 
 	fn refine_expression_type_from_assumptions(&self, expression: &Expr, data_type: DataType) -> DataType {

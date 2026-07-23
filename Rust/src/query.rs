@@ -136,12 +136,6 @@ pub enum SqlQueryResultShape {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LoweredQueryForShape {
-	pub query: SqlQuery,
-	pub scalar_projections: Vec<SqlScalarProjection>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryBinaryExpr {
 	pub left: Box<QueryExpr>,
 	pub operator: QueryBinaryOperator,
@@ -391,6 +385,7 @@ pub struct SqlQuery {
 	pub lock_mode: RecordLockMode,
 	pub parameters: Vec<SqlParameter>,
 	pub result_shape: SqlQueryResultShape,
+	pub scalar_projections: Vec<SqlScalarProjection>,
 	pub schema_is_implicit: bool,
 	pub schema_name: String,
 	pub statement: String,
@@ -428,11 +423,11 @@ pub fn lower_for_query(plan: &QueryForPlan) -> Result<LoweredBackendQuery, Query
 	}
 }
 
-pub fn lower_for_shape(shape: &QueryForShape) -> Result<LoweredQueryForShape, QueryLoweringError> {
+pub fn lower_for_shape(shape: &QueryForShape) -> Result<LoweredBackendQuery, QueryLoweringError> {
 	match shape.query.backend {
-		DatabaseBackend::MySql => sql_renderer::lower_for_shape(&mysql::MySqlRenderer, shape),
-		DatabaseBackend::PostgreSql => sql_renderer::lower_for_shape(&postgresql::PostgreSqlRenderer, shape),
-		DatabaseBackend::Sqlite => sql_renderer::lower_for_shape(&sqlite::SqliteRenderer, shape),
+		DatabaseBackend::MySql => sql_renderer::lower_for_shape(&mysql::MySqlRenderer, shape).map(LoweredBackendQuery::Sql),
+		DatabaseBackend::PostgreSql => sql_renderer::lower_for_shape(&postgresql::PostgreSqlRenderer, shape).map(LoweredBackendQuery::Sql),
+		DatabaseBackend::Sqlite => sql_renderer::lower_for_shape(&sqlite::SqliteRenderer, shape).map(LoweredBackendQuery::Sql),
 	}
 }
 
@@ -607,7 +602,7 @@ mod tests {
 			(
 				DatabaseBackend::PostgreSql,
 				SqlDialect::PostgreSql,
-				"SELECT CAST(\"__tablo_outer\".\"Id\" AS TEXT), (SELECT COUNT(*) FROM \"Orders\" AS \"__tablo_count_7\" WHERE (\"__tablo_count_7\".\"CustomerId\" = \"__tablo_outer\".\"Id\")) AS \"__tablo_projected_7\" FROM \"Customers\" AS \"__tablo_outer\"",
+				"SELECT CAST(\"__tablo_outer\".\"Id\" AS TEXT), CAST((SELECT COUNT(*) FROM \"Orders\" AS \"__tablo_count_7\" WHERE (\"__tablo_count_7\".\"CustomerId\" = \"__tablo_outer\".\"Id\")) AS TEXT) AS \"__tablo_projected_7\" FROM \"Customers\" AS \"__tablo_outer\"",
 			),
 			(
 				DatabaseBackend::MySql,
@@ -618,10 +613,11 @@ mod tests {
 
 		for (backend, dialect, statement) in cases {
 			let lowered = lower_for_shape(&correlated_count_shape(backend)).unwrap();
+			let LoweredBackendQuery::Sql(lowered) = lowered;
 
-			assert_eq!(lowered.query.dialect, dialect);
-			assert_eq!(lowered.query.statement, statement);
-			assert!(lowered.query.parameters.is_empty());
+			assert_eq!(lowered.dialect, dialect);
+			assert_eq!(lowered.statement, statement);
+			assert!(lowered.parameters.is_empty());
 			assert_eq!(lowered.scalar_projections, vec![SqlScalarProjection {
 				column_index: 1,
 				data_type: DataType::Int,
@@ -714,6 +710,7 @@ mod tests {
 				slot: 7,
 			}],
 			result_shape: SqlQueryResultShape::IntegerScalar,
+			scalar_projections: vec![],
 			schema_is_implicit: false,
 			schema_name: String::from("Reporting"),
 			statement: String::from(
@@ -992,6 +989,7 @@ mod tests {
 				},
 			],
 			result_shape: SqlQueryResultShape::IntegerScalar,
+			scalar_projections: vec![],
 			schema_is_implicit: false,
 			schema_name: String::from("Reporting"),
 			statement: String::from(
@@ -1061,6 +1059,7 @@ mod tests {
 				slot: 4,
 			}],
 			result_shape: SqlQueryResultShape::RecordPointer(all_columns(record_columns)),
+			scalar_projections: vec![],
 			schema_is_implicit: false,
 			schema_name: String::from("Public"),
 			statement: String::from(
@@ -1143,6 +1142,7 @@ mod tests {
 				},
 			],
 			result_shape: SqlQueryResultShape::RecordPointerArray(all_columns(record_columns)),
+			scalar_projections: vec![],
 			schema_is_implicit: false,
 			schema_name: String::from("Public"),
 			statement: String::from(
@@ -1276,6 +1276,7 @@ mod tests {
 			lock_mode: RecordLockMode::None,
 			parameters: vec![],
 			result_shape: SqlQueryResultShape::IntegerScalar,
+			scalar_projections: vec![],
 			schema_is_implicit: true,
 			schema_name: String::from("Main"),
 			statement: String::from(
@@ -1316,6 +1317,7 @@ mod tests {
 			lock_mode: RecordLockMode::None,
 			parameters: vec![],
 			result_shape: SqlQueryResultShape::IntegerScalar,
+			scalar_projections: vec![],
 			schema_is_implicit: true,
 			schema_name: String::from("Main"),
 			statement: String::from(
@@ -1367,6 +1369,7 @@ mod tests {
 			lock_mode: RecordLockMode::None,
 			parameters: vec![],
 			result_shape: SqlQueryResultShape::IntegerScalar,
+			scalar_projections: vec![],
 			schema_is_implicit: true,
 			schema_name: String::from("Main"),
 			statement: String::from(
@@ -1428,6 +1431,7 @@ mod tests {
 				},
 			],
 			result_shape: SqlQueryResultShape::IntegerScalar,
+			scalar_projections: vec![],
 			schema_is_implicit: true,
 			schema_name: String::from("Main"),
 			statement: String::from(
@@ -1461,6 +1465,7 @@ mod tests {
 			lock_mode: RecordLockMode::None,
 			parameters: vec![],
 			result_shape: SqlQueryResultShape::IntegerScalar,
+			scalar_projections: vec![],
 			schema_is_implicit: false,
 			schema_name: String::from("Reporting"),
 			statement: String::from(
@@ -1535,6 +1540,7 @@ mod tests {
 					is_primary_key: false,
 				},
 			])),
+			scalar_projections: vec![],
 			schema_is_implicit: true,
 			schema_name: String::from("Main"),
 			statement: String::from(
@@ -1611,6 +1617,7 @@ mod tests {
 					is_primary_key: true,
 				},
 			])),
+			scalar_projections: vec![],
 			schema_is_implicit: true,
 			schema_name: String::from("Main"),
 			statement: String::from(
@@ -1686,6 +1693,7 @@ mod tests {
 					is_primary_key: false,
 				},
 			])),
+			scalar_projections: vec![],
 			schema_is_implicit: true,
 			schema_name: String::from("Main"),
 			statement: String::from(
@@ -1743,6 +1751,7 @@ mod tests {
 					is_primary_key: true,
 				},
 			])),
+			scalar_projections: vec![],
 			schema_is_implicit: true,
 			schema_name: String::from("Main"),
 			statement: String::from(
@@ -1786,6 +1795,7 @@ mod tests {
 				},
 			],
 			result_shape: SqlQueryResultShape::IntegerScalar,
+			scalar_projections: vec![],
 			schema_is_implicit: true,
 			schema_name: String::from("Main"),
 			statement: String::from(
@@ -1849,6 +1859,8 @@ mod tests {
 		assert_eq!(sqlite.parameters, postgresql.parameters);
 		assert_eq!(sqlite.result_shape, mysql.result_shape);
 		assert_eq!(sqlite.result_shape, postgresql.result_shape);
+		assert_eq!(sqlite.scalar_projections, mysql.scalar_projections);
+		assert_eq!(sqlite.scalar_projections, postgresql.scalar_projections);
 		assert_eq!(sqlite.schema_is_implicit, mysql.schema_is_implicit);
 		assert_eq!(sqlite.schema_is_implicit, postgresql.schema_is_implicit);
 		assert_eq!(sqlite.schema_name, mysql.schema_name);

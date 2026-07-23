@@ -101,7 +101,14 @@ impl DatabaseDriver for MySqlSession {
 				};
 				let fields = load_record_fields(row, &selected_columns)?;
 				let original_fields = fields.clone();
-				Ok(Value::RecordPointer(record_pointer(query, schema, fields, original_fields, BTreeMap::new())))
+				Ok(Value::RecordPointer(record_pointer(
+					query,
+					schema,
+					fields,
+					original_fields,
+					BTreeMap::new(),
+					BTreeMap::new(),
+				)))
 			}
 			SqlQueryResultShape::RecordPointerArray(layout) => {
 				let schema = known_record_schema(layout)?;
@@ -114,6 +121,7 @@ impl DatabaseDriver for MySqlSession {
 						group_keys: load_group_keys(row, selected_columns.len(), &query.group_by)?,
 						original_fields: fields.clone(),
 						fields,
+						projected_values: load_scalar_projections(row, &query.scalar_projections)?,
 					});
 				}
 
@@ -125,6 +133,7 @@ impl DatabaseDriver for MySqlSession {
 						loaded.fields,
 						loaded.original_fields,
 						boundaries.get(index).cloned().unwrap_or_default(),
+						loaded.projected_values,
 					)))
 					.collect();
 				Ok(Value::Array(records))
@@ -285,6 +294,23 @@ fn load_record_fields(row: &Row, columns: &[QueryResultColumn]) -> Result<BTreeM
 	}
 
 	Ok(fields)
+}
+
+fn load_scalar_projections(
+	row: &Row,
+	projections: &[SqlScalarProjection],
+) -> Result<BTreeMap<u32, Value>, String> {
+	projections.iter().map(|projection| {
+		let value = row.as_ref(projection.column_index as usize)
+			.ok_or_else(|| format!("MySQL result is missing projected value {}.", projection.value_id.0))?;
+		let value = database_value(value, &projection.data_type)?;
+		let value = database_record_field_runtime_value(
+			&value,
+			&projection.data_type,
+			projection.data_type.is_nullable(),
+		)?;
+		Ok((projection.value_id.0, value))
+	}).collect()
 }
 
 fn mysql_integer(value: &MySqlValue) -> Result<i64, String> {

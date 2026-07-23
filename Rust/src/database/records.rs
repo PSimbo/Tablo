@@ -7,6 +7,7 @@ pub(super) struct LoadedRecord {
 	pub fields: BTreeMap<String, RecordFieldValue>,
 	pub group_keys: Vec<Value>,
 	pub original_fields: BTreeMap<String, RecordFieldValue>,
+	pub projected_values: BTreeMap<u32, Value>,
 }
 
 pub(super) fn empty_record_pointer(query: &SqlQuery, columns: &[QueryResultColumn]) -> RecordPointerValue {
@@ -19,6 +20,7 @@ pub(super) fn empty_record_pointer(query: &SqlQuery, columns: &[QueryResultColum
 		locked: false,
 		original_fields: BTreeMap::new(),
 		primary_key_column_names: primary_key_column_names(columns),
+		projected_values: BTreeMap::new(),
 		persisted: false,
 		record_type: record_pointer_type(query),
 		schema_is_implicit: query.schema_is_implicit,
@@ -41,6 +43,7 @@ pub(super) fn locked_record_pointer(query: &SqlQuery, columns: &[QueryResultColu
 		locked: true,
 		original_fields: BTreeMap::new(),
 		primary_key_column_names: primary_key_column_names(columns),
+		projected_values: BTreeMap::new(),
 		persisted: true,
 		record_type: record_pointer_type(query),
 		schema_is_implicit: query.schema_is_implicit,
@@ -81,6 +84,7 @@ pub(super) fn record_pointer(
 	fields: BTreeMap<String, RecordFieldValue>,
 	original_fields: BTreeMap<String, RecordFieldValue>,
 	group_boundaries: BTreeMap<String, RecordGroupBoundary>,
+	projected_values: BTreeMap<u32, Value>,
 ) -> RecordPointerValue {
 	RecordPointerValue {
 		column_names: columns.iter().map(|column| column.column_name.clone()).collect(),
@@ -91,6 +95,7 @@ pub(super) fn record_pointer(
 		locked: false,
 		original_fields,
 		primary_key_column_names: primary_key_column_names(columns),
+		projected_values,
 		persisted: true,
 		record_type: record_pointer_type(query),
 		schema_is_implicit: query.schema_is_implicit,

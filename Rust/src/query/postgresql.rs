@@ -48,6 +48,10 @@ impl SqlRenderer for PostgreSqlRenderer {
 	) -> Result<String, QueryLoweringError> {
 		Ok(format!("CAST({} AS TEXT)", lower_expression(expression, parameters)?))
 	}
+
+	fn result_sql_expression(&self, expression: &str, _data_type: &DataType) -> String {
+		format!("CAST({expression} AS TEXT)")
+	}
 }
 
 fn lower_built_in(

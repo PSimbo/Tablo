@@ -555,6 +555,7 @@ pub struct RecordPointerValue {
 	pub locked: bool,
 	pub original_fields: BTreeMap<String, RecordFieldValue>,
 	pub primary_key_column_names: Vec<String>,
+	pub projected_values: BTreeMap<u32, Value>,
 	pub persisted: bool,
 	pub record_type: RecordPointerType,
 	pub schema_is_implicit: bool,

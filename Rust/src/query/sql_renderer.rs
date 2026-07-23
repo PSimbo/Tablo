@@ -34,6 +34,10 @@ pub(super) trait SqlRenderer {
 		self.lower_expression(expression, parameters)
 	}
 
+	fn result_sql_expression(&self, expression: &str, _data_type: &DataType) -> String {
+		expression.to_string()
+	}
+
 	fn table_source(&self, schema_name: &str, table_name: &str, schema_is_implicit: bool) -> String {
 		if schema_is_implicit {
 			self.quote_identifier(table_name)
@@ -64,6 +68,7 @@ pub(super) fn lower_count(
 		lock_mode: RecordLockMode::None,
 		parameters,
 		result_shape: SqlQueryResultShape::IntegerScalar,
+		scalar_projections: vec![],
 		schema_is_implicit: plan.schema_is_implicit,
 		schema_name: plan.schema_name.clone(),
 		statement,
@@ -114,6 +119,7 @@ pub(super) fn lower_find(
 		lock_mode: plan.lock_mode,
 		parameters,
 		result_shape: SqlQueryResultShape::RecordPointer(plan.record_layout.clone()),
+		scalar_projections: vec![],
 		schema_is_implicit: plan.schema_is_implicit,
 		schema_name: plan.schema_name.clone(),
 		statement,
@@ -125,13 +131,13 @@ pub(super) fn lower_for(
 	renderer: &impl SqlRenderer,
 	plan: &QueryForPlan,
 ) -> Result<SqlQuery, QueryLoweringError> {
-	Ok(lower_for_with_scalar_projections(renderer, plan, &[])?.query)
+	lower_for_with_scalar_projections(renderer, plan, &[])
 }
 
 pub(super) fn lower_for_shape(
 	renderer: &impl SqlRenderer,
 	shape: &QueryForShape,
-) -> Result<LoweredQueryForShape, QueryLoweringError> {
+) -> Result<SqlQuery, QueryLoweringError> {
 	lower_for_with_scalar_projections(renderer, &shape.query, &shape.scalar_projections)
 }
 
@@ -139,7 +145,7 @@ fn lower_for_with_scalar_projections(
 	renderer: &impl SqlRenderer,
 	plan: &QueryForPlan,
 	scalar_projections: &[QueryScalarProjection],
-) -> Result<LoweredQueryForShape, QueryLoweringError> {
+) -> Result<SqlQuery, QueryLoweringError> {
 	let mut parameters = Vec::new();
 	let outer_alias = (!scalar_projections.is_empty()).then_some("__tablo_outer");
 	let outer_table_reference = outer_alias.unwrap_or(&plan.table_name);
@@ -225,25 +231,23 @@ fn lower_for_with_scalar_projections(
 		statement.push_str(&expression);
 	}
 
-	Ok(LoweredQueryForShape {
-		query: SqlQuery {
-			database_name: plan.database_name.clone(),
-			dialect: renderer.dialect(),
-			group_by: plan.group_by.iter()
-				.map(|item| SqlGroupByItem {
-					data_type: item.data_type.clone(),
-					key_names: item.key_names.clone(),
-				})
-				.collect(),
-			lock_mode: plan.lock_mode,
-			parameters,
-			result_shape: SqlQueryResultShape::RecordPointerArray(plan.record_layout.clone()),
-			schema_is_implicit: plan.schema_is_implicit,
-			schema_name: plan.schema_name.clone(),
-			statement,
-			table_name: plan.table_name.clone(),
-		},
+	Ok(SqlQuery {
+		database_name: plan.database_name.clone(),
+		dialect: renderer.dialect(),
+		group_by: plan.group_by.iter()
+			.map(|item| SqlGroupByItem {
+				data_type: item.data_type.clone(),
+				key_names: item.key_names.clone(),
+			})
+			.collect(),
+		lock_mode: plan.lock_mode,
+		parameters,
+		result_shape: SqlQueryResultShape::RecordPointerArray(plan.record_layout.clone()),
 		scalar_projections: lowered_scalar_projections,
+		schema_is_implicit: plan.schema_is_implicit,
+		schema_name: plan.schema_name.clone(),
+		statement,
+		table_name: plan.table_name.clone(),
 	})
 }
 
@@ -286,8 +290,9 @@ fn lower_scalar_projection(
 		statement.push_str(&renderer.lower_expression(&filter, parameters)?);
 	}
 
+	let expression = renderer.result_sql_expression(&format!("({statement})"), &DataType::Int);
 	Ok(format!(
-		"({statement}) AS {}",
+		"{expression} AS {}",
 		renderer.quote_identifier(&format!("__tablo_projected_{}", projection.value_id.0)),
 	))
 }

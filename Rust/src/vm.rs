@@ -612,6 +612,21 @@ impl VirtualMachine {
 				self.stack.push(self.resolve_runtime_value(value, instruction_index)?);
 				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::LoadProjectedValue(value_id) => {
+				let record = self.pop_value(instruction_index)?;
+				let Value::RecordPointer(record) = record else {
+					return Err(vm_error(
+						instruction_index,
+						String::from("Projected database value requires a record pointer operand."),
+					));
+				};
+				let value = record.projected_values.get(value_id).cloned().ok_or(vm_error(
+					instruction_index,
+					format!("Record pointer does not contain projected value {}.", value_id),
+				))?;
+				self.stack.push(value);
+				Ok(ExecutionOutcome::Continue(None))
+			}
 			Instruction::LoadReference(slot) => {
 				let value = locals.get(*slot as usize).cloned().ok_or(VmError {
 					instruction_index,
@@ -710,6 +725,7 @@ impl VirtualMachine {
 					locked: false,
 					original_fields: BTreeMap::new(),
 					primary_key_column_names: Vec::new(),
+					projected_values: BTreeMap::new(),
 					persisted: false,
 					record_type: record_type.clone(),
 					schema_is_implicit: *schema_is_implicit,
@@ -2657,6 +2673,7 @@ fn store_field_path_into_record_pointer(
 	let group_boundaries = record.group_boundaries;
 	let original_fields = record.original_fields;
 	let primary_key_column_names = record.primary_key_column_names;
+	let projected_values = record.projected_values;
 	let locked = record.locked;
 	let persisted = record.persisted;
 	let record_type = record.record_type;
@@ -2691,6 +2708,7 @@ fn store_field_path_into_record_pointer(
 			locked,
 			original_fields,
 			primary_key_column_names,
+			projected_values,
 			persisted,
 			record_type,
 			schema_is_implicit,
@@ -2718,6 +2736,7 @@ fn store_field_path_into_record_pointer(
 		locked,
 		original_fields,
 		primary_key_column_names,
+		projected_values,
 		persisted,
 		record_type,
 		schema_is_implicit,
@@ -3008,6 +3027,7 @@ mod tests {
 						locked: false,
 						original_fields: BTreeMap::new(),
 						primary_key_column_names: Vec::new(),
+						projected_values: BTreeMap::new(),
 						persisted: true,
 						record_type: RecordPointerType {
 							database_name: String::from("ExampleDb"),
