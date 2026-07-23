@@ -387,6 +387,7 @@ impl SemanticAnalyzer {
 					.map(|query| AnalyzedQueryMetadata {
 						captured_parameters: query.captured_parameters(),
 						database_name: query.database_name.clone(),
+						expressions_are_infallible: query.expressions_are_infallible(),
 						is_read_only: true,
 						record_slot: None,
 						result_semantics: PlannedQueryResultSemantics {
@@ -401,6 +402,7 @@ impl SemanticAnalyzer {
 					.map(|query| AnalyzedQueryMetadata {
 						captured_parameters: query.captured_parameters(),
 						database_name: query.database_name.clone(),
+						expressions_are_infallible: query.expressions_are_infallible(),
 						is_read_only: query.lock_mode == RecordLockMode::None,
 						record_slot: None,
 						result_semantics: PlannedQueryResultSemantics {
@@ -415,6 +417,7 @@ impl SemanticAnalyzer {
 					.map(|query| AnalyzedQueryMetadata {
 						captured_parameters: query.captured_parameters(),
 						database_name: query.database_name.clone(),
+						expressions_are_infallible: query.expressions_are_infallible(),
 						is_read_only: query.lock_mode == RecordLockMode::None,
 						record_slot: record_binding_position
 							.and_then(|position| self.semantic_program.declaration_slots.get(&position).copied()),
@@ -5254,6 +5257,94 @@ mod tests {
 	}
 
 	#[test]
+	fn proves_only_semantically_equivalent_correlated_count_merge() {
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Divisor int not null
+				);
+				create table Orders (
+					CustomerId int not null,
+					Amount int not null
+				);
+			"#,
+			"ExampleDb",
+		);
+		let program = parse_program(
+			concat!(
+				"with exampledb;\n",
+				"fn Main(args: [text]) int {\n",
+				"  for rec safeCustomer in Customers {\n",
+				"    var safeCount: int = count Orders where CustomerId == safeCustomer.Id;\n",
+				"  }\n",
+				"  for rec earlyCustomer in Customers {\n",
+				"    var earlyCount: int = count Orders where CustomerId == earlyCustomer.Id;\n",
+				"    break;\n",
+				"  }\n",
+				"  for rec fallibleCustomer in Customers {\n",
+				"    var fallibleCount: int = count Orders where CustomerId == fallibleCustomer.Id and Amount / fallibleCustomer.Divisor > 0;\n",
+				"  }\n",
+				"  return 0;\n",
+				"}",
+			),
+		);
+		let Statement::ForRecord(safe_loop) = &program.functions[0].body.statements[0] else {
+			panic!("Expected safe parent query.");
+		};
+		let Statement::ForRecord(early_exit_loop) = &program.functions[0].body.statements[1] else {
+			panic!("Expected early-exit parent query.");
+		};
+		let Statement::ForRecord(fallible_loop) = &program.functions[0].body.statements[2] else {
+			panic!("Expected fallible parent query.");
+		};
+		let count_position = |statement: &ForRecordStatement| {
+			let Statement::VariableDeclaration(VariableDeclaration {
+				initial_value: Some(Expr::Count(count)),
+				..
+			}) = &statement.body.statements[0] else {
+				panic!("Expected nested count query.");
+			};
+			count.position
+		};
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap();
+		let query_plan = semantic_program.query_plan();
+		let query_at_position = |position| query_plan.queries().iter()
+			.find(|query| query.position == position)
+			.unwrap();
+		let safe_parent = query_at_position(safe_loop.position);
+		let safe_count = query_at_position(count_position(safe_loop));
+		let early_exit_parent = query_at_position(early_exit_loop.position);
+		let early_exit_count = query_at_position(count_position(early_exit_loop));
+		let fallible_count = query_at_position(count_position(fallible_loop));
+
+		assert_eq!(
+			safe_count.proven_optimization,
+			Some(PlannedQueryOptimizationStrategy::MergeCorrelatedCountWith {
+				query: safe_parent.id,
+			}),
+		);
+		assert!(early_exit_parent.body_may_exit_early);
+		assert!(!early_exit_count.optimization_opportunities.is_empty());
+		assert_eq!(early_exit_count.proven_optimization, None);
+		assert_eq!(
+			early_exit_count.execution.independent_reason(),
+			Some(PlannedQueryIndependentReason::SemanticEquivalenceNotProven),
+		);
+		assert_eq!(fallible_count.expressions_are_infallible, Some(false));
+		assert!(!fallible_count.optimization_opportunities.is_empty());
+		assert_eq!(fallible_count.proven_optimization, None);
+		assert_eq!(
+			fallible_count.execution.independent_reason(),
+			Some(PlannedQueryIndependentReason::SemanticEquivalenceNotProven),
+		);
+	}
+
+	#[test]
 	fn records_compound_record_pointer_assignment_as_read_and_write() {
 		let schema = sqlite_test_schema(
 			r#"
@@ -5533,8 +5624,13 @@ mod tests {
 		let inner_query = query_plan.queries().iter()
 			.find(|query| query.position == inner_loop.position)
 			.unwrap();
-		let expected_opportunity = vec![
+		let expected_general_opportunity = vec![
 			PlannedQueryOptimizationOpportunity::MergeOrBatchWith {
+				query: outer_query.id,
+			},
+		];
+		let expected_count_opportunity = vec![
+			PlannedQueryOptimizationOpportunity::MergeCorrelatedCountWith {
 				query: outer_query.id,
 			},
 		];
@@ -5567,9 +5663,17 @@ mod tests {
 			has_limit: false,
 			has_ordering: true,
 		}));
-		assert_eq!(find_query.optimization_opportunities, expected_opportunity);
-		assert_eq!(count_query.optimization_opportunities, expected_opportunity);
-		assert_eq!(inner_query.optimization_opportunities, expected_opportunity);
+		assert_eq!(find_query.optimization_opportunities, expected_general_opportunity);
+		assert_eq!(count_query.optimization_opportunities, expected_count_opportunity);
+		assert_eq!(inner_query.optimization_opportunities, expected_general_opportunity);
+		assert_eq!(
+			count_query.proven_optimization,
+			Some(PlannedQueryOptimizationStrategy::MergeCorrelatedCountWith {
+				query: outer_query.id,
+			}),
+		);
+		assert_eq!(find_query.proven_optimization, None);
+		assert_eq!(inner_query.proven_optimization, None);
 		assert_eq!(
 			outer_query.execution.independent_reason(),
 			Some(PlannedQueryIndependentReason::NoOptimizationOpportunity),

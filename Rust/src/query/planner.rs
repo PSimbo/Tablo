@@ -55,7 +55,17 @@ pub enum PlannedQueryKind {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlannedQueryOptimizationOpportunity {
+	MergeCorrelatedCountWith {
+		query: PlannedQueryId,
+	},
 	MergeOrBatchWith {
+		query: PlannedQueryId,
+	},
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlannedQueryOptimizationStrategy {
+	MergeCorrelatedCountWith {
 		query: PlannedQueryId,
 	},
 }
@@ -80,17 +90,20 @@ pub enum PlannedQueryResultCardinality {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlannedQuery {
+	pub body_may_exit_early: bool,
 	pub body_may_have_side_effects: bool,
 	pub captured_parameters: Vec<PlannedQueryParameter>,
 	pub control_flow: PlannedQueryControlFlow,
 	pub database_name: Option<String>,
 	pub enclosing_query: Option<PlannedQueryId>,
 	pub execution: PlannedQueryExecution,
+	pub expressions_are_infallible: Option<bool>,
 	pub id: PlannedQueryId,
 	pub is_read_only: Option<bool>,
 	pub kind: PlannedQueryKind,
 	pub optimization_opportunities: Vec<PlannedQueryOptimizationOpportunity>,
 	pub position: usize,
+	pub proven_optimization: Option<PlannedQueryOptimizationStrategy>,
 	pub record_slot: Option<u32>,
 	pub result_semantics: Option<PlannedQueryResultSemantics>,
 	pub transaction_scopes: Vec<PlannedTransactionScopeId>,
@@ -138,6 +151,7 @@ impl ProgramQueryPlan {
 	pub(crate) fn disable_optimizations(&mut self) {
 		for query in &mut self.queries {
 			query.optimization_opportunities.clear();
+			query.proven_optimization = None;
 			query.execution = PlannedQueryExecution::Independent {
 				reason: PlannedQueryIndependentReason::OptimizationsDisabled,
 			};
@@ -172,6 +186,7 @@ impl ProgramQueryPlan {
 				})
 				.collect();
 			query.database_name = Some(metadata.database_name);
+			query.expressions_are_infallible = Some(metadata.expressions_are_infallible);
 			query.is_read_only = Some(metadata.is_read_only);
 			query.record_slot = metadata.record_slot;
 			query.result_semantics = Some(metadata.result_semantics);
@@ -179,6 +194,7 @@ impl ProgramQueryPlan {
 
 		self.classify_parameter_sources();
 		self.identify_nested_read_only_opportunities();
+		self.prove_optimization_equivalence();
 		self.finalize_execution_decisions();
 	}
 
@@ -207,7 +223,20 @@ impl ProgramQueryPlan {
 
 	fn finalize_execution_decisions(&mut self) {
 		for query in &mut self.queries {
-			let reason = if !query.optimization_opportunities.is_empty() {
+			let has_correlated_count_opportunity = query.optimization_opportunities.iter()
+				.any(|opportunity| {
+					matches!(
+						opportunity,
+						PlannedQueryOptimizationOpportunity::MergeCorrelatedCountWith { .. },
+					)
+				});
+			let reason = if query.proven_optimization.is_some() {
+				PlannedQueryIndependentReason::NoSupportedStrategy
+			}
+			else if has_correlated_count_opportunity {
+				PlannedQueryIndependentReason::SemanticEquivalenceNotProven
+			}
+			else if !query.optimization_opportunities.is_empty() {
 				PlannedQueryIndependentReason::NoSupportedStrategy
 			}
 			else if query.enclosing_query.is_some() {
@@ -248,8 +277,68 @@ impl ProgramQueryPlan {
 				&& !enclosing_query.body_may_have_side_effects
 				&& captures_enclosing_record
 				&& captures_only_query_records {
-				self.queries[query_index].optimization_opportunities.push(
-					PlannedQueryOptimizationOpportunity::MergeOrBatchWith {
+				let opportunity = match self.queries[query_index].kind {
+					PlannedQueryKind::Count => PlannedQueryOptimizationOpportunity::MergeCorrelatedCountWith {
+						query: enclosing_query_id,
+					},
+					PlannedQueryKind::Find | PlannedQueryKind::ForRecord => {
+						PlannedQueryOptimizationOpportunity::MergeOrBatchWith {
+							query: enclosing_query_id,
+						}
+					}
+				};
+				self.queries[query_index].optimization_opportunities.push(opportunity);
+			}
+		}
+	}
+
+	fn prove_optimization_equivalence(&mut self) {
+		for query_index in 0..self.queries.len() {
+			let Some(PlannedQueryOptimizationOpportunity::MergeCorrelatedCountWith {
+				query: enclosing_query_id,
+			}) = self.queries[query_index].optimization_opportunities.iter()
+				.find(|opportunity| {
+					matches!(
+						opportunity,
+						PlannedQueryOptimizationOpportunity::MergeCorrelatedCountWith { .. },
+					)
+				})
+				.copied()
+			else {
+				continue;
+			};
+			let query = &self.queries[query_index];
+			let enclosing_query = &self.queries[enclosing_query_id.0];
+			let query_semantics_are_scalar = query.result_semantics.as_ref().is_some_and(|semantics| {
+				semantics.cardinality == PlannedQueryResultCardinality::Scalar
+					&& semantics.error_timing == PlannedQueryErrorTiming::AtQueryStart
+					&& !semantics.has_grouping
+					&& !semantics.has_limit
+					&& !semantics.has_ordering
+			});
+			let enclosing_semantics_are_records = enclosing_query.result_semantics.as_ref()
+				.is_some_and(|semantics| semantics.cardinality == PlannedQueryResultCardinality::Many);
+			let parameters_are_captured_at_query_start = query.captured_parameters.iter()
+				.all(|parameter| {
+					parameter.evaluation == PlannedQueryParameterEvaluation::AtQueryStart
+						&& matches!(parameter.source, PlannedQueryParameterSource::EnclosingQuery(_))
+				});
+
+			if query.kind == PlannedQueryKind::Count
+				&& enclosing_query.kind == PlannedQueryKind::ForRecord
+				&& query.control_flow == PlannedQueryControlFlow::Direct
+				&& query.database_name == enclosing_query.database_name
+				&& query.transaction_scopes == enclosing_query.transaction_scopes
+				&& query.is_read_only == Some(true)
+				&& enclosing_query.is_read_only == Some(true)
+				&& query.expressions_are_infallible == Some(true)
+				&& !enclosing_query.body_may_exit_early
+				&& !enclosing_query.body_may_have_side_effects
+				&& query_semantics_are_scalar
+				&& enclosing_semantics_are_records
+				&& parameters_are_captured_at_query_start {
+				self.queries[query_index].proven_optimization = Some(
+					PlannedQueryOptimizationStrategy::MergeCorrelatedCountWith {
 						query: enclosing_query_id,
 					},
 				);
@@ -262,6 +351,7 @@ impl ProgramQueryPlan {
 pub(crate) struct AnalyzedQueryMetadata {
 	pub captured_parameters: Vec<QueryParameter>,
 	pub database_name: String,
+	pub expressions_are_infallible: bool,
 	pub is_read_only: bool,
 	pub record_slot: Option<u32>,
 	pub result_semantics: PlannedQueryResultSemantics,
@@ -285,6 +375,7 @@ impl QueryPlanBuilder {
 	) -> PlannedQueryId {
 		let id = PlannedQueryId(self.queries.len());
 		self.queries.push(PlannedQuery {
+			body_may_exit_early: false,
 			body_may_have_side_effects: false,
 			captured_parameters: Vec::new(),
 			control_flow: self.control_flow,
@@ -293,11 +384,13 @@ impl QueryPlanBuilder {
 			execution: PlannedQueryExecution::Independent {
 				reason: PlannedQueryIndependentReason::AnalysisIncomplete,
 			},
+			expressions_are_infallible: None,
 			id,
 			is_read_only: None,
 			kind,
 			optimization_opportunities: Vec::new(),
 			position,
+			proven_optimization: None,
 			record_binding_position,
 			record_slot: None,
 			result_semantics: None,
@@ -437,6 +530,7 @@ impl QueryPlanBuilder {
 			self.visit_expression(limit, Some(query_id));
 		}
 
+		self.queries[query_id.0].body_may_exit_early = block_may_exit_early(&statement.body);
 		self.queries[query_id.0].body_may_have_side_effects = block_may_have_side_effects(&statement.body);
 		let previous_control_flow = self.control_flow;
 		self.control_flow = PlannedQueryControlFlow::Direct;
@@ -543,6 +637,10 @@ pub fn plan_program_queries(program: &AstProgram) -> ProgramQueryPlan {
 	}
 }
 
+fn block_may_exit_early(block: &BlockStatement) -> bool {
+	block.statements.iter().any(statement_may_exit_early)
+}
+
 fn block_may_have_side_effects(block: &BlockStatement) -> bool {
 	block.statements.iter().any(statement_may_have_side_effects)
 }
@@ -587,6 +685,32 @@ fn expression_may_have_side_effects(expression: &Expr) -> bool {
 		| Expr::TimeTz(_)
 		| Expr::Timestamp(_)
 		| Expr::TimestampTz(_) => false,
+	}
+}
+
+fn statement_may_exit_early(statement: &Statement) -> bool {
+	match statement {
+		Statement::Block(block) | Statement::Transaction(TransactionStatement { body: block, .. }) => {
+			block_may_exit_early(block)
+		}
+		Statement::For(statement) => block_may_exit_early(&statement.body),
+		Statement::ForRecord(statement) => block_may_exit_early(&statement.body),
+		Statement::FunctionDeclaration(_) => false,
+		Statement::If(statement) => {
+			block_may_exit_early(&statement.then_branch)
+				|| statement.else_branch.as_ref()
+					.is_some_and(|branch| statement_may_exit_early(branch))
+		}
+		Statement::While(statement) => block_may_exit_early(&statement.body),
+		Statement::Break(_) | Statement::Continue(_) | Statement::Return(_) => true,
+		Statement::Create(_)
+		| Statement::Delete(_)
+		| Statement::EnumDeclaration(_)
+		| Statement::Expression(_)
+		| Statement::RecordPointerDeclaration(_)
+		| Statement::Update(_)
+		| Statement::Use(_)
+		| Statement::VariableDeclaration(_) => false,
 	}
 }
 
@@ -682,6 +806,7 @@ mod tests {
 				return Some(AnalyzedQueryMetadata {
 					captured_parameters: Vec::new(),
 					database_name: String::from("Primary"),
+					expressions_are_infallible: true,
 					is_read_only: true,
 					record_slot: Some(outer_slot),
 					result_semantics: PlannedQueryResultSemantics {
@@ -702,6 +827,7 @@ mod tests {
 						slot: outer_slot,
 					}],
 					database_name: String::from("Secondary"),
+					expressions_are_infallible: true,
 					is_read_only: true,
 					record_slot: Some(2),
 					result_semantics: PlannedQueryResultSemantics {
@@ -806,6 +932,7 @@ mod tests {
 
 		assert_eq!(plan.queries().len(), 4);
 		assert_eq!(plan.query(outer_query.id), Some(&PlannedQuery {
+			body_may_exit_early: false,
 			body_may_have_side_effects: false,
 			captured_parameters: Vec::new(),
 			control_flow: PlannedQueryControlFlow::Direct,
@@ -814,11 +941,13 @@ mod tests {
 			execution: PlannedQueryExecution::Independent {
 				reason: PlannedQueryIndependentReason::AnalysisIncomplete,
 			},
+			expressions_are_infallible: None,
 			id: outer_query.id,
 			is_read_only: None,
 			kind: PlannedQueryKind::ForRecord,
 			optimization_opportunities: Vec::new(),
 			position: outer_loop.position,
+			proven_optimization: None,
 			record_binding_position: Some(outer_loop.variable.position),
 			record_slot: None,
 			result_semantics: None,

@@ -170,6 +170,10 @@ impl QueryCountPlan {
 
 		parameters
 	}
+
+	pub(crate) fn expressions_are_infallible(&self) -> bool {
+		self.filter.as_ref().is_none_or(query_expression_is_infallible)
+	}
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -199,6 +203,11 @@ impl QueryFindPlan {
 		}
 
 		parameters
+	}
+
+	pub(crate) fn expressions_are_infallible(&self) -> bool {
+		self.filter.as_ref().is_none_or(query_expression_is_infallible)
+			&& self.order_by.iter().all(|item| query_expression_is_infallible(&item.expression))
 	}
 }
 
@@ -238,6 +247,12 @@ impl QueryForPlan {
 		}
 
 		parameters
+	}
+
+	pub(crate) fn expressions_are_infallible(&self) -> bool {
+		self.filter.as_ref().is_none_or(query_expression_is_infallible)
+			&& self.group_by.iter().all(|item| query_expression_is_infallible(&item.expression))
+			&& self.order_by.iter().all(|item| query_expression_is_infallible(&item.expression))
 	}
 }
 
@@ -397,6 +412,34 @@ fn collect_query_parameters(expression: &QueryExpr, parameters: &mut Vec<QueryPa
 fn push_query_parameter(parameter: &QueryParameter, parameters: &mut Vec<QueryParameter>) {
 	if !parameters.contains(parameter) {
 		parameters.push(parameter.clone());
+	}
+}
+
+fn query_expression_is_infallible(expression: &QueryExpr) -> bool {
+	match expression {
+		QueryExpr::ArrayLiteral(elements) => elements.iter().all(query_expression_is_infallible),
+		QueryExpr::Binary(binary) => {
+			matches!(
+				binary.operator,
+				QueryBinaryOperator::And
+					| QueryBinaryOperator::Equal
+					| QueryBinaryOperator::GreaterThan
+					| QueryBinaryOperator::GreaterThanOrEqual
+					| QueryBinaryOperator::LessThan
+					| QueryBinaryOperator::LessThanOrEqual
+					| QueryBinaryOperator::NotEqual
+					| QueryBinaryOperator::Or
+					| QueryBinaryOperator::Xor
+			)
+				&& query_expression_is_infallible(&binary.left)
+				&& query_expression_is_infallible(&binary.right)
+		}
+		QueryExpr::Unary(unary) => {
+			unary.operator == QueryUnaryOperator::Not
+				&& query_expression_is_infallible(&unary.operand)
+		}
+		QueryExpr::Column(_) | QueryExpr::Literal(_) | QueryExpr::Parameter(_) => true,
+		QueryExpr::BuiltInCall(_) => false,
 	}
 }
 

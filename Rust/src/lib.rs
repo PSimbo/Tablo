@@ -2448,10 +2448,17 @@ mod tests {
 
 		assert_eq!(planned_candidates.len(), 3);
 		assert!(planned_candidates.iter().all(|query| {
-			query.execution.independent_reason() == Some(PlannedQueryIndependentReason::NoSupportedStrategy)
+			let expected_reason = match query.kind {
+				PlannedQueryKind::Count => PlannedQueryIndependentReason::SemanticEquivalenceNotProven,
+				PlannedQueryKind::Find | PlannedQueryKind::ForRecord => {
+					PlannedQueryIndependentReason::NoSupportedStrategy
+				}
+			};
+			query.execution.independent_reason() == Some(expected_reason)
 		}));
 		assert!(unoptimized_semantics.query_plan().queries().iter().all(|query| {
 			query.optimization_opportunities.is_empty()
+				&& query.proven_optimization.is_none()
 				&& query.execution.independent_reason() == Some(PlannedQueryIndependentReason::OptimizationsDisabled)
 		}));
 
