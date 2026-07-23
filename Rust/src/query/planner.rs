@@ -1,5 +1,7 @@
 use crate::ast::*;
 
+use super::QueryParameter;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlannedQueryExecution {
 	Independent,
@@ -12,8 +14,14 @@ pub enum PlannedQueryKind {
 	ForRecord,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlannedQueryParameterEvaluation {
+	AtQueryStart,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlannedQuery {
+	pub captured_parameters: Vec<PlannedQueryParameter>,
 	pub enclosing_query: Option<PlannedQueryId>,
 	pub execution: PlannedQueryExecution,
 	pub id: PlannedQueryId,
@@ -23,6 +31,14 @@ pub struct PlannedQuery {
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct PlannedQueryId(pub usize);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlannedQueryParameter {
+	pub data_type: DataType,
+	pub evaluation: PlannedQueryParameterEvaluation,
+	pub field_path: Vec<String>,
+	pub slot: u32,
+}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ProgramQueryPlan {
@@ -36,6 +52,23 @@ impl ProgramQueryPlan {
 
 	pub fn query(&self, id: PlannedQueryId) -> Option<&PlannedQuery> {
 		self.queries.get(id.0)
+	}
+
+	pub(crate) fn populate_captured_parameters(
+		&mut self,
+		mut parameters_for_query: impl FnMut(PlannedQueryKind, usize) -> Vec<QueryParameter>,
+	) {
+		for query in &mut self.queries {
+			query.captured_parameters = parameters_for_query(query.kind, query.position)
+				.into_iter()
+				.map(|parameter| PlannedQueryParameter {
+					data_type: parameter.data_type,
+					evaluation: PlannedQueryParameterEvaluation::AtQueryStart,
+					field_path: parameter.field_path,
+					slot: parameter.slot,
+				})
+				.collect();
+		}
 	}
 }
 
@@ -53,6 +86,7 @@ impl QueryPlanBuilder {
 	) -> PlannedQueryId {
 		let id = PlannedQueryId(self.queries.len());
 		self.queries.push(PlannedQuery {
+			captured_parameters: Vec::new(),
 			enclosing_query,
 			execution: PlannedQueryExecution::Independent,
 			id,
@@ -348,6 +382,7 @@ mod tests {
 
 		assert_eq!(plan.queries().len(), 4);
 		assert_eq!(plan.query(outer_query.id), Some(&PlannedQuery {
+			captured_parameters: Vec::new(),
 			enclosing_query: None,
 			execution: PlannedQueryExecution::Independent,
 			id: outer_query.id,

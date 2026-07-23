@@ -160,6 +160,18 @@ pub struct QueryCountPlan {
 	pub table_name: String,
 }
 
+impl QueryCountPlan {
+	pub fn captured_parameters(&self) -> Vec<QueryParameter> {
+		let mut parameters = Vec::new();
+
+		if let Some(filter) = &self.filter {
+			collect_query_parameters(filter, &mut parameters);
+		}
+
+		parameters
+	}
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryFindPlan {
 	pub backend: DatabaseBackend,
@@ -172,6 +184,22 @@ pub struct QueryFindPlan {
 	pub schema_is_implicit: bool,
 	pub schema_name: String,
 	pub table_name: String,
+}
+
+impl QueryFindPlan {
+	pub fn captured_parameters(&self) -> Vec<QueryParameter> {
+		let mut parameters = Vec::new();
+
+		if let Some(filter) = &self.filter {
+			collect_query_parameters(filter, &mut parameters);
+		}
+
+		for item in &self.order_by {
+			collect_query_parameters(&item.expression, &mut parameters);
+		}
+
+		parameters
+	}
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -187,6 +215,30 @@ pub struct QueryForPlan {
 	pub schema_is_implicit: bool,
 	pub schema_name: String,
 	pub table_name: String,
+}
+
+impl QueryForPlan {
+	pub fn captured_parameters(&self) -> Vec<QueryParameter> {
+		let mut parameters = Vec::new();
+
+		if let Some(filter) = &self.filter {
+			collect_query_parameters(filter, &mut parameters);
+		}
+
+		for item in &self.group_by {
+			collect_query_parameters(&item.expression, &mut parameters);
+		}
+
+		for item in &self.order_by {
+			collect_query_parameters(&item.expression, &mut parameters);
+		}
+
+		if let Some(limit) = &self.limit {
+			push_query_parameter(limit, &mut parameters);
+		}
+
+		parameters
+	}
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -317,6 +369,34 @@ pub(super) fn effective_find_order_direction(kind: FindKind, direction: OrderByD
 			OrderByDirection::Ascending => OrderByDirection::Descending,
 			OrderByDirection::Descending => OrderByDirection::Ascending,
 		},
+	}
+}
+
+fn collect_query_parameters(expression: &QueryExpr, parameters: &mut Vec<QueryParameter>) {
+	match expression {
+		QueryExpr::ArrayLiteral(elements) => {
+			for element in elements {
+				collect_query_parameters(element, parameters);
+			}
+		}
+		QueryExpr::Binary(binary) => {
+			collect_query_parameters(&binary.left, parameters);
+			collect_query_parameters(&binary.right, parameters);
+		}
+		QueryExpr::BuiltInCall(call) => {
+			for argument in &call.arguments {
+				collect_query_parameters(argument, parameters);
+			}
+		}
+		QueryExpr::Parameter(parameter) => push_query_parameter(parameter, parameters),
+		QueryExpr::Unary(unary) => collect_query_parameters(&unary.operand, parameters),
+		QueryExpr::Column(_) | QueryExpr::Literal(_) => {}
+	}
+}
+
+fn push_query_parameter(parameter: &QueryParameter, parameters: &mut Vec<QueryParameter>) {
+	if !parameters.contains(parameter) {
+		parameters.push(parameter.clone());
 	}
 }
 

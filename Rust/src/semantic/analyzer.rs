@@ -400,7 +400,19 @@ impl SemanticAnalyzer {
 		self.enums.exit_scope();
 		self.finalize_record_pointer_usage(program);
 		self.apply_record_pointer_field_selections()?;
-		self.semantic_program.query_plan = plan_program_queries(program);
+		let mut query_plan = plan_program_queries(program);
+		query_plan.populate_captured_parameters(|kind, position| {
+			match kind {
+				PlannedQueryKind::Count => self.semantic_program.lowered_count_queries.get(&position)
+					.map(QueryCountPlan::captured_parameters),
+				PlannedQueryKind::Find => self.semantic_program.lowered_find_queries.get(&position)
+					.map(QueryFindPlan::captured_parameters),
+				PlannedQueryKind::ForRecord => self.semantic_program.lowered_for_record_queries.get(&position)
+					.map(QueryForPlan::captured_parameters),
+			}
+			.unwrap_or_default()
+		});
+		self.semantic_program.query_plan = query_plan;
 
 		Ok(self.semantic_program.clone())
 	}
@@ -5410,6 +5422,89 @@ mod tests {
 		assert!(query_plan.queries().iter().all(|query| {
 			query.execution == PlannedQueryExecution::Independent
 		}));
+	}
+
+	#[test]
+	fn records_query_parameter_dependencies_at_query_start() {
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null
+				);
+				create table Orders (
+					Id int not null,
+					CustomerId int not null
+				);
+			"#,
+			"ExampleDb",
+		);
+		let program = parse_program(
+			concat!(
+				"with exampledb;\n",
+				"fn Main(args: [text]) int {\n",
+				"  var minimumId: int = 1;\n",
+				"  var customerCount: int = count Customers where Id >= minimumId and Id != minimumId;\n",
+				"  rec firstCustomer = find first Customers where Id >= minimumId;\n",
+				"  for rec customer in Customers where Id >= minimumId {\n",
+				"    for rec customerOrder in Orders where CustomerId == customer.Id and Id >= minimumId {}\n",
+				"  }\n",
+				"  return 0;\n",
+				"}",
+			),
+		);
+		let Statement::VariableDeclaration(minimum_id) = &program.functions[0].body.statements[0] else {
+			panic!("Expected minimum ID declaration.");
+		};
+		let Statement::VariableDeclaration(VariableDeclaration {
+			initial_value: Some(Expr::Count(count)),
+			..
+		}) = &program.functions[0].body.statements[1] else {
+			panic!("Expected count query.");
+		};
+		let Statement::RecordPointerDeclaration(RecordPointerDeclaration {
+			initial_value: Expr::Find(find),
+			..
+		}) = &program.functions[0].body.statements[2] else {
+			panic!("Expected find query.");
+		};
+		let Statement::ForRecord(outer_loop) = &program.functions[0].body.statements[3] else {
+			panic!("Expected outer record loop.");
+		};
+		let Statement::ForRecord(inner_loop) = &outer_loop.body.statements[0] else {
+			panic!("Expected inner record loop.");
+		};
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap();
+		let minimum_id_slot = semantic_program.declaration_slot(minimum_id.position).unwrap();
+		let customer_slot = semantic_program.declaration_slot(outer_loop.variable.position).unwrap();
+		let query_plan = semantic_program.query_plan();
+		let query_at_position = |position| query_plan.queries().iter()
+			.find(|query| query.position == position)
+			.unwrap();
+		let minimum_id_parameter = PlannedQueryParameter {
+			data_type: DataType::Int,
+			evaluation: PlannedQueryParameterEvaluation::AtQueryStart,
+			field_path: Vec::new(),
+			slot: minimum_id_slot,
+		};
+		let customer_id_parameter = PlannedQueryParameter {
+			data_type: DataType::Int,
+			evaluation: PlannedQueryParameterEvaluation::AtQueryStart,
+			field_path: vec![String::from("Id")],
+			slot: customer_slot,
+		};
+
+		assert_eq!(query_at_position(count.position).captured_parameters, vec![minimum_id_parameter.clone()]);
+		assert_eq!(query_at_position(find.position).captured_parameters, vec![minimum_id_parameter.clone()]);
+		assert_eq!(query_at_position(outer_loop.position).captured_parameters, vec![minimum_id_parameter.clone()]);
+
+		let inner_parameters = &query_at_position(inner_loop.position).captured_parameters;
+		assert_eq!(inner_parameters.len(), 2);
+		assert!(inner_parameters.contains(&customer_id_parameter));
+		assert!(inner_parameters.contains(&minimum_id_parameter));
 	}
 
 	#[test]
