@@ -2479,6 +2479,249 @@ mod tests {
 	}
 
 	#[test]
+	fn merged_correlated_count_handles_empty_null_duplicate_and_multiple_row_results() {
+		let database_path = create_sqlite_test_database(
+			"merged_correlated_count_handles_empty_null_duplicate_and_multiple_row_results",
+			r#"
+				CREATE TABLE Parents (
+					Id INTEGER NOT NULL,
+					CorrelationKey INTEGER,
+					ExpectedCount INTEGER NOT NULL
+				);
+				CREATE TABLE Children (
+					CorrelationKey INTEGER
+				);
+				INSERT INTO Parents (Id, CorrelationKey, ExpectedCount) VALUES
+					(1, NULL, 0),
+					(2, 7, 3),
+					(3, 7, 3),
+					(4, 8, 0);
+				INSERT INTO Children (CorrelationKey) VALUES
+					(NULL),
+					(NULL),
+					(7),
+					(7),
+					(7),
+					(9);
+			"#,
+		);
+		let schema = schema_catalog_from_fixture_with_backends(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Parents (
+					Id int not null,
+					CorrelationKey int null,
+					ExpectedCount int not null
+				);
+				create table Children (
+					CorrelationKey int null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let source = concat!(
+			"with exampledb;\n",
+			"fn Main(args: [text]) int {\n",
+			"  for rec parent in Parents order by Id {\n",
+			"    var childCount: int = count Children where CorrelationKey == parent.CorrelationKey;\n",
+			"    var checked: int = [0][childCount == parent.ExpectedCount ? 1 : 2];\n",
+			"  }\n",
+			"  for rec missing in Parents where Id < 0 {\n",
+			"    var missingCount: int = count Children where CorrelationKey == missing.CorrelationKey;\n",
+			"    var unreachable: int = [0][2];\n",
+			"  }\n",
+			"  return 0;\n",
+			"}",
+		);
+		let (planned_program, planned_semantics) =
+			compile_standalone_with_query_optimizations(source, &schema, true).unwrap();
+		let (unoptimized_program, _) =
+			compile_standalone_with_query_optimizations(source, &schema, false).unwrap();
+		let merge_count = planned_semantics.query_plan().queries().iter()
+			.filter(|query| matches!(query.execution, PlannedQueryExecution::MergeWith { .. }))
+			.count();
+
+		assert_eq!(merge_count, 2, "{:#?}", planned_semantics.query_plan().queries());
+		assert_eq!(planned_program.queries().len(), 2);
+		assert_eq!(unoptimized_program.queries().len(), 4);
+
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let planned_result = run_program_with_database_config(&planned_program, database_config.clone()).unwrap();
+		let unoptimized_result = run_program_with_database_config(&unoptimized_program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(planned_result, Some(Value::Integer(0)));
+		assert_eq!(planned_result, unoptimized_result);
+	}
+
+	#[test]
+	fn merged_correlated_count_runs_in_grouped_limited_loop_inside_nested_transactions() {
+		let database_path = create_sqlite_test_database(
+			"merged_correlated_count_runs_in_grouped_limited_loop_inside_nested_transactions",
+			r#"
+				CREATE TABLE Parents (
+					Id INTEGER NOT NULL,
+					GroupKey TEXT NOT NULL,
+					ExpectedCount INTEGER NOT NULL
+				);
+				CREATE TABLE Children (
+					GroupKey TEXT NOT NULL
+				);
+				INSERT INTO Parents (Id, GroupKey, ExpectedCount) VALUES
+					(1, 'A', 2),
+					(2, 'A', 2),
+					(3, 'B', 1),
+					(4, 'C', 99);
+				INSERT INTO Children (GroupKey) VALUES
+					('A'),
+					('A'),
+					('B');
+			"#,
+		);
+		let schema = schema_catalog_from_fixture_with_backends(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Parents (
+					Id int not null,
+					GroupKey text not null,
+					ExpectedCount int not null
+				);
+				create table Children (
+					GroupKey text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let source = concat!(
+			"with exampledb;\n",
+			"fn Main(args: [text]) int {\n",
+			"  transaction {\n",
+			"    transaction {\n",
+			"      for rec parent in Parents group by GroupKey limit 3 {\n",
+			"        var childCount: int = count Children where GroupKey == parent.GroupKey;\n",
+			"        var checked: int = [0][childCount == parent.ExpectedCount ? 1 : 2];\n",
+			"      }\n",
+			"    }\n",
+			"  }\n",
+			"  return 0;\n",
+			"}",
+		);
+		let (planned_program, planned_semantics) =
+			compile_standalone_with_query_optimizations(source, &schema, true).unwrap();
+		let (unoptimized_program, _) =
+			compile_standalone_with_query_optimizations(source, &schema, false).unwrap();
+		let merged_query = planned_semantics.query_plan().queries().iter()
+			.find(|query| matches!(query.execution, PlannedQueryExecution::MergeWith { .. }))
+			.unwrap_or_else(|| panic!("{:#?}", planned_semantics.query_plan().queries()));
+
+		assert_eq!(merged_query.transaction_scopes.len(), 2);
+		assert_eq!(planned_program.queries().len(), 1);
+		assert_eq!(unoptimized_program.queries().len(), 2);
+
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let planned_result = run_program_with_database_config(&planned_program, database_config.clone()).unwrap();
+		let unoptimized_result = run_program_with_database_config(&unoptimized_program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(planned_result, Some(Value::Integer(0)));
+		assert_eq!(planned_result, unoptimized_result);
+	}
+
+	#[test]
+	fn merged_correlated_count_supports_multi_level_query_nesting() {
+		let database_path = create_sqlite_test_database(
+			"merged_correlated_count_supports_multi_level_query_nesting",
+			r#"
+				CREATE TABLE Parents (
+					Id INTEGER NOT NULL
+				);
+				CREATE TABLE Children (
+					Id INTEGER NOT NULL,
+					ParentId INTEGER NOT NULL,
+					ExpectedCount INTEGER NOT NULL
+				);
+				CREATE TABLE Grandchildren (
+					ChildId INTEGER NOT NULL
+				);
+				INSERT INTO Parents (Id) VALUES (1), (2), (3);
+				INSERT INTO Children (Id, ParentId, ExpectedCount) VALUES
+					(10, 1, 2),
+					(11, 1, 0),
+					(20, 2, 1);
+				INSERT INTO Grandchildren (ChildId) VALUES
+					(10),
+					(10),
+					(20);
+			"#,
+		);
+		let schema = schema_catalog_from_fixture_with_backends(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Parents (
+					Id int not null
+				);
+				create table Children (
+					Id int not null,
+					ParentId int not null,
+					ExpectedCount int not null
+				);
+				create table Grandchildren (
+					ChildId int not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let source = concat!(
+			"with exampledb;\n",
+			"fn Main(args: [text]) int {\n",
+			"  for rec parent in Parents order by Id {\n",
+			"    for rec child in Children where ParentId == parent.Id order by Id {\n",
+			"      var grandchildCount: int = count Grandchildren where ChildId == child.Id;\n",
+			"      var checked: int = [0][grandchildCount == child.ExpectedCount ? 1 : 2];\n",
+			"    }\n",
+			"  }\n",
+			"  return 0;\n",
+			"}",
+		);
+		let (planned_program, planned_semantics) =
+			compile_standalone_with_query_optimizations(source, &schema, true).unwrap();
+		let (unoptimized_program, _) =
+			compile_standalone_with_query_optimizations(source, &schema, false).unwrap();
+		let merged_count_query = planned_semantics.query_plan().queries().iter()
+			.find(|query| matches!(query.execution, PlannedQueryExecution::MergeWith { .. }))
+			.unwrap_or_else(|| panic!("{:#?}", planned_semantics.query_plan().queries()));
+		let PlannedQueryExecution::MergeWith {
+			query: enclosing_query_id,
+		} = merged_count_query.execution else {
+			unreachable!();
+		};
+		let enclosing_query = planned_semantics.query_plan().query(enclosing_query_id).unwrap();
+
+		assert_eq!(enclosing_query.kind, PlannedQueryKind::ForRecord);
+		assert!(enclosing_query.enclosing_query.is_some());
+		assert_eq!(
+			enclosing_query.execution.independent_reason(),
+			Some(PlannedQueryIndependentReason::NoSupportedStrategy),
+		);
+		assert_eq!(planned_program.queries().len(), 2);
+		assert_eq!(unoptimized_program.queries().len(), 3);
+
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let planned_result = run_program_with_database_config(&planned_program, database_config.clone()).unwrap();
+		let unoptimized_result = run_program_with_database_config(&unoptimized_program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(planned_result, Some(Value::Integer(0)));
+		assert_eq!(planned_result, unoptimized_result);
+	}
+
+	#[test]
 	fn omits_synthetic_entry_frame_from_standalone_runtime_stack_trace() {
 		let source = "fn inner() int {\n  var xs: [int] = [1];\n  return xs[2];\n}\nfn Main(args: [text]) int {\n  return inner();\n}";
 		let error = run(source).unwrap_err();
