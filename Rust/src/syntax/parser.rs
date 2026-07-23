@@ -364,6 +364,18 @@ impl Parser {
 		if !self.current().is_some_and(|token| token.kind == TokenKind::RightParenthesis) {
 			loop {
 				let argument_position = self.current().map_or(start, |token| token.start);
+				let name = if self.current().is_some_and(|token| token.kind == TokenKind::Identifier)
+					&& self.tokens.get(self.position + 1).is_some_and(|token| token.kind == TokenKind::Colon) {
+					let name = self.next().unwrap();
+					self.next();
+					Some(IdentifierExpr {
+						name: name.lexeme,
+						position: name.start,
+					})
+				}
+				else {
+					None
+				};
 				let is_by_ref = if self.current().is_some_and(|token| token.kind == TokenKind::Ampersand) {
 					self.next();
 					true
@@ -372,8 +384,18 @@ impl Parser {
 					false
 				};
 				let value = self.parse_assignment_expression()?;
+				if let Some(name) = &name
+					&& arguments.iter().any(|argument: &CallArgument| {
+						argument.name.as_ref().is_some_and(|existing| existing.name == name.name)
+					}) {
+					return Err(ParseError {
+						message: format!("Named argument `{}` is provided more than once.", name.name),
+						position: name.position,
+					});
+				}
 				arguments.push(CallArgument {
 					is_by_ref,
+					name,
 					position: argument_position,
 					value,
 				});
@@ -757,6 +779,14 @@ impl Parser {
 			}
 		}
 
+		if let Some(parameter) = parameters.iter().rev().skip(1)
+			.find(|parameter| parameter.is_variadic) {
+			return Err(ParseError {
+				message: String::from("A variadic parameter must be the final parameter."),
+				position: parameter.position,
+			});
+		}
+
 		self.expect_token(TokenKind::RightParenthesis, "Expected `)` after parameter list.")?;
 		let return_type = self.parse_data_type()?;
 		let body = match self.parse_block_statement()? {
@@ -775,6 +805,13 @@ impl Parser {
 	}
 
 	fn parse_function_parameter(&mut self) -> Result<FunctionParameter, ParseError> {
+		let is_variadic = if self.current().is_some_and(|token| token.kind == TokenKind::Ellipsis) {
+			self.next();
+			true
+		}
+		else {
+			false
+		};
 		let name = self.expect_token(TokenKind::Identifier, "Expected parameter name.")?;
 		self.expect_token(TokenKind::Colon, "Expected `:` after parameter name.")?;
 		let is_by_ref = if self.current().is_some_and(|token| token.kind == TokenKind::Ampersand) {
@@ -795,17 +832,39 @@ impl Parser {
 		else {
 			FunctionParameterType::Value(self.parse_data_type()?)
 		};
+		let default_value = if self.current().is_some_and(|token| token.kind == TokenKind::Equal) {
+			self.next();
+			Some(self.parse_assignment_expression()?)
+		}
+		else {
+			None
+		};
+
+		if is_variadic && default_value.is_some() {
+			return Err(ParseError {
+				message: String::from("A variadic parameter may not define a default value."),
+				position: name.start,
+			});
+		}
+		if is_variadic && !matches!(&data_type, FunctionParameterType::Value(DataType::Array(_))) {
+			return Err(ParseError {
+				message: String::from("A variadic parameter must have an array type."),
+				position: name.start,
+			});
+		}
 
 		Ok(FunctionParameter {
 			data_type,
+			default_value,
 			is_by_ref,
+			is_variadic,
 			name: name.lexeme,
 			position: name.start,
 		})
 	}
 
 	fn parse_group_expression(&mut self, start: usize) -> Result<Expr, ParseError> {
-		let expression = self.parse_expression_with_binding_power(BindingPower::Default, false)?;
+		let expression = self.parse_assignment_expression()?;
 		let closing = self.next().ok_or(ParseError {
 			message: String::from("Expected `)` to close grouped expression."),
 			position: start,
@@ -2293,6 +2352,7 @@ mod tests {
 	fn normalize_call_argument(argument: CallArgument) -> CallArgument {
 		CallArgument {
 			is_by_ref: argument.is_by_ref,
+			name: argument.name.map(normalize_identifier),
 			position: 0,
 			value: normalize_expr(argument.value),
 		}
@@ -2506,7 +2566,9 @@ mod tests {
 				}
 				FunctionParameterType::Value(data_type) => FunctionParameterType::Value(data_type),
 			},
+			default_value: parameter.default_value.map(normalize_expr),
 			is_by_ref: parameter.is_by_ref,
+			is_variadic: parameter.is_variadic,
 			name: parameter.name,
 			position: 0,
 		}
@@ -2717,6 +2779,24 @@ mod tests {
 		let tokens = lexer.tokenize().unwrap();
 		let mut parser = Parser::new(tokens);
 		normalize_program(parser.parse_program().unwrap())
+	}
+
+	#[test]
+	fn distinguishes_named_arguments_from_parenthesized_range_arguments() {
+		let Expr::Call(named_call) = parse("Example(value: upperBound)") else {
+			panic!("Expected a function call.");
+		};
+		assert_eq!(
+			named_call.arguments[0].name.as_ref().map(|name| name.name.as_str()),
+			Some("value"),
+		);
+		assert!(matches!(named_call.arguments[0].value, Expr::Identifier(_)));
+
+		let Expr::Call(range_call) = parse("Example((value:upperBound))") else {
+			panic!("Expected a function call.");
+		};
+		assert_eq!(range_call.arguments[0].name, None);
+		assert!(matches!(range_call.arguments[0].value, Expr::Range(_)));
 	}
 
 	#[test]
@@ -2934,7 +3014,9 @@ mod tests {
 						parameters: vec![
 							FunctionParameter {
 								data_type: FunctionParameterType::Value(DataType::Array(Box::new(DataType::Text))),
+								default_value: None,
 								is_by_ref: false,
+								is_variadic: false,
 								name: String::from("args"),
 								position: 0,
 							},
@@ -3143,6 +3225,7 @@ mod tests {
 				arguments: vec![
 					CallArgument {
 						is_by_ref: true,
+						name: None,
 						position: 0,
 						value: Expr::Identifier(IdentifierExpr {
 							name: String::from("x"),
@@ -3187,7 +3270,9 @@ mod tests {
 						parameters: vec![
 							FunctionParameter {
 								data_type: FunctionParameterType::Value(DataType::Int),
+								default_value: None,
 								is_by_ref: true,
+								is_variadic: false,
 								name: String::from("value"),
 								position: 0,
 							},
@@ -3213,6 +3298,7 @@ mod tests {
 				arguments: vec![
 					CallArgument {
 						is_by_ref: false,
+						name: None,
 						position: 0,
 						value: Expr::Identifier(IdentifierExpr {
 							name: String::from("value"),
@@ -3429,6 +3515,28 @@ mod tests {
 				position: 0,
 				value: Decimal::from_literal(".5").unwrap(),
 			})
+		);
+	}
+
+	#[test]
+	fn parses_defaulted_and_variadic_function_parameters() {
+		let program = parse_program("fn Example(value: int = 1, ...rest: [int]) void {}");
+		let parameters = &program.functions[0].parameters;
+
+		assert_eq!(parameters.len(), 2);
+		assert_eq!(
+			parameters[0].default_value,
+			Some(Expr::Integer(IntegerLiteral {
+				position: 0,
+				value: 1,
+			})),
+		);
+		assert!(!parameters[0].is_variadic);
+		assert_eq!(parameters[1].default_value, None);
+		assert!(parameters[1].is_variadic);
+		assert_eq!(
+			parameters[1].data_type,
+			FunctionParameterType::Value(DataType::Array(Box::new(DataType::Int))),
 		);
 	}
 
@@ -3756,6 +3864,7 @@ mod tests {
 									arguments: vec![
 										CallArgument {
 											is_by_ref: false,
+											name: None,
 											position: 0,
 											value: Expr::Identifier(IdentifierExpr {
 												name: String::from("countryCode"),
@@ -3937,6 +4046,7 @@ mod tests {
 				arguments: vec![
 					CallArgument {
 						is_by_ref: false,
+						name: None,
 						position: 0,
 						value: Expr::Integer(IntegerLiteral {
 							position: 0,
@@ -3945,6 +4055,7 @@ mod tests {
 					},
 					CallArgument {
 						is_by_ref: false,
+						name: None,
 						position: 0,
 						value: Expr::Integer(IntegerLiteral {
 							position: 0,
@@ -3992,13 +4103,17 @@ mod tests {
 						parameters: vec![
 							FunctionParameter {
 								data_type: FunctionParameterType::Value(DataType::Int),
+								default_value: None,
 								is_by_ref: false,
+								is_variadic: false,
 								name: String::from("a"),
 								position: 0,
 							},
 							FunctionParameter {
 								data_type: FunctionParameterType::Value(DataType::Int),
+								default_value: None,
 								is_by_ref: false,
+								is_variadic: false,
 								name: String::from("b"),
 								position: 0,
 							},
@@ -4013,6 +4128,7 @@ mod tests {
 					arguments: vec![
 						CallArgument {
 							is_by_ref: false,
+							name: None,
 							position: 0,
 							value: Expr::Integer(IntegerLiteral {
 								position: 0,
@@ -4021,6 +4137,7 @@ mod tests {
 						},
 						CallArgument {
 							is_by_ref: false,
+							name: None,
 							position: 0,
 							value: Expr::Integer(IntegerLiteral {
 								position: 0,
@@ -4518,6 +4635,21 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_named_and_trailing_unnamed_call_arguments() {
+		let Expr::Call(call) = parse("Example(1, second: &value, 3)") else {
+			panic!("Expected a function call.");
+		};
+
+		assert_eq!(call.arguments.len(), 3);
+		assert_eq!(call.arguments[0].name, None);
+		assert!(!call.arguments[0].is_by_ref);
+		assert_eq!(call.arguments[1].name.as_ref().map(|name| name.name.as_str()), Some("second"));
+		assert!(call.arguments[1].is_by_ref);
+		assert_eq!(call.arguments[2].name, None);
+		assert!(!call.arguments[2].is_by_ref);
+	}
+
+	#[test]
 	fn parses_named_inline_object_declaration_as_qualified_object() {
 		let program = parse_program(
 			"obj Outer { inner: obj Inner { value: int, }, label: text, };"
@@ -4707,7 +4839,9 @@ mod tests {
 									parameters: vec![
 										FunctionParameter {
 											data_type: FunctionParameterType::Value(DataType::Int),
+											default_value: None,
 											is_by_ref: true,
+											is_variadic: false,
 											name: String::from("value"),
 											position: 0,
 										},
@@ -4796,7 +4930,9 @@ mod tests {
 						parameters: vec![
 							FunctionParameter {
 								data_type: FunctionParameterType::Value(DataType::Array(Box::new(DataType::Text))),
+								default_value: None,
 								is_by_ref: false,
+								is_variadic: false,
 								name: String::from("args"),
 								position: 0,
 							},
@@ -4986,13 +5122,17 @@ mod tests {
 						parameters: vec![
 							FunctionParameter {
 								data_type: FunctionParameterType::Value(DataType::Int),
+								default_value: None,
 								is_by_ref: false,
+								is_variadic: false,
 								name: String::from("a"),
 								position: 0,
 							},
 							FunctionParameter {
 								data_type: FunctionParameterType::Value(DataType::Int),
+								default_value: None,
 								is_by_ref: false,
+								is_variadic: false,
 								name: String::from("b"),
 								position: 0,
 							},
@@ -5076,7 +5216,9 @@ mod tests {
 					parameters: vec![
 						FunctionParameter {
 							data_type: FunctionParameterType::Value(DataType::Array(Box::new(DataType::Text))),
+							default_value: None,
 							is_by_ref: false,
+							is_variadic: false,
 							name: String::from("args"),
 							position: 0,
 						},
@@ -5242,7 +5384,9 @@ mod tests {
 									],
 									position: 0,
 								}),
+								default_value: None,
 								is_by_ref: false,
+								is_variadic: false,
 								name: String::from("cust"),
 								position: 0,
 							},
@@ -5264,7 +5408,9 @@ mod tests {
 									],
 									position: 0,
 								}),
+								default_value: None,
 								is_by_ref: true,
+								is_variadic: false,
 								name: String::from("target"),
 								position: 0,
 							},
@@ -5673,7 +5819,9 @@ mod tests {
 						parameters: vec![
 							FunctionParameter {
 								data_type: FunctionParameterType::Value(DataType::Array(Box::new(DataType::Text))),
+								default_value: None,
 								is_by_ref: false,
+								is_variadic: false,
 								name: String::from("args"),
 								position: 0,
 							},
@@ -5739,7 +5887,9 @@ mod tests {
 						parameters: vec![
 							FunctionParameter {
 								data_type: FunctionParameterType::Value(DataType::Array(Box::new(DataType::Text))),
+								default_value: None,
 								is_by_ref: false,
+								is_variadic: false,
 								name: String::from("args"),
 								position: 0,
 							},
@@ -5882,7 +6032,9 @@ mod tests {
 						parameters: vec![
 							FunctionParameter {
 								data_type: FunctionParameterType::Value(DataType::Array(Box::new(DataType::Text))),
+								default_value: None,
 								is_by_ref: false,
+								is_variadic: false,
 								name: String::from("args"),
 								position: 0,
 							},
@@ -5928,6 +6080,17 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_duplicate_named_call_arguments() {
+		let mut lexer = Lexer::new(SourceText::new("Example(value: 1, value: 2)"));
+		let tokens = lexer.tokenize().unwrap();
+		let mut parser = Parser::new(tokens);
+		let error = parser.parse_expression().unwrap_err();
+
+		assert_eq!(error.message, "Named argument `value` is provided more than once.");
+		assert_eq!(error.position, 18);
+	}
+
+	#[test]
 	fn rejects_else_without_block_or_if() {
 		let mut lexer = Lexer::new(SourceText::new("if true { } else true"));
 		let tokens = lexer.tokenize().unwrap();
@@ -5936,6 +6099,31 @@ mod tests {
 
 		assert_eq!(error.message, "Expected `if` or `{` after `else`, found `true`.");
 		assert_eq!(error.position, 17);
+	}
+
+	#[test]
+	fn rejects_invalid_variadic_parameters() {
+		for (source, expected) in [
+			(
+				"fn Example(...values: [int], suffix: int) void {}",
+				"A variadic parameter must be the final parameter.",
+			),
+			(
+				"fn Example(...value: int) void {}",
+				"A variadic parameter must have an array type.",
+			),
+			(
+				"fn Example(...values: [int] = []) void {}",
+				"A variadic parameter may not define a default value.",
+			),
+		] {
+			let mut lexer = Lexer::new(SourceText::new(source));
+			let tokens = lexer.tokenize().unwrap();
+			let mut parser = Parser::new(tokens);
+			let error = parser.parse_program().unwrap_err();
+
+			assert_eq!(error.message, expected);
+		}
 	}
 
 	#[test]

@@ -274,6 +274,7 @@ pub struct BooleanLiteral {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallArgument {
 	pub is_by_ref: bool,
+	pub name: Option<IdentifierExpr>,
 	pub position: usize,
 	pub value: Expr,
 }
@@ -386,7 +387,9 @@ pub struct FunctionDeclaration {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FunctionParameter {
 	pub data_type: FunctionParameterType,
+	pub default_value: Option<Expr>,
 	pub is_by_ref: bool,
+	pub is_variadic: bool,
 	pub name: String,
 	pub position: usize,
 }

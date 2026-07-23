@@ -24,6 +24,7 @@ pub enum TokenKind {
 	DeleteKeyword,
 	DescKeyword,
 	Dot,
+	Ellipsis,
 	ElseKeyword,
 	EndOfFile,
 	EnumKeyword,

@@ -1382,6 +1382,8 @@ Any function may be called with a mix of positional arguments, named arguments, 
 * Any argument corresponding to a by-reference parameter must use the explicit `&identifier` syntax.
 * An argument corresponding to a `rec <table>` or `&rec <table>` parameter must be a record pointer for that same table.
 
+Within a function argument list, an identifier immediately followed by `:` begins a named argument. In order to pass a range expression whose `from` value is an identifier, it must be wrapped in parentheses. For example, `Example(value: upperBound)` supplies the named argument `value`, while `Example((value:upperBound))` supplies the range `value:upperBound` as a positional argument.
+
 ~~~
 fn Name(<Positional Args>, <Named Args>, <Varargs>) void {}
 ~~~
@@ -2091,7 +2093,7 @@ blockStatement = forStatement | ifStatement | whileStatement
 simpleStatement = ( `break` | `continue` | expression | returnStatement | variableDeclaration ) `;`
 forStatement = `for` identifier `in` expression block
 functionDeclaration = `fn` identifier `(` [ functionParameter { `,` functionParameter } ] `)` returnType block
-functionParameter = identifier `:` [ `&` ] dataType
+functionParameter = [ `...` ] identifier `:` [ `&` ] dataType [ `=` expression ]
 variableDeclaration = ( `const` | `var` ) identifier `:` dataType [ `=` expression ]
 returnStatement = `return` [ expression ]
 ifStatement = `if` expression block [ `else` ( block | ifStatement ) ]
@@ -2124,7 +2126,7 @@ objectLiteral = `{` [ objectLiteralField { `,` objectLiteralField } [ `,` ] ] `}
 objectLiteralField = identifier `:` expression
 objectDefaultLiteral = `null` | arrayLiteral | booleanLiteral | decimalLiteral | hexLiteral | integerLiteral | octalLiteral | objectLiteral | stringLiteral
 callSuffix = `(` [ callArgument { `,` callArgument } ] `)`
-callArgument = expression | referenceArgument
+callArgument = [ identifier `:` ] ( expression | referenceArgument )
 referenceArgument = `&` identifier
 indexSuffix = `[` expression `]`
 assignmentOperator = `=` | `+=` | `-=` | `*=` | `/=` | `%=`

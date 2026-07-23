@@ -1411,6 +1411,13 @@ impl SemanticAnalyzer {
 			}
 			Expr::Boolean(_) => Ok(DataType::Bool),
 			Expr::Call(CallExpr { arguments, callee, .. }) => {
+				if let Some(argument) = arguments.iter().find(|argument| argument.name.is_some()) {
+					return Err(self.compile_error(
+						argument.position,
+						String::from("Named arguments are not yet supported."),
+					));
+				}
+
 				if let Some(signature) = self.lookup_function(&callee.name).cloned() {
 					if arguments.len() != signature.parameters.len() {
 						return Err(self.compile_error(
@@ -1969,6 +1976,13 @@ impl SemanticAnalyzer {
 			}
 			Expr::Boolean(_) => Ok(DataType::Bool),
 			Expr::Call(CallExpr { arguments, callee, .. }) => {
+				if let Some(argument) = arguments.iter().find(|argument| argument.name.is_some()) {
+					return Err(self.compile_error(
+						argument.position,
+						String::from("Named arguments are not yet supported in database queries."),
+					));
+				}
+
 				if let Some(signature) = self.lookup_function(&callee.name).cloned() {
 					if arguments.len() != signature.parameters.len() {
 						return Err(self.compile_error(
@@ -1999,6 +2013,7 @@ impl SemanticAnalyzer {
 				else if let Some(built_in) = BuiltInFunction::from_name(&callee.name) {
 					let query_arguments = arguments.iter().map(|argument| CallArgument {
 						is_by_ref: argument.is_by_ref,
+						name: argument.name.clone(),
 						position: argument.position,
 						value: argument.value.clone(),
 					}).collect::<Vec<_>>();
@@ -3736,6 +3751,19 @@ impl SemanticAnalyzer {
 	}
 
 	fn validate_function_parameter(&mut self, parameter: &FunctionParameter) -> Result<(), CompileError> {
+		if parameter.default_value.is_some() {
+			return Err(self.compile_error(
+				parameter.position,
+				String::from("Default parameter values are not yet supported."),
+			));
+		}
+		if parameter.is_variadic {
+			return Err(self.compile_error(
+				parameter.position,
+				String::from("Variadic parameters are not yet supported."),
+			));
+		}
+
 		let parameter_type = self.resolve_function_parameter_type(parameter)?;
 
 		if self.current_scope_contains(&parameter.name) {

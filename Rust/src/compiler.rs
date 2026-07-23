@@ -1552,6 +1552,7 @@ mod tests {
 				arguments: vec![
 					CallArgument {
 						is_by_ref: false,
+						name: None,
 						position: 0,
 						value: Expr::Array(ArrayLiteral {
 							elements: vec![

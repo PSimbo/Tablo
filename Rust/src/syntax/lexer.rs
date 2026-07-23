@@ -198,6 +198,18 @@ impl Lexer {
 			'|' => TokenKind::Pipe,
 			':' => TokenKind::Colon,
 			',' => TokenKind::Comma,
+			'.' if self.peek_next_two_chars_are("...") => {
+				self.advance_char();
+				self.advance_char();
+				self.advance_char();
+
+				return Ok(Some(Token {
+					end: self.position,
+					kind: TokenKind::Ellipsis,
+					lexeme: String::from("..."),
+					start,
+				}));
+			}
 			'.' => TokenKind::Dot,
 			'[' => TokenKind::LeftBracket,
 			'{' => TokenKind::LeftBrace,
@@ -848,6 +860,15 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_unterminated_multiline_comment() {
+		let mut lexer = Lexer::new(SourceText::new("1 /* missing end"));
+		let error = lexer.tokenize().unwrap_err();
+
+		assert_eq!(error.position, 2);
+		assert_eq!(error.message, "Unterminated multi-line comment.");
+	}
+
+	#[test]
 	fn rejects_unterminated_quoted_identifier() {
 		let mut lexer = Lexer::new(SourceText::new("\"unfinished"));
 		let error = lexer.tokenize().unwrap_err();
@@ -911,6 +932,17 @@ mod tests {
 		assert_eq!(tokens[7].kind, TokenKind::MultiplyEqual);
 		assert_eq!(tokens[9].kind, TokenKind::SlashEqual);
 		assert_eq!(tokens[11].kind, TokenKind::PercentEqual);
+	}
+
+	#[test]
+	fn tokenizes_date_literal() {
+		let mut lexer = Lexer::new(SourceText::new("@2025-06-10"));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens.len(), 2);
+		assert_eq!(tokens[0].kind, TokenKind::DateLiteral);
+		assert_eq!(tokens[0].lexeme, "@2025-06-10");
+		assert_eq!(tokens[1].kind, TokenKind::EndOfFile);
 	}
 
 	#[test]
@@ -1055,17 +1087,6 @@ mod tests {
 	}
 
 	#[test]
-	fn tokenizes_date_literal() {
-		let mut lexer = Lexer::new(SourceText::new("@2025-06-10"));
-		let tokens = lexer.tokenize().unwrap();
-
-		assert_eq!(tokens.len(), 2);
-		assert_eq!(tokens[0].kind, TokenKind::DateLiteral);
-		assert_eq!(tokens[0].lexeme, "@2025-06-10");
-		assert_eq!(tokens[1].kind, TokenKind::EndOfFile);
-	}
-
-	#[test]
 	fn tokenizes_multiline_interpolated_string_using_global_minimum_indentation() {
 		let mut lexer = Lexer::new(SourceText::new(
 			"    '\n        hello ${name}\n      world\n    '",
@@ -1150,6 +1171,25 @@ mod tests {
 	}
 
 	#[test]
+	fn tokenizes_nested_multiline_comments() {
+		let mut lexer = Lexer::new(SourceText::new(
+			"var x: int = 1; /* outer /* inner */ still outer */ x",
+		));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens.len(), 9);
+		assert_eq!(tokens[0].kind, TokenKind::VarKeyword);
+		assert_eq!(tokens[1].kind, TokenKind::Identifier);
+		assert_eq!(tokens[2].kind, TokenKind::Colon);
+		assert_eq!(tokens[3].kind, TokenKind::IntKeyword);
+		assert_eq!(tokens[4].kind, TokenKind::Equal);
+		assert_eq!(tokens[5].kind, TokenKind::IntegerLiteral);
+		assert_eq!(tokens[6].kind, TokenKind::Semicolon);
+		assert_eq!(tokens[7].kind, TokenKind::Identifier);
+		assert_eq!(tokens[8].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
 	fn tokenizes_parentheses() {
 		let mut lexer = Lexer::new(SourceText::new("(1 + 2)"));
 		let tokens = lexer.tokenize().unwrap();
@@ -1212,6 +1252,34 @@ mod tests {
 	}
 
 	#[test]
+	fn tokenizes_single_line_comment_until_multiline_comment_starts() {
+		let mut lexer = Lexer::new(SourceText::new(
+			"1 // ignored /* block */ + 2",
+		));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens.len(), 4);
+		assert_eq!(tokens[0].kind, TokenKind::IntegerLiteral);
+		assert_eq!(tokens[1].kind, TokenKind::Plus);
+		assert_eq!(tokens[2].kind, TokenKind::IntegerLiteral);
+		assert_eq!(tokens[3].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
+	fn tokenizes_single_line_comments() {
+		let mut lexer = Lexer::new(SourceText::new(
+			"var x: int = 1; // ignore this\nx",
+		));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens.len(), 9);
+		assert_eq!(tokens[0].kind, TokenKind::VarKeyword);
+		assert_eq!(tokens[7].kind, TokenKind::Identifier);
+		assert_eq!(tokens[7].lexeme, "x");
+		assert_eq!(tokens[8].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
 	fn tokenizes_string_interpolation() {
 		let mut lexer = Lexer::new(SourceText::new("'hello ${name}!';"));
 		let tokens = lexer.tokenize().unwrap();
@@ -1252,6 +1320,23 @@ mod tests {
 	}
 
 	#[test]
+	fn tokenizes_variadic_marker_separately_from_member_access() {
+		let mut lexer = Lexer::new(SourceText::new("...values item.field"));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens.len(), 6);
+		assert_eq!(tokens[0].kind, TokenKind::Ellipsis);
+		assert_eq!(tokens[0].lexeme, "...");
+		assert_eq!(tokens[1].kind, TokenKind::Identifier);
+		assert_eq!(tokens[1].lexeme, "values");
+		assert_eq!(tokens[2].kind, TokenKind::Identifier);
+		assert_eq!(tokens[2].lexeme, "item");
+		assert_eq!(tokens[3].kind, TokenKind::Dot);
+		assert_eq!(tokens[4].kind, TokenKind::Identifier);
+		assert_eq!(tokens[5].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
 	fn trims_using_closing_delimiter_line_when_it_is_the_smallest() {
 		let mut lexer = Lexer::new(SourceText::new(
 			"foo = '- Bar\n           - Baz\n  ';",
@@ -1260,61 +1345,5 @@ mod tests {
 
 		assert_eq!(tokens[2].kind, TokenKind::StringLiteral);
 		assert_eq!(tokens[2].lexeme, "    - Bar\n        - Baz\n");
-	}
-
-	#[test]
-	fn tokenizes_nested_multiline_comments() {
-		let mut lexer = Lexer::new(SourceText::new(
-			"var x: int = 1; /* outer /* inner */ still outer */ x",
-		));
-		let tokens = lexer.tokenize().unwrap();
-
-		assert_eq!(tokens.len(), 9);
-		assert_eq!(tokens[0].kind, TokenKind::VarKeyword);
-		assert_eq!(tokens[1].kind, TokenKind::Identifier);
-		assert_eq!(tokens[2].kind, TokenKind::Colon);
-		assert_eq!(tokens[3].kind, TokenKind::IntKeyword);
-		assert_eq!(tokens[4].kind, TokenKind::Equal);
-		assert_eq!(tokens[5].kind, TokenKind::IntegerLiteral);
-		assert_eq!(tokens[6].kind, TokenKind::Semicolon);
-		assert_eq!(tokens[7].kind, TokenKind::Identifier);
-		assert_eq!(tokens[8].kind, TokenKind::EndOfFile);
-	}
-
-	#[test]
-	fn tokenizes_single_line_comments() {
-		let mut lexer = Lexer::new(SourceText::new(
-			"var x: int = 1; // ignore this\nx",
-		));
-		let tokens = lexer.tokenize().unwrap();
-
-		assert_eq!(tokens.len(), 9);
-		assert_eq!(tokens[0].kind, TokenKind::VarKeyword);
-		assert_eq!(tokens[7].kind, TokenKind::Identifier);
-		assert_eq!(tokens[7].lexeme, "x");
-		assert_eq!(tokens[8].kind, TokenKind::EndOfFile);
-	}
-
-	#[test]
-	fn tokenizes_single_line_comment_until_multiline_comment_starts() {
-		let mut lexer = Lexer::new(SourceText::new(
-			"1 // ignored /* block */ + 2",
-		));
-		let tokens = lexer.tokenize().unwrap();
-
-		assert_eq!(tokens.len(), 4);
-		assert_eq!(tokens[0].kind, TokenKind::IntegerLiteral);
-		assert_eq!(tokens[1].kind, TokenKind::Plus);
-		assert_eq!(tokens[2].kind, TokenKind::IntegerLiteral);
-		assert_eq!(tokens[3].kind, TokenKind::EndOfFile);
-	}
-
-	#[test]
-	fn rejects_unterminated_multiline_comment() {
-		let mut lexer = Lexer::new(SourceText::new("1 /* missing end"));
-		let error = lexer.tokenize().unwrap_err();
-
-		assert_eq!(error.position, 2);
-		assert_eq!(error.message, "Unterminated multi-line comment.");
 	}
 }
