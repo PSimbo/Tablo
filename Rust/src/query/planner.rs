@@ -321,7 +321,7 @@ impl ProgramQueryPlan {
 			let parameters_are_captured_at_query_start = query.captured_parameters.iter()
 				.all(|parameter| {
 					parameter.evaluation == PlannedQueryParameterEvaluation::AtQueryStart
-						&& matches!(parameter.source, PlannedQueryParameterSource::EnclosingQuery(_))
+						&& parameter.source == PlannedQueryParameterSource::EnclosingQuery(enclosing_query_id)
 				});
 
 			if query.kind == PlannedQueryKind::Count

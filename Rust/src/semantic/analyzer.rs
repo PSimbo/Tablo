@@ -192,6 +192,8 @@ pub struct SemanticProgram {
 	new_record_layouts: BTreeMap<usize, NewRecordLayout>,
 	object_declarations: BTreeMap<String, ObjectDeclaration>,
 	query_plan: ProgramQueryPlan,
+	query_for_shapes: BTreeMap<usize, QueryForShape>,
+	query_projected_value_bindings: BTreeMap<usize, QueryProjectedValueBinding>,
 	record_pointer_bindings: BTreeMap<usize, RecordPointerBindingInfo>,
 	resolved_sequences: BTreeMap<usize, ResolvedSequenceReference>,
 	resolved_tables: BTreeMap<usize, ResolvedTableReference>,
@@ -299,8 +301,16 @@ impl SemanticProgram {
 		self.object_declarations.get(name)
 	}
 
+	pub fn query_for_shape(&self, position: usize) -> Option<&QueryForShape> {
+		self.query_for_shapes.get(&position)
+	}
+
 	pub fn query_plan(&self) -> &ProgramQueryPlan {
 		&self.query_plan
+	}
+
+	pub fn query_projected_value_binding(&self, position: usize) -> Option<&QueryProjectedValueBinding> {
+		self.query_projected_value_bindings.get(&position)
 	}
 
 	pub fn record_pointer_binding(&self, position: usize) -> Option<&RecordPointerBindingInfo> {
@@ -434,6 +444,7 @@ impl SemanticAnalyzer {
 		if self.query_optimizations_disabled {
 			query_plan.disable_optimizations();
 		}
+		self.record_proven_query_shapes(&query_plan)?;
 		self.semantic_program.query_plan = query_plan;
 
 		Ok(self.semantic_program.clone())
@@ -2816,6 +2827,69 @@ impl SemanticAnalyzer {
 		else {
 			(identity_fields, false)
 		}
+	}
+
+	fn record_proven_query_shapes(&mut self, query_plan: &ProgramQueryPlan) -> Result<(), CompileError> {
+		for query in query_plan.queries() {
+			let Some(PlannedQueryOptimizationStrategy::MergeCorrelatedCountWith {
+				query: enclosing_query_id,
+			}) = query.proven_optimization else {
+				continue;
+			};
+			let enclosing_query = query_plan.query(enclosing_query_id).ok_or_else(|| {
+				self.compile_error(query.position, String::from("Proven query optimization references an unknown enclosing query."))
+			})?;
+			let enclosing_record_slot = enclosing_query.record_slot.ok_or_else(|| {
+				self.compile_error(query.position, String::from("Proven query optimization requires an enclosing record slot."))
+			})?;
+			let enclosing_for_query = self.semantic_program.lowered_for_record_queries
+				.get(&enclosing_query.position)
+				.cloned()
+				.ok_or_else(|| {
+					self.compile_error(query.position, String::from("Proven query optimization requires an enclosing record query."))
+				})?;
+			let count_query = self.semantic_program.lowered_count_queries
+				.get(&query.position)
+				.cloned()
+				.ok_or_else(|| {
+					self.compile_error(query.position, String::from("Proven count optimization is missing its neutral query plan."))
+				})?;
+			let value_id = QueryProjectedValueId(u32::try_from(query.id.0).map_err(|_| {
+				self.compile_error(query.position, String::from("Program contains too many queries to identify a projected value."))
+			})?);
+			let correlations = query.captured_parameters.iter()
+				.map(|parameter| QueryCorrelation {
+					outer_field_path: parameter.field_path.clone(),
+					parameter: QueryParameter {
+						data_type: parameter.data_type.clone(),
+						field_path: parameter.field_path.clone(),
+						slot: parameter.slot,
+					},
+				})
+				.collect();
+			let shape = self.semantic_program.query_for_shapes
+				.entry(enclosing_query.position)
+				.or_insert_with(|| QueryForShape {
+					query: enclosing_for_query,
+					scalar_projections: Vec::new(),
+				});
+			shape.scalar_projections.push(QueryScalarProjection {
+				expression: QueryScalarProjectionExpression::CorrelatedCount(QueryCorrelatedCount {
+					correlations,
+					query: count_query,
+				}),
+				value_id,
+			});
+			self.semantic_program.query_projected_value_bindings.insert(
+				query.position,
+				QueryProjectedValueBinding {
+					enclosing_record_slot,
+					value_id,
+				},
+			);
+		}
+
+		Ok(())
 	}
 
 	fn record_record_pointer_assignment(
@@ -5328,9 +5402,13 @@ mod tests {
 				query: safe_parent.id,
 			}),
 		);
+		assert!(semantic_program.query_for_shape(safe_loop.position).is_some());
+		assert!(semantic_program.query_projected_value_binding(count_position(safe_loop)).is_some());
 		assert!(early_exit_parent.body_may_exit_early);
 		assert!(!early_exit_count.optimization_opportunities.is_empty());
 		assert_eq!(early_exit_count.proven_optimization, None);
+		assert!(semantic_program.query_for_shape(early_exit_loop.position).is_none());
+		assert!(semantic_program.query_projected_value_binding(count_position(early_exit_loop)).is_none());
 		assert_eq!(
 			early_exit_count.execution.independent_reason(),
 			Some(PlannedQueryIndependentReason::SemanticEquivalenceNotProven),
@@ -5338,6 +5416,8 @@ mod tests {
 		assert_eq!(fallible_count.expressions_are_infallible, Some(false));
 		assert!(!fallible_count.optimization_opportunities.is_empty());
 		assert_eq!(fallible_count.proven_optimization, None);
+		assert!(semantic_program.query_for_shape(fallible_loop.position).is_none());
+		assert!(semantic_program.query_projected_value_binding(count_position(fallible_loop)).is_none());
 		assert_eq!(
 			fallible_count.execution.independent_reason(),
 			Some(PlannedQueryIndependentReason::SemanticEquivalenceNotProven),
@@ -5674,6 +5754,24 @@ mod tests {
 		);
 		assert_eq!(find_query.proven_optimization, None);
 		assert_eq!(inner_query.proven_optimization, None);
+		let query_shape = semantic_program.query_for_shape(outer_loop.position).unwrap();
+		let projection = &query_shape.scalar_projections[0];
+		let QueryScalarProjectionExpression::CorrelatedCount(projected_count) = &projection.expression;
+		let projected_binding = semantic_program.query_projected_value_binding(count.position).unwrap();
+
+		assert_eq!(&query_shape.query, semantic_program.lowered_for_record_query(outer_loop.position).unwrap());
+		assert_eq!(query_shape.scalar_projections.len(), 1);
+		assert_eq!(&projected_count.query, semantic_program.lowered_count_query(count.position).unwrap());
+		assert_eq!(projected_count.correlations, vec![QueryCorrelation {
+			outer_field_path: vec![String::from("Id")],
+			parameter: QueryParameter {
+				data_type: DataType::Int,
+				field_path: vec![String::from("Id")],
+				slot: outer_query.record_slot.unwrap(),
+			},
+		}]);
+		assert_eq!(projected_binding.value_id, projection.value_id);
+		assert_eq!(projected_binding.enclosing_record_slot, outer_query.record_slot.unwrap());
 		assert_eq!(
 			outer_query.execution.independent_reason(),
 			Some(PlannedQueryIndependentReason::NoOptimizationOpportunity),

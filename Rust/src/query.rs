@@ -93,6 +93,11 @@ pub enum QueryRecordSchema {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum QueryScalarProjectionExpression {
+	CorrelatedCount(QueryCorrelatedCount),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum QueryUnaryOperator {
 	Negate,
 	Not,
@@ -148,6 +153,18 @@ pub struct QueryColumnReference {
 	pub column_name: String,
 	pub data_type: DataType,
 	pub table_name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryCorrelatedCount {
+	pub correlations: Vec<QueryCorrelation>,
+	pub query: QueryCountPlan,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryCorrelation {
+	pub outer_field_path: Vec<String>,
+	pub parameter: QueryParameter,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -257,6 +274,12 @@ impl QueryForPlan {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryForShape {
+	pub query: QueryForPlan,
+	pub scalar_projections: Vec<QueryScalarProjection>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryGroupByItem {
 	pub alias: Option<String>,
 	pub data_type: DataType,
@@ -276,6 +299,15 @@ pub struct QueryParameter {
 	pub field_path: Vec<String>,
 	pub slot: u32,
 }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryProjectedValueBinding {
+	pub enclosing_record_slot: u32,
+	pub value_id: QueryProjectedValueId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct QueryProjectedValueId(pub u32);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryRecordLayout {
@@ -317,6 +349,12 @@ pub struct QueryResultColumn {
 	pub data_type: DataType,
 	pub is_nullable: bool,
 	pub is_primary_key: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueryScalarProjection {
+	pub expression: QueryScalarProjectionExpression,
+	pub value_id: QueryProjectedValueId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
