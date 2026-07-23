@@ -4617,6 +4617,10 @@ mod tests {
 		assert_eq!(outer_query.is_read_only, Some(true));
 		assert_eq!(inner_query.is_read_only, Some(false));
 		assert!(inner_query.optimization_opportunities.is_empty());
+		assert_eq!(
+			inner_query.execution.independent_reason(),
+			Some(PlannedQueryIndependentReason::SemanticEquivalenceNotProven),
+		);
 	}
 
 	#[test]
@@ -5557,9 +5561,22 @@ mod tests {
 		assert_eq!(find_query.optimization_opportunities, expected_opportunity);
 		assert_eq!(count_query.optimization_opportunities, expected_opportunity);
 		assert_eq!(inner_query.optimization_opportunities, expected_opportunity);
-		assert!(query_plan.queries().iter().all(|query| {
-			query.execution == PlannedQueryExecution::Independent
-		}));
+		assert_eq!(
+			outer_query.execution.independent_reason(),
+			Some(PlannedQueryIndependentReason::NoOptimizationOpportunity),
+		);
+		assert_eq!(
+			find_query.execution.independent_reason(),
+			Some(PlannedQueryIndependentReason::NoSupportedStrategy),
+		);
+		assert_eq!(
+			count_query.execution.independent_reason(),
+			Some(PlannedQueryIndependentReason::NoSupportedStrategy),
+		);
+		assert_eq!(
+			inner_query.execution.independent_reason(),
+			Some(PlannedQueryIndependentReason::NoSupportedStrategy),
+		);
 	}
 
 	#[test]
@@ -5647,7 +5664,12 @@ mod tests {
 		assert_eq!(inner_parameters.len(), 2);
 		assert!(inner_parameters.contains(&customer_id_parameter));
 		assert!(inner_parameters.contains(&minimum_id_parameter));
-		assert!(query_at_position(inner_loop.position).optimization_opportunities.is_empty());
+		let inner_query = query_at_position(inner_loop.position);
+		assert!(inner_query.optimization_opportunities.is_empty());
+		assert_eq!(
+			inner_query.execution.independent_reason(),
+			Some(PlannedQueryIndependentReason::SemanticEquivalenceNotProven),
+		);
 	}
 
 	#[test]
@@ -5899,13 +5921,29 @@ mod tests {
 
 		assert_eq!(conditional_child_query.control_flow, PlannedQueryControlFlow::Conditional);
 		assert!(conditional_child_query.optimization_opportunities.is_empty());
+		assert_eq!(
+			conditional_child_query.execution.independent_reason(),
+			Some(PlannedQueryIndependentReason::SemanticEquivalenceNotProven),
+		);
 		assert_ne!(transaction_child_query.transaction_scopes, transaction_parent_query.transaction_scopes);
 		assert!(transaction_child_query.optimization_opportunities.is_empty());
+		assert_eq!(
+			transaction_child_query.execution.independent_reason(),
+			Some(PlannedQueryIndependentReason::SemanticEquivalenceNotProven),
+		);
 		assert!(mutation_parent_query.body_may_have_side_effects);
 		assert_eq!(mutation_child_query.control_flow, PlannedQueryControlFlow::Direct);
 		assert!(mutation_child_query.optimization_opportunities.is_empty());
+		assert_eq!(
+			mutation_child_query.execution.independent_reason(),
+			Some(PlannedQueryIndependentReason::SemanticEquivalenceNotProven),
+		);
 		assert_eq!(repeated_child_query.control_flow, PlannedQueryControlFlow::Repeated);
 		assert!(repeated_child_query.optimization_opportunities.is_empty());
+		assert_eq!(
+			repeated_child_query.execution.independent_reason(),
+			Some(PlannedQueryIndependentReason::SemanticEquivalenceNotProven),
+		);
 	}
 
 	#[test]

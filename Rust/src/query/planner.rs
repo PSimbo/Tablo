@@ -17,7 +17,32 @@ pub enum PlannedQueryErrorTiming {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlannedQueryExecution {
-	Independent,
+	BatchWith {
+		query: PlannedQueryId,
+	},
+	Independent {
+		reason: PlannedQueryIndependentReason,
+	},
+	MergeWith {
+		query: PlannedQueryId,
+	},
+}
+
+impl PlannedQueryExecution {
+	pub fn independent_reason(self) -> Option<PlannedQueryIndependentReason> {
+		match self {
+			Self::Independent { reason } => Some(reason),
+			Self::BatchWith { .. } | Self::MergeWith { .. } => None,
+		}
+	}
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlannedQueryIndependentReason {
+	AnalysisIncomplete,
+	NoOptimizationOpportunity,
+	NoSupportedStrategy,
+	SemanticEquivalenceNotProven,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -144,6 +169,7 @@ impl ProgramQueryPlan {
 
 		self.classify_parameter_sources();
 		self.identify_nested_read_only_opportunities();
+		self.finalize_execution_decisions();
 	}
 
 	fn classify_parameter_sources(&mut self) {
@@ -166,6 +192,24 @@ impl ProgramQueryPlan {
 					enclosing_query = next_enclosing_query;
 				}
 			}
+		}
+	}
+
+	fn finalize_execution_decisions(&mut self) {
+		for query in &mut self.queries {
+			let reason = if !query.optimization_opportunities.is_empty() {
+				PlannedQueryIndependentReason::NoSupportedStrategy
+			}
+			else if query.enclosing_query.is_some() {
+				PlannedQueryIndependentReason::SemanticEquivalenceNotProven
+			}
+			else {
+				PlannedQueryIndependentReason::NoOptimizationOpportunity
+			};
+
+			query.execution = PlannedQueryExecution::Independent {
+				reason,
+			};
 		}
 	}
 
@@ -236,7 +280,9 @@ impl QueryPlanBuilder {
 			control_flow: self.control_flow,
 			database_name: None,
 			enclosing_query,
-			execution: PlannedQueryExecution::Independent,
+			execution: PlannedQueryExecution::Independent {
+				reason: PlannedQueryIndependentReason::AnalysisIncomplete,
+			},
 			id,
 			is_read_only: None,
 			kind,
@@ -669,6 +715,10 @@ mod tests {
 			PlannedQueryParameterSource::EnclosingQuery(outer_query.id),
 		);
 		assert!(inner_query.optimization_opportunities.is_empty());
+		assert_eq!(
+			inner_query.execution.independent_reason(),
+			Some(PlannedQueryIndependentReason::SemanticEquivalenceNotProven),
+		);
 	}
 
 	#[test]
@@ -751,7 +801,9 @@ mod tests {
 			control_flow: PlannedQueryControlFlow::Direct,
 			database_name: None,
 			enclosing_query: None,
-			execution: PlannedQueryExecution::Independent,
+			execution: PlannedQueryExecution::Independent {
+				reason: PlannedQueryIndependentReason::AnalysisIncomplete,
+			},
 			id: outer_query.id,
 			is_read_only: None,
 			kind: PlannedQueryKind::ForRecord,
@@ -765,6 +817,9 @@ mod tests {
 		assert_eq!(find_query.enclosing_query, Some(outer_query.id));
 		assert_eq!(inner_query.enclosing_query, Some(outer_query.id));
 		assert_eq!(count_query.enclosing_query, Some(inner_query.id));
-		assert!(plan.queries().iter().all(|query| query.execution == PlannedQueryExecution::Independent));
+		assert!(plan.queries().iter().all(|query| {
+			query.execution.independent_reason()
+				== Some(PlannedQueryIndependentReason::AnalysisIncomplete)
+		}));
 	}
 }
