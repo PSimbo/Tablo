@@ -401,16 +401,52 @@ impl SemanticAnalyzer {
 		self.finalize_record_pointer_usage(program);
 		self.apply_record_pointer_field_selections()?;
 		let mut query_plan = plan_program_queries(program);
-		query_plan.populate_captured_parameters(|kind, position| {
+		query_plan.populate_analyzed_metadata(|kind, position, record_binding_position| {
 			match kind {
 				PlannedQueryKind::Count => self.semantic_program.lowered_count_queries.get(&position)
-					.map(QueryCountPlan::captured_parameters),
+					.map(|query| AnalyzedQueryMetadata {
+						captured_parameters: query.captured_parameters(),
+						database_name: query.database_name.clone(),
+						is_read_only: true,
+						record_slot: None,
+						result_semantics: PlannedQueryResultSemantics {
+							cardinality: PlannedQueryResultCardinality::Scalar,
+							error_timing: PlannedQueryErrorTiming::AtQueryStart,
+							has_grouping: false,
+							has_limit: false,
+							has_ordering: false,
+						},
+					}),
 				PlannedQueryKind::Find => self.semantic_program.lowered_find_queries.get(&position)
-					.map(QueryFindPlan::captured_parameters),
+					.map(|query| AnalyzedQueryMetadata {
+						captured_parameters: query.captured_parameters(),
+						database_name: query.database_name.clone(),
+						is_read_only: query.lock_mode == RecordLockMode::None,
+						record_slot: None,
+						result_semantics: PlannedQueryResultSemantics {
+							cardinality: PlannedQueryResultCardinality::AtMostOne,
+							error_timing: PlannedQueryErrorTiming::AtQueryStart,
+							has_grouping: false,
+							has_limit: true,
+							has_ordering: !query.order_by.is_empty(),
+						},
+					}),
 				PlannedQueryKind::ForRecord => self.semantic_program.lowered_for_record_queries.get(&position)
-					.map(QueryForPlan::captured_parameters),
+					.map(|query| AnalyzedQueryMetadata {
+						captured_parameters: query.captured_parameters(),
+						database_name: query.database_name.clone(),
+						is_read_only: query.lock_mode == RecordLockMode::None,
+						record_slot: record_binding_position
+							.and_then(|position| self.semantic_program.declaration_slots.get(&position).copied()),
+						result_semantics: PlannedQueryResultSemantics {
+							cardinality: PlannedQueryResultCardinality::Many,
+							error_timing: PlannedQueryErrorTiming::AtQueryStart,
+							has_grouping: !query.group_by.is_empty(),
+							has_limit: query.limit.is_some(),
+							has_ordering: !query.order_by.is_empty() || !query.group_by.is_empty(),
+						},
+					}),
 			}
-			.unwrap_or_default()
 		});
 		self.semantic_program.query_plan = query_plan;
 
@@ -4535,6 +4571,55 @@ mod tests {
 	}
 
 	#[test]
+	fn does_not_offer_nested_query_optimization_for_mutable_queries() {
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null
+				);
+				create table Orders (
+					Id int not null,
+					CustomerId int not null
+				);
+			"#,
+			"ExampleDb",
+		);
+		let program = parse_program(
+			concat!(
+				"with exampledb;\n",
+				"fn Main(args: [text]) int {\n",
+				"  for rec customer in Customers {\n",
+				"    for rec mut customerOrder in Orders where CustomerId == customer.Id {}\n",
+				"  }\n",
+				"  return 0;\n",
+				"}",
+			),
+		);
+		let Statement::ForRecord(outer_loop) = &program.functions[0].body.statements[0] else {
+			panic!("Expected outer record loop.");
+		};
+		let Statement::ForRecord(inner_loop) = &outer_loop.body.statements[0] else {
+			panic!("Expected inner record loop.");
+		};
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap();
+		let query_plan = semantic_program.query_plan();
+		let outer_query = query_plan.queries().iter()
+			.find(|query| query.position == outer_loop.position)
+			.unwrap();
+		let inner_query = query_plan.queries().iter()
+			.find(|query| query.position == inner_loop.position)
+			.unwrap();
+
+		assert_eq!(outer_query.is_read_only, Some(true));
+		assert_eq!(inner_query.is_read_only, Some(false));
+		assert!(inner_query.optimization_opportunities.is_empty());
+	}
+
+	#[test]
 	fn does_not_record_record_pointer_escapes_for_built_ins_or_unreachable_calls() {
 		let schema = sqlite_test_schema(
 			r#"
@@ -5393,7 +5478,9 @@ mod tests {
 				"with exampledb;\n",
 				"fn Main(args: [text]) int {\n",
 				"  for rec customer in Customers {\n",
-				"    for rec customerOrder in Orders where CustomerId == customer.Id {}\n",
+				"    rec firstOrder = find first Orders where CustomerId == customer.Id;\n",
+				"    var orderCount: int = count Orders where CustomerId == customer.Id;\n",
+				"    for rec customerOrder in Orders where CustomerId == customer.Id group by CustomerId {}\n",
 				"  }\n",
 				"  return 0;\n",
 				"}",
@@ -5402,7 +5489,19 @@ mod tests {
 		let Statement::ForRecord(outer_loop) = &program.functions[0].body.statements[0] else {
 			panic!("Expected outer record loop.");
 		};
-		let Statement::ForRecord(inner_loop) = &outer_loop.body.statements[0] else {
+		let Statement::RecordPointerDeclaration(RecordPointerDeclaration {
+			initial_value: Expr::Find(find),
+			..
+		}) = &outer_loop.body.statements[0] else {
+			panic!("Expected nested find query.");
+		};
+		let Statement::VariableDeclaration(VariableDeclaration {
+			initial_value: Some(Expr::Count(count)),
+			..
+		}) = &outer_loop.body.statements[1] else {
+			panic!("Expected nested count query.");
+		};
+		let Statement::ForRecord(inner_loop) = &outer_loop.body.statements[2] else {
 			panic!("Expected inner record loop.");
 		};
 		let mut analyzer = SemanticAnalyzer::new();
@@ -5412,13 +5511,52 @@ mod tests {
 		let outer_query = query_plan.queries().iter()
 			.find(|query| query.position == outer_loop.position)
 			.unwrap();
+		let find_query = query_plan.queries().iter()
+			.find(|query| query.position == find.position)
+			.unwrap();
+		let count_query = query_plan.queries().iter()
+			.find(|query| query.position == count.position)
+			.unwrap();
 		let inner_query = query_plan.queries().iter()
 			.find(|query| query.position == inner_loop.position)
 			.unwrap();
+		let expected_opportunity = vec![
+			PlannedQueryOptimizationOpportunity::MergeOrBatchWith {
+				query: outer_query.id,
+			},
+		];
 
-		assert_eq!(query_plan.queries().len(), 2);
+		assert_eq!(query_plan.queries().len(), 4);
 		assert_eq!(outer_query.enclosing_query, None);
+		assert_eq!(find_query.enclosing_query, Some(outer_query.id));
+		assert_eq!(count_query.enclosing_query, Some(outer_query.id));
 		assert_eq!(inner_query.enclosing_query, Some(outer_query.id));
+		assert_eq!(outer_query.database_name.as_deref(), Some("ExampleDb"));
+		assert_eq!(outer_query.is_read_only, Some(true));
+		assert_eq!(find_query.result_semantics, Some(PlannedQueryResultSemantics {
+			cardinality: PlannedQueryResultCardinality::AtMostOne,
+			error_timing: PlannedQueryErrorTiming::AtQueryStart,
+			has_grouping: false,
+			has_limit: true,
+			has_ordering: false,
+		}));
+		assert_eq!(count_query.result_semantics, Some(PlannedQueryResultSemantics {
+			cardinality: PlannedQueryResultCardinality::Scalar,
+			error_timing: PlannedQueryErrorTiming::AtQueryStart,
+			has_grouping: false,
+			has_limit: false,
+			has_ordering: false,
+		}));
+		assert_eq!(inner_query.result_semantics, Some(PlannedQueryResultSemantics {
+			cardinality: PlannedQueryResultCardinality::Many,
+			error_timing: PlannedQueryErrorTiming::AtQueryStart,
+			has_grouping: true,
+			has_limit: false,
+			has_ordering: true,
+		}));
+		assert_eq!(find_query.optimization_opportunities, expected_opportunity);
+		assert_eq!(count_query.optimization_opportunities, expected_opportunity);
+		assert_eq!(inner_query.optimization_opportunities, expected_opportunity);
 		assert!(query_plan.queries().iter().all(|query| {
 			query.execution == PlannedQueryExecution::Independent
 		}));
@@ -5489,12 +5627,16 @@ mod tests {
 			evaluation: PlannedQueryParameterEvaluation::AtQueryStart,
 			field_path: Vec::new(),
 			slot: minimum_id_slot,
+			source: PlannedQueryParameterSource::Local,
 		};
 		let customer_id_parameter = PlannedQueryParameter {
 			data_type: DataType::Int,
 			evaluation: PlannedQueryParameterEvaluation::AtQueryStart,
 			field_path: vec![String::from("Id")],
 			slot: customer_slot,
+			source: PlannedQueryParameterSource::EnclosingQuery(
+				query_at_position(outer_loop.position).id,
+			),
 		};
 
 		assert_eq!(query_at_position(count.position).captured_parameters, vec![minimum_id_parameter.clone()]);
@@ -5505,6 +5647,7 @@ mod tests {
 		assert_eq!(inner_parameters.len(), 2);
 		assert!(inner_parameters.contains(&customer_id_parameter));
 		assert!(inner_parameters.contains(&minimum_id_parameter));
+		assert!(query_at_position(inner_loop.position).optimization_opportunities.is_empty());
 	}
 
 	#[test]
@@ -5661,6 +5804,108 @@ mod tests {
 		let error = analyzer.analyze_program(&program).unwrap_err();
 
 		assert_eq!(error.message, "Function `Inner` cannot be declared `pub` inside another function.");
+	}
+
+	#[test]
+	fn rejects_query_optimization_when_execution_context_cannot_be_preserved() {
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null
+				);
+				create table Orders (
+					Id int not null,
+					CustomerId int not null
+				);
+			"#,
+			"ExampleDb",
+		);
+		let program = parse_program(
+			concat!(
+				"with exampledb;\n",
+				"fn Main(args: [text]) int {\n",
+				"  var marker: int = 0;\n",
+				"  for rec conditionalParent in Customers {\n",
+				"    if conditionalParent.Id > 0 {\n",
+				"      for rec conditionalChild in Orders where CustomerId == conditionalParent.Id {}\n",
+				"    }\n",
+				"  }\n",
+				"  for rec transactionParent in Customers {\n",
+				"    transaction {\n",
+				"      for rec transactionChild in Orders where CustomerId == transactionParent.Id {}\n",
+				"    }\n",
+				"  }\n",
+				"  for rec mutationParent in Customers {\n",
+				"    marker = mutationParent.Id;\n",
+				"    for rec mutationChild in Orders where CustomerId == mutationParent.Id {}\n",
+				"  }\n",
+				"  for rec repeatedParent in Customers {\n",
+				"    for iteration in 1:2 {\n",
+				"      for rec repeatedChild in Orders where CustomerId == repeatedParent.Id {}\n",
+				"    }\n",
+				"  }\n",
+				"  return 0;\n",
+				"}",
+			),
+		);
+		let Statement::ForRecord(conditional_parent) = &program.functions[0].body.statements[1] else {
+			panic!("Expected conditional parent query.");
+		};
+		let Statement::If(conditional) = &conditional_parent.body.statements[0] else {
+			panic!("Expected conditional statement.");
+		};
+		let Statement::ForRecord(conditional_child) = &conditional.then_branch.statements[0] else {
+			panic!("Expected conditional child query.");
+		};
+		let Statement::ForRecord(transaction_parent) = &program.functions[0].body.statements[2] else {
+			panic!("Expected transaction parent query.");
+		};
+		let Statement::Transaction(transaction) = &transaction_parent.body.statements[0] else {
+			panic!("Expected transaction statement.");
+		};
+		let Statement::ForRecord(transaction_child) = &transaction.body.statements[0] else {
+			panic!("Expected transaction child query.");
+		};
+		let Statement::ForRecord(mutation_parent) = &program.functions[0].body.statements[3] else {
+			panic!("Expected mutation parent query.");
+		};
+		let Statement::ForRecord(mutation_child) = &mutation_parent.body.statements[1] else {
+			panic!("Expected mutation child query.");
+		};
+		let Statement::ForRecord(repeated_parent) = &program.functions[0].body.statements[4] else {
+			panic!("Expected repeated parent query.");
+		};
+		let Statement::For(repeated_loop) = &repeated_parent.body.statements[0] else {
+			panic!("Expected repeated ordinary loop.");
+		};
+		let Statement::ForRecord(repeated_child) = &repeated_loop.body.statements[0] else {
+			panic!("Expected repeated child query.");
+		};
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap();
+		let query_plan = semantic_program.query_plan();
+		let query_at_position = |position| query_plan.queries().iter()
+			.find(|query| query.position == position)
+			.unwrap();
+		let conditional_child_query = query_at_position(conditional_child.position);
+		let transaction_parent_query = query_at_position(transaction_parent.position);
+		let transaction_child_query = query_at_position(transaction_child.position);
+		let mutation_parent_query = query_at_position(mutation_parent.position);
+		let mutation_child_query = query_at_position(mutation_child.position);
+		let repeated_child_query = query_at_position(repeated_child.position);
+
+		assert_eq!(conditional_child_query.control_flow, PlannedQueryControlFlow::Conditional);
+		assert!(conditional_child_query.optimization_opportunities.is_empty());
+		assert_ne!(transaction_child_query.transaction_scopes, transaction_parent_query.transaction_scopes);
+		assert!(transaction_child_query.optimization_opportunities.is_empty());
+		assert!(mutation_parent_query.body_may_have_side_effects);
+		assert_eq!(mutation_child_query.control_flow, PlannedQueryControlFlow::Direct);
+		assert!(mutation_child_query.optimization_opportunities.is_empty());
+		assert_eq!(repeated_child_query.control_flow, PlannedQueryControlFlow::Repeated);
+		assert!(repeated_child_query.optimization_opportunities.is_empty());
 	}
 
 	#[test]
