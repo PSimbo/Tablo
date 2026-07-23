@@ -1280,6 +1280,16 @@ mod tests {
 		run_program(&program)
 	}
 
+	fn run_program_with_database_config_and_query_count(
+		program: &Program,
+		database_config: RuntimeDatabaseConfig,
+	) -> (Result<Option<Value>, TabloError>, usize) {
+		let mut vm = VirtualMachine::with_database_config(database_config);
+		let result = vm.run(program).map_err(TabloError::Runtime);
+		let query_execution_count = vm.database_query_execution_count();
+		(result, query_execution_count)
+	}
+
 	fn schema_catalog_from_fixture_with_backends(
 		schema_fixture: &str,
 		backends: &[(&str, DatabaseBackend)],
@@ -2215,10 +2225,16 @@ mod tests {
 		let round_tripped_program = read_program(&write_program(&planned_program)).unwrap();
 		let database_config = RuntimeDatabaseConfig::new()
 			.with_sqlite_database("ExampleDb", &database_path);
-		let planned_error = run_program_with_database_config(&round_tripped_program, database_config.clone()).unwrap_err();
-		let unoptimized_error = run_program_with_database_config(&unoptimized_program, database_config).unwrap_err();
+		let (planned_result, planned_query_execution_count) =
+			run_program_with_database_config_and_query_count(&round_tripped_program, database_config.clone());
+		let (unoptimized_result, unoptimized_query_execution_count) =
+			run_program_with_database_config_and_query_count(&unoptimized_program, database_config);
+		let planned_error = planned_result.unwrap_err();
+		let unoptimized_error = unoptimized_result.unwrap_err();
 		let _ = std::fs::remove_file(&database_path);
 
+		assert_eq!(planned_query_execution_count, 1);
+		assert_eq!(unoptimized_query_execution_count, 2);
 		assert_eq!(planned_error.to_string(), unoptimized_error.to_string());
 		assert_eq!(
 			planned_error.to_string(),
@@ -2548,10 +2564,16 @@ mod tests {
 
 		let database_config = RuntimeDatabaseConfig::new()
 			.with_sqlite_database("ExampleDb", &database_path);
-		let planned_result = run_program_with_database_config(&planned_program, database_config.clone()).unwrap();
-		let unoptimized_result = run_program_with_database_config(&unoptimized_program, database_config).unwrap();
+		let (planned_result, planned_query_execution_count) =
+			run_program_with_database_config_and_query_count(&planned_program, database_config.clone());
+		let (unoptimized_result, unoptimized_query_execution_count) =
+			run_program_with_database_config_and_query_count(&unoptimized_program, database_config);
 		let _ = std::fs::remove_file(&database_path);
+		let planned_result = planned_result.unwrap();
+		let unoptimized_result = unoptimized_result.unwrap();
 
+		assert_eq!(planned_query_execution_count, 2);
+		assert_eq!(unoptimized_query_execution_count, 6);
 		assert_eq!(planned_result, Some(Value::Integer(0)));
 		assert_eq!(planned_result, unoptimized_result);
 	}
@@ -2623,10 +2645,16 @@ mod tests {
 
 		let database_config = RuntimeDatabaseConfig::new()
 			.with_sqlite_database("ExampleDb", &database_path);
-		let planned_result = run_program_with_database_config(&planned_program, database_config.clone()).unwrap();
-		let unoptimized_result = run_program_with_database_config(&unoptimized_program, database_config).unwrap();
+		let (planned_result, planned_query_execution_count) =
+			run_program_with_database_config_and_query_count(&planned_program, database_config.clone());
+		let (unoptimized_result, unoptimized_query_execution_count) =
+			run_program_with_database_config_and_query_count(&unoptimized_program, database_config);
 		let _ = std::fs::remove_file(&database_path);
+		let planned_result = planned_result.unwrap();
+		let unoptimized_result = unoptimized_result.unwrap();
 
+		assert_eq!(planned_query_execution_count, 1);
+		assert_eq!(unoptimized_query_execution_count, 4);
 		assert_eq!(planned_result, Some(Value::Integer(0)));
 		assert_eq!(planned_result, unoptimized_result);
 	}
@@ -2713,10 +2741,16 @@ mod tests {
 
 		let database_config = RuntimeDatabaseConfig::new()
 			.with_sqlite_database("ExampleDb", &database_path);
-		let planned_result = run_program_with_database_config(&planned_program, database_config.clone()).unwrap();
-		let unoptimized_result = run_program_with_database_config(&unoptimized_program, database_config).unwrap();
+		let (planned_result, planned_query_execution_count) =
+			run_program_with_database_config_and_query_count(&planned_program, database_config.clone());
+		let (unoptimized_result, unoptimized_query_execution_count) =
+			run_program_with_database_config_and_query_count(&unoptimized_program, database_config);
 		let _ = std::fs::remove_file(&database_path);
+		let planned_result = planned_result.unwrap();
+		let unoptimized_result = unoptimized_result.unwrap();
 
+		assert_eq!(planned_query_execution_count, 4);
+		assert_eq!(unoptimized_query_execution_count, 7);
 		assert_eq!(planned_result, Some(Value::Integer(0)));
 		assert_eq!(planned_result, unoptimized_result);
 	}

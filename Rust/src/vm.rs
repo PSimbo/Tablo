@@ -209,6 +209,11 @@ impl VirtualMachine {
 		self.frames.len()
 	}
 
+	#[cfg(test)]
+	pub(crate) fn database_query_execution_count(&self) -> usize {
+		self.database_runtime.query_execution_count()
+	}
+
 	pub(crate) fn current_stack_frames(&self, program: &Program) -> Vec<VmStackFrame> {
 		self.frames
 			.iter()

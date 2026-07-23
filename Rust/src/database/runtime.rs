@@ -29,6 +29,8 @@ pub(super) trait DatabaseDriver {
 pub(crate) struct DatabaseRuntime {
 	config: RuntimeDatabaseConfig,
 	next_transaction_id: u64,
+	#[cfg(test)]
+	query_execution_count: usize,
 	sessions: BTreeMap<String, Box<dyn DatabaseDriver>>,
 	transactions: Vec<TransactionScope>,
 }
@@ -97,7 +99,12 @@ impl DatabaseRuntime {
 					}
 				}
 
-				self.session_mut(&query.database_name)?.execute_query(query, parameters)
+				let result = self.session_mut(&query.database_name)?.execute_query(query, parameters);
+				#[cfg(test)]
+				{
+					self.query_execution_count += 1;
+				}
+				result
 			}
 		}
 	}
@@ -116,13 +123,24 @@ impl DatabaseRuntime {
 		Self {
 			config,
 			next_transaction_id: 0,
+			#[cfg(test)]
+			query_execution_count: 0,
 			sessions: BTreeMap::new(),
 			transactions: Vec::new(),
 		}
 	}
 
+	#[cfg(test)]
+	pub(crate) fn query_execution_count(&self) -> usize {
+		self.query_execution_count
+	}
+
 	pub(crate) fn reset(&mut self) {
 		self.next_transaction_id = 0;
+		#[cfg(test)]
+		{
+			self.query_execution_count = 0;
+		}
 		self.sessions.clear();
 		self.transactions.clear();
 	}
