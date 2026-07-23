@@ -190,6 +190,7 @@ pub struct SemanticProgram {
 	lowered_for_record_queries: BTreeMap<usize, QueryForPlan>,
 	new_record_layouts: BTreeMap<usize, NewRecordLayout>,
 	object_declarations: BTreeMap<String, ObjectDeclaration>,
+	query_plan: ProgramQueryPlan,
 	record_pointer_bindings: BTreeMap<usize, RecordPointerBindingInfo>,
 	resolved_sequences: BTreeMap<usize, ResolvedSequenceReference>,
 	resolved_tables: BTreeMap<usize, ResolvedTableReference>,
@@ -297,6 +298,10 @@ impl SemanticProgram {
 		self.object_declarations.get(name)
 	}
 
+	pub fn query_plan(&self) -> &ProgramQueryPlan {
+		&self.query_plan
+	}
+
 	pub fn record_pointer_binding(&self, position: usize) -> Option<&RecordPointerBindingInfo> {
 		self.record_pointer_bindings.get(&position)
 	}
@@ -395,6 +400,7 @@ impl SemanticAnalyzer {
 		self.enums.exit_scope();
 		self.finalize_record_pointer_usage(program);
 		self.apply_record_pointer_field_selections()?;
+		self.semantic_program.query_plan = plan_program_queries(program);
 
 		Ok(self.semantic_program.clone())
 	}
@@ -5352,6 +5358,58 @@ mod tests {
 		let binding = semantic_program.record_pointer_binding(declaration_position).unwrap();
 
 		assert_eq!(binding.read_fields, BTreeSet::from([String::from("Id"), String::from("Name")]));
+	}
+
+	#[test]
+	fn records_nested_query_structure_in_semantic_program() {
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null
+				);
+				create table Orders (
+					Id int not null,
+					CustomerId int not null
+				);
+			"#,
+			"ExampleDb",
+		);
+		let program = parse_program(
+			concat!(
+				"with exampledb;\n",
+				"fn Main(args: [text]) int {\n",
+				"  for rec customer in Customers {\n",
+				"    for rec customerOrder in Orders where CustomerId == customer.Id {}\n",
+				"  }\n",
+				"  return 0;\n",
+				"}",
+			),
+		);
+		let Statement::ForRecord(outer_loop) = &program.functions[0].body.statements[0] else {
+			panic!("Expected outer record loop.");
+		};
+		let Statement::ForRecord(inner_loop) = &outer_loop.body.statements[0] else {
+			panic!("Expected inner record loop.");
+		};
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap();
+		let query_plan = semantic_program.query_plan();
+		let outer_query = query_plan.queries().iter()
+			.find(|query| query.position == outer_loop.position)
+			.unwrap();
+		let inner_query = query_plan.queries().iter()
+			.find(|query| query.position == inner_loop.position)
+			.unwrap();
+
+		assert_eq!(query_plan.queries().len(), 2);
+		assert_eq!(outer_query.enclosing_query, None);
+		assert_eq!(inner_query.enclosing_query, Some(outer_query.id));
+		assert!(query_plan.queries().iter().all(|query| {
+			query.execution == PlannedQueryExecution::Independent
+		}));
 	}
 
 	#[test]

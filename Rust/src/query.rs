@@ -4,9 +4,12 @@ use crate::schema::DatabaseBackend;
 use crate::value::*;
 
 mod mysql;
+mod planner;
 mod postgresql;
 mod sql_renderer;
 mod sqlite;
+
+pub use planner::*;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LoweredBackendQuery {
