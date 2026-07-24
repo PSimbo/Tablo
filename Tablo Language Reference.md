@@ -216,6 +216,7 @@ The following identifiers are reserved as keywords:
 | `delete`      | Commits a database record deletion                  |
 | `desc`        | Marks the sort order for a field as descending      |
 | `else`        | Starts an else-block for an if statement            |
+| `exists`      | Tests whether a record or field exists              |
 | `fail`        | Exits a function by throwing an error               |
 | `false`       | A literal false value                               |
 | `first`       | Follows keyword `find`                              |
@@ -229,6 +230,7 @@ The following identifiers are reserved as keywords:
 | `json`        | JSON data type                                      |
 | `last`        | Follows keyword `find`                              |
 | `limit`       | Specifies the LIMIT value for a query               |
+| `locked`      | Tests whether a record pointer is locked            |
 | `mut`         | Marks a variable as mutable                         |
 | `not`         | Logical NOT                                         |
 | `null`        | A literal null value                                |
@@ -259,8 +261,6 @@ Keyword Literals
 Variables of type `bool` may be assigned the literal values `true` and `false`.
 
 The null value may be assigned only to a nullable type. Nullable types are written by adding `?` after the type name. The null value is written using the reserved word `null`.
-
-Unless marked as required, an argument of any data type may hold a void value. The void value cannot be manually assigned. Only arguments that have not been provided when a function is called receive the void value. For the purposes of conversion to and from JSON, the void value is equivalent to `undefined`.
 
 Integer Literals
 ----------------
@@ -382,6 +382,36 @@ The unary prefix `not` operator evaluates to the result of a logical NOT of its 
 The `xor` operator evaluates to the result of a logical XOR of the two operands. Operands must be of type `bool`.
 
 Logical operators are not defined for operands of type `any`.
+
+### Presence and Lock Operators
+
+The unary prefix `exists` operator tests the presence of its operand. It may be applied to a record pointer or to a field-access expression.
+
+When applied to a record pointer, `exists` evaluates to `true` if the corresponding database record exists, including when that record is locked. It evaluates to `false` if no matching record exists or if the record has been deleted through that record pointer.
+
+When applied to a field-access expression, `exists` evaluates to `true` if the complete field-access path can be resolved and the final field is present. A final field whose value is `null` is still present. It evaluates to `false` if a field in the path is missing or if an intermediate value is `null` and therefore cannot be traversed.
+
+Fields declared by a statically typed object are always present because object construction produces a complete instance. Field presence is therefore principally useful when inspecting JSON data or traversing nullable intermediate values.
+
+The unary prefix `locked` operator may be applied only to a record pointer. It evaluates to `true` if a matching database record exists but could not be assigned to the record pointer because it was locked. Otherwise it evaluates to `false`.
+
+Both operators bind to the complete postfix expression that follows them. For example, `exists payload.customer.name` is equivalent to `exists (payload.customer.name)`.
+
+~~~
+if not exists payload.customer.name {
+  // The field is missing or an intermediate value cannot be traversed.
+}
+
+if exists payload.customer.name {
+  if payload.customer.name == null {
+    // The field is present and explicitly contains null.
+  }
+}
+
+if locked customer {
+  // The matching customer record is locked.
+}
+~~~
 
 ### Mathematical Operators
 
@@ -598,6 +628,8 @@ Internal fields are accessed using the `.` operator:
 ~~~
 var addr1: text = locData.addressLines.line1;
 ~~~
+
+The `exists` prefix operator may be used to distinguish a missing field from a field whose value is `null`. See "Presence and Lock Operators" for its complete semantics.
 
 Arrays
 ------
@@ -1010,7 +1042,7 @@ Note that the data provided by a record pointer represents a snapshot of the cor
 
 When a record pointer's fields are modified, by default the changes are not committed to the database until the end of the enclosing scope. To force the changes to be committed at an earlier point in the code, the appropriate `create` or `update` keyword may be used.
 
-If a record is deleted via its record pointer, the deletion is committed to the database at the point at which the `delete` keyword appears. From that point on, the record pointer may not be used to access field data and calling `exists()` on the record pointer will return `false`.
+If a record is deleted via its record pointer, the deletion is committed to the database at the point at which the `delete` keyword appears. From that point on, the record pointer may not be used to access field data and `exists <record-pointer>` evaluates to `false`.
 
 #### Record Pointers and Database Locks
 
@@ -1018,7 +1050,7 @@ Record pointer mutability (i.e. whether the `mut` keyword was used in acquiring 
 
 For database backends that support row-level locking, a mutable `find` query within a transaction attempts to acquire an update lock without waiting. If the selected record is already locked, the result is a locked record pointer as described under "Find Statements". A mutable query-based `for` loop instead waits for matching locked records to become available. It does not silently omit these records from the iteration. A deadlock, lock timeout, or other database failure produces a runtime error and causes the active transaction to be rolled back.
 
-Database locks are held according to the lifetime of the active transaction, not the lexical lifetime of an individual record pointer. Leaving the record pointer's scope does not release its lock while the transaction remains active. For backends without row-level locking, including SQLite, record pointers never enter the locked state and `locked()` always returns `false`. Other database write contentions may still produce a runtime database error.
+Database locks are held according to the lifetime of the active transaction, not the lexical lifetime of an individual record pointer. Leaving the record pointer's scope does not release its lock while the transaction remains active. For backends without row-level locking, including SQLite, record pointers never enter the locked state and the `locked` operator always evaluates to `false`. Other database write contentions may still produce a runtime database error.
 
 ### For Loops
 
@@ -1107,13 +1139,19 @@ When assigning the result of a mutable `find` expression within a transaction to
 1. No matching record exists, or
 2. A matching record exists but is locked
 
-When no result can be assigned to the record pointer, it ends up in one of two "nullish" states. If no matching record could be found, this may be checked with `exists()` (returns `true` if the record exists but is locked). If a matching record exists but is locked, this may be checked with `locked()` (returns `false` if no matching record was found). Immutable `find` queries and queries executed outside a transaction do not request update locks, so their record pointers do not enter the locked state. For database backends that do not support record locking, the `locked()` function always returns false. Calling the `locked()` function on a read-only record pointer produces a compiler warning. If a record both exists and is not locked then it is not nullish and the record pointer may be used as the condition for an `if` statement, where it evaluates to `true`.
+When no result can be assigned to the record pointer, it ends up in one of two "nullish" states. The `exists <record-pointer>` expression distinguishes a missing record from a locked record: it evaluates to `true` when the matching record exists, even if that record is locked. The `locked <record-pointer>` expression evaluates to `true` only when a matching record exists but is locked. Immutable `find` queries and queries executed outside a transaction do not request update locks, so their record pointers do not enter the locked state. For database backends that do not support record locking, the `locked` operator always evaluates to `false`. Applying `locked` to a read-only record pointer produces a compiler warning. If a record both exists and is not locked then it is not nullish and the record pointer may be used as the condition for an `if` statement, where it evaluates to `true`.
 
 ~~~
 {
   rec mut custAcme = find first tblCustomers where name == 'Acme';
 
-  if custAcme {
+  if not exists custAcme {
+    // No matching record exists.
+  }
+  else if locked custAcme {
+    // A matching record exists but is locked.
+  }
+  else {
     custAcme.name += ' Ltd.';
   }
 }
@@ -1175,7 +1213,7 @@ if invalidComp {
 
 If a `delete` statement is used on a record pointer that doesn't exist or is locked then a runtime error is thrown. The compiler may generate warnings for attempts to delete unchecked record pointers.
 
-Following a `delete` statement, the record pointer is no longer valid. Calling the `exists()` function on the record pointer returns `false`.
+Following a `delete` statement, the record pointer is no longer valid. Applying the `exists` operator to the record pointer returns `false`.
 
 Sequences
 ---------
@@ -1381,6 +1419,8 @@ Any function may be called with a mix of positional arguments, named arguments, 
 * Any omitted parameter must either be nullable or have a default value.
 * Any argument corresponding to a by-reference parameter must use the explicit `&identifier` syntax.
 * An argument corresponding to a `rec <table>` or `&rec <table>` parameter must be a record pointer for that same table.
+
+When a by-value parameter is omitted, it receives its declared default value. If the parameter has no declared default but has a nullable type, it receives `null`.
 
 Within a function argument list, an identifier immediately followed by `:` begins a named argument. In order to pass a range expression whose `from` value is an identifier, it must be wrapped in parentheses. For example, `Example(value: upperBound)` supplies the named argument `value`, while `Example((value:upperBound))` supplies the range `value:upperBound` as a positional argument.
 
@@ -2117,7 +2157,7 @@ comparison = additive { relationalOperator additive }
 additive = multiplicative { additiveOperator multiplicative }
 multiplicative = unary { multiplicativeOperator unary }
 unary = ( unaryOperator unary ) | postfix
-postfix = primary { callSuffix | indexSuffix }
+postfix = primary { callSuffix | indexSuffix | memberSuffix }
 primary = literal | objectConstruction | groupExpression | identifier
 literal = `null` | arrayLiteral | booleanLiteral | decimalLiteral | hexLiteral | integerLiteral | octalLiteral | stringLiteral
 arrayLiteral = `[` [ expression { `,` expression } ] `]`
@@ -2129,12 +2169,13 @@ callSuffix = `(` [ callArgument { `,` callArgument } ] `)`
 callArgument = [ identifier `:` ] ( expression | referenceArgument )
 referenceArgument = `&` identifier
 indexSuffix = `[` expression `]`
+memberSuffix = `.` identifier
 assignmentOperator = `=` | `+=` | `-=` | `*=` | `/=` | `%=`
 equalityOperator = `==` | `!=`
 relationalOperator = `>` | `>=` | `<` | `<=`
 multiplicativeOperator = `*` | `/` | `%`
 additiveOperator = `+` | `-`
-unaryOperator = `not` | `-`
+unaryOperator = `not` | `exists` | `locked` | `-`
 
 identifier = quotedIdentifier | unquotedIdentifier
 quotedIdentifier = `"` { `""` | unicode } `"`
