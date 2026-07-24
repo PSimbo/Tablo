@@ -994,6 +994,12 @@ fn rewrite_function_declaration_calls(
 	top_level_renames: &BTreeMap<String, String>,
 	import_bindings: &BTreeMap<String, String>,
 ) {
+	for parameter in &mut function.parameters {
+		if let Some(default_value) = &mut parameter.default_value {
+			rewrite_expression_calls(default_value, top_level_renames, import_bindings, &[]);
+		}
+	}
+
 	rewrite_statements_calls(&mut function.body.statements, top_level_renames, import_bindings, &[]);
 }
 
@@ -2875,6 +2881,20 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_ambiguous_call_between_defaulted_overloads() {
+		let error = run(
+			"fn Main(args: [text]) int { return choose(); }\n\
+			fn choose(value: int = 1) int { return value; }\n\
+			fn choose(value: text = 'x') int { return 2; }"
+		).unwrap_err();
+
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+		assert_eq!(error.message, "Call to function `choose` is ambiguous between multiple overloads.");
+	}
+
+	#[test]
 	fn rejects_ambiguous_positional_overload_call() {
 		let error = run(
 			"fn Main(args: [text]) int { return choose(1); }\n\
@@ -2967,6 +2987,19 @@ mod tests {
 			message: String::from("Built-in function `len` does not accept by-reference arguments."),
 			position: 25,
 		}));
+	}
+
+	#[test]
+	fn rejects_by_reference_parameter_with_default_value() {
+		let error = run(
+			"fn Main(args: [text]) int { return 0; }\n\
+			fn bump(value: &int = 1) void { value += 1; }"
+		).unwrap_err();
+
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+		assert_eq!(error.message, "By-reference parameter `value` cannot define a default value.");
 	}
 
 	#[test]
@@ -3064,6 +3097,32 @@ mod tests {
 			message: String::from("Text slicing requires a range of `int`, found `range<dec>`."),
 			position: 28,
 		}));
+	}
+
+	#[test]
+	fn rejects_default_parameter_expression_that_references_parameter() {
+		let error = run(
+			"fn Main(args: [text]) int { return calculate(2); }\n\
+			fn calculate(left: int, right: int = left) int { return left + right; }"
+		).unwrap_err();
+
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+		assert_eq!(error.message, "Variable `left` is not declared in this scope.");
+	}
+
+	#[test]
+	fn rejects_default_parameter_value_with_incompatible_type() {
+		let error = run(
+			"fn Main(args: [text]) int { return 0; }\n\
+			fn calculate(value: int = 'wrong') int { return value; }"
+		).unwrap_err();
+
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+		assert_eq!(error.message, "Cannot assign a value of type `text` to a variable of type `int`.");
 	}
 
 	#[test]
@@ -3935,6 +3994,75 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_call_with_array_default_value() {
+		let result = run(
+			"fn Main(args: [text]) int { return size(); }\n\
+			fn size(values: [int] = [2, 3, 4]) int { return len(values); }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
+	fn runs_call_with_default_expression() {
+		let result = run(
+			"fn Main(args: [text]) int { return calculate(); }\n\
+			fn DefaultValue() int { return 6; }\n\
+			fn calculate(value: int = DefaultValue()) int { return value + 1; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(7)));
+	}
+
+	#[test]
+	fn runs_call_with_defaulted_parameter() {
+		let result = run(
+			"fn Main(args: [text]) int { return add(3); }\n\
+			fn add(left: int, right: int = 4) int { return left + right; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(7)));
+	}
+
+	#[test]
+	fn runs_call_with_named_argument_after_omitted_defaults() {
+		let result = run(
+			"fn Main(args: [text]) int { return combine(third: 6); }\n\
+			fn combine(firstValue: int = 1, secondValue: int = 2, third: int = 3) int {\n\
+			    return firstValue * 100 + secondValue * 10 + third;\n\
+			}"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(126)));
+	}
+
+	#[test]
+	fn runs_call_with_omitted_defaults_after_object_round_trip() {
+		let output_path = unique_test_output_path("runs_call_with_omitted_defaults_after_object_round_trip");
+		compile(
+			"fn Main(args: [text]) int { return combine(third: 6); }\n\
+			fn combine(firstValue: int = 1, secondValue: int = 2, third: int = 3) int {\n\
+			    return firstValue * 100 + secondValue * 10 + third;\n\
+			}",
+			&output_path,
+		).unwrap();
+		let result = run_file(&output_path).unwrap();
+		let _ = std::fs::remove_file(&output_path);
+
+		assert_eq!(result, Some(Value::Integer(126)));
+	}
+
+	#[test]
+	fn runs_call_with_omitted_nullable_parameter() {
+		let result = run(
+			"fn Main(args: [text]) int { return isMissing(); }\n\
+			fn isMissing(value: text?) int { return value == null ? 1 : 0; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
 	fn runs_compound_array_concatenation_source_text() {
 		let result = evaluate_snippet("var xs: [int] = [1, 2];\nxs += [3, 4];\nxs").unwrap();
 
@@ -4597,6 +4725,35 @@ mod tests {
 		let result = run(standalone_body("var x: int = 1;\nif true { x = 2; }\nreturn x;")).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(2)));
+	}
+
+	#[test]
+	fn runs_imported_function_with_default_expression() {
+		let root_path = write_test_source_file(
+			"runs_imported_function_with_default_expression_root",
+			"main.tablo",
+			"use Add from './Helpers';\nfn Main(args: [text]) int { return Add(); }",
+		);
+		let helper_path = root_path.parent().unwrap().join("Helpers.tablo");
+		fs::write(
+			&helper_path,
+			"pub fn Add(value: int = DefaultValue()) int { return value + 1; }\n\
+			fn DefaultValue() int { return 6; }",
+		).unwrap();
+
+		let program = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap();
+		let result = run_program(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(7)));
+
+		let _ = fs::remove_file(helper_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
 	}
 
 	#[test]

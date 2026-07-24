@@ -11,6 +11,13 @@ use crate::schema::*;
 use super::scope::ScopeStack;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CallArgumentBinding {
+	Default(Expr),
+	OmittedNull,
+	Supplied(u32),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EnumValue {
 	Constant(Constant),
 }
@@ -71,6 +78,7 @@ struct FunctionParameterSignature {
 #[derive(Clone)]
 struct FunctionSignature {
 	function_index: u32,
+	parameter_defaults: Vec<Option<Expr>>,
 	parameters: Vec<FunctionParameterSignature>,
 	return_type: DataType,
 }
@@ -170,7 +178,7 @@ pub struct ResolvedTableReference {
 pub struct SemanticProgram {
 	active_databases: Vec<String>,
 	built_in_call_targets: BTreeMap<usize, BuiltInFunction>,
-	call_argument_order: BTreeMap<usize, Vec<u32>>,
+	call_argument_bindings: BTreeMap<usize, Vec<CallArgumentBinding>>,
 	call_argument_reference_slots: BTreeMap<usize, Vec<Option<u32>>>,
 	call_return_types: BTreeMap<usize, DataType>,
 	call_targets: BTreeMap<usize, u32>,
@@ -213,8 +221,8 @@ impl SemanticProgram {
 		self.built_in_call_targets.get(&position).copied()
 	}
 
-	pub fn call_argument_order(&self, position: usize) -> Option<&[u32]> {
-		self.call_argument_order.get(&position).map(Vec::as_slice)
+	pub fn call_argument_bindings(&self, position: usize) -> Option<&[CallArgumentBinding]> {
+		self.call_argument_bindings.get(&position).map(Vec::as_slice)
 	}
 
 	pub fn call_argument_reference_slots(&self, position: usize) -> Option<&[Option<u32>]> {
@@ -716,12 +724,12 @@ impl SemanticAnalyzer {
 		&self,
 		signature: &FunctionSignature,
 		arguments: &[CallArgument],
-	) -> Option<Vec<usize>> {
-		if signature.parameters.len() != arguments.len() {
+	) -> Option<Vec<CallArgumentBinding>> {
+		if arguments.len() > signature.parameters.len() {
 			return None;
 		}
 
-		let mut argument_order = vec![None; signature.parameters.len()];
+		let mut bindings = vec![None; signature.parameters.len()];
 		let mut next_positional_parameter = 0;
 		let mut saw_named_argument = false;
 
@@ -740,13 +748,34 @@ impl SemanticAnalyzer {
 				parameter_index
 			};
 
-			if argument_order.get(parameter_index)?.is_some() {
+			if bindings.get(parameter_index)?.is_some() {
 				return None;
 			}
-			argument_order[parameter_index] = Some(argument_index);
+			bindings[parameter_index] = Some(CallArgumentBinding::Supplied(argument_index as u32));
 		}
 
-		argument_order.into_iter().collect()
+		for (parameter_index, binding) in bindings.iter_mut().enumerate() {
+			if binding.is_some() {
+				continue;
+			}
+
+			let parameter = &signature.parameters[parameter_index];
+			if parameter.is_by_ref {
+				return None;
+			}
+
+			*binding = if let Some(default_value) = &signature.parameter_defaults[parameter_index] {
+				Some(CallArgumentBinding::Default(default_value.clone()))
+			}
+			else if parameter.data_type.is_nullable() {
+				Some(CallArgumentBinding::OmittedNull)
+			}
+			else {
+				return None;
+			};
+		}
+
+		bindings.into_iter().collect()
 	}
 
 	fn block_guarantees_return(&self, block: &BlockStatement) -> bool {
@@ -847,6 +876,9 @@ impl SemanticAnalyzer {
 		let function_index = self.next_function_index;
 		let signature = FunctionSignature {
 			function_index,
+			parameter_defaults: function.parameters.iter()
+				.map(|parameter| parameter.default_value.clone())
+				.collect(),
 			parameters,
 			return_type: function.return_type.clone(),
 		};
@@ -1467,35 +1499,11 @@ impl SemanticAnalyzer {
 			Expr::Boolean(_) => Ok(DataType::Bool),
 			Expr::Call(CallExpr { arguments, callee, .. }) => {
 				if let Some(signatures) = self.lookup_functions(&callee.name).map(<[FunctionSignature]>::to_vec) {
-					if signatures.len() == 1 && arguments.len() != signatures[0].parameters.len() {
-						return Err(self.compile_error(
-							expression.position(),
-							format!(
-								"Function `{}` expects {} argument(s), found {}.",
-								callee.name,
-								signatures[0].parameters.len(),
-								arguments.len(),
-							),
-						));
-					}
-
-					if signatures.len() > 1
-						&& !signatures.iter().any(|signature| signature.parameters.len() == arguments.len()) {
-						return Err(self.compile_error(
-							expression.position(),
-							format!(
-								"No overload of function `{}` accepts {} argument(s).",
-								callee.name,
-								arguments.len(),
-							),
-						));
-					}
-
 					let mut argument_types = Vec::with_capacity(arguments.len());
 					for argument in arguments {
 						argument_types.push(self.infer_expression_type(&argument.value)?);
 					}
-					let (signature, argument_order) = self.select_function_overload(
+					let (signature, argument_bindings) = self.select_function_overload(
 						&callee.name,
 						&signatures,
 						arguments,
@@ -1504,10 +1512,18 @@ impl SemanticAnalyzer {
 					)?;
 					let mut reference_slots = vec![None; arguments.len()];
 
-					for (parameter_index, argument_index) in argument_order.iter().enumerate() {
-						let argument = &arguments[*argument_index];
-						let argument_type = &argument_types[*argument_index];
+					for (parameter_index, binding) in argument_bindings.iter().enumerate() {
 						let parameter = &signature.parameters[parameter_index];
+						let CallArgumentBinding::Supplied(argument_index) = binding else {
+							if let CallArgumentBinding::Default(default_value) = binding
+								&& matches!(parameter.data_type.without_nullability(), DataType::RecordPointer(_)) {
+								self.record_record_pointer_escape(default_value);
+							}
+							continue;
+						};
+						let argument_index = *argument_index as usize;
+						let argument = &arguments[argument_index];
+						let argument_type = &argument_types[argument_index];
 						if parameter.is_by_ref {
 							if !argument.is_by_ref {
 								return Err(self.compile_error(
@@ -1547,7 +1563,7 @@ impl SemanticAnalyzer {
 								));
 							}
 
-							reference_slots[*argument_index] = Some(local.slot);
+							reference_slots[argument_index] = Some(local.slot);
 						}
 						else {
 							if argument.is_by_ref {
@@ -1566,9 +1582,9 @@ impl SemanticAnalyzer {
 					}
 
 					self.semantic_program.call_targets.insert(expression.position(), signature.function_index);
-					self.semantic_program.call_argument_order.insert(
+					self.semantic_program.call_argument_bindings.insert(
 						expression.position(),
-						argument_order.into_iter().map(|index| index as u32).collect(),
+						argument_bindings,
 					);
 					self.semantic_program.call_argument_reference_slots.insert(expression.position(), reference_slots);
 					self.semantic_program.call_return_types.insert(expression.position(), signature.return_type.clone());
@@ -2066,30 +2082,6 @@ impl SemanticAnalyzer {
 			Expr::Boolean(_) => Ok(DataType::Bool),
 			Expr::Call(CallExpr { arguments, callee, .. }) => {
 				if let Some(signatures) = self.lookup_functions(&callee.name).map(<[FunctionSignature]>::to_vec) {
-					if signatures.len() == 1 && arguments.len() != signatures[0].parameters.len() {
-						return Err(self.compile_error(
-							expression.position(),
-							format!(
-								"Function `{}` expects {} argument(s), found {}.",
-								callee.name,
-								signatures[0].parameters.len(),
-								arguments.len(),
-							),
-						));
-					}
-
-					if signatures.len() > 1
-						&& !signatures.iter().any(|signature| signature.parameters.len() == arguments.len()) {
-						return Err(self.compile_error(
-							expression.position(),
-							format!(
-								"No overload of function `{}` accepts {} argument(s).",
-								callee.name,
-								arguments.len(),
-							),
-						));
-					}
-
 					let mut argument_types = Vec::with_capacity(arguments.len());
 					for argument in arguments {
 						if argument.is_by_ref {
@@ -2101,7 +2093,7 @@ impl SemanticAnalyzer {
 
 						argument_types.push(self.infer_query_expression_type(&argument.value, table)?);
 					}
-					let (signature, argument_order) = self.select_function_overload(
+					let (signature, argument_bindings) = self.select_function_overload(
 						&callee.name,
 						&signatures,
 						arguments,
@@ -2109,9 +2101,13 @@ impl SemanticAnalyzer {
 						expression.position(),
 					)?;
 
-					for (parameter_index, argument_index) in argument_order.iter().enumerate() {
-						let argument = &arguments[*argument_index];
-						let argument_type = &argument_types[*argument_index];
+					for (parameter_index, binding) in argument_bindings.iter().enumerate() {
+						let CallArgumentBinding::Supplied(argument_index) = binding else {
+							continue;
+						};
+						let argument_index = *argument_index as usize;
+						let argument = &arguments[argument_index];
+						let argument_type = &argument_types[argument_index];
 						let parameter = &signature.parameters[parameter_index];
 						self.ensure_assignable(&parameter.data_type, argument_type, argument.value.position())?;
 					}
@@ -3647,23 +3643,27 @@ impl SemanticAnalyzer {
 		arguments: &[CallArgument],
 		argument_types: &[DataType],
 		position: usize,
-	) -> Result<(FunctionSignature, Vec<usize>), CompileError> {
+	) -> Result<(FunctionSignature, Vec<CallArgumentBinding>), CompileError> {
 		if signatures.len() == 1 {
-			let argument_order = self.bind_call_arguments(&signatures[0], arguments).ok_or(self.compile_error(
+			let argument_bindings = self.bind_call_arguments(&signatures[0], arguments).ok_or(self.compile_error(
 				position,
 				format!("Arguments do not match the parameters of function `{name}`."),
 			))?;
-			return Ok((signatures[0].clone(), argument_order));
+			return Ok((signatures[0].clone(), argument_bindings));
 		}
 
 		let candidates = signatures.iter()
 			.filter_map(|signature| {
-				let argument_order = self.bind_call_arguments(signature, arguments)?;
+				let argument_bindings = self.bind_call_arguments(signature, arguments)?;
 				let accepts_types = signature.parameters.iter()
-					.zip(argument_order.iter())
-					.all(|(parameter, argument_index)| {
-						let argument = &arguments[*argument_index];
-						let argument_type = &argument_types[*argument_index];
+					.zip(argument_bindings.iter())
+					.all(|(parameter, binding)| {
+						let CallArgumentBinding::Supplied(argument_index) = binding else {
+							return true;
+						};
+						let argument_index = *argument_index as usize;
+						let argument = &arguments[argument_index];
+						let argument_type = &argument_types[argument_index];
 						if parameter.is_by_ref != argument.is_by_ref {
 							return false;
 						}
@@ -3677,7 +3677,7 @@ impl SemanticAnalyzer {
 					});
 
 				if accepts_types {
-					Some((signature.clone(), argument_order))
+					Some((signature.clone(), argument_bindings))
 				}
 				else {
 					None
@@ -3686,7 +3686,7 @@ impl SemanticAnalyzer {
 			.collect::<Vec<_>>();
 
 		match candidates.as_slice() {
-			[(signature, argument_order)] => Ok((signature.clone(), argument_order.clone())),
+			[(signature, argument_bindings)] => Ok((signature.clone(), argument_bindings.clone())),
 			[] => Err(self.compile_error(
 				position,
 				format!("No overload of function `{name}` accepts the supplied arguments."),
@@ -3897,6 +3897,10 @@ impl SemanticAnalyzer {
 		self.enter_scope();
 
 		for parameter in &function.parameters {
+			self.validate_function_parameter_default(parameter)?;
+		}
+
+		for parameter in &function.parameters {
 			self.validate_function_parameter(parameter)?;
 		}
 
@@ -3924,13 +3928,24 @@ impl SemanticAnalyzer {
 		Ok(())
 	}
 
-	fn validate_function_parameter(&mut self, parameter: &FunctionParameter) -> Result<(), CompileError> {
-		if parameter.default_value.is_some() {
+	fn validate_function_parameter_default(&mut self, parameter: &FunctionParameter) -> Result<(), CompileError> {
+		let Some(default_value) = &parameter.default_value else {
+			return Ok(());
+		};
+
+		if parameter.is_by_ref {
 			return Err(self.compile_error(
 				parameter.position,
-				String::from("Default parameter values are not yet supported."),
+				format!("By-reference parameter `{}` cannot define a default value.", parameter.name),
 			));
 		}
+
+		let parameter_type = self.resolve_function_parameter_type(parameter)?;
+		let default_type = self.infer_expression_type(default_value)?;
+		self.ensure_assignable(&parameter_type, &default_type, default_value.position())
+	}
+
+	fn validate_function_parameter(&mut self, parameter: &FunctionParameter) -> Result<(), CompileError> {
 		if parameter.is_variadic {
 			return Err(self.compile_error(
 				parameter.position,

@@ -260,7 +260,7 @@ Variables of type `bool` may be assigned the literal values `true` and `false`.
 
 The null value may be assigned only to a nullable type. Nullable types are written by adding `?` after the type name. The null value is written using the reserved word `null`.
 
-Unless marked as required, an argument of any data type my hold a void value. The void value cannot be manually assigned. Only arguments that have not been provided when a function is called receive the void value. For the purposes of conversion to and from JSON, the void value is equivalent to `undefined`.
+Unless marked as required, an argument of any data type may hold a void value. The void value cannot be manually assigned. Only arguments that have not been provided when a function is called receive the void value. For the purposes of conversion to and from JSON, the void value is equivalent to `undefined`.
 
 Integer Literals
 ----------------

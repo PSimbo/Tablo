@@ -392,22 +392,45 @@ impl Compiler {
 					self.emit(emission, Instruction::CallBuiltIn(built_in, arguments.len() as u32), expression_position);
 				}
 				else {
-					if let Some(argument_order) = semantic_program.call_argument_order(expression.position()) {
-						let requires_reordering = argument_order.iter().enumerate()
-							.any(|(parameter_index, argument_index)| parameter_index as u32 != *argument_index);
+					let argument_bindings = semantic_program.call_argument_bindings(expression.position())
+						.unwrap_or_else(|| panic!("Missing argument bindings for call expression."));
+					let mut next_materialized_index = arguments.len() as u32;
+					let mut argument_order = Vec::with_capacity(argument_bindings.len());
 
-						if requires_reordering {
-							self.emit(
-								emission,
-								Instruction::ReorderCallArguments(argument_order.to_vec()),
-								expression_position,
-							);
+					for binding in argument_bindings {
+						match binding {
+							CallArgumentBinding::Supplied(argument_index) => argument_order.push(*argument_index),
+							CallArgumentBinding::Default(default_value) => {
+								self.compile_into_with_debug_position(
+									default_value,
+									semantic_program,
+									emission,
+									Some(expression_position),
+								);
+								argument_order.push(next_materialized_index);
+								next_materialized_index += 1;
+							}
+							CallArgumentBinding::OmittedNull => {
+								self.emit(emission, Instruction::PushNull, expression_position);
+								argument_order.push(next_materialized_index);
+								next_materialized_index += 1;
+							}
 						}
+					}
+
+					let requires_reordering = argument_order.iter().enumerate()
+						.any(|(parameter_index, argument_index)| parameter_index as u32 != *argument_index);
+					if requires_reordering {
+						self.emit(
+							emission,
+							Instruction::ReorderCallArguments(argument_order),
+							expression_position,
+						);
 					}
 
 					let function_index = semantic_program.call_target(expression.position())
 						.unwrap_or_else(|| panic!("Missing function target for call expression."));
-					self.emit(emission, Instruction::Call(function_index, arguments.len() as u32), expression_position);
+					self.emit(emission, Instruction::Call(function_index, argument_bindings.len() as u32), expression_position);
 				}
 			}
 			Expr::Count(_) => {
