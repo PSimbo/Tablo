@@ -213,6 +213,7 @@ The following identifiers are reserved as keywords:
 | `create`      | Commits a database record creation                  |
 | `date`        | Date data type                                      |
 | `dec`         | Decimal data type                                   |
+| `default`     | Requests a named parameter's declared default       |
 | `delete`      | Commits a database record deletion                  |
 | `desc`        | Marks the sort order for a field as descending      |
 | `else`        | Starts an else-block for an if statement            |
@@ -352,6 +353,8 @@ If a case-insensitive text equality comparison is required, the expected approac
 Decimal values may be compared with other decimal values. Decimal values may also be compared with integer values as the integer will be automatically converted to a decimal as per the "Automatic Type Conversions" section below.
 
 Arrays may be compared for equality using `==` and `!=`. Two arrays are equal if and only if they have the same length and each element is equal to the corresponding element in the other array.
+
+The `null` literal may be compared for equality with a nullable or non-nullable value of any type for which equality is defined. A non-nullable value is never equal to `null`, so `value == null` always evaluates to `false` and `value != null` always evaluates to `true` when `value` has a non-nullable type. Such comparisons are valid even when the compiler can determine their result statically.
 
 Equality operators are not defined directly for `any` values. If equality over dynamically typed values is required, those values must first be converted or validated into more specific types.
 
@@ -1459,8 +1462,28 @@ Any function may be called with a mix of positional arguments, named arguments, 
 * Only by-value parameters may be omitted. An omitted by-value parameter must either be nullable or have a default value. Every by-reference parameter must be supplied.
 * Any argument corresponding to a by-reference parameter must use the explicit `&identifier` syntax.
 * An argument corresponding to a `rec <table>` or `&rec <table>` parameter must be a record pointer for that same table.
+* The `default` keyword may be used only as the value of a named argument whose corresponding by-value parameter declares a default expression.
 
 When a by-value parameter is omitted, it receives its declared default value. If the parameter has no declared default but has a nullable type, it receives `null`.
+
+The caller may explicitly request a parameter's declared default by supplying the `default` keyword as the value of a named argument:
+
+~~~
+fn Example(value: int = 10) {
+}
+
+Example(value: default); // `value` receives 10.
+
+Example(default); // Compile error: `default` cannot be positional.
+
+fn NullableOnly(value: int?) {
+}
+
+// Compile error: `value` has no declared default expression.
+NullableOnly(value: default);
+~~~
+
+The `default` keyword is not a general expression and may not be supplied as a positional argument. It is invalid for a nullable parameter without a declared default, a by-reference parameter, or a "varargs" parameter. It requests the parameter's declared default expression rather than the ordinary default value of the parameter's data type.
 
 Names used by a default expression are resolved in the scope where the function is declared. Names from the caller's scope are never visible to the default expression.
 
@@ -1534,14 +1557,14 @@ fn Outer() {
 }
 ~~~
 
-Each explicitly supplied argument expression is evaluated exactly once, from left to right in the order written at the call site. This order applies to positional, named, and unnamed "varargs" arguments. Binding a named argument to its corresponding parameter does not reorder its evaluation.
+Each explicitly supplied argument expression is evaluated exactly once, from left to right in the order written at the call site. This order applies to positional, named, and unnamed "varargs" arguments. Binding a named argument to its corresponding parameter does not reorder its evaluation. A named `default` argument contains no call-site expression and therefore has no evaluation step.
 
 ~~~
 // `Next()` is called first for `second` and then for `first`.
 Example(second: Next(), first: Next());
 ~~~
 
-After all explicitly supplied arguments have been evaluated, omitted by-value parameters are initialized in parameter declaration order. A declared default expression is evaluated exactly once for each call in which its parameter is omitted. It is not evaluated when that parameter is supplied explicitly. An omitted nullable parameter without a declared default receives `null` without evaluating an expression.
+After all explicitly supplied arguments have been evaluated, omitted by-value parameters are initialized in parameter declaration order. A parameter explicitly bound to `default` is initialized as though it had been omitted. A declared default expression is evaluated exactly once for each call in which its parameter is omitted or explicitly bound to `default`. It is not evaluated when that parameter is supplied with an expression. An omitted nullable parameter without a declared default receives `null` without evaluating an expression.
 
 ~~~
 fn Example(first: int = Next(), second: int = Next()) {
@@ -1556,8 +1579,6 @@ Example(second: Supplied());
 
 ### Function Overloading
 
-Note that named arguments are not merely a convenience for readability. They also form part of the function overload resolution process and may be used to disambiguate otherwise ambiguous function calls.
-
 The function overload resolution process is as follows:
 
 1. Collect all functions in scope that have the same name as the called function.
@@ -1566,12 +1587,114 @@ The function overload resolution process is as follows:
   * Named arguments are bound by parameter name.
   * Unnamed "varargs" arguments are bound to the final "varargs" parameter, if one exists.
 3. A candidate function is discarded if:
-  * Any supplied named argument does not match one of its parameters
-  * Any parameter receives more than one value
-  * Any supplied argument has an incompatible type
-  * Any required parameter is left unbound after argument binding is complete
-4. If multiple candidate functions remain after binding and type-checking then the call is ambiguous and a compile error is produced.
-5. In the event of such an ambiguity, the caller may disambiguate the call by converting one or more positional arguments to named arguments.
+  * Any supplied named argument does not match one of its parameters.
+  * Any parameter receives more than one value.
+  * Any supplied argument has an incompatible type or reference form.
+  * A by-reference parameter is left unbound.
+  * A non-nullable by-value parameter without a default is left unbound.
+4. If exactly one candidate remains then that function is selected. Otherwise, if no candidates remain then no matching overload exists and if multiple candidates remain then the call is ambiguous. In either case, the call produces a compile error.
+
+The compiler does not rank compatible candidates for the purpose of overload resolution. In particular, it does not prefer exact parameter types over nullable parameter types, fewer omitted parameters over more omitted parameters, or fixed parameters over "varargs" parameters. The ordinary function-argument compatibility rules still apply: a non-nullable value may be passed to a parameter with the corresponding nullable type, while a nullable value may not be passed to the corresponding non-nullable type. General automatic conversions, including conversions between `int` and `dec`, are not performed when passing arguments to functions and do not participate in overload resolution.
+
+Parameter names do participate in overload resolution through argument binding. Overloads with otherwise identical parameter types must therefore be distinguished by named arguments. A positional call that does not distinguish them is ambiguous and produces a compile error.
+
+Every function in an overload set must have at least one syntactically valid argument list that selects it uniquely. The compiler rejects a declaration if adding it would leave any function in the resulting overload set with no uniquely identifying call. This rule is independent of the calls that currently exist in the program.
+
+A parameter with a default value and a nullable by-value parameter are both considered omittable for overload resolution and overload-set validation. A "varargs" parameter may receive zero arguments. The value or expression used as a parameter default has no effect on overload resolution. A named `default` argument participates in binding through its parameter name but has no type of its own. It does not make an otherwise unselectable overload valid because the same parameter name could instead be supplied with an explicit compatible value.
+
+Function return types play no part in overload resolution.
+
+The following overload sets are valid:
+
+~~~
+// The argument types distinguish these overloads.
+fn Display(value: int) {
+}
+
+fn Display(value: text) {
+}
+
+// The parameter names distinguish these overloads when named arguments
+// are used.
+fn Substring(str: text, start: int, len: int): text {
+}
+
+fn Substring(str: text, start: int, end: int): text {
+}
+
+Substring('substring', 4, len: 6); // Selects the first overload.
+Substring('substring', 4, end: 6); // Selects the second overload.
+Substring('substring', 4, 6);      // Compile error: ambiguous.
+
+// The explicit `&` at the call site distinguishes reference arguments.
+fn Reset(value: int) {
+}
+
+fn Reset(value: &int) {
+}
+
+// The fixed overload requires a `text` argument where the "varargs"
+// overload accepts only additional `int` arguments.
+fn Collect(value: int, ...others: [int]) {
+}
+
+fn Collect(value: int, label: text) {
+}
+
+// Each overload can be selected by supplying its distinct optional
+// parameter by name. Omitting both produces an ambiguous call.
+fn Format(value: int, radix: int = 10) {
+}
+
+fn Format(value: int, prefix: text = '') {
+}
+
+Format(1, radix: 16);       // Selects the first overload.
+Format(1, prefix: '');      // Selects the second overload.
+Format(1, radix: default);  // Selects the first overload and uses 10.
+Format(1, prefix: default); // Selects the second overload and uses ''.
+Format(1);                  // Compile error: ambiguous.
+~~~
+
+The following overload sets are invalid and produce compile errors:
+
+~~~
+// Parameter names and types are identical, so neither overload can ever
+// be selected uniquely.
+fn Twice(value: int): int {
+  return value * 2;
+}
+
+fn Twice(value: int): int {
+  return value + value;
+}
+
+// A non-nullable `int` is also compatible with `int?`, so the first
+// overload can never be selected uniquely.
+fn Inspect(value: int) {
+}
+
+fn Inspect(value: int?) {
+}
+
+// `Example(1)` matches both overloads, while only the second overload can
+// be selected uniquely by supplying `precision`.
+fn Example(value: int) {
+}
+
+fn Example(value: int, precision: int = 0) {
+}
+
+// A "varargs" parameter may receive no arguments. Only the second
+// overload can be selected uniquely by supplying additional arguments.
+fn Append(value: int) {
+}
+
+fn Append(value: int, ...others: [int]) {
+}
+~~~
+
+Overload-set validation occurs whenever functions become visible together in the same scope. Functions declared in separate modules may therefore be valid independently but produce a compile error when an import brings them into the same overload set. In that case, the error is reported at the import that introduces the ambiguity.
 
 ### Async Functions
 
@@ -2269,7 +2392,9 @@ objectLiteral = `{` [ objectLiteralField { `,` objectLiteralField } [ `,` ] ] `}
 objectLiteralField = identifier `:` expression
 objectDefaultLiteral = `null` | arrayLiteral | booleanLiteral | decimalLiteral | hexLiteral | integerLiteral | octalLiteral | objectLiteral | stringLiteral
 callSuffix = `(` [ callArgument { `,` callArgument } ] `)`
-callArgument = [ identifier `:` ] ( expression | referenceArgument )
+callArgument = positionalArgument | namedArgument
+positionalArgument = expression | referenceArgument
+namedArgument = identifier `:` ( expression | referenceArgument | `default` )
 referenceArgument = `&` identifier
 indexSuffix = `[` expression `]`
 memberSuffix = `.` identifier
