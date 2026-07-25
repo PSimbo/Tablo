@@ -28,7 +28,7 @@ obj ForumPost {
   ],
 }
 
-fn FindPosts(id: int, madeBy: int, since: date, until: date) [ForumPost] {
+fn FindPosts(id: int, madeBy: int, since: date, until: date): [ForumPost] {
   // If the user gets the dates in the wrong order, swap them.
   var tempDate: date? = null;
 
@@ -82,7 +82,7 @@ Many of the design decisions that drive the development of Tablo stem from the f
 When Tablo code is compiled or interpreted as a standalone program, the module must define an entry-point function named `Main`. The required signature is:
 
 ~~~
-fn Main(args: [text]) int {
+fn Main(args: [text]): int {
   ...
 }
 ~~~
@@ -673,7 +673,7 @@ The default value of an array is the empty array `[]`. The default value of a nu
 Arrays use copy-on-write semantics when passed to functions or otherwise assigned by value. In other words, array values may be shared internally until one of the aliases is mutated, at which point a private copy is created for the write.
 
 ~~~
-fn BumpFirst(values: [int]) [int] {
+fn BumpFirst(values: [int]): [int] {
   values[1] += 1;
   return values;
 }
@@ -1241,7 +1241,7 @@ Only plain sequence identifiers are valid assignment targets.
 Sequences may be passed to functions, but they use their own parameter syntax rather than the ordinary `int` type. A sequence parameter is written as `seq <sequence>` and refers to the underlying database sequence rather than merely its current integer value.
 
 ~~~
-fn BumpInvoiceNumber(invoiceNo: seq InvoiceNumber) int {
+fn BumpInvoiceNumber(invoiceNo: seq InvoiceNumber): int {
   return seqnext(invoiceNo);
 }
 ~~~
@@ -1302,12 +1302,12 @@ TODO: Once error handling semantics have been designed, this section should be u
 Functions
 ---------
 
-Functions are declared using the `fn` keyword followed by the function name, a parameter list, the return type, and a block containing the function body.
+Functions are declared using the `fn` keyword followed by the function name, a parameter list, an optional return type, and a block containing the function body.
 
 By default, a function may only be referenced within the module in which it is declared. In order for a function to be imported by another module, it must be marked with the `pub` keyword.
 
 ~~~
-pub fn FindPosts(id: int, madeBy: int, since: date, until: date) [ForumPost] {
+pub fn FindPosts(id: int, madeBy: int, since: date, until: date): [ForumPost] {
   ...
 }
 ~~~
@@ -1321,7 +1321,7 @@ Record-pointer parameters use the syntax `<name>: rec <table>` where `<table>` i
 Ordinary parameters are passed by value. To declare that a parameter is passed by reference, prefix the parameter type with `&`:
 
 ~~~
-fn Increment(value: &int) void {
+fn Increment(value: &int) {
   value += 1;
 }
 ~~~
@@ -1329,7 +1329,7 @@ fn Increment(value: &int) void {
 The same rule applies to record-pointer parameters:
 
 ~~~
-fn TouchCustomer(cust: rec tblCustomers, refCust: &rec tblCustomers) void {
+fn TouchCustomer(cust: rec tblCustomers, refCust: &rec tblCustomers) {
   if cust {
     ...
   }
@@ -1358,11 +1358,13 @@ Tablo references are not nullable and cannot be created independently of a funct
 
 For the time being, record-pointer parameter types are limited to single-table record pointers. Joined query row-shapes do not yet have a parameter type syntax.
 
-The return type follows immediately after the parameter list. Any valid Tablo type may be used as the return type, including arrays, objects, and nullable or non-nullable types. Record pointers are not yet valid as function return types.
+When a function returns a value, its return type follows the parameter list and a `:` character. Any valid Tablo type may be used as the return type, including arrays, objects, and nullable or non-nullable types. Record pointers are not yet valid as function return types.
+
+Omitting the return type declares that the function does not return a value. This is not return-type inference: a function without a return type must not return a value.
 
 The function body is enclosed between `{` and `}` characters and contains zero or more statements. Function parameters are referenced by name within the body of the function.
 
-For a standalone program, one module-scope function must be named `Main` and must use the exact signature `fn Main(args: [text]) int`. This function is the program entry point.
+For a standalone program, one module-scope function must be named `Main` and must use the exact signature `fn Main(args: [text]): int`. This function is the program entry point.
 
 The `Main` function's `args` parameter always exists, even when the program is launched without arguments, in which case it receives the empty array. The integer result returned from `Main` becomes the program's exit status.
 
@@ -1372,7 +1374,9 @@ The `return` statement exits the body of the function, optionally returning a va
 return forumPosts;
 ~~~
 
-For a function that returns `void`, the final `return` statement may be omitted.
+In a function with an explicit return type, every execution path that completes normally must return a value compatible with that type. Reaching the end of the function body or using a bare `return;` is invalid. A path that exits by propagating a failure does not also need to return a value.
+
+A function without a return type may use a bare `return;` or allow execution to reach the end of its body. Returning an expression from such a function is a compile error. A call to a function without a return type cannot be used where a value is required.
 
 To call a function, use the function name followed by an argument list between `(` and `)` characters:
 
@@ -1391,8 +1395,8 @@ Variables and parameters from an enclosing scope are not captured implicitly, ev
 A `return` statement always exits the innermost enclosing function body. A `return` within a nested function therefore returns from the nested function only and does not cause the enclosing function to return.
 
 ~~~
-fn FormatPostSummary(post: ForumPost) text {
-  fn AppendLine(prefix: text, value: text) text {
+fn FormatPostSummary(post: ForumPost): text {
+  fn AppendLine(prefix: text, value: text): text {
     return prefix + value + '\n';
   }
 
@@ -1415,7 +1419,7 @@ Tablo functions support:
 Within a function argument list, an identifier immediately followed by `:` begins a named argument.
 
 ~~~
-fn Name(<Positional Args>, <Named Args>, <Varargs>) void {}
+fn Name(<Positional Args>, <Named Args>, <Varargs>) {}
 ~~~
 
 In order to pass a range expression whose `from` value is an identifier, it must be wrapped in parentheses. For example, `Example(value: upperBound)` supplies the named argument `value`, while `Example((value:upperBound))` supplies the range `value:upperBound` as a positional argument.
@@ -1423,7 +1427,7 @@ In order to pass a range expression whose `from` value is an identifier, it must
 To specify that a function accepts a variable number of arguments ("varargs"), the `...` syntax is used to mark the "varargs" argument. If present, this parameter must be the final parameter in the parameter list, must have an array type, and may not define a default value. The "varargs" argument may be provided as a named argument but only if the value is passed as a single array of the appropriate type.
 
 ~~~
-fn Example(arg1: text?, arg2: int = 1, ...args: [int]) void {
+fn Example(arg1: text?, arg2: int = 1, ...args: [int]) {
 }
 
 // `arg1` set to 'Foo', `arg2` defaults to 1, `args` is [].
@@ -1469,7 +1473,7 @@ The following default expressions are valid:
 ~~~
 global var DefaultLabel: text = 'Default';
 
-fn ReadDefaultLabel() text {
+fn ReadDefaultLabel(): text {
   return DefaultLabel;
 }
 
@@ -1484,7 +1488,7 @@ fn ValidDefaults(
   selectedValue: text = IsProduction() ? 'production' : 'development',
   formattedValue: text = FormatLabel('Default', 3),
   indirectGlobalValue: text = ReadDefaultLabel()
-) void {
+) {
 }
 ~~~
 
@@ -1496,36 +1500,36 @@ The following declarations are invalid and produce compile errors:
 global var DefaultCount: int = 10;
 
 // A default expression cannot directly reference a global variable.
-fn InvalidGlobal(value: int = DefaultCount) void {
+fn InvalidGlobal(value: int = DefaultCount) {
 }
 
 // A default expression cannot reference another parameter.
-fn InvalidParameter(base: int, value: int = base + 1) void {
+fn InvalidParameter(base: int, value: int = base + 1) {
 }
 
 // Field access does not permit a parameter reference as its root.
-fn InvalidParameterField(customer: Customer, name: text = customer.name) void {
+fn InvalidParameterField(customer: Customer, name: text = customer.name) {
 }
 
 // A local variable at the call site is not visible to the default expression.
-fn InvalidCallerScope(value: int = callerValue) void {
+fn InvalidCallerScope(value: int = callerValue) {
 }
 
-fn Caller() void {
+fn Caller() {
   var callerValue: int = 10;
   InvalidCallerScope();
 }
 
-fn Outer() void {
+fn Outer() {
   var localValue: int = 10;
   const localConstant: int = 20;
 
   // A nested function cannot capture an enclosing local variable.
-  fn InvalidLocal(value: int = localValue) void {
+  fn InvalidLocal(value: int = localValue) {
   }
 
   // The same restriction applies to an enclosing constant.
-  fn InvalidConstant(value: int = localConstant) void {
+  fn InvalidConstant(value: int = localConstant) {
   }
 }
 ~~~
@@ -1540,7 +1544,7 @@ Example(second: Next(), first: Next());
 After all explicitly supplied arguments have been evaluated, omitted by-value parameters are initialized in parameter declaration order. A declared default expression is evaluated exactly once for each call in which its parameter is omitted. It is not evaluated when that parameter is supplied explicitly. An omitted nullable parameter without a declared default receives `null` without evaluating an expression.
 
 ~~~
-fn Example(first: int = Next(), second: int = Next()) void {
+fn Example(first: int = Next(), second: int = Next()) {
 }
 
 // `Next()` is called first for `first` and then for `second`.
@@ -1576,7 +1580,7 @@ Tablo supports concurrency using the principles of structured concurrency.
 Functions are synchronous by default. Each function that supports being run asynchronously must be prefixed with the `async` keyword:
 
 ~~~
-async fn LoadPosts(authorId: int) [ForumPost] {
+async fn LoadPosts(authorId: int): [ForumPost] {
   ...
 }
 ~~~
@@ -1632,7 +1636,7 @@ Tablo supports structured error handling using `try`, `catch`, and `finally` blo
 Within a function, the `fail` keyword exits the current function by throwing an error. Unless the error is caught by a surrounding `try` / `catch` block, it continues to propagate outward until it reaches a caller or terminates execution.
 
 ~~~
-fn UpdateCustomer(id: int, name: text) void {
+fn UpdateCustomer(id: int, name: text) {
   if name == '' {
     fail 'Customer name must not be empty.';
   }
@@ -1782,11 +1786,11 @@ Returns the days component of `d`.
 
 Returns the days component of `t`.
 
-### `disp(fmt: text) void`
+### `disp(fmt: text)`
 
 Displays the `fmt` text in `stdout`. Note that no new line character is automatically added to the end of `fmt`.
 
-### `displn(fmt: text) void`
+### `displn(fmt: text)`
 
 Displays the `fmt` text in `stdout`. A new line character is automatically added to the end of `fmt`.
 
@@ -1848,7 +1852,7 @@ The `\` character is used to escape wildcard characters within the pattern. Ther
 
 Returns the index of the first instance of `str` within `arr` or `null` if `str` is not an element in `arr`.
 
-### `indexof(sub: text, str) int?`
+### `indexof(sub: text, str: text): int?`
 
 Returns the index of the first instance of the sub-string `sub` within `str` or `null` if `str` does not contain `sub`.
 
@@ -2228,7 +2232,7 @@ block = `{` { statement } `}`
 blockStatement = forStatement | ifStatement | whileStatement
 simpleStatement = ( `break` | `continue` | expression | returnStatement | variableDeclaration ) `;`
 forStatement = `for` identifier `in` expression block
-functionDeclaration = `fn` identifier `(` [ functionParameter { `,` functionParameter } ] `)` returnType block
+functionDeclaration = `fn` identifier `(` [ functionParameter { `,` functionParameter } ] `)` [ `:` dataType ] block
 functionParameter = variadicFunctionParameter | byReferenceFunctionParameter | byValueFunctionParameter
 variadicFunctionParameter = `...` identifier `:` parameterType
 byReferenceFunctionParameter = identifier `:` `&` parameterType
@@ -2238,7 +2242,6 @@ variableDeclaration = ( `const` | `var` ) identifier `:` dataType [ `=` expressi
 returnStatement = `return` [ expression ]
 ifStatement = `if` expression block [ `else` ( block | ifStatement ) ]
 whileStatement = `while` expression block
-returnType = dataType | `void`
 dataType = baseDataType [ `?` ]
 baseDataType = typeReference | arrayType
 arrayType = `[` dataType `]`
