@@ -788,7 +788,26 @@ impl Parser {
 		}
 
 		self.expect_token(TokenKind::RightParenthesis, "Expected `)` after parameter list.")?;
-		let return_type = self.parse_data_type()?;
+		let return_type = if self.current().is_some_and(|token| token.kind == TokenKind::Colon) {
+			self.next();
+			self.parse_data_type()?
+		}
+		else if self.current().is_some_and(|token| token.kind == TokenKind::LeftBrace) {
+			DataType::Void
+		}
+		else if self.current().is_some_and(|token| {
+			token.kind == TokenKind::Identifier && token.lexeme == "void"
+		}) {
+			// Keep existing source fixtures usable until `DataType::Void` is
+			// removed during the return-type representation migration.
+			self.next();
+			DataType::Void
+		}
+		else {
+			// Old value-return syntax remains transitional compatibility while
+			// the existing fixtures are migrated to the colon form.
+			self.parse_data_type()?
+		};
 		let body = match self.parse_block_statement()? {
 			Statement::Block(block) => block,
 			_ => unreachable!("Block parser must return a block statement."),
@@ -1533,7 +1552,9 @@ impl Parser {
 			}),
 			TokenKind::FalseKeyword | TokenKind::TrueKeyword => self.parse_boolean_literal(token),
 			TokenKind::FindKeyword => self.parse_find_expression(token.start),
-			TokenKind::Identifier => Ok(self.parse_identifier_expression(token)),
+			TokenKind::ExistsKeyword
+			| TokenKind::Identifier
+			| TokenKind::LockedKeyword => Ok(self.parse_identifier_expression(token)),
 			TokenKind::IntegerLiteral => self.parse_integer_literal(token),
 			TokenKind::InterpolatedStringStart => self.parse_interpolated_string(token),
 			TokenKind::LeftBracket => self.parse_array_literal(token.start),
@@ -1574,7 +1595,6 @@ impl Parser {
 			TokenKind::TimeTzKeyword => Ok(DataType::TimeTz),
 			TokenKind::TimestampKeyword => Ok(DataType::Timestamp),
 			TokenKind::TimestampTzKeyword => Ok(DataType::TimestampTz),
-			TokenKind::VoidKeyword => Ok(DataType::Void),
 			_ => Err(ParseError {
 				message: format!("Expected a supported data type, found `{}`.", token.lexeme),
 				position: token.start,
@@ -5453,6 +5473,20 @@ mod tests {
 				})),
 			})
 		);
+	}
+
+	#[test]
+	fn parses_revised_function_return_syntax() {
+		let program = parse_program(
+			"fn Value(): int { return 1; }\n\
+			fn Touch() { return; }",
+		);
+
+		assert_eq!(program.functions.len(), 2);
+		assert_eq!(program.functions[0].name, "Value");
+		assert_eq!(program.functions[0].return_type, DataType::Int);
+		assert_eq!(program.functions[1].name, "Touch");
+		assert_eq!(program.functions[1].return_type, DataType::Void);
 	}
 
 	#[test]

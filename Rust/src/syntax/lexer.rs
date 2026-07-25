@@ -358,10 +358,12 @@ impl Lexer {
 			"create" => TokenKind::CreateKeyword,
 			"date" => TokenKind::DateKeyword,
 			"dec" => TokenKind::DecKeyword,
+			"default" => TokenKind::DefaultKeyword,
 			"delete" => TokenKind::DeleteKeyword,
 			"desc" => TokenKind::DescKeyword,
 			"else" => TokenKind::ElseKeyword,
 			"enum" => TokenKind::EnumKeyword,
+			"exists" => TokenKind::ExistsKeyword,
 			"false" => TokenKind::FalseKeyword,
 			"find" => TokenKind::FindKeyword,
 			"first" => TokenKind::FirstKeyword,
@@ -374,6 +376,7 @@ impl Lexer {
 			"int" => TokenKind::IntKeyword,
 			"last" => TokenKind::LastKeyword,
 			"limit" => TokenKind::LimitKeyword,
+			"locked" => TokenKind::LockedKeyword,
 			"mut" => TokenKind::MutKeyword,
 			"new" => TokenKind::NewKeyword,
 			"null" => TokenKind::NullKeyword,
@@ -395,7 +398,6 @@ impl Lexer {
 			"update" => TokenKind::UpdateKeyword,
 			"use" => TokenKind::UseKeyword,
 			"var" => TokenKind::VarKeyword,
-			"void" => TokenKind::VoidKeyword,
 			"where" => TokenKind::WhereKeyword,
 			"while" => TokenKind::WhileKeyword,
 			"with" => TokenKind::WithKeyword,
@@ -1029,10 +1031,10 @@ mod tests {
 
 	#[test]
 	fn tokenizes_keyword_literals() {
-		let mut lexer = Lexer::new(SourceText::new("and any as asc bool break by const continue count create date dec delete desc else find first fn for from group if in last limit mut new not or order pub rec return text time timestamp timestamptz timetz transaction true update use var void where while with xor"));
+		let mut lexer = Lexer::new(SourceText::new("and any as asc bool break by const continue count create date dec delete desc else find first fn for from group if in last limit mut new not or order pub rec return text time timestamp timestamptz timetz transaction true update use var where while with xor"));
 		let tokens = lexer.tokenize().unwrap();
 
-		assert_eq!(tokens.len(), 50);
+		assert_eq!(tokens.len(), 49);
 		assert_eq!(tokens[0].kind, TokenKind::AndKeyword);
 		assert_eq!(tokens[0].lexeme, "and");
 		assert_eq!(tokens[1].kind, TokenKind::AnyKeyword);
@@ -1078,12 +1080,11 @@ mod tests {
 		assert_eq!(tokens[41].kind, TokenKind::UpdateKeyword);
 		assert_eq!(tokens[42].kind, TokenKind::UseKeyword);
 		assert_eq!(tokens[43].kind, TokenKind::VarKeyword);
-		assert_eq!(tokens[44].kind, TokenKind::VoidKeyword);
-		assert_eq!(tokens[45].kind, TokenKind::WhereKeyword);
-		assert_eq!(tokens[46].kind, TokenKind::WhileKeyword);
-		assert_eq!(tokens[47].kind, TokenKind::WithKeyword);
-		assert_eq!(tokens[48].kind, TokenKind::XorKeyword);
-		assert_eq!(tokens[49].kind, TokenKind::EndOfFile);
+		assert_eq!(tokens[44].kind, TokenKind::WhereKeyword);
+		assert_eq!(tokens[45].kind, TokenKind::WhileKeyword);
+		assert_eq!(tokens[46].kind, TokenKind::WithKeyword);
+		assert_eq!(tokens[47].kind, TokenKind::XorKeyword);
+		assert_eq!(tokens[48].kind, TokenKind::EndOfFile);
 	}
 
 	#[test]
@@ -1187,6 +1188,17 @@ mod tests {
 		assert_eq!(tokens[6].kind, TokenKind::Semicolon);
 		assert_eq!(tokens[7].kind, TokenKind::Identifier);
 		assert_eq!(tokens[8].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
+	fn tokenizes_new_function_semantics_keywords() {
+		let mut lexer = Lexer::new(SourceText::new("default exists locked"));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens[0].kind, TokenKind::DefaultKeyword);
+		assert_eq!(tokens[1].kind, TokenKind::ExistsKeyword);
+		assert_eq!(tokens[2].kind, TokenKind::LockedKeyword);
+		assert_eq!(tokens[3].kind, TokenKind::EndOfFile);
 	}
 
 	#[test]
@@ -1334,6 +1346,15 @@ mod tests {
 		assert_eq!(tokens[3].kind, TokenKind::Dot);
 		assert_eq!(tokens[4].kind, TokenKind::Identifier);
 		assert_eq!(tokens[5].kind, TokenKind::EndOfFile);
+	}
+
+	#[test]
+	fn tokenizes_void_as_an_identifier() {
+		let mut lexer = Lexer::new(SourceText::new("void"));
+		let tokens = lexer.tokenize().unwrap();
+
+		assert_eq!(tokens[0].kind, TokenKind::Identifier);
+		assert_eq!(tokens[0].lexeme, "void");
 	}
 
 	#[test]
