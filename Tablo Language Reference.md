@@ -1458,6 +1458,78 @@ Any function may be called with a mix of positional arguments, named arguments, 
 
 When a by-value parameter is omitted, it receives its declared default value. If the parameter has no declared default but has a nullable type, it receives `null`.
 
+Names used by a default expression are resolved in the scope where the function is declared. Names from the caller's scope are never visible to the default expression.
+
+A default expression may be composed recursively from literals, enum variants, array and object construction, function calls, field and index access, and unary, binary, or ternary operators. Each argument to a function call and each operand of an operator or access expression must itself be a valid default expression. Functions, object types, and enum types referenced by the expression must be visible in the function's declaration scope and are resolved there using the normal rules.
+
+A default expression may not directly reference a variable, constant, or parameter. In particular, it cannot reference another parameter of the function or capture a variable or parameter from an enclosing function. These restrictions apply only to the default expression itself. A function called by the default expression executes according to its ordinary semantics and may call other functions or access state that is normally available within its own body.
+
+The following default expressions are valid:
+
+~~~
+global var DefaultLabel: text = 'Default';
+
+fn ReadDefaultLabel() text {
+  return DefaultLabel;
+}
+
+fn ValidDefaults(
+  literalValue: int = 10,
+  calculatedValue: int = day(date()) - 1,
+  enumValue: HttpResponseCode = HttpResponseCode.Ok,
+  arrayValue: [int] = [1, 2, 3],
+  indexedValue: int = [10, 20][1],
+  objectValue: Customer = Customer { id: 1 },
+  fieldValue: text = Customer { id: 1 }.name,
+  selectedValue: text = IsProduction() ? 'production' : 'development',
+  formattedValue: text = FormatLabel('Default', 3),
+  indirectGlobalValue: text = ReadDefaultLabel()
+) void {
+}
+~~~
+
+In the example above, `ReadDefaultLabel()` may access `DefaultLabel` because the restriction applies to the default expression rather than to the implementation of a function that it calls.
+
+The following declarations are invalid and produce compile errors:
+
+~~~
+global var DefaultCount: int = 10;
+
+// A default expression cannot directly reference a global variable.
+fn InvalidGlobal(value: int = DefaultCount) void {
+}
+
+// A default expression cannot reference another parameter.
+fn InvalidParameter(base: int, value: int = base + 1) void {
+}
+
+// Field access does not permit a parameter reference as its root.
+fn InvalidParameterField(customer: Customer, name: text = customer.name) void {
+}
+
+// A local variable at the call site is not visible to the default expression.
+fn InvalidCallerScope(value: int = callerValue) void {
+}
+
+fn Caller() void {
+  var callerValue: int = 10;
+  InvalidCallerScope();
+}
+
+fn Outer() void {
+  var localValue: int = 10;
+  const localConstant: int = 20;
+
+  // A nested function cannot capture an enclosing local variable.
+  fn InvalidLocal(value: int = localValue) void {
+  }
+
+  // The same restriction applies to an enclosing constant.
+  fn InvalidConstant(value: int = localConstant) void {
+  }
+}
+~~~
+
 Each explicitly supplied argument expression is evaluated exactly once, from left to right in the order written at the call site. This order applies to positional, named, and unnamed "varargs" arguments. Binding a named argument to its corresponding parameter does not reorder its evaluation.
 
 ~~~
