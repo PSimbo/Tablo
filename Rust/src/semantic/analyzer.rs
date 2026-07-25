@@ -861,14 +861,14 @@ impl SemanticAnalyzer {
 			});
 		}
 
-		if !matches!(function.return_type, DataType::Void) {
+		if let Some(return_type) = &function.return_type {
 			self.validate_non_void_data_type(
-				&function.return_type,
+				return_type,
 				function.position,
 				format!(
 					"Function `{}` cannot return `{}`.",
 					function.name,
-					function.return_type.name(),
+					return_type.name(),
 				),
 			)?;
 		}
@@ -880,7 +880,7 @@ impl SemanticAnalyzer {
 				.map(|parameter| parameter.default_value.clone())
 				.collect(),
 			parameters,
-			return_type: function.return_type.clone(),
+			return_type: function.return_type.clone().unwrap_or(DataType::Void),
 		};
 
 		if self.functions.contains_in_current_scope(&function.name) {
@@ -3893,7 +3893,7 @@ impl SemanticAnalyzer {
 		self.function_depth += 1;
 		self.loop_depth = 0;
 		self.next_local_slot = 0;
-		self.current_return_type = Some(function.return_type.clone());
+		self.current_return_type = Some(function.return_type.clone().unwrap_or(DataType::Void));
 		self.enter_scope();
 
 		for parameter in &function.parameters {
@@ -3906,13 +3906,14 @@ impl SemanticAnalyzer {
 
 		self.validate_block(function.body.statements.as_slice())?;
 
-		if function.return_type != DataType::Void && !self.block_guarantees_return(&function.body) {
+		if let Some(return_type) = &function.return_type
+			&& !self.block_guarantees_return(&function.body) {
 			return Err(self.compile_error(
 				function.position,
 				format!(
 					"Function `{}` must return a value of type `{}` on all paths.",
 					function.name,
-					function.return_type.name(),
+					return_type.name(),
 				),
 			));
 		}
@@ -4036,11 +4037,11 @@ impl SemanticAnalyzer {
 			|| main_function.parameters[0].name != "args"
 			|| main_function.parameters[0].is_by_ref
 			|| main_function.parameters[0].data_type != FunctionParameterType::Value(DataType::Array(Box::new(DataType::Text)))
-			|| main_function.return_type != DataType::Int
+			|| main_function.return_type != Some(DataType::Int)
 		{
 			return Err(self.compile_error(
 				main_function.position,
-				String::from("Entry-point function `Main` must have the exact signature `fn Main(args: [text]) int`."),
+				String::from("Entry-point function `Main` must have the exact signature `fn Main(args: [text]): int`."),
 			));
 		}
 

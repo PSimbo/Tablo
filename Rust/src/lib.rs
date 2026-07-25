@@ -3259,7 +3259,7 @@ mod tests {
 		let error = run("fn Main() int { return 0; }").unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
-			message: String::from("Entry-point function `Main` must have the exact signature `fn Main(args: [text]) int`."),
+			message: String::from("Entry-point function `Main` must have the exact signature `fn Main(args: [text]): int`."),
 			position: 0,
 		}));
 	}

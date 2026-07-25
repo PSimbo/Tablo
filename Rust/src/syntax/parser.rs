@@ -790,10 +790,10 @@ impl Parser {
 		self.expect_token(TokenKind::RightParenthesis, "Expected `)` after parameter list.")?;
 		let return_type = if self.current().is_some_and(|token| token.kind == TokenKind::Colon) {
 			self.next();
-			self.parse_data_type()?
+			Some(self.parse_data_type()?)
 		}
 		else if self.current().is_some_and(|token| token.kind == TokenKind::LeftBrace) {
-			DataType::Void
+			None
 		}
 		else if self.current().is_some_and(|token| {
 			token.kind == TokenKind::Identifier && token.lexeme == "void"
@@ -801,12 +801,12 @@ impl Parser {
 			// Keep existing source fixtures usable until `DataType::Void` is
 			// removed during the return-type representation migration.
 			self.next();
-			DataType::Void
+			None
 		}
 		else {
 			// Old value-return syntax remains transitional compatibility while
 			// the existing fixtures are migrated to the colon form.
-			self.parse_data_type()?
+			Some(self.parse_data_type()?)
 		};
 		let body = match self.parse_block_statement()? {
 			Statement::Block(block) => block,
@@ -3042,7 +3042,7 @@ mod tests {
 							},
 						],
 						position: 0,
-						return_type: DataType::Int,
+						return_type: Some(DataType::Int),
 						visibility: Visibility::Private,
 					},
 				],
@@ -3298,7 +3298,7 @@ mod tests {
 							},
 						],
 						position: 0,
-						return_type: DataType::Void,
+						return_type: None,
 						visibility: Visibility::Private,
 					},
 				],
@@ -4139,7 +4139,7 @@ mod tests {
 							},
 						],
 						position: 0,
-						return_type: DataType::Int,
+						return_type: Some(DataType::Int),
 						visibility: Visibility::Private,
 					},
 				],
@@ -4867,7 +4867,7 @@ mod tests {
 										},
 									],
 									position: 0,
-									return_type: DataType::Void,
+									return_type: None,
 									visibility: Visibility::Private,
 								}),
 							],
@@ -4875,7 +4875,7 @@ mod tests {
 						name: String::from("outer"),
 						parameters: vec![],
 						position: 0,
-						return_type: DataType::Void,
+						return_type: None,
 						visibility: Visibility::Private,
 					},
 				],
@@ -4958,7 +4958,7 @@ mod tests {
 							},
 						],
 						position: 0,
-						return_type: DataType::Int,
+						return_type: Some(DataType::Int),
 						visibility: Visibility::Private,
 					},
 				],
@@ -5158,7 +5158,7 @@ mod tests {
 							},
 						],
 						position: 0,
-						return_type: DataType::Int,
+						return_type: Some(DataType::Int),
 						visibility: Visibility::Public,
 					},
 				],
@@ -5244,7 +5244,7 @@ mod tests {
 						},
 					],
 					position: 0,
-					return_type: DataType::Object(String::from("Outer.Inner")),
+					return_type: Some(DataType::Object(String::from("Outer.Inner"))),
 					visibility: Visibility::Private,
 				},
 			],
@@ -5436,7 +5436,7 @@ mod tests {
 							},
 						],
 						position: 0,
-						return_type: DataType::Void,
+						return_type: None,
 						visibility: Visibility::Private,
 					},
 				],
@@ -5479,14 +5479,17 @@ mod tests {
 	fn parses_revised_function_return_syntax() {
 		let program = parse_program(
 			"fn Value(): int { return 1; }\n\
-			fn Touch() { return; }",
+			fn Touch() { return; }\n\
+			fn Main(args: [text]): int { return 0; }",
 		);
 
-		assert_eq!(program.functions.len(), 2);
+		assert_eq!(program.functions.len(), 3);
 		assert_eq!(program.functions[0].name, "Value");
-		assert_eq!(program.functions[0].return_type, DataType::Int);
+		assert_eq!(program.functions[0].return_type, Some(DataType::Int));
 		assert_eq!(program.functions[1].name, "Touch");
-		assert_eq!(program.functions[1].return_type, DataType::Void);
+		assert_eq!(program.functions[1].return_type, None);
+		assert_eq!(program.functions[2].name, "Main");
+		assert_eq!(program.functions[2].return_type, Some(DataType::Int));
 	}
 
 	#[test]
@@ -5861,7 +5864,7 @@ mod tests {
 							},
 						],
 						position: 0,
-						return_type: DataType::Int,
+						return_type: Some(DataType::Int),
 						visibility: Visibility::Private,
 					},
 				],
@@ -5929,7 +5932,7 @@ mod tests {
 							},
 						],
 						position: 0,
-						return_type: DataType::Int,
+						return_type: Some(DataType::Int),
 						visibility: Visibility::Private,
 					},
 				],
@@ -6074,7 +6077,7 @@ mod tests {
 							},
 						],
 						position: 0,
-						return_type: DataType::Int,
+						return_type: Some(DataType::Int),
 						visibility: Visibility::Private,
 					},
 				],

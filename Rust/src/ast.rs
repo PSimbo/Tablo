@@ -380,7 +380,7 @@ pub struct FunctionDeclaration {
 	pub name: String,
 	pub parameters: Vec<FunctionParameter>,
 	pub position: usize,
-	pub return_type: DataType,
+	pub return_type: Option<DataType>,
 	pub visibility: Visibility,
 }
 
