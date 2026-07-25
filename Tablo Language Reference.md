@@ -1419,6 +1419,8 @@ Tablo functions support:
 * Default parameter values
 * Variable number of arguments ("varargs")
 
+Unless explicitly stated otherwise, all function-call and parameter rules apply equally to user-defined and built-in functions.
+
 Within a function argument list, an identifier immediately followed by `:` begins a named argument.
 
 ~~~
@@ -1858,6 +1860,12 @@ All global variables are initialized before any user-written functions are execu
 
 Built-In Functions
 ------------------
+
+Built-in functions behave like user-defined functions from the caller's perspective. They support positional and named arguments and participate in overload resolution under the normal function-call rules. The parameter names shown in their signatures are therefore part of the language interface and may be used for named arguments.
+
+~~~
+var containsName: bool = contains(sub: 'abl', str: 'Tablo');
+~~~
 
 Unless otherwise specified, built-in functions may be used in query expressions such as `where`, `order by`, and `group by` clauses.
 
