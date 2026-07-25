@@ -1352,6 +1352,8 @@ For the time being, only plain identifiers may be passed by reference. It is the
 
 Assigning to a by-reference parameter modifies the caller's variable behind the reference. This remains true even when the assigned value is read from another by-reference parameter.
 
+By-reference parameters may not declare default values and must be supplied with every call. This rule also applies when the referenced value has a nullable type: a nullable referenced value may contain `null`, but the reference itself must still alias a caller variable.
+
 Tablo references are not nullable and cannot be created independently of a function call. A by-reference parameter exists only for the duration of the corresponding call and must not outlive it.
 
 For the time being, record-pointer parameter types are limited to single-table record pointers. Joined query row-shapes do not yet have a parameter type syntax.
@@ -1416,7 +1418,7 @@ Any function may be called with a mix of positional arguments, named arguments, 
 * Any unnamed "varargs" arguments are specified after all positional and named arguments.
 * Each named argument must match the corresponding parameter name in the function declaration.
 * No named argument is provided more than once.
-* Any omitted parameter must either be nullable or have a default value.
+* Only by-value parameters may be omitted. An omitted by-value parameter must either be nullable or have a default value. Every by-reference parameter must be supplied.
 * Any argument corresponding to a by-reference parameter must use the explicit `&identifier` syntax.
 * An argument corresponding to a `rec <table>` or `&rec <table>` parameter must be a record pointer for that same table.
 
@@ -2133,7 +2135,11 @@ blockStatement = forStatement | ifStatement | whileStatement
 simpleStatement = ( `break` | `continue` | expression | returnStatement | variableDeclaration ) `;`
 forStatement = `for` identifier `in` expression block
 functionDeclaration = `fn` identifier `(` [ functionParameter { `,` functionParameter } ] `)` returnType block
-functionParameter = [ `...` ] identifier `:` [ `&` ] dataType [ `=` expression ]
+functionParameter = variadicFunctionParameter | byReferenceFunctionParameter | byValueFunctionParameter
+variadicFunctionParameter = `...` identifier `:` parameterType
+byReferenceFunctionParameter = identifier `:` `&` parameterType
+byValueFunctionParameter = identifier `:` parameterType [ `=` expression ]
+parameterType = dataType | `rec` typeReference
 variableDeclaration = ( `const` | `var` ) identifier `:` dataType [ `=` expression ]
 returnStatement = `return` [ expression ]
 ifStatement = `if` expression block [ `else` ( block | ifStatement ) ]
