@@ -1465,6 +1465,19 @@ Each explicitly supplied argument expression is evaluated exactly once, from lef
 Example(second: Next(), first: Next());
 ~~~
 
+After all explicitly supplied arguments have been evaluated, omitted by-value parameters are initialized in parameter declaration order. A declared default expression is evaluated exactly once for each call in which its parameter is omitted. It is not evaluated when that parameter is supplied explicitly. An omitted nullable parameter without a declared default receives `null` without evaluating an expression.
+
+~~~
+fn Example(first: int = Next(), second: int = Next()) void {
+}
+
+// `Next()` is called first for `first` and then for `second`.
+Example();
+
+// `Supplied()` is called first. `Next()` is then called only for `first`.
+Example(second: Supplied());
+~~~
+
 ### Function Overloading
 
 Note that named arguments are not merely a convenience for readability. They also form part of the function overload resolution process and may be used to disambiguate otherwise ambiguous function calls.
