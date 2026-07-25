@@ -1412,23 +1412,13 @@ Tablo functions support:
 * Default parameter values
 * Variable number of arguments ("varargs")
 
-Any function may be called with a mix of positional arguments, named arguments, and "varargs" arguments provided that:
-
-* All positional arguments are specified before all named arguments.
-* Any unnamed "varargs" arguments are specified after all positional and named arguments.
-* Each named argument must match the corresponding parameter name in the function declaration.
-* No named argument is provided more than once.
-* Only by-value parameters may be omitted. An omitted by-value parameter must either be nullable or have a default value. Every by-reference parameter must be supplied.
-* Any argument corresponding to a by-reference parameter must use the explicit `&identifier` syntax.
-* An argument corresponding to a `rec <table>` or `&rec <table>` parameter must be a record pointer for that same table.
-
-When a by-value parameter is omitted, it receives its declared default value. If the parameter has no declared default but has a nullable type, it receives `null`.
-
-Within a function argument list, an identifier immediately followed by `:` begins a named argument. In order to pass a range expression whose `from` value is an identifier, it must be wrapped in parentheses. For example, `Example(value: upperBound)` supplies the named argument `value`, while `Example((value:upperBound))` supplies the range `value:upperBound` as a positional argument.
+Within a function argument list, an identifier immediately followed by `:` begins a named argument.
 
 ~~~
 fn Name(<Positional Args>, <Named Args>, <Varargs>) void {}
 ~~~
+
+In order to pass a range expression whose `from` value is an identifier, it must be wrapped in parentheses. For example, `Example(value: upperBound)` supplies the named argument `value`, while `Example((value:upperBound))` supplies the range `value:upperBound` as a positional argument.
 
 To specify that a function accepts a variable number of arguments ("varargs"), the `...` syntax is used to mark the "varargs" argument. If present, this parameter must be the final parameter in the parameter list, must have an array type, and may not define a default value. The "varargs" argument may be provided as a named argument but only if the value is passed as a single array of the appropriate type.
 
@@ -1454,6 +1444,25 @@ Example(arg1: 'Quux', args: [3, 2, 1]);
 // `arg1` defaults to null, `arg2` defaults to 1, `args` set to [3, 2, 1].
 // Must specify `args` as a named parameter or the first "varargs" argument would be interpreted as a positional argument.
 Example(args: [3, 2, 1]);
+~~~
+
+Any function may be called with a mix of positional arguments, named arguments, and "varargs" arguments provided that:
+
+* All positional arguments are specified before all named arguments.
+* Any unnamed "varargs" arguments are specified after all positional and named arguments.
+* Each named argument must match the corresponding parameter name in the function declaration.
+* No named argument is provided more than once.
+* Only by-value parameters may be omitted. An omitted by-value parameter must either be nullable or have a default value. Every by-reference parameter must be supplied.
+* Any argument corresponding to a by-reference parameter must use the explicit `&identifier` syntax.
+* An argument corresponding to a `rec <table>` or `&rec <table>` parameter must be a record pointer for that same table.
+
+When a by-value parameter is omitted, it receives its declared default value. If the parameter has no declared default but has a nullable type, it receives `null`.
+
+Each explicitly supplied argument expression is evaluated exactly once, from left to right in the order written at the call site. This order applies to positional, named, and unnamed "varargs" arguments. Binding a named argument to its corresponding parameter does not reorder its evaluation.
+
+~~~
+// `Next()` is called first for `second` and then for `first`.
+Example(second: Next(), first: Next());
 ~~~
 
 ### Function Overloading
