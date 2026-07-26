@@ -163,7 +163,15 @@ impl VirtualMachine {
 	}
 
 	pub fn run(&mut self, program: &Program) -> Result<Option<Value>, VmError> {
-		self.begin_execution(program);
+		self.run_with_arguments(program, &[])
+	}
+
+	pub fn run_with_arguments(
+		&mut self,
+		program: &Program,
+		arguments: &[String],
+	) -> Result<Option<Value>, VmError> {
+		self.begin_execution_with_arguments(program, arguments);
 
 		loop {
 			match self.step(program)? {
@@ -180,13 +188,21 @@ impl VirtualMachine {
 		}
 	}
 
-	pub(crate) fn begin_execution(&mut self, _program: &Program) {
+	pub(crate) fn begin_execution(&mut self, program: &Program) {
+		self.begin_execution_with_arguments(program, &[]);
+	}
+
+	pub(crate) fn begin_execution_with_arguments(
+		&mut self,
+		program: &Program,
+		arguments: &[String],
+	) {
 		self.finished_result = None;
 		self.database_runtime.reset();
 		self.frames.clear();
 		self.stack.clear();
 
-		match _program.entry_point() {
+		match program.entry_point() {
 			crate::bytecode::EntryPoint::Code(_) => {
 				self.frames.push(CallFrame::new(None, 0, Vec::new()));
 			}
@@ -194,7 +210,9 @@ impl VirtualMachine {
 				self.frames.push(CallFrame::new(
 					Some(*function_index as usize),
 					0,
-					vec![Value::Array(Vec::new())],
+					vec![Value::Array(
+						arguments.iter().cloned().map(Value::Text).collect(),
+					)],
 				));
 			}
 		}

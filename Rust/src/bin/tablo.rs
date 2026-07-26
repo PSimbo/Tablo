@@ -5,6 +5,7 @@ use clap::Parser as ClapParser;
 use tablo::database::RuntimeDatabaseConfig;
 use tablo::runtime_config::read_runtime_database_config_from_path;
 use tablo::utils::existing_child_path;
+use tablo::value::Value;
 use tablo::*;
 
 #[derive(ClapParser, Debug)]
@@ -27,6 +28,9 @@ struct Args {
 
 	#[arg(value_name = "INPUT")]
 	input_path: PathBuf,
+
+	#[arg(value_name = "ARG")]
+	program_arguments: Vec<String>,
 }
 
 fn main() {
@@ -49,14 +53,24 @@ fn main() {
 	let has_database_config = config_path.is_some() || !args.databases.is_empty();
 
 	let result = if has_database_config {
-		run_file_with_database_config(&args.input_path, database_config)
+		run_file_with_database_config_and_arguments(
+			&args.input_path,
+			database_config,
+			&args.program_arguments,
+		)
 	}
 	else {
-		run_file(&args.input_path)
+		run_file_with_arguments(&args.input_path, &args.program_arguments)
 	};
 
 	match result {
-		Ok(_) => {}
+		Ok(result) => match main_exit_status(result) {
+			Ok(exit_status) => std::process::exit(exit_status),
+			Err(error) => {
+				eprintln!("{error}");
+				std::process::exit(1);
+			}
+		},
 		Err(error) => {
 			eprintln!("{error}");
 			std::process::exit(1);
@@ -86,6 +100,20 @@ fn build_database_config(
 
 fn default_runtime_config_path(current_dir: &std::path::Path) -> Option<PathBuf> {
 	existing_child_path(current_dir, "tablo.toml")
+}
+
+fn main_exit_status(result: Option<Value>) -> Result<i32, String> {
+	let Some(Value::Integer(exit_status)) = result else {
+		return Err(String::from(
+			"Runtime error: Entry-point function `Main` did not return an `int` exit status.",
+		));
+	};
+
+	i32::try_from(exit_status).map_err(|_| {
+		format!(
+			"Runtime error: Entry-point function `Main` returned exit status {exit_status}, which is outside the supported 32-bit signed range."
+		)
+	})
 }
 
 fn parse_database_mapping(mapping: &str) -> Result<(&str, &str), String> {
@@ -187,9 +215,41 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_program_arguments_after_the_object_file_path() {
+		let args = Args::try_parse_from([
+			"tablo",
+			"program.tbo",
+			"first",
+			"second",
+		]).unwrap();
+
+		assert_eq!(
+			args.program_arguments,
+			vec![String::from("first"), String::from("second")],
+		);
+	}
+
+	#[test]
 	fn rejects_database_mapping_without_equals() {
 		let error = parse_database_mapping("ExampleDb").unwrap_err();
 
 		assert_eq!(error, String::from("Database mappings must use the form `NAME=CONNECTION_STRING`."));
+	}
+
+	#[test]
+	fn rejects_main_exit_status_outside_the_host_process_range() {
+		let error = main_exit_status(Some(Value::Integer(i64::MAX))).unwrap_err();
+
+		assert_eq!(
+			error,
+			String::from(
+				"Runtime error: Entry-point function `Main` returned exit status 9223372036854775807, which is outside the supported 32-bit signed range."
+			),
+		);
+	}
+
+	#[test]
+	fn uses_main_integer_result_as_process_exit_status() {
+		assert_eq!(main_exit_status(Some(Value::Integer(27))).unwrap(), 27);
 	}
 }

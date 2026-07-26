@@ -452,4 +452,27 @@ helper(\n\
 		assert_eq!(paused.current_frame().unwrap().source_location().unwrap().line(), 5);
 		assert_eq!(paused.current_frame().unwrap().local("x").unwrap().value(), &Value::Integer(1));
 	}
+
+	#[test]
+	fn steps_over_no_return_function_call_without_creating_a_stack_value() {
+		let source = "fn helper() {\n  var y: int = 1;\n}\nvar x: int = 1;\nhelper();\nx += 1;\nx";
+		let program = compile_debug_program(source, "example.tablo");
+		let mut session = DebuggerSession::new(&program);
+		let breakpoints = session.resolve_source_breakpoints("example.tablo", &[5]);
+		session.set_breakpoints(breakpoints);
+
+		let stop = session.resume().unwrap();
+		let paused = stop.paused_state().unwrap();
+		assert_eq!(paused.current_frame().unwrap().source_location().unwrap().line(), 5);
+
+		let stop = session.step_over().unwrap();
+		let paused = stop.paused_state().unwrap();
+
+		assert_eq!(paused.reason(), PauseReason::StepOver);
+		assert_eq!(paused.current_frame().unwrap().source_location().unwrap().line(), 6);
+		assert_eq!(paused.current_frame().unwrap().local("x").unwrap().value(), &Value::Integer(1));
+
+		let stop = session.resume().unwrap();
+		assert_eq!(stop.completed_result(), Some(&Some(Value::Integer(2))));
+	}
 }

@@ -855,6 +855,13 @@ impl SemanticAnalyzer {
 		let mut parameters = Vec::with_capacity(function.parameters.len());
 
 		for parameter in &function.parameters {
+			if parameter.is_by_ref && parameter.default_value.is_some() {
+				return Err(self.compile_error(
+					parameter.position,
+					format!("By-reference parameter `{}` cannot define a default value.", parameter.name),
+				));
+			}
+
 			let parameter_type = self.resolve_function_parameter_type(parameter)?;
 			parameters.push(FunctionParameterSignature {
 				data_type: parameter_type,
@@ -3999,13 +4006,6 @@ impl SemanticAnalyzer {
 		let Some(default_value) = &parameter.default_value else {
 			return Ok(());
 		};
-
-		if parameter.is_by_ref {
-			return Err(self.compile_error(
-				parameter.position,
-				format!("By-reference parameter `{}` cannot define a default value.", parameter.name),
-			));
-		}
 
 		let parameter_type = self.resolve_function_parameter_type(parameter)?;
 		let default_type = self.infer_expression_type(default_value)?;

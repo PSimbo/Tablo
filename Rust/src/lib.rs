@@ -404,29 +404,59 @@ pub fn run(source: impl Into<String>) -> Result<Option<Value>, TabloError> {
 }
 
 pub fn run_file(path: impl AsRef<Path>) -> Result<Option<Value>, TabloError> {
+	run_file_with_arguments(path, &[])
+}
+
+pub fn run_file_with_arguments(
+	path: impl AsRef<Path>,
+	arguments: &[String],
+) -> Result<Option<Value>, TabloError> {
 	let program = read_program_from_path(path).map_err(TabloError::ObjectFile)?;
-	run_program(&program)
+	run_program_with_arguments(&program, arguments)
 }
 
 pub fn run_file_with_database_config(
 	path: impl AsRef<Path>,
 	database_config: RuntimeDatabaseConfig,
 ) -> Result<Option<Value>, TabloError> {
+	run_file_with_database_config_and_arguments(path, database_config, &[])
+}
+
+pub fn run_file_with_database_config_and_arguments(
+	path: impl AsRef<Path>,
+	database_config: RuntimeDatabaseConfig,
+	arguments: &[String],
+) -> Result<Option<Value>, TabloError> {
 	let program = read_program_from_path(path).map_err(TabloError::ObjectFile)?;
-	run_program_with_database_config(&program, database_config)
+	run_program_with_database_config_and_arguments(&program, database_config, arguments)
 }
 
 pub fn run_program(program: &Program) -> Result<Option<Value>, TabloError> {
+	run_program_with_arguments(program, &[])
+}
+
+pub fn run_program_with_arguments(
+	program: &Program,
+	arguments: &[String],
+) -> Result<Option<Value>, TabloError> {
 	let mut vm = VirtualMachine::new();
-	vm.run(program).map_err(TabloError::Runtime)
+	vm.run_with_arguments(program, arguments).map_err(TabloError::Runtime)
 }
 
 pub fn run_program_with_database_config(
 	program: &Program,
 	database_config: RuntimeDatabaseConfig,
 ) -> Result<Option<Value>, TabloError> {
+	run_program_with_database_config_and_arguments(program, database_config, &[])
+}
+
+pub fn run_program_with_database_config_and_arguments(
+	program: &Program,
+	database_config: RuntimeDatabaseConfig,
+	arguments: &[String],
+) -> Result<Option<Value>, TabloError> {
 	let mut vm = VirtualMachine::with_database_config(database_config);
-	vm.run(program).map_err(TabloError::Runtime)
+	vm.run_with_arguments(program, arguments).map_err(TabloError::Runtime)
 }
 
 pub fn run_with_database_config(
@@ -2853,6 +2883,16 @@ mod tests {
 	}
 
 	#[test]
+	fn prefers_declared_default_over_nullable_parameter_default() {
+		let result = run(
+			"fn Main(args: [text]): int { return inspect(); }\n\
+			fn inspect(value: int? = 7): int { return value == 7 ? 1 : 0; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
 	fn preserves_debug_metadata_in_object_file() {
 		let output_path = unique_test_output_path("preserves_debug_metadata_in_object_file");
 		compile_with_source_name("fn Main(args: [text]): int {\nvar x: int = 1;\nreturn x;\n}", "example.tablo", &output_path).unwrap();
@@ -2990,19 +3030,6 @@ mod tests {
 	}
 
 	#[test]
-	fn rejects_by_reference_parameter_with_default_value() {
-		let error = run(
-			"fn Main(args: [text]): int { return 0; }\n\
-			fn bump(value: &int = 1) { value += 1; }"
-		).unwrap_err();
-
-		let TabloError::Compile(error) = error else {
-			panic!("Expected a compile error.");
-		};
-		assert_eq!(error.message, "By-reference parameter `value` cannot define a default value.");
-	}
-
-	#[test]
 	fn rejects_call_to_private_helper_from_imported_module() {
 		let root_path = write_test_source_file(
 			"rejects_call_to_private_helper_from_imported_module_root",
@@ -3123,6 +3150,27 @@ mod tests {
 			panic!("Expected a compile error.");
 		};
 		assert_eq!(error.message, "Cannot assign a value of type `text` to a variable of type `int`.");
+	}
+
+	#[test]
+	fn rejects_defaults_on_all_by_reference_parameter_forms() {
+		for (parameter, expected_name) in [
+			("value: &int? = null", "value"),
+			("record: &rec Customers = null", "record"),
+			("sequence: &seq InvoiceNumber = 1", "sequence"),
+		] {
+			let error = run(format!(
+				"fn Main(args: [text]): int {{ return 0; }}\nfn inspect({parameter}) {{}}"
+			)).unwrap_err();
+
+			let TabloError::Compile(error) = error else {
+				panic!("Expected a compile error.");
+			};
+			assert_eq!(
+				error.message,
+				format!("By-reference parameter `{expected_name}` cannot define a default value."),
+			);
+		}
 	}
 
 	#[test]
@@ -3452,6 +3500,18 @@ mod tests {
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Record pointer `cust` must be initialized from a record pointer value, found `int`."),
 			position: 40,
+		}));
+	}
+
+	#[test]
+	fn rejects_omitted_reference_to_nullable_value() {
+		let error = run(
+			"fn Main(args: [text]): int { return inspect(); }\nfn inspect(value: &text?): int { return value == null ? 1 : 0; }"
+		).unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Arguments do not match the parameters of function `inspect`."),
+			position: 43,
 		}));
 	}
 
@@ -6329,6 +6389,19 @@ mod tests {
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn supplies_command_line_arguments_to_main() {
+		let program = compile_to_program_with_name(
+			"fn Main(args: [text]): int { if args[1] == 'first' and args[2] == 'second' { return len(args); } return -1; }",
+			None,
+		).unwrap();
+		let arguments = vec![String::from("first"), String::from("second")];
+
+		let result = run_program_with_arguments(&program, &arguments).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(2)));
 	}
 
 	#[test]
