@@ -1321,11 +1321,11 @@ mod tests {
 	}
 
 	fn standalone_body(body: &str) -> String {
-		format!("fn Main(args: [text]) int {{\n{body}\n}}")
+		format!("fn Main(args: [text]): int {{\n{body}\n}}")
 	}
 
 	fn standalone_expression(expression: &str) -> String {
-		format!("fn Main(args: [text]) int {{ return {expression}; }}")
+		format!("fn Main(args: [text]): int {{ return {expression}; }}")
 	}
 
 	fn unique_test_output_path(test_name: &str) -> PathBuf {
@@ -1361,12 +1361,12 @@ mod tests {
 		let root_path = write_test_source_file(
 			"assigns_imported_functions_to_their_own_source_file_in_debug_metadata_root",
 			"main.tablo",
-			"use Helper from './Helpers';\nfn Main(args: [text]) int { return Helper(); }",
+			"use Helper from './Helpers';\nfn Main(args: [text]): int { return Helper(); }",
 		);
 		let helper_path = root_path.parent().unwrap().join("Helpers.tablo");
 		fs::write(
 			&helper_path,
-			"pub fn Helper() int { return PrivateHelper(); }\nfn PrivateHelper() int { return 1; }",
+			"pub fn Helper(): int { return PrivateHelper(); }\nfn PrivateHelper(): int { return 1; }",
 		).unwrap();
 
 		let program = compile_source_to_program_with_name_and_schema(
@@ -1407,7 +1407,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    while true {\n        rec mut cust = new Customers;\n        cust.Id = 13;\n        cust.Name = 'Cia';\n        break;\n    }\n    return count Customers where Id == 13 and Name == 'Cia';\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    while true {\n        rec mut cust = new Customers;\n        cust.Id = 13;\n        cust.Name = 'Cia';\n        break;\n    }\n    return count Customers where Id == 13 and Name == 'Cia';\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -1438,7 +1438,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    var i: int = 0;\n    while i < 2 {\n        i += 1;\n        rec mut cust = new Customers;\n        cust.Id = i;\n        cust.Name = 'Dee';\n        if i == 1 {\n            continue;\n        }\n    }\n    return count Customers where Name == 'Dee';\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    var i: int = 0;\n    while i < 2 {\n        i += 1;\n        rec mut cust = new Customers;\n        cust.Id = i;\n        cust.Name = 'Dee';\n        if i == 1 {\n            continue;\n        }\n    }\n    return count Customers where Name == 'Dee';\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -1469,7 +1469,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    rec mut cust = new Customers;\n    cust.Id = 11;\n    cust.Name = 'Bea';\n    return 5;\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    rec mut cust = new Customers;\n    cust.Id = 11;\n    cust.Name = 'Bea';\n    return 5;\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -1507,7 +1507,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    {\n        rec mut cust = new Customers;\n        cust.Id = 7;\n        cust.Name = 'Ada';\n    }\n    return count Customers where Id == 7 and Name == 'Ada';\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    {\n        rec mut cust = new Customers;\n        cust.Id = 7;\n        cust.Name = 'Ada';\n    }\n    return count Customers where Id == 7 and Name == 'Ada';\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -1538,7 +1538,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    rec mut cust = find first Customers where Id == -1;\n    return 0;\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    rec mut cust = find first Customers where Id == -1;\n    return 0;\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -1571,7 +1571,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    for rec mut cust in Customers where Name == 'Ada' {\n        cust.Name = 'Updated';\n    }\n    return count Customers where Name == 'Updated';\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    for rec mut cust in Customers where Name == 'Ada' {\n        cust.Name = 'Updated';\n    }\n    return count Customers where Name == 'Updated';\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -1603,7 +1603,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    {\n        rec mut cust = find first Customers where Id == 8;\n        cust.Name = 'Mina';\n    }\n    return count Customers where Id == 8 and Name == 'Mina';\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    {\n        rec mut cust = find first Customers where Id == 8;\n        cust.Name = 'Mina';\n    }\n    return count Customers where Id == 8 and Name == 'Mina';\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -1634,7 +1634,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    var rows: int = 0;\n    for rec cust in Customers limit -1 {\n        rows += 1;\n    }\n    return rows;\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    var rows: int = 0;\n    for rec cust in Customers limit -1 {\n        rows += 1;\n    }\n    return rows;\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -1664,7 +1664,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    transaction {\n        {\n            rec mut cust = new Customers;\n            cust.Id = 19;\n            cust.Name = 'Iris';\n        }\n    }\n    return count Customers where Id == 19 and Name == 'Iris';\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    transaction {\n        {\n            rec mut cust = new Customers;\n            cust.Id = 19;\n            cust.Name = 'Iris';\n        }\n    }\n    return count Customers where Id == 19 and Name == 'Iris';\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -1913,7 +1913,7 @@ mod tests {
 	#[test]
 	fn compiles_source_text_to_object_file() {
 		let output_path = unique_test_output_path("compiles_source_text_to_object_file");
-		compile("fn Main(args: [text]) int { return 1 + 2; }", &output_path).unwrap();
+		compile("fn Main(args: [text]): int { return 1 + 2; }", &output_path).unwrap();
 		let program = read_program_from_path(&output_path).unwrap();
 		let _ = std::fs::remove_file(&output_path);
 
@@ -1942,7 +1942,7 @@ mod tests {
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
 			concat!(
 				"with exampledb;\n",
-				"fn Main(args: [text]) int {\n",
+				"fn Main(args: [text]): int {\n",
 				"  for rec customer in Customers { displn(customer.Name); }\n",
 				"  return 0;\n",
 				"}",
@@ -1983,7 +1983,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    rec mut cust = new Customers;\n    cust.Id = 7;\n    cust.Name = 'Ada';\n    create cust;\n    return count Customers where Id == 7 and Name == 'Ada';\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    rec mut cust = new Customers;\n    cust.Id = 7;\n    cust.Name = 'Ada';\n    create cust;\n    return count Customers where Id == 7 and Name == 'Ada';\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -2014,7 +2014,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    rec mut cust = new Customers;\n    cust.Id = 5;\n    create cust;\n    return count Customers where Id == 5;\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    rec mut cust = new Customers;\n    cust.Id = 5;\n    create cust;\n    return count Customers where Id == 5;\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -2062,7 +2062,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    rec mut cust = find first Customers where Id == 32;\n    delete cust;\n    if cust {\n        return 1;\n    }\n    return 0;\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    rec mut cust = find first Customers where Id == 32;\n    delete cust;\n    if cust {\n        return 1;\n    }\n    return 0;\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -2094,7 +2094,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    rec mut cust = find first Customers where Id == 31;\n    delete cust;\n    return count Customers where Id == 31;\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    rec mut cust = find first Customers where Id == 31;\n    delete cust;\n    return count Customers where Id == 31;\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -2127,7 +2127,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn GetLimit(callCount: &int) int { callCount += 1; return 2; }\nfn Main(args: [text]) int {\n    var callCount: int = 0;\n    var rows: int = 0;\n    for rec cust in Customers limit GetLimit(&callCount) {\n        rows += 1;\n    }\n    return callCount * 10 + rows;\n}",
+			"with exampledb;\nfn GetLimit(callCount: &int): int { callCount += 1; return 2; }\nfn Main(args: [text]): int {\n    var callCount: int = 0;\n    var rows: int = 0;\n    for rec cust in Customers limit GetLimit(&callCount) {\n        rows += 1;\n    }\n    return callCount * 10 + rows;\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -2175,7 +2175,7 @@ mod tests {
 		).unwrap();
 		let source = concat!(
 			"with exampledb;\n",
-			"fn Main(args: [text]) int {\n",
+			"fn Main(args: [text]): int {\n",
 			"  for rec customer in Customers order by Id {\n",
 			"    var orderCount: int = count Orders where CustomerId == customer.Id;\n",
 			"    var values: [int] = [10];\n",
@@ -2244,7 +2244,7 @@ mod tests {
 		assert_eq!(planned_error.to_string(), unoptimized_error.to_string());
 		assert_eq!(
 			planned_error.to_string(),
-			"Runtime error: Array index 2 is out of bounds for length 1.\nStack trace:\n  at Main (line 1, column 223)",
+			"Runtime error: Array index 2 is out of bounds for length 1.\nStack trace:\n  at Main (line 1, column 224)",
 		);
 	}
 
@@ -2297,10 +2297,10 @@ mod tests {
 		let root_path = write_test_source_file(
 			"formats_imported_module_compile_errors_against_imported_file_root",
 			"main.tablo",
-			"use './Helpers';\nfn Main(args: [text]) int { return Helper(); }",
+			"use './Helpers';\nfn Main(args: [text]): int { return Helper(); }",
 		);
 		let helper_path = root_path.parent().unwrap().join("Helpers.tablo");
-		fs::write(&helper_path, "pub fn Helper() int {\n\tvar value: int = 'oops';\n\treturn value;\n}").unwrap();
+		fs::write(&helper_path, "pub fn Helper(): int {\n\tvar value: int = 'oops';\n\treturn value;\n}").unwrap();
 		let root_source = fs::read_to_string(&root_path).unwrap();
 
 		let error = compile_source_to_program_with_name_and_schema(
@@ -2325,10 +2325,10 @@ mod tests {
 		let root_path = write_test_source_file(
 			"formats_imported_module_parse_errors_against_imported_file_root",
 			"main.tablo",
-			"use './Helpers';\nfn Main(args: [text]) int { return Helper(); }",
+			"use './Helpers';\nfn Main(args: [text]): int { return Helper(); }",
 		);
 		let helper_path = root_path.parent().unwrap().join("Helpers.tablo");
-		fs::write(&helper_path, "pub fn Helper() int {\n\treturn 1\n").unwrap();
+		fs::write(&helper_path, "pub fn Helper(): int {\n\treturn 1\n").unwrap();
 		let root_source = fs::read_to_string(&root_path).unwrap();
 
 		let error = compile_source_to_program_with_name_and_schema(
@@ -2350,7 +2350,7 @@ mod tests {
 
 	#[test]
 	fn formats_missing_function_return_error_with_line_and_column() {
-		let source = "fn Main(args: [text]) int { return add(1, 2); }\nfn add(a: int, b: int) int {\n  a + b;\n}";
+		let source = "fn Main(args: [text]): int { return add(1, 2); }\nfn add(a: int, b: int): int {\n  a + b;\n}";
 		let error = run(source).unwrap_err();
 
 		assert_eq!(
@@ -2361,7 +2361,7 @@ mod tests {
 
 	#[test]
 	fn formats_runtime_stack_trace_with_function_names() {
-		let source = "fn inner() int {\n  var xs: [int] = [1];\n  return xs[2];\n}\nfn outer() int {\n  return inner();\n}\nouter()";
+		let source = "fn inner(): int {\n  var xs: [int] = [1];\n  return xs[2];\n}\nfn outer(): int {\n  return inner();\n}\nouter()";
 		let error = evaluate_snippet(source).unwrap_err();
 
 		assert_eq!(
@@ -2408,7 +2408,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    var firstId: int = 0;\n    for rec cust in Customers group by Country as country, City {\n        firstId = cust.Id;\n        break;\n    }\n    return firstId;\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    var firstId: int = 0;\n    for rec cust in Customers group by Country as country, City {\n        firstId = cust.Id;\n        break;\n    }\n    return firstId;\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -2440,7 +2440,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    {\n        rec mut cust = new Customers;\n        cust.Id = 17;\n        cust.Name = 'Eli';\n    }\n    return 1 / 0;\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    {\n        rec mut cust = new Customers;\n        cust.Id = 17;\n        cust.Name = 'Eli';\n    }\n    return 1 / 0;\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -2481,7 +2481,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    var total: int = 0;\n    var maxRows: int = 2;\n    for rec cust in Customers order by Id limit maxRows {\n        total += cust.Id;\n    }\n    return total;\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    var total: int = 0;\n    var maxRows: int = 2;\n    for rec cust in Customers order by Id limit maxRows {\n        total += cust.Id;\n    }\n    return total;\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -2544,7 +2544,7 @@ mod tests {
 		).unwrap();
 		let source = concat!(
 			"with exampledb;\n",
-			"fn Main(args: [text]) int {\n",
+			"fn Main(args: [text]): int {\n",
 			"  for rec parent in Parents order by Id {\n",
 			"    var childCount: int = count Children where CorrelationKey == parent.CorrelationKey;\n",
 			"    var checked: int = [0][childCount == parent.ExpectedCount ? 1 : 2];\n",
@@ -2625,7 +2625,7 @@ mod tests {
 		).unwrap();
 		let source = concat!(
 			"with exampledb;\n",
-			"fn Main(args: [text]) int {\n",
+			"fn Main(args: [text]): int {\n",
 			"  transaction {\n",
 			"    transaction {\n",
 			"      for rec parent in Parents group by GroupKey limit 3 {\n",
@@ -2712,7 +2712,7 @@ mod tests {
 		).unwrap();
 		let source = concat!(
 			"with exampledb;\n",
-			"fn Main(args: [text]) int {\n",
+			"fn Main(args: [text]): int {\n",
 			"  for rec parent in Parents order by Id {\n",
 			"    for rec child in Children where ParentId == parent.Id order by Id {\n",
 			"      var grandchildCount: int = count Grandchildren where ChildId == child.Id;\n",
@@ -2763,7 +2763,7 @@ mod tests {
 
 	#[test]
 	fn omits_synthetic_entry_frame_from_standalone_runtime_stack_trace() {
-		let source = "fn inner() int {\n  var xs: [int] = [1];\n  return xs[2];\n}\nfn Main(args: [text]) int {\n  return inner();\n}";
+		let source = "fn inner(): int {\n  var xs: [int] = [1];\n  return xs[2];\n}\nfn Main(args: [text]): int {\n  return inner();\n}";
 		let error = run(source).unwrap_err();
 
 		assert_eq!(
@@ -2807,7 +2807,7 @@ mod tests {
 		).unwrap();
 		let source = concat!(
 			"with exampledb;\n",
-			"fn Main(args: [text]) int {\n",
+			"fn Main(args: [text]): int {\n",
 			"  for rec customer in Customers order by Id {\n",
 			"    var orderCount: int = count Orders where CustomerId == customer.Id;\n",
 			"    rec firstOrder = find first Orders where CustomerId == customer.Id order by Id;\n",
@@ -2855,7 +2855,7 @@ mod tests {
 	#[test]
 	fn preserves_debug_metadata_in_object_file() {
 		let output_path = unique_test_output_path("preserves_debug_metadata_in_object_file");
-		compile_with_source_name("fn Main(args: [text]) int {\nvar x: int = 1;\nreturn x;\n}", "example.tablo", &output_path).unwrap();
+		compile_with_source_name("fn Main(args: [text]): int {\nvar x: int = 1;\nreturn x;\n}", "example.tablo", &output_path).unwrap();
 		let program = read_program_from_path(&output_path).unwrap();
 		let _ = std::fs::remove_file(&output_path);
 
@@ -2883,9 +2883,9 @@ mod tests {
 	#[test]
 	fn rejects_ambiguous_call_between_defaulted_overloads() {
 		let error = run(
-			"fn Main(args: [text]) int { return choose(); }\n\
-			fn choose(value: int = 1) int { return value; }\n\
-			fn choose(value: text = 'x') int { return 2; }"
+			"fn Main(args: [text]): int { return choose(); }\n\
+			fn choose(value: int = 1): int { return value; }\n\
+			fn choose(value: text = 'x'): int { return 2; }"
 		).unwrap_err();
 
 		let TabloError::Compile(error) = error else {
@@ -2897,9 +2897,9 @@ mod tests {
 	#[test]
 	fn rejects_ambiguous_positional_overload_call() {
 		let error = run(
-			"fn Main(args: [text]) int { return choose(1); }\n\
-			fn choose(left: int) int { return left; }\n\
-			fn choose(right: int) int { return right; }"
+			"fn Main(args: [text]): int { return choose(1); }\n\
+			fn choose(left: int): int { return left; }\n\
+			fn choose(right: int): int { return right; }"
 		).unwrap_err();
 
 		let TabloError::Compile(error) = error else {
@@ -2931,41 +2931,41 @@ mod tests {
 
 	#[test]
 	fn rejects_arithmetic_on_union_typed_values() {
-		let error = run("fn Main(args: [text]) int { var value: int | text = 1; return value + 1; }").unwrap_err();
+		let error = run("fn Main(args: [text]): int { var value: int | text = 1; return value + 1; }").unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Expected numeric operands, found `int | text` and `int`."),
-			position: 68,
+			position: 69,
 		}));
 	}
 
 	#[test]
 	fn rejects_assigning_null_to_non_nullable_variable() {
-		let error = run("fn Main(args: [text]) int { var value: text = null; return 0; }").unwrap_err();
+		let error = run("fn Main(args: [text]): int { var value: text = null; return 0; }").unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Cannot assign a value of type `null` to a variable of type `text`."),
-			position: 46,
+			position: 47,
 		}));
 	}
 
 	#[test]
 	fn rejects_assignment_from_any_to_specific_type() {
-		let error = run("fn Main(args: [text]) int { var value: any = 1; var total: int = value; return total; }").unwrap_err();
+		let error = run("fn Main(args: [text]): int { var value: any = 1; var total: int = value; return total; }").unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Cannot assign a value of type `any` to a variable of type `int`."),
-			position: 65,
+			position: 66,
 		}));
 	}
 
 	#[test]
 	fn rejects_assignment_of_non_member_type_to_union() {
-		let error = run("fn Main(args: [text]) int { var value: int | text = true; return 0; }").unwrap_err();
+		let error = run("fn Main(args: [text]): int { var value: int | text = true; return 0; }").unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Cannot assign a value of type `bool` to a variable of type `int | text`."),
-			position: 52,
+			position: 53,
 		}));
 	}
 
@@ -2992,8 +2992,8 @@ mod tests {
 	#[test]
 	fn rejects_by_reference_parameter_with_default_value() {
 		let error = run(
-			"fn Main(args: [text]) int { return 0; }\n\
-			fn bump(value: &int = 1) void { value += 1; }"
+			"fn Main(args: [text]): int { return 0; }\n\
+			fn bump(value: &int = 1) { value += 1; }"
 		).unwrap_err();
 
 		let TabloError::Compile(error) = error else {
@@ -3007,12 +3007,12 @@ mod tests {
 		let root_path = write_test_source_file(
 			"rejects_call_to_private_helper_from_imported_module_root",
 			"main.tablo",
-			"use AddTwo from './Helpers';\nfn Main(args: [text]) int { return AddOne(5); }",
+			"use AddTwo from './Helpers';\nfn Main(args: [text]): int { return AddOne(5); }",
 		);
 		let helper_path = root_path.parent().unwrap().join("Helpers.tablo");
 		fs::write(
 			&helper_path,
-			"pub fn AddTwo(value: int) int { return AddOne(value) + 1; }\nfn AddOne(value: int) int { return value + 1; }",
+			"pub fn AddTwo(value: int): int { return AddOne(value) + 1; }\nfn AddOne(value: int): int { return value + 1; }",
 		).unwrap();
 
 		let error = compile_source_to_program_with_name_and_schema(
@@ -3024,7 +3024,7 @@ mod tests {
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Function `AddOne` is not declared in this scope."),
-			position: 64,
+			position: 65,
 		}));
 
 		let _ = fs::remove_file(helper_path);
@@ -3035,9 +3035,9 @@ mod tests {
 	#[test]
 	fn rejects_call_when_no_function_overload_matches() {
 		let error = run(
-			"fn Main(args: [text]) int { return choose(true); }\n\
-			fn choose(value: int) int { return value; }\n\
-			fn choose(value: text) int { return 0; }"
+			"fn Main(args: [text]): int { return choose(true); }\n\
+			fn choose(value: int): int { return value; }\n\
+			fn choose(value: text): int { return 0; }"
 		).unwrap_err();
 
 		let TabloError::Compile(error) = error else {
@@ -3049,8 +3049,8 @@ mod tests {
 	#[test]
 	fn rejects_constant_passed_by_reference() {
 		let error = run(
-			"fn Main(args: [text]) int { const value: int = 1; bump(&value); return value; }\n\
-			fn bump(value: &int) void { value += 1; }"
+			"fn Main(args: [text]): int { const value: int = 1; bump(&value); return value; }\n\
+			fn bump(value: &int) { value += 1; }"
 		).unwrap_err();
 
 		let TabloError::Compile(error) = error else {
@@ -3102,8 +3102,8 @@ mod tests {
 	#[test]
 	fn rejects_default_parameter_expression_that_references_parameter() {
 		let error = run(
-			"fn Main(args: [text]) int { return calculate(2); }\n\
-			fn calculate(left: int, right: int = left) int { return left + right; }"
+			"fn Main(args: [text]): int { return calculate(2); }\n\
+			fn calculate(left: int, right: int = left): int { return left + right; }"
 		).unwrap_err();
 
 		let TabloError::Compile(error) = error else {
@@ -3115,8 +3115,8 @@ mod tests {
 	#[test]
 	fn rejects_default_parameter_value_with_incompatible_type() {
 		let error = run(
-			"fn Main(args: [text]) int { return 0; }\n\
-			fn calculate(value: int = 'wrong') int { return value; }"
+			"fn Main(args: [text]): int { return 0; }\n\
+			fn calculate(value: int = 'wrong'): int { return value; }"
 		).unwrap_err();
 
 		let TabloError::Compile(error) = error else {
@@ -3138,9 +3138,9 @@ mod tests {
 	#[test]
 	fn rejects_duplicate_function_overload_signature() {
 		let error = run(
-			"fn Main(args: [text]) int { return 0; }\n\
-			fn choose(value: int) int { return value; }\n\
-			fn choose(value: int) text { return 'duplicate'; }"
+			"fn Main(args: [text]): int { return 0; }\n\
+			fn choose(value: int): int { return value; }\n\
+			fn choose(value: int): text { return 'duplicate'; }"
 		).unwrap_err();
 
 		let TabloError::Compile(error) = error else {
@@ -3155,8 +3155,8 @@ mod tests {
 	#[test]
 	fn rejects_duplicate_named_and_positional_argument_binding() {
 		let error = run(
-			"fn Main(args: [text]) int { return subtract(9, left: 2); }\n\
-			fn subtract(left: int, right: int) int { return left - right; }"
+			"fn Main(args: [text]): int { return subtract(9, left: 2); }\n\
+			fn subtract(left: int, right: int): int { return left - right; }"
 		).unwrap_err();
 
 		let TabloError::Compile(error) = error else {
@@ -3168,29 +3168,29 @@ mod tests {
 	#[test]
 	fn rejects_enum_downcast_to_wrong_backing_type() {
 		let error = run(
-			"enum Color { Red, Blue }\nfn Main(args: [text]) int { var color: Color = Color.Red; var value: text = text(color); return 0; }"
+			"enum Color { Red, Blue }\nfn Main(args: [text]): int { var color: Color = Color.Red; var value: text = text(color); return 0; }"
 		).unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Built-in function `text` cannot cast enum `Color` because its backing type is `int`."),
-			position: 105,
+			position: 106,
 		}));
 	}
 
 	#[test]
 	fn rejects_equality_comparison_on_any_values() {
-		let error = run("fn Main(args: [text]) int { var left: any = 1; var right: any = 2; var same: bool = left == right; return 0; }").unwrap_err();
+		let error = run("fn Main(args: [text]): int { var left: any = 1; var right: any = 2; var same: bool = left == right; return 0; }").unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Equality comparison is not supported between `any` and `any`."),
-			position: 89,
+			position: 90,
 		}));
 	}
 
 	#[test]
 	fn rejects_if_rec_binding_used_inside_its_condition() {
 		let error = compile_source_to_program_with_name_and_schema(
-			"with exampledb;\nfn Main(args: [text]) int { if rec user = find first Customers where Id == 1 and user.Id == 1 { return user.Id; } return -1; }",
+			"with exampledb;\nfn Main(args: [text]): int { if rec user = find first Customers where Id == 1 and user.Id == 1 { return user.Id; } return -1; }",
 			None,
 			CompilationTarget::Standalone,
 			Some(&read_schema_catalog_from_str(
@@ -3205,15 +3205,15 @@ mod tests {
 		).unwrap_err();
 
 		assert_eq!(
-			error.format_with_source("with exampledb;\nfn Main(args: [text]) int { if rec user = find first Customers where Id == 1 and user.Id == 1 { return user.Id; } return -1; }"),
-			"Compile error in <source>:2:82: Qualified field reference must use the target table name `Customers`."
+			error.format_with_source("with exampledb;\nfn Main(args: [text]): int { if rec user = find first Customers where Id == 1 and user.Id == 1 { return user.Id; } return -1; }"),
+			"Compile error in <source>:2:83: Qualified field reference must use the target table name `Customers`."
 		);
 	}
 
 	#[test]
 	fn rejects_implicit_outer_variable_capture_in_nested_function_source_text() {
 		let error = run(
-			"fn Main(args: [text]) int { var x: int = 1; fn inner() int { return x; } return inner(); }"
+			"fn Main(args: [text]): int { var x: int = 1; fn inner(): int { return x; } return inner(); }"
 		).unwrap_err();
 
 		match error {
@@ -3256,7 +3256,7 @@ mod tests {
 
 	#[test]
 	fn rejects_invalid_main_signature_source_text() {
-		let error = run("fn Main() int { return 0; }").unwrap_err();
+		let error = run("fn Main(): int { return 0; }").unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Entry-point function `Main` must have the exact signature `fn Main(args: [text]): int`."),
@@ -3297,12 +3297,12 @@ mod tests {
 	#[test]
 	fn rejects_missing_by_reference_argument_source_text() {
 		let error = run(
-			"fn Main(args: [text]) int { var x: int = 1; bump(x); return x; }\nfn bump(value: &int) void { value += 1; }"
+			"fn Main(args: [text]): int { var x: int = 1; bump(x); return x; }\nfn bump(value: &int) { value += 1; }"
 		).unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Parameter `value` must be passed by reference."),
-			position: 49,
+			position: 50,
 		}));
 	}
 
@@ -3311,7 +3311,7 @@ mod tests {
 		let root_path = write_test_source_file(
 			"rejects_missing_imported_module_file_root",
 			"main.tablo",
-			"use './Missing';\nfn Main(args: [text]) int { return 0; }",
+			"use './Missing';\nfn Main(args: [text]): int { return 0; }",
 		);
 
 		let error = compile_source_to_program_with_name_and_schema(
@@ -3338,7 +3338,7 @@ mod tests {
 		let error = run("var x: int = 1;").unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
-			message: String::from("Standalone Tablo programs must define `fn Main(args: [text]) int`."),
+			message: String::from("Standalone Tablo programs must define `fn Main(args: [text]): int`."),
 			position: 0,
 		}));
 	}
@@ -3346,7 +3346,7 @@ mod tests {
 	#[test]
 	fn rejects_mysql_sequence_references_during_compilation() {
 		let error = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { return seqnext(InvoiceNumber); }",
+			"with exampledb;\nfn Main(args: [text]): int { return seqnext(InvoiceNumber); }",
 			r#"
 				database ExampleDb;
 				schema Reporting;
@@ -3379,10 +3379,10 @@ mod tests {
 		let root_path = write_test_source_file(
 			"rejects_named_use_of_non_public_function_root",
 			"main.tablo",
-			"use UsefulHelper from './Helpers';\nfn Main(args: [text]) int { return 0; }",
+			"use UsefulHelper from './Helpers';\nfn Main(args: [text]): int { return 0; }",
 		);
 		let helper_path = root_path.parent().unwrap().join("Helpers.tablo");
-		fs::write(&helper_path, "fn UsefulHelper() int { return 1; }").unwrap();
+		fs::write(&helper_path, "fn UsefulHelper(): int { return 1; }").unwrap();
 
 		let error = compile_source_to_program_with_name_and_schema(
 			fs::read_to_string(&root_path).unwrap(),
@@ -3406,7 +3406,7 @@ mod tests {
 		let root_path = write_test_source_file(
 			"rejects_nested_use_during_module_resolution_root",
 			"main.tablo",
-			"fn Main(args: [text]) int {\n\tuse './Helpers';\n\treturn 0;\n}",
+			"fn Main(args: [text]): int {\n\tuse './Helpers';\n\treturn 0;\n}",
 		);
 
 		let error = compile_source_to_program_with_name_and_schema(
@@ -3418,7 +3418,7 @@ mod tests {
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Nested `use` declarations are not yet supported during module resolution."),
-			position: 29,
+			position: 30,
 		}));
 
 		let _ = fs::remove_file(&root_path);
@@ -3451,7 +3451,7 @@ mod tests {
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Record pointer `cust` must be initialized from a record pointer value, found `int`."),
-			position: 39,
+			position: 40,
 		}));
 	}
 
@@ -3507,7 +3507,7 @@ mod tests {
 	#[test]
 	fn rejects_query_table_field_in_for_record_limit() {
 		let error = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    for rec cust in Customers limit Id {}\n    return 0;\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    for rec cust in Customers limit Id {}\n    return 0;\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -3538,11 +3538,11 @@ mod tests {
 
 	#[test]
 	fn rejects_top_level_code_when_main_is_present_source_text() {
-		let error = run("fn Main(args: [text]) int { return 0; }\n1 + 2").unwrap_err();
+		let error = run("fn Main(args: [text]): int { return 0; }\n1 + 2").unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from("Top-level executable statements are not permitted when `Main` is defined."),
-			position: 42,
+			position: 43,
 		}));
 	}
 
@@ -3576,8 +3576,8 @@ mod tests {
 	#[test]
 	fn rejects_unknown_named_argument() {
 		let error = run(
-			"fn Main(args: [text]) int { return subtract(foo: 9, right: 2); }\n\
-			fn subtract(left: int, right: int) int { return left - right; }"
+			"fn Main(args: [text]): int { return subtract(foo: 9, right: 2); }\n\
+			fn subtract(left: int, right: int): int { return left - right; }"
 		).unwrap_err();
 
 		let TabloError::Compile(error) = error else {
@@ -3608,7 +3608,7 @@ mod tests {
 	#[test]
 	fn rejects_use_without_source_file_path() {
 		let error = compile_source_to_program_with_name_and_schema(
-			"use './Helpers';\nfn Main(args: [text]) int { return 0; }",
+			"use './Helpers';\nfn Main(args: [text]): int { return 0; }",
 			None,
 			CompilationTarget::Standalone,
 			None,
@@ -3716,7 +3716,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    transaction {\n        {\n            rec mut cust = new Customers;\n            cust.Id = 23;\n            cust.Name = 'Noor';\n        }\n        var fail: int = 1 / 0;\n    }\n    return 0;\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    transaction {\n        {\n            rec mut cust = new Customers;\n            cust.Id = 23;\n            cust.Name = 'Noor';\n        }\n        var fail: int = 1 / 0;\n    }\n    return 0;\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -3755,7 +3755,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    transaction {\n        rec mut cust = find first Customers where Id == 33;\n        delete cust;\n        var fail: int = 1 / 0;\n    }\n    return 0;\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    transaction {\n        rec mut cust = find first Customers where Id == 33;\n        delete cust;\n        var fail: int = 1 / 0;\n    }\n    return 0;\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -3794,7 +3794,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    transaction {\n        rec mut cust = find first Customers where Id == 9;\n        cust.Name = 'Noor';\n        update cust;\n        var fail: int = 1 / 0;\n    }\n    return 0;\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    transaction {\n        rec mut cust = find first Customers where Id == 9;\n        cust.Name = 'Noor';\n        update cust;\n        var fail: int = 1 / 0;\n    }\n    return 0;\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -3833,7 +3833,7 @@ mod tests {
 	fn runs_anonymous_inline_object_declaration_in_array_field_object_file() {
 		let output_path = unique_test_output_path("runs_anonymous_inline_object_declaration_in_array_field_object_file");
 		compile(
-			"obj Outer { items: [{ value: int, }], };\nfn Main(args: [text]) int { var item: Outer.items.Element = Outer.items.Element { value: 7 }; var outer: Outer = Outer { items: [item] }; return outer.items[1].value; }",
+			"obj Outer { items: [{ value: int, }], };\nfn Main(args: [text]): int { var item: Outer.items.Element = Outer.items.Element { value: 7 }; var outer: Outer = Outer { items: [item] }; return outer.items[1].value; }",
 			&output_path,
 		).unwrap();
 		let result = run_file(&output_path).unwrap();
@@ -3845,7 +3845,7 @@ mod tests {
 	#[test]
 	fn runs_anonymous_inline_object_declaration_in_array_field_source_text() {
 		let result = run(
-			"obj Outer { items: [{ value: int, }], };\nfn Main(args: [text]) int { var item: Outer.items.Element = Outer.items.Element { value: 7 }; var outer: Outer = Outer { items: [item] }; return outer.items[1].value; }"
+			"obj Outer { items: [{ value: int, }], };\nfn Main(args: [text]): int { var item: Outer.items.Element = Outer.items.Element { value: 7 }; var outer: Outer = Outer { items: [item] }; return outer.items[1].value; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(7)));
@@ -3854,7 +3854,7 @@ mod tests {
 	#[test]
 	fn runs_anonymous_inline_object_declaration_in_union_field_source_text() {
 		let result = run(
-			"obj Envelope { payload: text | { value: int, }, };\nfn Main(args: [text]) int { var payload: Envelope.payloadMember2 = Envelope.payloadMember2 { value: 7 }; var envelope: Envelope = Envelope { payload: payload }; return 0; }"
+			"obj Envelope { payload: text | { value: int, }, };\nfn Main(args: [text]): int { var payload: Envelope.payloadMember2 = Envelope.payloadMember2 { value: 7 }; var envelope: Envelope = Envelope { payload: payload }; return 0; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(0)));
@@ -3863,7 +3863,7 @@ mod tests {
 	#[test]
 	fn runs_anonymous_inline_object_declaration_source_text() {
 		let result = run(
-			"obj Outer { inner: { value: int, }, };\nfn Main(args: [text]) int { var inner: Outer.inner = Outer.inner { value: 7 }; var outer: Outer = Outer { inner: inner }; return outer.inner.value; }"
+			"obj Outer { inner: { value: int, }, };\nfn Main(args: [text]): int { var inner: Outer.inner = Outer.inner { value: 7 }; var outer: Outer = Outer { inner: inner }; return outer.inner.value; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(7)));
@@ -3891,7 +3891,7 @@ mod tests {
 	#[test]
 	fn runs_array_fill_with_mixed_decimal_integer_multiplication_source_text() {
 		let result = run(
-			"fn Main(args: [text]) int {\n  var foo: [dec] = [];\n\n  for i in 2:20 {\n    foo[i / 2] = 0.75 * i;\n  }\n\n  return 0;\n}"
+			"fn Main(args: [text]): int {\n  var foo: [dec] = [];\n\n  for i in 2:20 {\n    foo[i / 2] = 0.75 * i;\n  }\n\n  return 0;\n}"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(0)));
@@ -3946,7 +3946,7 @@ mod tests {
 	#[test]
 	fn runs_assignment_between_by_reference_parameters_source_text() {
 		let result = run(
-			"fn Main(args: [text]) int { var x: int = 1; var y: int = 5; copy(&x, &y); return x; }\nfn copy(dst: &int, src: &int) void { dst = src; }"
+			"fn Main(args: [text]): int { var x: int = 1; var y: int = 5; copy(&x, &y); return x; }\nfn copy(dst: &int, src: &int) { dst = src; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(5)));
@@ -3962,7 +3962,7 @@ mod tests {
 	#[test]
 	fn runs_bool_backed_enum_source_text() {
 		let result = run(
-			"enum Flag: bool { Off: false, On: true }\nfn Main(args: [text]) int { var flag: Flag = Flag.On; if (flag == Flag.On) { return 1; } return 0; }"
+			"enum Flag: bool { Off: false, On: true }\nfn Main(args: [text]): int { var flag: Flag = Flag.On; if (flag == Flag.On) { return 1; } return 0; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
@@ -3987,7 +3987,7 @@ mod tests {
 	#[test]
 	fn runs_by_reference_function_call_source_text() {
 		let result = run(
-			"fn Main(args: [text]) int { var x: int = 1; bump(&x); return x; }\nfn bump(value: &int) void { value += 1; }"
+			"fn Main(args: [text]): int { var x: int = 1; bump(&x); return x; }\nfn bump(value: &int) { value += 1; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(2)));
@@ -3996,8 +3996,8 @@ mod tests {
 	#[test]
 	fn runs_call_with_array_default_value() {
 		let result = run(
-			"fn Main(args: [text]) int { return size(); }\n\
-			fn size(values: [int] = [2, 3, 4]) int { return len(values); }"
+			"fn Main(args: [text]): int { return size(); }\n\
+			fn size(values: [int] = [2, 3, 4]): int { return len(values); }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(3)));
@@ -4006,9 +4006,9 @@ mod tests {
 	#[test]
 	fn runs_call_with_default_expression() {
 		let result = run(
-			"fn Main(args: [text]) int { return calculate(); }\n\
-			fn DefaultValue() int { return 6; }\n\
-			fn calculate(value: int = DefaultValue()) int { return value + 1; }"
+			"fn Main(args: [text]): int { return calculate(); }\n\
+			fn DefaultValue(): int { return 6; }\n\
+			fn calculate(value: int = DefaultValue()): int { return value + 1; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(7)));
@@ -4017,8 +4017,8 @@ mod tests {
 	#[test]
 	fn runs_call_with_defaulted_parameter() {
 		let result = run(
-			"fn Main(args: [text]) int { return add(3); }\n\
-			fn add(left: int, right: int = 4) int { return left + right; }"
+			"fn Main(args: [text]): int { return add(3); }\n\
+			fn add(left: int, right: int = 4): int { return left + right; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(7)));
@@ -4027,8 +4027,8 @@ mod tests {
 	#[test]
 	fn runs_call_with_named_argument_after_omitted_defaults() {
 		let result = run(
-			"fn Main(args: [text]) int { return combine(third: 6); }\n\
-			fn combine(firstValue: int = 1, secondValue: int = 2, third: int = 3) int {\n\
+			"fn Main(args: [text]): int { return combine(third: 6); }\n\
+			fn combine(firstValue: int = 1, secondValue: int = 2, third: int = 3): int {\n\
 			    return firstValue * 100 + secondValue * 10 + third;\n\
 			}"
 		).unwrap();
@@ -4040,8 +4040,8 @@ mod tests {
 	fn runs_call_with_omitted_defaults_after_object_round_trip() {
 		let output_path = unique_test_output_path("runs_call_with_omitted_defaults_after_object_round_trip");
 		compile(
-			"fn Main(args: [text]) int { return combine(third: 6); }\n\
-			fn combine(firstValue: int = 1, secondValue: int = 2, third: int = 3) int {\n\
+			"fn Main(args: [text]): int { return combine(third: 6); }\n\
+			fn combine(firstValue: int = 1, secondValue: int = 2, third: int = 3): int {\n\
 			    return firstValue * 100 + secondValue * 10 + third;\n\
 			}",
 			&output_path,
@@ -4055,8 +4055,8 @@ mod tests {
 	#[test]
 	fn runs_call_with_omitted_nullable_parameter() {
 		let result = run(
-			"fn Main(args: [text]) int { return isMissing(); }\n\
-			fn isMissing(value: text?) int { return value == null ? 1 : 0; }"
+			"fn Main(args: [text]): int { return isMissing(); }\n\
+			fn isMissing(value: text?): int { return value == null ? 1 : 0; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
@@ -4137,7 +4137,7 @@ mod tests {
 	#[test]
 	fn runs_date_backed_enum_source_text() {
 		let result = run(
-			"enum Holiday: date { NewYear: @2026-01-01, Christmas: @2026-12-25 }\nfn Main(args: [text]) int { var holiday: Holiday = Holiday.Christmas; if (holiday == Holiday.Christmas) { return 1; } return 0; }"
+			"enum Holiday: date { NewYear: @2026-01-01, Christmas: @2026-12-25 }\nfn Main(args: [text]): int { var holiday: Holiday = Holiday.Christmas; if (holiday == Holiday.Christmas) { return 1; } return 0; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
@@ -4211,7 +4211,7 @@ mod tests {
 	#[test]
 	fn runs_date_variable_comparison_in_if_source_text() {
 		let result = run(
-			"fn Main(args: [text]) int { const dateToday: date = @2026-06-14; const later: date = @2026-07-01; if dateToday > later { return 1; } return 0; }"
+			"fn Main(args: [text]): int { const dateToday: date = @2026-06-14; const later: date = @2026-07-01; if dateToday > later { return 1; } return 0; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(0)));
@@ -4221,7 +4221,7 @@ mod tests {
 	fn runs_date_variable_without_initializer_with_current_date_default() {
 		let current_date = crate::value::Date::current_local();
 		let source = format!(
-			"fn Main(args: [text]) int {{ var value: date; if value == @{:04}-{:02}-{:02} {{ return 1; }} return 0; }}",
+			"fn Main(args: [text]): int {{ var value: date; if value == @{:04}-{:02}-{:02} {{ return 1; }} return 0; }}",
 			current_date.year,
 			current_date.month,
 			current_date.day,
@@ -4245,7 +4245,7 @@ mod tests {
 	#[test]
 	fn runs_decimal_backed_enum_source_text() {
 		let result = run(
-			"enum Rate: dec { Reduced: 0.05, Standard: 0.20 }\nfn Main(args: [text]) int { var rate: Rate = Rate.Standard; if (rate == Rate.Standard) { return 1; } return 0; }"
+			"enum Rate: dec { Reduced: 0.05, Standard: 0.20 }\nfn Main(args: [text]): int { var rate: Rate = Rate.Standard; if (rate == Rate.Standard) { return 1; } return 0; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
@@ -4288,7 +4288,7 @@ mod tests {
 
 	#[test]
 	fn runs_displn_in_standalone_source_text() {
-		let result = run("fn Main(args: [text]) int { displn('hello'); return 0; }").unwrap();
+		let result = run("fn Main(args: [text]): int { displn('hello'); return 0; }").unwrap();
 
 		assert_eq!(result, Some(Value::Integer(0)));
 	}
@@ -4303,7 +4303,7 @@ mod tests {
 	#[test]
 	fn runs_enum_downcast_to_int_backing_type() {
 		let result = run(
-			"enum Color { Red, Green: 3, Blue }\nfn Main(args: [text]) int { var color: Color = Color.Green; return int(color); }"
+			"enum Color { Red, Green: 3, Blue }\nfn Main(args: [text]): int { var color: Color = Color.Green; return int(color); }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(3)));
@@ -4312,7 +4312,7 @@ mod tests {
 	#[test]
 	fn runs_enum_downcast_to_text_backing_type() {
 		let result = run(
-			"enum Status: text { Pending: 'PENDING', Complete: 'COMPLETE' }\nfn Main(args: [text]) int { var status: Status = Status.Complete; if text(status) == 'COMPLETE' { return 1; } return 0; }"
+			"enum Status: text { Pending: 'PENDING', Complete: 'COMPLETE' }\nfn Main(args: [text]): int { var status: Status = Status.Complete; if text(status) == 'COMPLETE' { return 1; } return 0; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
@@ -4381,7 +4381,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { rec c = find first Tbl where TableNum == 7 and contains(['ALPHA', 'CHARLIE'], Code) order by Id; if c { return c.Id; } return 0; }",
+			"with exampledb;\nfn Main(args: [text]): int { rec c = find first Tbl where TableNum == 7 and contains(['ALPHA', 'CHARLIE'], Code) order by Id; if c { return c.Id; } return 0; }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -4416,7 +4416,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { rec cust = find first Customers where countof('na', Name) == 2 and indexof('Ba', Name) == 1; if cust { return cust.Id; } return 0; }",
+			"with exampledb;\nfn Main(args: [text]): int { rec cust = find first Customers where countof('na', Name) == 2 and indexof('Ba', Name) == 1; if cust { return cust.Id; } return 0; }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -4450,7 +4450,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { rec cust = find first Customers where contains(trim(Name), 'Ada'); if cust { return cust.Id; } return 0; }",
+			"with exampledb;\nfn Main(args: [text]): int { rec cust = find first Customers where contains(trim(Name), 'Ada'); if cust { return cust.Id; } return 0; }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -4485,7 +4485,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    var firstCountries: int = 0;\n    var lastCountries: int = 0;\n    var firstCities: int = 0;\n    for rec cust in Customers group by Country as country, City {\n        if firstof(country) {\n            firstCountries += 1;\n        }\n        if lastof(country) {\n            lastCountries += 1;\n        }\n        if firstof(country, City) {\n            firstCities += 1;\n        }\n    }\n    return firstCountries * 100 + lastCountries * 10 + firstCities;\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    var firstCountries: int = 0;\n    var lastCountries: int = 0;\n    var firstCities: int = 0;\n    for rec cust in Customers group by Country as country, City {\n        if firstof(country) {\n            firstCountries += 1;\n        }\n        if lastof(country) {\n            lastCountries += 1;\n        }\n        if firstof(country, City) {\n            firstCities += 1;\n        }\n    }\n    return firstCountries * 100 + lastCountries * 10 + firstCities;\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -4584,7 +4584,7 @@ mod tests {
 
 	#[test]
 	fn runs_function_call_source_text() {
-		let result = run("fn Main(args: [text]) int { return add(1, 2); }\nfn add(a: int, b: int) int { return a + b; }").unwrap();
+		let result = run("fn Main(args: [text]): int { return add(1, 2); }\nfn add(a: int, b: int): int { return a + b; }").unwrap();
 
 		assert_eq!(result, Some(Value::Integer(3)));
 	}
@@ -4602,7 +4602,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn ReadName(cust: rec Customers) text { return cust.Name; }\nfn Rename(cust: &rec Customers) void { cust.Name = 'Ada Ltd'; }\nfn Main(args: [text]) int { rec mut cust = find first Customers where Id == 1; if cust { if ReadName(cust) == 'Ada' { Rename(&cust); if cust.Name == 'Ada Ltd' { return 1; } } } return 0; }",
+			"with exampledb;\nfn ReadName(cust: rec Customers): text { return cust.Name; }\nfn Rename(cust: &rec Customers) { cust.Name = 'Ada Ltd'; }\nfn Main(args: [text]): int { rec mut cust = find first Customers where Id == 1; if cust { if ReadName(cust) == 'Ada' { Rename(&cust); if cust.Name == 'Ada Ltd' { return 1; } } } return 0; }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -4624,7 +4624,7 @@ mod tests {
 	#[test]
 	fn runs_function_object_file() {
 		let output_path = unique_test_output_path("runs_function_object_file");
-		compile("fn Main(args: [text]) int { return add(1, 2); }\nfn add(a: int, b: int) int { return a + b; }", &output_path).unwrap();
+		compile("fn Main(args: [text]): int { return add(1, 2); }\nfn add(a: int, b: int): int { return a + b; }", &output_path).unwrap();
 		let result = run_file(&output_path).unwrap();
 		let _ = std::fs::remove_file(&output_path);
 
@@ -4668,7 +4668,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { if rec user = find first Customers where Id == 1 { return user.Id; } else { return -1; } }",
+			"with exampledb;\nfn Main(args: [text]): int { if rec user = find first Customers where Id == 1 { return user.Id; } else { return -1; } }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -4701,7 +4701,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { if rec user = find first Customers where Id == 1 { return user.Id; } return -1; }",
+			"with exampledb;\nfn Main(args: [text]): int { if rec user = find first Customers where Id == 1 { return user.Id; } return -1; }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -4732,13 +4732,13 @@ mod tests {
 		let root_path = write_test_source_file(
 			"runs_imported_function_with_default_expression_root",
 			"main.tablo",
-			"use Add from './Helpers';\nfn Main(args: [text]) int { return Add(); }",
+			"use Add from './Helpers';\nfn Main(args: [text]): int { return Add(); }",
 		);
 		let helper_path = root_path.parent().unwrap().join("Helpers.tablo");
 		fs::write(
 			&helper_path,
-			"pub fn Add(value: int = DefaultValue()) int { return value + 1; }\n\
-			fn DefaultValue() int { return 6; }",
+			"pub fn Add(value: int = DefaultValue()): int { return value + 1; }\n\
+			fn DefaultValue(): int { return 6; }",
 		).unwrap();
 
 		let program = compile_source_to_program_with_name_and_schema(
@@ -4761,12 +4761,12 @@ mod tests {
 		let root_path = write_test_source_file(
 			"runs_imported_public_function_that_calls_private_helper_root",
 			"main.tablo",
-			"use AddTwo from './Helpers';\nfn Main(args: [text]) int { return AddTwo(5); }",
+			"use AddTwo from './Helpers';\nfn Main(args: [text]): int { return AddTwo(5); }",
 		);
 		let helper_path = root_path.parent().unwrap().join("Helpers.tablo");
 		fs::write(
 			&helper_path,
-			"pub fn AddTwo(value: int) int { return AddOne(value) + 1; }\nfn AddOne(value: int) int { return value + 1; }",
+			"pub fn AddTwo(value: int): int { return AddOne(value) + 1; }\nfn AddOne(value: int): int { return value + 1; }",
 		).unwrap();
 
 		let program = compile_source_to_program_with_name_and_schema(
@@ -4830,7 +4830,7 @@ mod tests {
 	#[test]
 	fn runs_int_backed_enum_source_text() {
 		let result = run(
-			"enum Color { Red, Green: 3, Blue }\nfn Main(args: [text]) int { var color: Color; if (color == Color.Red) { color = Color.Blue; } if (color == Color.Blue) { return 1; } return 0; }"
+			"enum Color { Red, Green: 3, Blue }\nfn Main(args: [text]): int { var color: Color; if (color == Color.Red) { color = Color.Blue; } if (color == Color.Blue) { return 1; } return 0; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
@@ -4869,7 +4869,7 @@ mod tests {
 
 	#[test]
 	fn runs_integer_variable_without_initializer_with_default() {
-		let result = run("fn Main(args: [text]) int { var value: int; return value; }").unwrap();
+		let result = run("fn Main(args: [text]): int { var value: int; return value; }").unwrap();
 
 		assert_eq!(result, Some(Value::Integer(0)));
 	}
@@ -4904,7 +4904,7 @@ mod tests {
 
 	#[test]
 	fn runs_main_entry_point_source_text() {
-		let result = run("fn Main(args: [text]) int { return 7; }").unwrap();
+		let result = run("fn Main(args: [text]): int { return 7; }").unwrap();
 
 		assert_eq!(result, Some(Value::Integer(7)));
 	}
@@ -4912,8 +4912,8 @@ mod tests {
 	#[test]
 	fn runs_mixed_positional_and_named_arguments() {
 		let result = run(
-			"fn Main(args: [text]) int { return subtract(9, right: 2); }\n\
-			fn subtract(left: int, right: int) int { return left - right; }"
+			"fn Main(args: [text]): int { return subtract(9, right: 2); }\n\
+			fn subtract(left: int, right: int): int { return left - right; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(7)));
@@ -4922,8 +4922,8 @@ mod tests {
 	#[test]
 	fn runs_named_arguments_in_parameter_order() {
 		let result = run(
-			"fn Main(args: [text]) int { return subtract(right: 2, left: 9); }\n\
-			fn subtract(left: int, right: int) int { return left - right; }"
+			"fn Main(args: [text]): int { return subtract(right: 2, left: 9); }\n\
+			fn subtract(left: int, right: int): int { return left - right; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(7)));
@@ -4932,12 +4932,12 @@ mod tests {
 	#[test]
 	fn runs_named_arguments_with_source_order_evaluation() {
 		let result = run(
-			"fn Main(args: [text]) int {\n\
+			"fn Main(args: [text]): int {\n\
 			    var value: int = 0;\n\
 			    return combine(later: next(&value), earlier: next(&value));\n\
 			}\n\
-			fn next(value: &int) int { value += 1; return value; }\n\
-			fn combine(earlier: int, later: int) int { return earlier * 10 + later; }"
+			fn next(value: &int): int { value += 1; return value; }\n\
+			fn combine(earlier: int, later: int): int { return earlier * 10 + later; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(21)));
@@ -4946,13 +4946,13 @@ mod tests {
 	#[test]
 	fn runs_named_by_reference_arguments() {
 		let result = run(
-			"fn Main(args: [text]) int {\n\
+			"fn Main(args: [text]): int {\n\
 			    var left: int = 1;\n\
 			    var right: int = 2;\n\
 			    swap(right: &right, left: &left);\n\
 			    return left * 10 + right;\n\
 			}\n\
-			fn swap(left: &int, right: &int) void {\n\
+			fn swap(left: &int, right: &int) {\n\
 			    var old_left: int = left;\n\
 			    left = right;\n\
 			    right = old_left;\n\
@@ -4967,14 +4967,14 @@ mod tests {
 		let root_path = write_test_source_file(
 			"runs_named_imported_function_overloads_root",
 			"main.tablo",
-			"use Convert from './Helpers';\nfn Main(args: [text]) int { return Convert(value: 2) + Convert(value: 'x') + Convert(right: 4, left: 3); }",
+			"use Convert from './Helpers';\nfn Main(args: [text]): int { return Convert(value: 2) + Convert(value: 'x') + Convert(right: 4, left: 3); }",
 		);
 		let helper_path = root_path.parent().unwrap().join("Helpers.tablo");
 		fs::write(
 			&helper_path,
-			"pub fn Convert(value: int) int { return value; }\n\
-			pub fn Convert(value: text) int { return 10; }\n\
-			pub fn Convert(left: int, right: int) int { return left + right; }",
+			"pub fn Convert(value: int): int { return value; }\n\
+			pub fn Convert(value: text): int { return 10; }\n\
+			pub fn Convert(left: int, right: int): int { return left + right; }",
 		).unwrap();
 
 		let program = compile_source_to_program_with_name_and_schema(
@@ -4996,7 +4996,7 @@ mod tests {
 	fn runs_named_inline_object_declaration_in_array_field_object_file() {
 		let output_path = unique_test_output_path("runs_named_inline_object_declaration_in_array_field_object_file");
 		compile(
-			"obj Outer { items: [obj Item { value: int, }], };\nfn Main(args: [text]) int { var item: Outer.Item = Outer.Item { value: 7 }; var outer: Outer = Outer { items: [item] }; return outer.items[1].value; }",
+			"obj Outer { items: [obj Item { value: int, }], };\nfn Main(args: [text]): int { var item: Outer.Item = Outer.Item { value: 7 }; var outer: Outer = Outer { items: [item] }; return outer.items[1].value; }",
 			&output_path,
 		).unwrap();
 		let result = run_file(&output_path).unwrap();
@@ -5008,7 +5008,7 @@ mod tests {
 	#[test]
 	fn runs_named_inline_object_declaration_in_array_field_source_text() {
 		let result = run(
-			"obj Outer { items: [obj Item { value: int, }], };\nfn Main(args: [text]) int { var item: Outer.Item = Outer.Item { value: 7 }; var outer: Outer = Outer { items: [item] }; return outer.items[1].value; }"
+			"obj Outer { items: [obj Item { value: int, }], };\nfn Main(args: [text]): int { var item: Outer.Item = Outer.Item { value: 7 }; var outer: Outer = Outer { items: [item] }; return outer.items[1].value; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(7)));
@@ -5017,7 +5017,7 @@ mod tests {
 	#[test]
 	fn runs_named_inline_object_declaration_in_union_field_source_text() {
 		let result = run(
-			"obj Envelope { payload: text | obj Payload { value: int, }, };\nfn Main(args: [text]) int { var payload: Envelope.Payload = Envelope.Payload { value: 7 }; var envelope: Envelope = Envelope { payload: payload }; return 0; }"
+			"obj Envelope { payload: text | obj Payload { value: int, }, };\nfn Main(args: [text]): int { var payload: Envelope.Payload = Envelope.Payload { value: 7 }; var envelope: Envelope = Envelope { payload: payload }; return 0; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(0)));
@@ -5026,7 +5026,7 @@ mod tests {
 	#[test]
 	fn runs_named_inline_object_declaration_source_text() {
 		let result = run(
-			"obj Outer { inner: obj Inner { value: int, }, };\nfn Main(args: [text]) int { var inner: Outer.Inner = Outer.Inner { value: 7 }; var outer: Outer = Outer { inner: inner }; return outer.inner.value; }"
+			"obj Outer { inner: obj Inner { value: int, }, };\nfn Main(args: [text]): int { var inner: Outer.Inner = Outer.Inner { value: 7 }; var outer: Outer = Outer { inner: inner }; return outer.inner.value; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(7)));
@@ -5035,7 +5035,7 @@ mod tests {
 	#[test]
 	fn runs_nested_by_reference_function_call_source_text() {
 		let result = run(
-			"fn Main(args: [text]) int { var x: int = 1; fn bump(value: &int) void { value += 1; } bump(&x); return x; }"
+			"fn Main(args: [text]): int { var x: int = 1; fn bump(value: &int) { value += 1; } bump(&x); return x; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(2)));
@@ -5044,7 +5044,7 @@ mod tests {
 	#[test]
 	fn runs_nested_function_call_before_declaration_source_text() {
 		let result = run(
-			"fn Main(args: [text]) int { return add(1, 2); fn add(a: int, b: int) int { return a + b; } }"
+			"fn Main(args: [text]): int { return add(1, 2); fn add(a: int, b: int): int { return a + b; } }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(3)));
@@ -5053,7 +5053,7 @@ mod tests {
 	#[test]
 	fn runs_nested_function_call_source_text() {
 		let result = run(
-			"fn Main(args: [text]) int { fn add(a: int, b: int) int { return a + b; } return add(1, 2); }"
+			"fn Main(args: [text]): int { fn add(a: int, b: int): int { return a + b; } return add(1, 2); }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(3)));
@@ -5062,10 +5062,10 @@ mod tests {
 	#[test]
 	fn runs_nested_function_overloads_that_shadow_outer_functions() {
 		let result = run(
-			"fn choose(value: int) int { return 100; }\n\
-			fn Main(args: [text]) int {\n\
-				fn choose(value: bool) int { return 1; }\n\
-				fn choose(value: text) int { return 2; }\n\
+			"fn choose(value: int): int { return 100; }\n\
+			fn Main(args: [text]): int {\n\
+				fn choose(value: bool): int { return 1; }\n\
+				fn choose(value: text): int { return 2; }\n\
 				return choose(true) + choose('x');\n\
 			}"
 		).unwrap();
@@ -5090,7 +5090,7 @@ mod tests {
 	#[test]
 	fn runs_nested_object_field_assignment_source_text() {
 		let result = run(
-			"obj Address { line1: text = 'Unknown', };\nobj Person { name: text = '', address: Address, };\nfn Main(args: [text]) int { var person: Person = Person { name: 'Alice', address: Address { } }; person.address.line1 = 'Updated'; if person.address.line1 == 'Updated' { return 1; } return 0; }"
+			"obj Address { line1: text = 'Unknown', };\nobj Person { name: text = '', address: Address, };\nfn Main(args: [text]): int { var person: Person = Person { name: 'Alice', address: Address { } }; person.address.line1 = 'Updated'; if person.address.line1 == 'Updated' { return 1; } return 0; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
@@ -5099,8 +5099,15 @@ mod tests {
 	#[test]
 	fn runs_nested_ternary_with_nullable_text_guarded_by_null_check() {
 		let result = run(
-			"fn Main(args: [text]) int { var val1: text = ''; var val2: text? = 'Foo'; var target: text = val1 != '' ? val1 : val2 != null ? val2 : ''; if target == 'Foo' { return 1; } return 0; }"
+			"fn Main(args: [text]): int { var val1: text = ''; var val2: text? = 'Foo'; var target: text = val1 != '' ? val1 : val2 != null ? val2 : ''; if target == 'Foo' { return 1; } return 0; }"
 		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn runs_no_return_function_as_expression_statement() {
+		let result = run("fn Main(args: [text]): int { var x: int = 1; bump(x); return x; }\nfn bump(value: int) { return; }").unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
 	}
@@ -5116,7 +5123,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { rec user = find first Customers where Id == 1; if not user { return -1; } return 1; }",
+			"with exampledb;\nfn Main(args: [text]): int { rec user = find first Customers where Id == 1; if not user { return -1; } return 1; }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -5137,7 +5144,7 @@ mod tests {
 	#[test]
 	fn runs_null_literal_assignment_and_comparison() {
 		let result = run(
-			"fn Main(args: [text]) int { var value: text? = null; if value == null { return 1; } return 0; }"
+			"fn Main(args: [text]): int { var value: text? = null; if value == null { return 1; } return 0; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
@@ -5153,7 +5160,7 @@ mod tests {
 	#[test]
 	fn runs_nullable_date_comparison_with_null_when_value_is_non_null() {
 		let result = run(
-			"fn Main(args: [text]) int { var value: date? = @2026-06-14; if value == null { return 1; } return 0; }"
+			"fn Main(args: [text]): int { var value: date? = @2026-06-14; if value == null { return 1; } return 0; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(0)));
@@ -5162,7 +5169,7 @@ mod tests {
 	#[test]
 	fn runs_nullable_date_comparison_with_null_when_value_is_null() {
 		let result = run(
-			"fn Main(args: [text]) int { var value: date? = null; if value == null { return 1; } return 0; }"
+			"fn Main(args: [text]): int { var value: date? = null; if value == null { return 1; } return 0; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
@@ -5178,7 +5185,7 @@ mod tests {
 	#[test]
 	fn runs_object_default_field_values_source_text() {
 		let result = run(
-			"obj Person { name: text = 'Anonymous', age: int, };\nfn Main(args: [text]) int { var person: Person = Person { age: 30 }; if person.name == 'Anonymous' { return 1; } return 0; }"
+			"obj Person { name: text = 'Anonymous', age: int, };\nfn Main(args: [text]): int { var person: Person = Person { age: 30 }; if person.name == 'Anonymous' { return 1; } return 0; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
@@ -5187,7 +5194,7 @@ mod tests {
 	#[test]
 	fn runs_object_field_access_source_text() {
 		let result = run(
-			"obj Person { name: text = '', age: int, };\nfn Main(args: [text]) int { var person: Person = Person { age: 30 }; return person.age; }"
+			"obj Person { name: text = '', age: int, };\nfn Main(args: [text]): int { var person: Person = Person { age: 30 }; return person.age; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(30)));
@@ -5197,7 +5204,7 @@ mod tests {
 	fn runs_object_field_assignment_object_file() {
 		let output_path = unique_test_output_path("runs_object_field_assignment_object_file");
 		compile(
-			"obj Counter { value: int = 0, };\nfn Main(args: [text]) int { var counter: Counter = Counter { }; counter.value += 2; return counter.value; }",
+			"obj Counter { value: int = 0, };\nfn Main(args: [text]): int { var counter: Counter = Counter { }; counter.value += 2; return counter.value; }",
 			&output_path,
 		).unwrap();
 		let result = run_file(&output_path).unwrap();
@@ -5209,7 +5216,7 @@ mod tests {
 	#[test]
 	fn runs_object_field_compound_assignment_source_text() {
 		let result = run(
-			"obj Counter { value: int = 0, };\nfn Main(args: [text]) int { var counter: Counter = Counter { }; counter.value += 2; return counter.value; }"
+			"obj Counter { value: int = 0, };\nfn Main(args: [text]): int { var counter: Counter = Counter { }; counter.value += 2; return counter.value; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(2)));
@@ -5218,7 +5225,7 @@ mod tests {
 	#[test]
 	fn runs_object_field_without_explicit_default_using_default() {
 		let result = run(
-			"obj Counter { value: int, };\nfn Main(args: [text]) int { var counter: Counter = Counter { }; return counter.value; }"
+			"obj Counter { value: int, };\nfn Main(args: [text]): int { var counter: Counter = Counter { }; return counter.value; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(0)));
@@ -5227,7 +5234,7 @@ mod tests {
 	#[test]
 	fn runs_object_file() {
 		let output_path = unique_test_output_path("runs_object_file");
-		compile("fn Main(args: [text]) int { return 8 / 2; }", &output_path).unwrap();
+		compile("fn Main(args: [text]): int { return 8 / 2; }", &output_path).unwrap();
 		let result = run_file(&output_path).unwrap();
 		let _ = std::fs::remove_file(&output_path);
 
@@ -5238,7 +5245,7 @@ mod tests {
 	fn runs_object_object_file() {
 		let output_path = unique_test_output_path("runs_object_object_file");
 		compile(
-			"obj Person { name: text = '', age: int, };\nfn Main(args: [text]) int { var person: Person = Person { age: 30 }; return person.age; }",
+			"obj Person { name: text = '', age: int, };\nfn Main(args: [text]): int { var person: Person = Person { age: 30 }; return person.age; }",
 			&output_path,
 		).unwrap();
 		let result = run_file(&output_path).unwrap();
@@ -5259,11 +5266,11 @@ mod tests {
 	#[test]
 	fn runs_overloaded_function_calls_selected_by_arity_and_type() {
 		let result = run(
-			"fn Main(args: [text]) int { return identify(1) + identify('x') + add(2, 3); }\n\
-			fn identify(value: int) int { return 1; }\n\
-			fn identify(value: text) int { return 10; }\n\
-			fn add(value: int) int { return value; }\n\
-			fn add(left: int, right: int) int { return left + right; }"
+			"fn Main(args: [text]): int { return identify(1) + identify('x') + add(2, 3); }\n\
+			fn identify(value: int): int { return 1; }\n\
+			fn identify(value: text): int { return 10; }\n\
+			fn add(value: int): int { return value; }\n\
+			fn add(left: int, right: int): int { return left + right; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(16)));
@@ -5285,7 +5292,7 @@ mod tests {
 	#[test]
 	fn runs_quoted_identifier_matching_keyword() {
 		let result = run(
-			"fn Main(args: [text]) int { var \"return\": int = 1; return \"return\"; }"
+			"fn Main(args: [text]): int { var \"return\": int = 1; return \"return\"; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
@@ -5305,7 +5312,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { return \"temp-seq\"; }",
+			"with exampledb;\nfn Main(args: [text]): int { return \"temp-seq\"; }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -5344,7 +5351,7 @@ mod tests {
 	#[test]
 	fn runs_root_array_shaped_object_declaration_with_anonymous_element_source_text() {
 		let result = run(
-			"obj CustomerCollection [{ name: text, }];\nfn Main(args: [text]) int { var customers: CustomerCollection = [CustomerCollection.Element { name: 'Alice' }]; if customers[1].name == 'Alice' { return 1; } return 0; }"
+			"obj CustomerCollection [{ name: text, }];\nfn Main(args: [text]): int { var customers: CustomerCollection = [CustomerCollection.Element { name: 'Alice' }]; if customers[1].name == 'Alice' { return 1; } return 0; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
@@ -5354,7 +5361,7 @@ mod tests {
 	fn runs_root_array_shaped_object_declaration_with_named_element_object_file() {
 		let output_path = unique_test_output_path("runs_root_array_shaped_object_declaration_with_named_element_object_file");
 		compile(
-			"obj CustomerCollection [obj Customer { name: text, }];\nfn Main(args: [text]) int { var customers: CustomerCollection = [CustomerCollection.Customer { name: 'Alice' }]; if customers[1].name == 'Alice' { return 1; } return 0; }",
+			"obj CustomerCollection [obj Customer { name: text, }];\nfn Main(args: [text]): int { var customers: CustomerCollection = [CustomerCollection.Customer { name: 'Alice' }]; if customers[1].name == 'Alice' { return 1; } return 0; }",
 			&output_path,
 		).unwrap();
 		let result = run_file(&output_path).unwrap();
@@ -5366,7 +5373,7 @@ mod tests {
 	#[test]
 	fn runs_root_array_shaped_object_declaration_with_named_element_source_text() {
 		let result = run(
-			"obj CustomerCollection [obj Customer { name: text, }];\nfn Main(args: [text]) int { var customers: CustomerCollection = [CustomerCollection.Customer { name: 'Alice' }]; if customers[1].name == 'Alice' { return 1; } return 0; }"
+			"obj CustomerCollection [obj Customer { name: text, }];\nfn Main(args: [text]): int { var customers: CustomerCollection = [CustomerCollection.Customer { name: 'Alice' }]; if customers[1].name == 'Alice' { return 1; } return 0; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
@@ -5386,7 +5393,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { return seqnext(\"temp-seq\"); }",
+			"with exampledb;\nfn Main(args: [text]): int { return seqnext(\"temp-seq\"); }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -5419,7 +5426,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { return seqnext(InvoiceNumber); }",
+			"with exampledb;\nfn Main(args: [text]): int { return seqnext(InvoiceNumber); }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -5456,7 +5463,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { return seqnext(\"temp-seq\"); }",
+			"with exampledb;\nfn Main(args: [text]): int { return seqnext(\"temp-seq\"); }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -5567,7 +5574,7 @@ mod tests {
 		);
 		let output_path = unique_test_output_path("sqlite_count_query_program");
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { var targetId: int = 2; return count customers where id == targetId; }",
+			"with exampledb;\nfn Main(args: [text]): int { var targetId: int = 2; return count customers where id == targetId; }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -5645,7 +5652,7 @@ mod tests {
 		);
 		let output_path = unique_test_output_path("sqlite_find_query_program");
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { return (find last customers where active == true order by id).id; }",
+			"with exampledb;\nfn Main(args: [text]): int { return (find last customers where active == true order by id).id; }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -5685,7 +5692,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { rec cust = find first customers where active == true order by id; if cust.name == 'Ada' { return cust.id; } return 0; }",
+			"with exampledb;\nfn Main(args: [text]): int { rec cust = find first customers where active == true order by id; if cust.name == 'Ada' { return cust.id; } return 0; }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -5721,7 +5728,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    rec outer = find first OuterTable where Id == 2;\n    if outer {\n        rec inner = find first InnerTable where InnerTable.Id == outer.Id;\n        if inner {\n            return inner.Id;\n        }\n    }\n    return 0;\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    rec outer = find first OuterTable where Id == 2;\n    if outer {\n        rec inner = find first InnerTable where InnerTable.Id == outer.Id;\n        if inner {\n            return inner.Id;\n        }\n    }\n    return 0;\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -5795,7 +5802,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with test;\nfn Main(args: [text]) int { rec temp = find first Customer; return temp.Id; }",
+			"with test;\nfn Main(args: [text]): int { rec temp = find first Customer; return temp.Id; }",
 			r#"
 				database Test;
 				schema Main implicit;
@@ -5833,7 +5840,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { var total: int = 0; for rec cust in customers where active == true order by id { total += cust.id; } return total; }",
+			"with exampledb;\nfn Main(args: [text]): int { var total: int = 0; for rec cust in customers where active == true order by id { total += cust.id; } return total; }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -5865,7 +5872,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { InvoiceNumber = 10; return InvoiceNumber; }",
+			"with exampledb;\nfn Main(args: [text]): int { InvoiceNumber = 10; return InvoiceNumber; }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -5898,7 +5905,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int { return InvoiceNumber; }",
+			"with exampledb;\nfn Main(args: [text]): int { return InvoiceNumber; }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -5942,7 +5949,7 @@ mod tests {
 	#[test]
 	fn runs_ternary_with_nullable_object_field_guarded_by_null_check() {
 		let result = run(
-			"obj Config { TestDate: date?, };\nfn Main(args: [text]) int { var config: Config = Config { TestDate: @2026-06-14 }; const today: date = @2026-06-20; const testDate: date = config.TestDate != null ? config.TestDate : today; if testDate == @2026-06-14 { return 1; } return 0; }"
+			"obj Config { TestDate: date?, };\nfn Main(args: [text]): int { var config: Config = Config { TestDate: @2026-06-14 }; const today: date = @2026-06-20; const testDate: date = config.TestDate != null ? config.TestDate : today; if testDate == @2026-06-14 { return 1; } return 0; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
@@ -5951,7 +5958,7 @@ mod tests {
 	#[test]
 	fn runs_text_backed_enum_source_text() {
 		let result = run(
-			"enum Status: text { Pending: 'PENDING', Complete: 'COMPLETE' }\nfn Main(args: [text]) int { var status: Status = Status.Complete; if (status == Status.Complete) { return 1; } return 0; }"
+			"enum Status: text { Pending: 'PENDING', Complete: 'COMPLETE' }\nfn Main(args: [text]): int { var status: Status = Status.Complete; if (status == Status.Complete) { return 1; } return 0; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
@@ -6105,7 +6112,7 @@ mod tests {
 	#[test]
 	fn runs_timestamp_variable_comparison_in_if_source_text() {
 		let result = run(
-			"fn Main(args: [text]) int { const earlier: timestamp = @2026-06-14T12:00:00; const later: timestamp = @2026-07-01T00:00:00; if earlier > later { return 1; } return 0; }"
+			"fn Main(args: [text]): int { const earlier: timestamp = @2026-06-14T12:00:00; const later: timestamp = @2026-07-01T00:00:00; if earlier > later { return 1; } return 0; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(0)));
@@ -6239,7 +6246,7 @@ mod tests {
 	fn runs_union_typed_program_after_object_round_trip() {
 		let output_path = unique_test_output_path("runs_union_typed_program_after_object_round_trip");
 		compile(
-			"obj Envelope { payload: int | text = 1, };\nfn Main(args: [text]) int { var value: int | text = 'hello'; var env: Envelope = Envelope { payload: value }; return 0; }",
+			"obj Envelope { payload: int | text = 1, };\nfn Main(args: [text]): int { var value: int | text = 'hello'; var env: Envelope = Envelope { payload: value }; return 0; }",
 			&output_path,
 		).unwrap();
 		let result = run_file(&output_path).unwrap();
@@ -6251,17 +6258,10 @@ mod tests {
 	#[test]
 	fn runs_union_typed_variable_and_object_field_source_text() {
 		let result = run(
-			"obj Envelope { payload: int | text = 1, };\nfn Main(args: [text]) int { var value: int | text = 1; var env: Envelope = Envelope { }; return 0; }"
+			"obj Envelope { payload: int | text = 1, };\nfn Main(args: [text]): int { var value: int | text = 1; var env: Envelope = Envelope { }; return 0; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(0)));
-	}
-
-	#[test]
-	fn runs_void_function_as_expression_statement() {
-		let result = run("fn Main(args: [text]) int { var x: int = 1; bump(x); return x; }\nfn bump(value: int) void { return; }").unwrap();
-
-		assert_eq!(result, Some(Value::Integer(1)));
 	}
 
 	#[test]
@@ -6276,13 +6276,13 @@ mod tests {
 		let root_path = write_test_source_file(
 			"runs_wildcard_imported_function_overloads_root",
 			"main.tablo",
-			"use './Helpers';\nfn Main(args: [text]) int { return Convert(value: 2) + Convert(value: 'x'); }",
+			"use './Helpers';\nfn Main(args: [text]): int { return Convert(value: 2) + Convert(value: 'x'); }",
 		);
 		let helper_path = root_path.parent().unwrap().join("Helpers.tablo");
 		fs::write(
 			&helper_path,
-			"pub fn Convert(value: int) int { return value; }\n\
-			pub fn Convert(value: text) int { return 10; }",
+			"pub fn Convert(value: int): int { return value; }\n\
+			pub fn Convert(value: text): int { return 10; }",
 		).unwrap();
 
 		let program = compile_source_to_program_with_name_and_schema(
@@ -6303,9 +6303,9 @@ mod tests {
 	#[test]
 	fn selects_function_overload_by_named_argument() {
 		let result = run(
-			"fn Main(args: [text]) int { return choose(right: 1); }\n\
-			fn choose(left: int) int { return 10; }\n\
-			fn choose(right: int) int { return 20; }"
+			"fn Main(args: [text]): int { return choose(right: 1); }\n\
+			fn choose(left: int): int { return 10; }\n\
+			fn choose(right: int): int { return 20; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(20)));
@@ -6314,9 +6314,9 @@ mod tests {
 	#[test]
 	fn selects_function_overloads_by_reference_mode() {
 		let result = run(
-			"fn Main(args: [text]) int { var value: int = 2; return inspect(value) + inspect(&value); }\n\
-			fn inspect(value: int) int { return value; }\n\
-			fn inspect(value: &int) int { value += 1; return value; }"
+			"fn Main(args: [text]): int { var value: int = 2; return inspect(value) + inspect(&value); }\n\
+			fn inspect(value: int): int { return value; }\n\
+			fn inspect(value: &int): int { value += 1; return value; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(5)));
@@ -6325,7 +6325,7 @@ mod tests {
 	#[test]
 	fn stringifies_enum_value_as_variant_name() {
 		let result = run(
-			"enum Color { Red, Green: 3, Blue }\nfn Main(args: [text]) int { var color: Color; color = Color.Blue; var message: text = 'Selected: ${ color }'; if message == 'Selected: Blue' { return 1; } return 0; }"
+			"enum Color { Red, Green: 3, Blue }\nfn Main(args: [text]): int { var color: Color; color = Color.Blue; var message: text = 'Selected: ${ color }'; if message == 'Selected: Blue' { return 1; } return 0; }"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
@@ -6344,7 +6344,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    rec mut cust = find first Customers where Id == 7;\n    cust.Name = 'Grace';\n    update cust;\n    return count Customers where Id == 7 and Name == 'Grace';\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    rec mut cust = find first Customers where Id == 7;\n    cust.Name = 'Grace';\n    update cust;\n    return count Customers where Id == 7 and Name == 'Grace';\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -6377,7 +6377,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]) int {\n    rec mut cust = find first Customers where Id == 12;\n    cust.Name = 'Grace';\n    update cust;\n    return count Customers where Id == 12 and Name == 'Grace' and Notes == 'Keep';\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    rec mut cust = find first Customers where Id == 12;\n    cust.Name = 'Grace';\n    update cust;\n    return count Customers where Id == 12 and Name == 'Grace' and Notes == 'Keep';\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -6410,12 +6410,12 @@ mod tests {
 		let root_path = write_test_source_file(
 			"validates_named_use_against_public_functions_in_imported_module_root",
 			"main.tablo",
-			"use UsefulHelper from './Helpers';\nfn Main(args: [text]) int { return 0; }",
+			"use UsefulHelper from './Helpers';\nfn Main(args: [text]): int { return 0; }",
 		);
 		let helper_path = root_path.parent().unwrap().join("Helpers.tablo");
 		fs::write(
 			&helper_path,
-			"pub fn UsefulHelper() int { return 1; }\nfn HiddenHelper() int { return 2; }",
+			"pub fn UsefulHelper(): int { return 1; }\nfn HiddenHelper(): int { return 2; }",
 		).unwrap();
 
 		let result = compile_source_to_program_with_name_and_schema(

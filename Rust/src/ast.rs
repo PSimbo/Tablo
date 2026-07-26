@@ -55,7 +55,6 @@ pub enum DataType {
 	Timestamp,
 	TimestampTz,
 	Union(Vec<DataType>),
-	Void,
 }
 
 impl DataType {
@@ -94,7 +93,6 @@ impl DataType {
 			Self::Timestamp => String::from("timestamp"),
 			Self::TimestampTz => String::from("timestamptz"),
 			Self::Union(members) => members.iter().map(Self::name).collect::<Vec<_>>().join(" | "),
-			Self::Void => String::from("void"),
 		}
 	}
 

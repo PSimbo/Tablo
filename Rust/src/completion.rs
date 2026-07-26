@@ -1310,7 +1310,7 @@ mod tests {
 
 	#[test]
 	fn document_completion_items_include_document_symbols_before_cursor() {
-		let source = "fn Helper(value: int) int { var localValue: int = value; return localValue; }\nfn Main(args: [text]) int { Hel";
+		let source = "fn Helper(value: int): int { var localValue: int = value; return localValue; }\nfn Main(args: [text]): int { Hel";
 		let items = collect_document_completion_items(source);
 		let labels = items.into_iter().map(|item| item.label).collect::<Vec<_>>();
 
@@ -1327,7 +1327,7 @@ enum Status {
 	Complete,
 };
 
-fn Main(args: [text]) int {
+fn Main(args: [text]): int {
 	Status.
 ";
 		let items = member_completion_items(source, source.len(), None).unwrap();
@@ -1347,7 +1347,7 @@ obj Config {
 	}
 };
 
-fn Main(args: [text]) int {
+fn Main(args: [text]): int {
 	var config: Config = Config {};
 	config.Values.
 ";
@@ -1363,7 +1363,7 @@ fn Main(args: [text]) int {
 		let schema = read_schema_catalog_from_str(
 			"database ExampleDb; schema Main implicit; create table Customers (Id int, Name text);",
 		).unwrap();
-		let source = "with ExampleDb;\nfn Main(args: [text]) int { rec tp = find first Customers where Id == 1; tp.";
+		let source = "with ExampleDb;\nfn Main(args: [text]): int { rec tp = find first Customers where Id == 1; tp.";
 		let items = member_completion_items(source, source.len(), Some(&schema)).unwrap();
 		let labels = items.into_iter().map(|item| item.label).collect::<Vec<_>>();
 

@@ -1050,7 +1050,7 @@ impl Compiler {
 					self.emit_all_pending_create_cleanups(emission, statement_position(statement));
 					self.emit_all_pending_update_cleanups(emission, statement_position(statement));
 					self.emit_all_transaction_commits(emission, statement_position(statement));
-					self.emit(emission, Instruction::ReturnVoid, statement_position(statement));
+					self.emit(emission, Instruction::ReturnNoValue, statement_position(statement));
 				}
 
 				Ok(())
@@ -1260,8 +1260,7 @@ impl Compiler {
 			| crate::ast::DataType::Null
 			| crate::ast::DataType::Range(_)
 			| crate::ast::DataType::RecordPointer(_)
-			| crate::ast::DataType::Union(_)
-			| crate::ast::DataType::Void => {
+			| crate::ast::DataType::Union(_) => {
 				panic!("Cannot emit an implicit default value for `{}`.", data_type.name());
 			}
 		}
@@ -1497,7 +1496,7 @@ fn collect_functions_from_statements<'a>(statements: &'a [Statement], functions:
 
 fn expression_produces_runtime_value(expression: &Expr, semantic_program: &SemanticProgram) -> bool {
 	match expression {
-		Expr::Call(call) => semantic_program.call_return_type(call.position) != Some(crate::ast::DataType::Void),
+		Expr::Call(call) => semantic_program.call_returns_value(call.position),
 		_ => true,
 	}
 }

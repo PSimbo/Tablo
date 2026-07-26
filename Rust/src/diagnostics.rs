@@ -200,17 +200,17 @@ mod tests {
 
 	#[test]
 	fn highlights_full_span_for_assignment_type_error_on_string_literal() {
-		let source = "fn Main(args: [text]) int { var x: int = 'abc'; return 0; }";
+		let source = "fn Main(args: [text]): int { var x: int = 'abc'; return 0; }";
 		let diagnostic = diagnostic_for_tablo_error(
 			source,
 			TabloError::Compile(CompileError {
 				message: String::from("Cannot assign a value of type `text` to a variable of type `int`."),
-				position: 41,
+				position: 42,
 			}),
 		);
 
-		assert_eq!(diagnostic.range.start.character, 41);
-		assert_eq!(diagnostic.range.end.character, 46);
+		assert_eq!(diagnostic.range.start.character, 42);
+		assert_eq!(diagnostic.range.end.character, 47);
 		assert_eq!(diagnostic.severity, 1);
 	}
 

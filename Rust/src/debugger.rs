@@ -373,7 +373,7 @@ mod tests {
 		let source = "\
 obj Inner { Value: int };\n\
 obj Outer { Inner: Inner, Other: int };\n\
-fn helper(value: int, other: int) int {\n\
+fn helper(value: int, other: int): int {\n\
   return value + other;\n\
 }\n\
 var outer: Outer = Outer {};\n\
@@ -413,7 +413,7 @@ helper(\n\
 
 	#[test]
 	fn steps_out_to_caller_after_entering_function() {
-		let source = "fn helper() int {\n  var y: int = 1;\n  return y;\n}\nvar x: int = helper();\nx";
+		let source = "fn helper(): int {\n  var y: int = 1;\n  return y;\n}\nvar x: int = helper();\nx";
 		let program = compile_debug_program(source, "example.tablo");
 		let mut session = DebuggerSession::new(&program);
 		let breakpoints = session.resolve_source_breakpoints("example.tablo", &[2]);
@@ -434,7 +434,7 @@ helper(\n\
 
 	#[test]
 	fn steps_over_function_call_without_entering_callee() {
-		let source = "fn helper() int {\n  return 1;\n}\nvar x: int = helper();\nx";
+		let source = "fn helper(): int {\n  return 1;\n}\nvar x: int = helper();\nx";
 		let program = compile_debug_program(source, "example.tablo");
 		let mut session = DebuggerSession::new(&program);
 		let breakpoints = session.resolve_source_breakpoints("example.tablo", &[4]);

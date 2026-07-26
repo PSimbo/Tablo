@@ -75,8 +75,8 @@ const OPCODE_PUSH_TIMESTAMP_TZ: u8 = OPCODE_PUSH_TIMESTAMP + 1;
 const OPCODE_PUSH_TIME_TZ: u8 = OPCODE_PUSH_TIMESTAMP_TZ + 1;
 const OPCODE_REORDER_CALL_ARGUMENTS: u8 = OPCODE_PUSH_TIME_TZ + 1;
 const OPCODE_RETURN: u8 = OPCODE_REORDER_CALL_ARGUMENTS + 1;
-const OPCODE_RETURN_VOID: u8 = OPCODE_RETURN + 1;
-const OPCODE_STORE_FIELD_PATH: u8 = OPCODE_RETURN_VOID + 1;
+const OPCODE_RETURN_NO_VALUE: u8 = OPCODE_RETURN + 1;
+const OPCODE_STORE_FIELD_PATH: u8 = OPCODE_RETURN_NO_VALUE + 1;
 const OPCODE_STORE_INDEX: u8 = OPCODE_STORE_FIELD_PATH + 1;
 const OPCODE_STORE_LOCAL: u8 = OPCODE_STORE_INDEX + 1;
 const OPCODE_STORE_SEQUENCE_CURRENT: u8 = OPCODE_STORE_LOCAL + 1;
@@ -84,6 +84,24 @@ const OPCODE_SUBTRACT: u8 = OPCODE_STORE_SEQUENCE_CURRENT + 1;
 const OPCODE_UPDATE_RECORD: u8 = OPCODE_SUBTRACT + 1;
 const OPCODE_UPDATE_RECORD_IF_CHANGED: u8 = OPCODE_UPDATE_RECORD + 1;
 const OPCODE_XOR: u8 = OPCODE_UPDATE_RECORD_IF_CHANGED + 1;
+
+const DATA_TYPE_TAG_ANY: u8 = 1;
+const DATA_TYPE_TAG_ARRAY: u8 = DATA_TYPE_TAG_ANY + 1;
+const DATA_TYPE_TAG_BOOL: u8 = DATA_TYPE_TAG_ARRAY + 1;
+const DATA_TYPE_TAG_DATE: u8 = DATA_TYPE_TAG_BOOL + 1;
+const DATA_TYPE_TAG_DEC: u8 = DATA_TYPE_TAG_DATE + 1;
+const DATA_TYPE_TAG_EMPTY_ARRAY: u8 = DATA_TYPE_TAG_DEC + 1;
+const DATA_TYPE_TAG_INT: u8 = DATA_TYPE_TAG_EMPTY_ARRAY + 1;
+const DATA_TYPE_TAG_NULLABLE: u8 = DATA_TYPE_TAG_INT + 1;
+const DATA_TYPE_TAG_OBJECT: u8 = DATA_TYPE_TAG_NULLABLE + 1;
+const DATA_TYPE_TAG_RANGE: u8 = DATA_TYPE_TAG_OBJECT + 1;
+const DATA_TYPE_TAG_RECORD_POINTER: u8 = DATA_TYPE_TAG_RANGE + 1;
+const DATA_TYPE_TAG_TEXT: u8 = DATA_TYPE_TAG_RECORD_POINTER + 1;
+const DATA_TYPE_TAG_TIME: u8 = DATA_TYPE_TAG_TEXT + 1;
+const DATA_TYPE_TAG_TIMESTAMP: u8 = DATA_TYPE_TAG_TIME + 1;
+const DATA_TYPE_TAG_TIMESTAMP_TZ: u8 = DATA_TYPE_TAG_TIMESTAMP + 1;
+const DATA_TYPE_TAG_TIME_TZ: u8 = DATA_TYPE_TAG_TIMESTAMP_TZ + 1;
+const DATA_TYPE_TAG_UNION: u8 = DATA_TYPE_TAG_TIME_TZ + 1;
 
 const QUERY_KIND_SQL: u8 = 1;
 
@@ -262,22 +280,21 @@ impl<'a> ObjectFileReader<'a> {
 	fn read_data_type(&mut self) -> Result<DataType, ObjectFileError> {
 		let tag_offset = self.offset;
 		match self.read_u8()? {
-			1 => Ok(DataType::Any),
-			2 => Ok(DataType::Array(Box::new(self.read_data_type()?))),
-			3 => Ok(DataType::Bool),
-			4 => Ok(DataType::Dec),
-			5 => Ok(DataType::EmptyArray),
-			6 => Ok(DataType::Int),
-			7 => Ok(DataType::Object(self.read_string()?)),
-			8 => Ok(DataType::Range(Box::new(self.read_data_type()?))),
-			9 => Ok(DataType::Text),
-			10 => Ok(DataType::Void),
-			11 => Ok(DataType::RecordPointer(crate::ast::RecordPointerType {
+			DATA_TYPE_TAG_ANY => Ok(DataType::Any),
+			DATA_TYPE_TAG_ARRAY => Ok(DataType::Array(Box::new(self.read_data_type()?))),
+			DATA_TYPE_TAG_BOOL => Ok(DataType::Bool),
+			DATA_TYPE_TAG_DEC => Ok(DataType::Dec),
+			DATA_TYPE_TAG_EMPTY_ARRAY => Ok(DataType::EmptyArray),
+			DATA_TYPE_TAG_INT => Ok(DataType::Int),
+			DATA_TYPE_TAG_OBJECT => Ok(DataType::Object(self.read_string()?)),
+			DATA_TYPE_TAG_RANGE => Ok(DataType::Range(Box::new(self.read_data_type()?))),
+			DATA_TYPE_TAG_TEXT => Ok(DataType::Text),
+			DATA_TYPE_TAG_RECORD_POINTER => Ok(DataType::RecordPointer(crate::ast::RecordPointerType {
 				database_name: self.read_string()?,
 				schema_name: self.read_string()?,
 				table_name: self.read_string()?,
 			})),
-			12 => {
+			DATA_TYPE_TAG_UNION => {
 				let member_count = self.read_u32()? as usize;
 				let mut members = Vec::with_capacity(member_count);
 
@@ -287,12 +304,12 @@ impl<'a> ObjectFileReader<'a> {
 
 				Ok(DataType::Union(members))
 			}
-			13 => Ok(DataType::Date),
-			14 => Ok(DataType::Nullable(Box::new(self.read_data_type()?))),
-			15 => Ok(DataType::Time),
-			16 => Ok(DataType::TimeTz),
-			17 => Ok(DataType::Timestamp),
-			18 => Ok(DataType::TimestampTz),
+			DATA_TYPE_TAG_DATE => Ok(DataType::Date),
+			DATA_TYPE_TAG_NULLABLE => Ok(DataType::Nullable(Box::new(self.read_data_type()?))),
+			DATA_TYPE_TAG_TIME => Ok(DataType::Time),
+			DATA_TYPE_TAG_TIME_TZ => Ok(DataType::TimeTz),
+			DATA_TYPE_TAG_TIMESTAMP => Ok(DataType::Timestamp),
+			DATA_TYPE_TAG_TIMESTAMP_TZ => Ok(DataType::TimestampTz),
 			tag => Err(ObjectFileError {
 				offset: tag_offset,
 				message: format!("Unknown data type tag {tag}."),
@@ -552,7 +569,7 @@ impl<'a> ObjectFileReader<'a> {
 				Ok(Instruction::ReorderCallArguments(argument_order))
 			}
 			OPCODE_RETURN => Ok(Instruction::Return),
-			OPCODE_RETURN_VOID => Ok(Instruction::ReturnVoid),
+			OPCODE_RETURN_NO_VALUE => Ok(Instruction::ReturnNoValue),
 			OPCODE_STORE_FIELD_PATH => Ok(Instruction::StoreFieldPath(self.read_string_vec()?)),
 			OPCODE_STORE_INDEX => Ok(Instruction::StoreIndex),
 			OPCODE_STORE_LOCAL => Ok(Instruction::StoreLocal(self.read_u32()?)),
@@ -805,45 +822,44 @@ fn write_code_body(bytes: &mut Vec<u8>, code_body: &CodeBody) {
 
 fn write_data_type(bytes: &mut Vec<u8>, data_type: &DataType) {
 	match data_type {
-		DataType::Any => bytes.push(1),
+		DataType::Any => bytes.push(DATA_TYPE_TAG_ANY),
 		DataType::Array(element_type) => {
-			bytes.push(2);
+			bytes.push(DATA_TYPE_TAG_ARRAY);
 			write_data_type(bytes, element_type);
 		}
-		DataType::Bool => bytes.push(3),
-		DataType::Date => bytes.push(13),
-		DataType::Dec => bytes.push(4),
-		DataType::EmptyArray => bytes.push(5),
-		DataType::Int => bytes.push(6),
+		DataType::Bool => bytes.push(DATA_TYPE_TAG_BOOL),
+		DataType::Date => bytes.push(DATA_TYPE_TAG_DATE),
+		DataType::Dec => bytes.push(DATA_TYPE_TAG_DEC),
+		DataType::EmptyArray => bytes.push(DATA_TYPE_TAG_EMPTY_ARRAY),
+		DataType::Int => bytes.push(DATA_TYPE_TAG_INT),
 		DataType::Null => panic!("internal data type `null` must not be serialized into object files"),
 		DataType::Nullable(inner) => {
-			bytes.push(14);
+			bytes.push(DATA_TYPE_TAG_NULLABLE);
 			write_data_type(bytes, inner);
 		}
 		DataType::Object(name) => {
-			bytes.push(7);
+			bytes.push(DATA_TYPE_TAG_OBJECT);
 			bytes.extend_from_slice(&(name.len() as u32).to_le_bytes());
 			bytes.extend_from_slice(name.as_bytes());
 		}
 		DataType::Range(element_type) => {
-			bytes.push(8);
+			bytes.push(DATA_TYPE_TAG_RANGE);
 			write_data_type(bytes, element_type);
 		}
-		DataType::Text => bytes.push(9),
-		DataType::Time => bytes.push(15),
-		DataType::TimeTz => bytes.push(16),
-		DataType::Timestamp => bytes.push(17),
-		DataType::TimestampTz => bytes.push(18),
-		DataType::Void => bytes.push(10),
+		DataType::Text => bytes.push(DATA_TYPE_TAG_TEXT),
+		DataType::Time => bytes.push(DATA_TYPE_TAG_TIME),
+		DataType::TimeTz => bytes.push(DATA_TYPE_TAG_TIME_TZ),
+		DataType::Timestamp => bytes.push(DATA_TYPE_TAG_TIMESTAMP),
+		DataType::TimestampTz => bytes.push(DATA_TYPE_TAG_TIMESTAMP_TZ),
 		DataType::RecordPointer(record_pointer) => {
-			bytes.push(11);
+			bytes.push(DATA_TYPE_TAG_RECORD_POINTER);
 			for value in [&record_pointer.database_name, &record_pointer.schema_name, &record_pointer.table_name] {
 				bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
 				bytes.extend_from_slice(value.as_bytes());
 			}
 		}
 		DataType::Union(members) => {
-			bytes.push(12);
+			bytes.push(DATA_TYPE_TAG_UNION);
 			bytes.extend_from_slice(&(members.len() as u32).to_le_bytes());
 
 			for member in members {
@@ -1066,7 +1082,7 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			}
 		}
 		Instruction::Return => bytes.push(OPCODE_RETURN),
-		Instruction::ReturnVoid => bytes.push(OPCODE_RETURN_VOID),
+		Instruction::ReturnNoValue => bytes.push(OPCODE_RETURN_NO_VALUE),
 		Instruction::StoreFieldPath(field_path) => {
 			bytes.push(OPCODE_STORE_FIELD_PATH);
 			bytes.extend_from_slice(&(field_path.len() as u32).to_le_bytes());

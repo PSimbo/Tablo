@@ -795,18 +795,8 @@ impl Parser {
 		else if self.current().is_some_and(|token| token.kind == TokenKind::LeftBrace) {
 			None
 		}
-		else if self.current().is_some_and(|token| {
-			token.kind == TokenKind::Identifier && token.lexeme == "void"
-		}) {
-			// Keep existing source fixtures usable until `DataType::Void` is
-			// removed during the return-type representation migration.
-			self.next();
-			None
-		}
 		else {
-			// Old value-return syntax remains transitional compatibility while
-			// the existing fixtures are migrated to the colon form.
-			Some(self.parse_data_type()?)
+			None
 		};
 		let body = match self.parse_block_statement()? {
 			Statement::Block(block) => block,
@@ -2994,7 +2984,7 @@ mod tests {
 	#[test]
 	fn parses_any_data_type_in_variable_and_array_positions() {
 		assert_eq!(
-			parse_program("fn Main(args: [text]) int { var value: any = 1; var values: [any] = []; return 0; }"),
+			parse_program("fn Main(args: [text]): int { var value: any = 1; var values: [any] = []; return 0; }"),
 			Program {
 				functions: vec![
 					FunctionDeclaration {
@@ -3265,7 +3255,7 @@ mod tests {
 	#[test]
 	fn parses_by_reference_function_parameter() {
 		assert_eq!(
-			parse_program("fn bump(value: &int) void { value += 1; }"),
+			parse_program("fn bump(value: &int) { value += 1; }"),
 			Program {
 				functions: vec![
 					FunctionDeclaration {
@@ -3540,7 +3530,7 @@ mod tests {
 
 	#[test]
 	fn parses_defaulted_and_variadic_function_parameters() {
-		let program = parse_program("fn Example(value: int = 1, ...rest: [int]) void {}");
+		let program = parse_program("fn Example(value: int = 1, ...rest: [int]) {}");
 		let parameters = &program.functions[0].parameters;
 
 		assert_eq!(parameters.len(), 2);
@@ -3755,7 +3745,7 @@ mod tests {
 	#[test]
 	fn parses_for_identifier_iterable_followed_by_block() {
 		let program = parse_program(
-			"fn Main(args: [text]) int { for value in items { value; } return 0; }"
+			"fn Main(args: [text]): int { for value in items { value; } return 0; }"
 		);
 
 		assert!(matches!(
@@ -4095,7 +4085,7 @@ mod tests {
 	#[test]
 	fn parses_function_declaration() {
 		assert_eq!(
-			parse_program("fn add(a: int, b: int) int { return a + b; }\nadd(1, 2)"),
+			parse_program("fn add(a: int, b: int): int { return a + b; }\nadd(1, 2)"),
 			Program {
 				functions: vec![
 					FunctionDeclaration {
@@ -4386,7 +4376,7 @@ mod tests {
 	#[test]
 	fn parses_if_record_pointer_condition_followed_by_field_assignment_block() {
 		let program = parse_program(
-			"fn Main(args: [text]) int { rec mut c = find first TblTest; if c { parentObj.InnerObj.FieldA = c.ColC; } return 0; }"
+			"fn Main(args: [text]): int { rec mut c = find first TblTest; if c { parentObj.InnerObj.FieldA = c.ColC; } return 0; }"
 		);
 
 		assert!(matches!(
@@ -4830,7 +4820,7 @@ mod tests {
 	#[test]
 	fn parses_nested_function_declaration() {
 		assert_eq!(
-			parse_program("fn outer() void { fn inner(value: &int) void { value += 1; } }"),
+			parse_program("fn outer() { fn inner(value: &int) { value += 1; } }"),
 			Program {
 				functions: vec![
 					FunctionDeclaration {
@@ -4913,7 +4903,7 @@ mod tests {
 	#[test]
 	fn parses_nullable_data_type_in_variable_and_array_positions() {
 		assert_eq!(
-			parse_program("fn Main(args: [text]) int { var value: int?; var values: [text]? = []; return 0; }"),
+			parse_program("fn Main(args: [text]): int { var value: int?; var values: [text]? = []; return 0; }"),
 			Program {
 				functions: vec![
 					FunctionDeclaration {
@@ -5114,7 +5104,7 @@ mod tests {
 	#[test]
 	fn parses_public_function_declaration() {
 		assert_eq!(
-			parse_program("pub fn add(a: int, b: int) int { return a + b; }"),
+			parse_program("pub fn add(a: int, b: int): int { return a + b; }"),
 			Program {
 				functions: vec![
 					FunctionDeclaration {
@@ -5201,7 +5191,7 @@ mod tests {
 	#[test]
 	fn parses_qualified_object_type_names_in_type_positions() {
 		let program = parse_program(
-			"fn Main(args: [text]) Outer.Inner { var value: [Outer.Inner | text] = []; return value; }"
+			"fn Main(args: [text]): Outer.Inner { var value: [Outer.Inner | text] = []; return value; }"
 		);
 
 		assert_eq!(normalize_program(program), Program {
@@ -5384,7 +5374,7 @@ mod tests {
 	#[test]
 	fn parses_record_pointer_function_parameters() {
 		assert_eq!(
-			parse_program("fn touch(cust: rec customers, target: &rec ExampleDb.Main.Customers) void {}"),
+			parse_program("fn touch(cust: rec customers, target: &rec ExampleDb.Main.Customers) {}"),
 			Program {
 				functions: vec![
 					FunctionDeclaration {
@@ -5816,7 +5806,7 @@ mod tests {
 	#[test]
 	fn parses_union_data_type_in_variable_and_array_positions() {
 		assert_eq!(
-			parse_program("fn Main(args: [text]) int { var value: int | text = 1; var values: [int | text] = []; return 0; }"),
+			parse_program("fn Main(args: [text]): int { var value: int | text = 1; var values: [int | text] = []; return 0; }"),
 			Program {
 				functions: vec![
 					FunctionDeclaration {
@@ -5899,7 +5889,7 @@ mod tests {
 	#[test]
 	fn parses_use_declaration_inside_function_scope() {
 		assert_eq!(
-			parse_program("fn Main(args: [text]) int { use '../Common/DateUtils'; return 0; }"),
+			parse_program("fn Main(args: [text]): int { use '../Common/DateUtils'; return 0; }"),
 			Program {
 				functions: vec![
 					FunctionDeclaration {
@@ -6049,7 +6039,7 @@ mod tests {
 	#[test]
 	fn parses_with_declaration_before_objects_and_functions() {
 		assert_eq!(
-			parse_program("with exampledb, archivedb;\nobj Person { name: text, };\nfn Main(args: [text]) int { return 0; }"),
+			parse_program("with exampledb, archivedb;\nobj Person { name: text, };\nfn Main(args: [text]): int { return 0; }"),
 			Program {
 				functions: vec![
 					FunctionDeclaration {
@@ -6139,18 +6129,30 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_function_return_type_without_colon() {
+		let mut lexer = Lexer::new(SourceText::new("fn Example() int { return 1; }"));
+		let tokens = lexer.tokenize().unwrap();
+		let mut parser = Parser::new(tokens);
+
+		let error = parser.parse_program().unwrap_err();
+
+		assert_eq!(error.message, "Expected `{` to start block. Found `int` instead.");
+		assert_eq!(error.position, 13);
+	}
+
+	#[test]
 	fn rejects_invalid_variadic_parameters() {
 		for (source, expected) in [
 			(
-				"fn Example(...values: [int], suffix: int) void {}",
+				"fn Example(...values: [int], suffix: int) {}",
 				"A variadic parameter must be the final parameter.",
 			),
 			(
-				"fn Example(...value: int) void {}",
+				"fn Example(...value: int) {}",
 				"A variadic parameter must have an array type.",
 			),
 			(
-				"fn Example(...values: [int] = []) void {}",
+				"fn Example(...values: [int] = []) {}",
 				"A variadic parameter may not define a default value.",
 			),
 		] {

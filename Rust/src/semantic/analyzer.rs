@@ -80,7 +80,7 @@ struct FunctionSignature {
 	function_index: u32,
 	parameter_defaults: Vec<Option<Expr>>,
 	parameters: Vec<FunctionParameterSignature>,
-	return_type: DataType,
+	return_type: Option<DataType>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -231,6 +231,10 @@ impl SemanticProgram {
 
 	pub fn call_return_type(&self, position: usize) -> Option<DataType> {
 		self.call_return_types.get(&position).cloned()
+	}
+
+	pub fn call_returns_value(&self, position: usize) -> bool {
+		self.call_return_types.contains_key(&position)
 	}
 
 	pub fn call_target(&self, position: usize) -> Option<u32> {
@@ -487,7 +491,7 @@ impl SemanticAnalyzer {
 		let Some(main_function) = program.functions.iter().find(|function| function.name == "Main") else {
 			return Err(self.compile_error(
 				0,
-				String::from("Standalone Tablo programs must define `fn Main(args: [text]) int`."),
+				String::from("Standalone Tablo programs must define `fn Main(args: [text]): int`."),
 			));
 		};
 
@@ -862,7 +866,7 @@ impl SemanticAnalyzer {
 		}
 
 		if let Some(return_type) = &function.return_type {
-			self.validate_non_void_data_type(
+			self.validate_declared_data_type(
 				return_type,
 				function.position,
 				format!(
@@ -880,7 +884,7 @@ impl SemanticAnalyzer {
 				.map(|parameter| parameter.default_value.clone())
 				.collect(),
 			parameters,
-			return_type: function.return_type.clone().unwrap_or(DataType::Void),
+			return_type: function.return_type.clone(),
 		};
 
 		if self.functions.contains_in_current_scope(&function.name) {
@@ -973,8 +977,7 @@ impl SemanticAnalyzer {
 			DataType::EmptyArray
 			| DataType::Null
 			| DataType::Range(_)
-			| DataType::RecordPointer(_)
-			| DataType::Void => false,
+			| DataType::RecordPointer(_) => false,
 		}
 	}
 
@@ -1130,7 +1133,12 @@ impl SemanticAnalyzer {
 		}
 	}
 
-	fn infer_built_in_call_type(&mut self, built_in: BuiltInFunction, arguments: &[CallArgument], position: usize) -> Result<DataType, CompileError> {
+	fn infer_built_in_call_type(
+		&mut self,
+		built_in: BuiltInFunction,
+		arguments: &[CallArgument],
+		position: usize,
+	) -> Result<Option<DataType>, CompileError> {
 		if !built_in.supports_arity(arguments.len()) {
 			return Err(self.compile_error(
 				position,
@@ -1143,7 +1151,7 @@ impl SemanticAnalyzer {
 		}
 
 		if matches!(built_in, BuiltInFunction::FirstOf | BuiltInFunction::LastOf) {
-			return self.infer_group_boundary_call_type(built_in, arguments, position);
+			return self.infer_group_boundary_call_type(built_in, arguments, position).map(Some);
 		}
 
 		for argument in arguments {
@@ -1171,16 +1179,16 @@ impl SemanticAnalyzer {
 			};
 			self.semantic_program.sequence_call_targets.insert(position, resolved_sequence);
 			self.semantic_program.call_return_types.insert(position, DataType::Int);
-			return Ok(DataType::Int);
+			return Ok(Some(DataType::Int));
 		}
 
 		if let Some(return_type) = self.infer_enum_downcast_built_in_type(built_in, &argument_types, position)? {
 			self.semantic_program.built_in_call_targets.insert(position, built_in);
 			self.semantic_program.call_return_types.insert(position, return_type.clone());
-			return Ok(return_type);
+			return Ok(Some(return_type));
 		}
 
-		let return_type = built_in.return_type(&argument_types).ok_or(self.compile_error(
+		let return_type = built_in.return_type(&argument_types).map_err(|_| self.compile_error(
 			arguments.first().map_or(position, |argument| argument.value.position()),
 			format!(
 				"Built-in function `{}` does not accept an argument of type `{}`.",
@@ -1194,7 +1202,9 @@ impl SemanticAnalyzer {
 		}
 
 		self.semantic_program.built_in_call_targets.insert(position, built_in);
-		self.semantic_program.call_return_types.insert(position, return_type.clone());
+		if let Some(return_type) = &return_type {
+			self.semantic_program.call_return_types.insert(position, return_type.clone());
+		}
 		Ok(return_type)
 	}
 
@@ -1236,7 +1246,7 @@ impl SemanticAnalyzer {
 			.map(|argument| self.infer_query_expression_type(&argument.value, table))
 			.collect::<Result<Vec<_>, _>>()?;
 
-		let return_type = built_in.return_type(&argument_types).ok_or(self.compile_error(
+		let return_type = built_in.return_type(&argument_types).map_err(|_| self.compile_error(
 			arguments.first().map_or(position, |argument| argument.value.position()),
 			format!(
 				"Built-in function `{}` does not accept an argument of type `{}`.",
@@ -1246,8 +1256,125 @@ impl SemanticAnalyzer {
 		))?;
 
 		self.semantic_program.built_in_call_targets.insert(position, built_in);
-		self.semantic_program.call_return_types.insert(position, return_type.clone());
-		Ok(return_type)
+		if let Some(return_type) = &return_type {
+			self.semantic_program.call_return_types.insert(position, return_type.clone());
+		}
+		return_type.ok_or_else(|| self.compile_error(
+			position,
+			format!("Built-in function `{}` does not return a value.", built_in.name()),
+		))
+	}
+
+	fn infer_call_type(&mut self, call: &CallExpr) -> Result<Option<DataType>, CompileError> {
+		let CallExpr { arguments, callee, position } = call;
+
+		if let Some(signatures) = self.lookup_functions(&callee.name).map(<[FunctionSignature]>::to_vec) {
+			let mut argument_types = Vec::with_capacity(arguments.len());
+			for argument in arguments {
+				argument_types.push(self.infer_expression_type(&argument.value)?);
+			}
+			let (signature, argument_bindings) = self.select_function_overload(
+				&callee.name,
+				&signatures,
+				arguments,
+				&argument_types,
+				*position,
+			)?;
+			let mut reference_slots = vec![None; arguments.len()];
+
+			for (parameter_index, binding) in argument_bindings.iter().enumerate() {
+				let parameter = &signature.parameters[parameter_index];
+				let CallArgumentBinding::Supplied(argument_index) = binding else {
+					if let CallArgumentBinding::Default(default_value) = binding
+						&& matches!(parameter.data_type.without_nullability(), DataType::RecordPointer(_)) {
+						self.record_record_pointer_escape(default_value);
+					}
+					continue;
+				};
+				let argument_index = *argument_index as usize;
+				let argument = &arguments[argument_index];
+				let argument_type = &argument_types[argument_index];
+				if parameter.is_by_ref {
+					if !argument.is_by_ref {
+						return Err(self.compile_error(
+							argument.position,
+							format!("Parameter `{}` must be passed by reference.", parameter.name),
+						));
+					}
+
+					let Expr::Identifier(identifier) = &argument.value else {
+						return Err(self.compile_error(
+							argument.position,
+							String::from("By-reference arguments must be plain identifiers."),
+						));
+					};
+
+					let local = self.lookup_local(&identifier.name).ok_or(self.compile_error(
+						identifier.position,
+						format!("Variable `{}` is not declared in this scope.", identifier.name),
+					))?;
+
+					if local.is_const {
+						return Err(self.compile_error(
+							argument.position,
+							format!("Constant `{}` cannot be passed by reference.", identifier.name),
+						));
+					}
+
+					if argument_type != &parameter.data_type {
+						return Err(self.compile_error(
+							argument.position,
+							format!(
+								"By-reference argument for parameter `{}` must have type `{}`, found `{}`.",
+								parameter.name,
+								parameter.data_type.name(),
+								argument_type.name(),
+							),
+						));
+					}
+
+					reference_slots[argument_index] = Some(local.slot);
+				}
+				else {
+					if argument.is_by_ref {
+						return Err(self.compile_error(
+							argument.position,
+							format!("Parameter `{}` must be passed by value.", parameter.name),
+						));
+					}
+
+					self.ensure_assignable(&parameter.data_type, argument_type, argument.value.position())?;
+				}
+
+				if matches!(parameter.data_type.without_nullability(), DataType::RecordPointer(_)) {
+					self.record_record_pointer_escape(&argument.value);
+				}
+			}
+
+			self.semantic_program.call_targets.insert(*position, signature.function_index);
+			self.semantic_program.call_argument_bindings.insert(*position, argument_bindings);
+			self.semantic_program.call_argument_reference_slots.insert(*position, reference_slots);
+			if let Some(return_type) = &signature.return_type {
+				self.semantic_program.call_return_types.insert(*position, return_type.clone());
+			}
+			Ok(signature.return_type)
+		}
+		else if let Some(built_in) = BuiltInFunction::from_name(&callee.name) {
+			if let Some(argument) = arguments.iter().find(|argument| argument.name.is_some()) {
+				return Err(self.compile_error(
+					argument.position,
+					String::from("Named arguments are not yet supported for built-in functions."),
+				));
+			}
+
+			self.infer_built_in_call_type(built_in, arguments, *position)
+		}
+		else {
+			Err(self.compile_error(
+				callee.position,
+				format!("Function `{}` is not declared in this scope.", callee.name),
+			))
+		}
 	}
 
 	fn infer_count_expression_type(&mut self, count: &CountExpr) -> Result<DataType, CompileError> {
@@ -1497,116 +1624,18 @@ impl SemanticAnalyzer {
 				self.binary_result_type(*operator, &left_type, &right_type, expression.position())
 			}
 			Expr::Boolean(_) => Ok(DataType::Bool),
-			Expr::Call(CallExpr { arguments, callee, .. }) => {
-				if let Some(signatures) = self.lookup_functions(&callee.name).map(<[FunctionSignature]>::to_vec) {
-					let mut argument_types = Vec::with_capacity(arguments.len());
-					for argument in arguments {
-						argument_types.push(self.infer_expression_type(&argument.value)?);
-					}
-					let (signature, argument_bindings) = self.select_function_overload(
-						&callee.name,
-						&signatures,
-						arguments,
-						&argument_types,
-						expression.position(),
-					)?;
-					let mut reference_slots = vec![None; arguments.len()];
-
-					for (parameter_index, binding) in argument_bindings.iter().enumerate() {
-						let parameter = &signature.parameters[parameter_index];
-						let CallArgumentBinding::Supplied(argument_index) = binding else {
-							if let CallArgumentBinding::Default(default_value) = binding
-								&& matches!(parameter.data_type.without_nullability(), DataType::RecordPointer(_)) {
-								self.record_record_pointer_escape(default_value);
-							}
-							continue;
-						};
-						let argument_index = *argument_index as usize;
-						let argument = &arguments[argument_index];
-						let argument_type = &argument_types[argument_index];
-						if parameter.is_by_ref {
-							if !argument.is_by_ref {
-								return Err(self.compile_error(
-									argument.position,
-									format!("Parameter `{}` must be passed by reference.", parameter.name),
-								));
-							}
-
-							let Expr::Identifier(identifier) = &argument.value else {
-								return Err(self.compile_error(
-									argument.position,
-									String::from("By-reference arguments must be plain identifiers."),
-								));
-							};
-
-							let local = self.lookup_local(&identifier.name).ok_or(self.compile_error(
-								identifier.position,
-								format!("Variable `{}` is not declared in this scope.", identifier.name),
-							))?;
-
-							if local.is_const {
-								return Err(self.compile_error(
-									argument.position,
-									format!("Constant `{}` cannot be passed by reference.", identifier.name),
-								));
-							}
-
-							if argument_type != &parameter.data_type {
-								return Err(self.compile_error(
-									argument.position,
-									format!(
-										"By-reference argument for parameter `{}` must have type `{}`, found `{}`.",
-										parameter.name,
-										parameter.data_type.name(),
-										argument_type.name(),
-									),
-								));
-							}
-
-							reference_slots[argument_index] = Some(local.slot);
-						}
-						else {
-							if argument.is_by_ref {
-								return Err(self.compile_error(
-									argument.position,
-									format!("Parameter `{}` must be passed by value.", parameter.name),
-								));
-							}
-
-							self.ensure_assignable(&parameter.data_type, argument_type, argument.value.position())?;
-						}
-
-						if matches!(parameter.data_type.without_nullability(), DataType::RecordPointer(_)) {
-							self.record_record_pointer_escape(&argument.value);
-						}
-					}
-
-					self.semantic_program.call_targets.insert(expression.position(), signature.function_index);
-					self.semantic_program.call_argument_bindings.insert(
-						expression.position(),
-						argument_bindings,
-					);
-					self.semantic_program.call_argument_reference_slots.insert(expression.position(), reference_slots);
-					self.semantic_program.call_return_types.insert(expression.position(), signature.return_type.clone());
-					Ok(signature.return_type)
-				}
-				else if let Some(built_in) = BuiltInFunction::from_name(&callee.name) {
-					if let Some(argument) = arguments.iter().find(|argument| argument.name.is_some()) {
-						return Err(self.compile_error(
-							argument.position,
-							String::from("Named arguments are not yet supported for built-in functions."),
-						));
-					}
-
-					self.infer_built_in_call_type(built_in, arguments, expression.position())
+			Expr::Call(call) => self.infer_call_type(call)?.ok_or_else(|| {
+				let callable_kind = if BuiltInFunction::from_name(&call.callee.name).is_some() {
+					"Built-in function"
 				}
 				else {
-					Err(self.compile_error(
-						callee.position,
-						format!("Function `{}` is not declared in this scope.", callee.name),
-					))
-				}
-			}
+					"Function"
+				};
+				self.compile_error(
+					call.position,
+					format!("{callable_kind} `{}` does not return a value.", call.callee.name),
+				)
+			}),
 			Expr::Count(count) => self.infer_count_expression_type(count),
 			Expr::Date(_) => Ok(DataType::Date),
 			Expr::Decimal(_) => Ok(DataType::Dec),
@@ -1934,14 +1963,7 @@ impl SemanticAnalyzer {
 		}
 
 		for order_by in &find.order_by {
-			let order_type = self.infer_query_expression_type(&order_by.expression, &find.table)?;
-
-			if order_type.without_nullability() == &DataType::Void {
-				return Err(self.compile_error(
-					order_by.position,
-					String::from("`order by` expressions must produce a runtime value."),
-				));
-			}
+			self.infer_query_expression_type(&order_by.expression, &find.table)?;
 		}
 
 		let compiled_query = lower_find_query(&lowered_query).map_err(|error| self.compile_error(
@@ -2112,7 +2134,10 @@ impl SemanticAnalyzer {
 						self.ensure_assignable(&parameter.data_type, argument_type, argument.value.position())?;
 					}
 
-					Ok(signature.return_type)
+					signature.return_type.ok_or_else(|| self.compile_error(
+						expression.position(),
+						format!("Function `{}` does not return a value.", callee.name),
+					))
 				}
 				else if let Some(built_in) = BuiltInFunction::from_name(&callee.name) {
 					if let Some(argument) = arguments.iter().find(|argument| argument.name.is_some()) {
@@ -3413,7 +3438,7 @@ impl SemanticAnalyzer {
 				String::from("Sequence parameters are not yet supported."),
 			)),
 			FunctionParameterType::Value(data_type) => {
-				self.validate_non_void_data_type(
+				self.validate_declared_data_type(
 					data_type,
 					parameter.position,
 					format!("Parameter `{}` cannot have type `{}`.", parameter.name, parameter.data_type.name()),
@@ -3810,6 +3835,47 @@ impl SemanticAnalyzer {
 		Ok(())
 	}
 
+	fn validate_declared_data_type(&self, data_type: &DataType, position: usize, message: String) -> Result<(), CompileError> {
+		match data_type {
+			DataType::EmptyArray | DataType::Null => Err(self.compile_error(position, message)),
+			DataType::Array(element_type) => self.validate_declared_data_type(element_type, position, message),
+			DataType::Nullable(inner) => {
+				match inner.as_ref() {
+					DataType::Any => Err(self.compile_error(
+						position,
+						String::from("The `any` type may not currently be marked as nullable."),
+					)),
+					DataType::Union(_) => Err(self.compile_error(
+						position,
+						String::from("Nullable union types are not yet supported."),
+					)),
+					_ => self.validate_declared_data_type(inner, position, message),
+				}
+			}
+			DataType::Union(members) => {
+				for member in members {
+					self.validate_declared_data_type(member, position, message.clone())?;
+				}
+
+				Ok(())
+			}
+			DataType::Object(name) => {
+				if self.semantic_program.object_declarations.contains_key(name)
+					|| self.lookup_enum(name).is_some() {
+					Ok(())
+				}
+				else {
+					Err(self.compile_error(
+						position,
+						format!("Object type `{name}` is not declared in this module."),
+					))
+				}
+			}
+			DataType::RecordPointer(_) => Err(self.compile_error(position, message)),
+			_ => Ok(()),
+		}
+	}
+
 	fn validate_enum_declaration(&mut self, enum_declaration: &EnumDeclaration) -> Result<(), CompileError> {
 		let binding = self.lookup_enum(&enum_declaration.name).ok_or(self.compile_error(
 			enum_declaration.position,
@@ -3893,7 +3959,7 @@ impl SemanticAnalyzer {
 		self.function_depth += 1;
 		self.loop_depth = 0;
 		self.next_local_slot = 0;
-		self.current_return_type = Some(function.return_type.clone().unwrap_or(DataType::Void));
+		self.current_return_type = function.return_type.clone();
 		self.enter_scope();
 
 		for parameter in &function.parameters {
@@ -4048,51 +4114,10 @@ impl SemanticAnalyzer {
 		Ok(())
 	}
 
-	fn validate_non_void_data_type(&self, data_type: &DataType, position: usize, message: String) -> Result<(), CompileError> {
-		match data_type {
-			DataType::Void | DataType::EmptyArray | DataType::Null => Err(self.compile_error(position, message)),
-			DataType::Array(element_type) => self.validate_non_void_data_type(element_type, position, message),
-			DataType::Nullable(inner) => {
-				match inner.as_ref() {
-					DataType::Any => Err(self.compile_error(
-						position,
-						String::from("The `any` type may not currently be marked as nullable."),
-					)),
-					DataType::Union(_) => Err(self.compile_error(
-						position,
-						String::from("Nullable union types are not yet supported."),
-					)),
-					_ => self.validate_non_void_data_type(inner, position, message),
-				}
-			}
-			DataType::Union(members) => {
-				for member in members {
-					self.validate_non_void_data_type(member, position, message.clone())?;
-				}
-
-				Ok(())
-			}
-			DataType::Object(name) => {
-				if self.semantic_program.object_declarations.contains_key(name)
-					|| self.lookup_enum(name).is_some() {
-					Ok(())
-				}
-				else {
-					Err(self.compile_error(
-						position,
-						format!("Object type `{name}` is not declared in this module."),
-					))
-				}
-			}
-			DataType::RecordPointer(_) => Err(self.compile_error(position, message)),
-			_ => Ok(()),
-		}
-	}
-
 	fn validate_object_declaration(&mut self, object: &ObjectDeclaration) -> Result<(), CompileError> {
 		match &object.shape {
 			crate::ast::ObjectDeclarationShape::Array(element_type) => {
-				self.validate_non_void_data_type(
+				self.validate_declared_data_type(
 					element_type,
 					object.position,
 					format!("Array-shaped object `{}` cannot have element type `{}`.", object.name, element_type.name()),
@@ -4109,7 +4134,7 @@ impl SemanticAnalyzer {
 						));
 					}
 
-					self.validate_non_void_data_type(
+					self.validate_declared_data_type(
 						&field.data_type,
 						field.position,
 						format!("Field `{}` cannot have type `{}`.", field.name, field.data_type.name()),
@@ -4229,7 +4254,12 @@ impl SemanticAnalyzer {
 			}
 			Statement::EnumDeclaration(enum_declaration) => self.validate_enum_declaration(enum_declaration),
 			Statement::Expression(expression) => {
-				self.infer_expression_type(expression)?;
+				if let Expr::Call(call) = expression {
+					self.infer_call_type(call)?;
+				}
+				else {
+					self.infer_expression_type(expression)?;
+				}
 				Ok(())
 			}
 			Statement::FunctionDeclaration(function) => self.validate_function_declaration(function),
@@ -4358,25 +4388,11 @@ impl SemanticAnalyzer {
 				}
 
 				for group_by in group_by {
-					let group_type = self.infer_query_expression_type(&group_by.expression, table)?;
-
-					if group_type.without_nullability() == &DataType::Void {
-						return Err(self.compile_error(
-							group_by.position,
-							String::from("`group by` expressions must produce a runtime value."),
-						));
-					}
+					self.infer_query_expression_type(&group_by.expression, table)?;
 				}
 
 				for order_by in order_by {
-					let order_type = self.infer_query_expression_type(&order_by.expression, table)?;
-
-					if order_type.without_nullability() == &DataType::Void {
-						return Err(self.compile_error(
-							order_by.position,
-							String::from("`order by` expressions must produce a runtime value."),
-						));
-					}
+					self.infer_query_expression_type(&order_by.expression, table)?;
 				}
 
 				let compiled_query = lower_for_query(&lowered_query).map_err(|error| self.compile_error(
@@ -4560,22 +4576,25 @@ impl SemanticAnalyzer {
 				Ok(())
 			}
 			Statement::Return(ReturnStatement { position, value }) => {
-				let return_type = self.current_return_type.clone().ok_or(self.compile_error(
-					*position,
-					String::from("`return` may only be used inside a function body."),
-				))?;
+				if self.function_depth == 0 {
+					return Err(self.compile_error(
+						*position,
+						String::from("`return` may only be used inside a function body."),
+					));
+				}
 
+				let return_type = self.current_return_type.clone();
 				match (return_type, value) {
-					(DataType::Void, None) => Ok(()),
-					(DataType::Void, Some(value)) => Err(self.compile_error(
+					(None, None) => Ok(()),
+					(None, Some(value)) => Err(self.compile_error(
 						value.position(),
-						String::from("A `void` function cannot return a value."),
+						String::from("A function without a return type cannot return a value."),
 					)),
-					(expected_type, Some(value)) => {
+					(Some(expected_type), Some(value)) => {
 						let value_type = self.infer_expression_type(value)?;
 						self.ensure_assignable(&expected_type, &value_type, value.position())
 					}
-					(expected_type, None) => Err(self.compile_error(
+					(Some(expected_type), None) => Err(self.compile_error(
 						*position,
 						format!("Function must return a value of type `{}`.", expected_type.name()),
 					)),
@@ -4609,7 +4628,7 @@ impl SemanticAnalyzer {
 			}
 			Statement::Use(UseDeclaration { .. }) => Ok(()),
 			Statement::VariableDeclaration(VariableDeclaration { data_type, initial_value, is_const, name, position }) => {
-				self.validate_non_void_data_type(
+				self.validate_declared_data_type(
 					data_type,
 					*position,
 					format!(
@@ -4859,11 +4878,33 @@ mod tests {
 			"ExampleDb",
 		);
 		let program = parse_program(
-			"with exampledb;\nfn Main(args: [text]) int { rec mut cust = new Customers; create cust; return 0; }"
+			"with exampledb;\nfn Main(args: [text]): int { rec mut cust = new Customers; create cust; return 0; }"
 		);
 		let mut analyzer = SemanticAnalyzer::new();
 
 		analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap();
+	}
+
+	#[test]
+	fn accepts_fallthrough_and_bare_return_in_function_without_return_type() {
+		let program = parse_program(
+			"fn Log(stop: bool) { if stop { return; } }\n\
+			fn Main(args: [text]): int { Log(false); return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		analyzer.analyze_standalone_program(&program).unwrap();
+	}
+
+	#[test]
+	fn accepts_no_return_calls_as_expression_statements() {
+		let program = parse_program(
+			"fn Log() {}\n\
+			fn Main(args: [text]): int { Log(); displn('x'); return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		analyzer.analyze_standalone_program(&program).unwrap();
 	}
 
 	#[test]
@@ -4900,6 +4941,40 @@ mod tests {
 	}
 
 	#[test]
+	fn distinguishes_value_and_no_value_function_calls_in_semantic_metadata() {
+		let program = parse_program(
+			"fn Log() {}\n\
+			fn Value(): int { return 1; }\n\
+			fn Main(args: [text]): int { Log(); Value(); displn('x'); len('x'); return 0; }",
+		);
+		let main = program.functions.iter().find(|function| function.name == "Main").unwrap();
+		let Statement::Expression(Expr::Call(log_call)) = &main.body.statements[0] else {
+			panic!("Expected `Log` call.");
+		};
+		let Statement::Expression(Expr::Call(value_call)) = &main.body.statements[1] else {
+			panic!("Expected `Value` call.");
+		};
+		let Statement::Expression(Expr::Call(displn_call)) = &main.body.statements[2] else {
+			panic!("Expected `displn` call.");
+		};
+		let Statement::Expression(Expr::Call(len_call)) = &main.body.statements[3] else {
+			panic!("Expected `len` call.");
+		};
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program(&program).unwrap();
+
+		assert!(!semantic_program.call_returns_value(log_call.position));
+		assert!(semantic_program.call_returns_value(value_call.position));
+		assert_eq!(semantic_program.call_return_type(log_call.position), None);
+		assert_eq!(semantic_program.call_return_type(value_call.position), Some(DataType::Int));
+		assert!(!semantic_program.call_returns_value(displn_call.position));
+		assert!(semantic_program.call_returns_value(len_call.position));
+		assert_eq!(semantic_program.call_return_type(displn_call.position), None);
+		assert_eq!(semantic_program.call_return_type(len_call.position), Some(DataType::Int));
+	}
+
+	#[test]
 	fn does_not_offer_nested_query_optimization_for_mutable_queries() {
 		let schema = sqlite_test_schema(
 			r#"
@@ -4918,7 +4993,7 @@ mod tests {
 		let program = parse_program(
 			concat!(
 				"with exampledb;\n",
-				"fn Main(args: [text]) int {\n",
+				"fn Main(args: [text]): int {\n",
 				"  for rec customer in Customers {\n",
 				"    for rec mut customerOrder in Orders where CustomerId == customer.Id {}\n",
 				"  }\n",
@@ -4965,8 +5040,8 @@ mod tests {
 		let program = parse_program(
 			concat!(
 				"with exampledb;\n",
-				"fn Visit(cust: rec Customers) void {}\n",
-				"fn Main(args: [text]) int {\n",
+				"fn Visit(cust: rec Customers) {}\n",
+				"fn Main(args: [text]): int {\n",
 				"  rec cust = find first Customers;\n",
 				"  var present: bool = exists(cust);\n",
 				"  return 0;\n",
@@ -4997,7 +5072,7 @@ mod tests {
 			"ExampleDb",
 		);
 		let program = parse_program(
-			"with exampledb;\nfn Main(args: [text]) int { rec cust = find first Customers; displn(cust.Name); return 0; }"
+			"with exampledb;\nfn Main(args: [text]): int { rec cust = find first Customers; displn(cust.Name); return 0; }"
 		);
 		let declaration_position = match &program.functions[0].body.statements[0] {
 			Statement::RecordPointerDeclaration(statement) => statement.position,
@@ -5510,7 +5585,7 @@ mod tests {
 			"ExampleDb",
 		);
 		let program = parse_program(
-			"with exampledb;\nfn Main(args: [text]) int { for rec mut entry in AuditLog { delete entry; } return 0; }"
+			"with exampledb;\nfn Main(args: [text]): int { for rec mut entry in AuditLog { delete entry; } return 0; }"
 		);
 		let (query_position, variable_position) = match &program.functions[0].body.statements[0] {
 			Statement::ForRecord(statement) => (statement.position, statement.variable.position),
@@ -5546,7 +5621,7 @@ mod tests {
 		let program = parse_program(
 			concat!(
 				"with exampledb;\n",
-				"fn Main(args: [text]) int {\n",
+				"fn Main(args: [text]): int {\n",
 				"  rec mut line = find first OrderLines;\n",
 				"  line.Description = 'Updated';\n",
 				"  update line;\n",
@@ -5593,7 +5668,7 @@ mod tests {
 		let program = parse_program(
 			concat!(
 				"with exampledb;\n",
-				"fn Main(args: [text]) int {\n",
+				"fn Main(args: [text]): int {\n",
 				"  for rec safeCustomer in Customers {\n",
 				"    var safeCount: int = count Orders where CustomerId == safeCustomer.Id;\n",
 				"  }\n",
@@ -5685,7 +5760,7 @@ mod tests {
 			"ExampleDb",
 		);
 		let program = parse_program(
-			"with exampledb;\nfn Main(args: [text]) int { rec mut cust = find first Customers; cust.Name += ' Ltd.'; return 0; }"
+			"with exampledb;\nfn Main(args: [text]): int { rec mut cust = find first Customers; cust.Name += ' Ltd.'; return 0; }"
 		);
 		let declaration_position = match &program.functions[0].body.statements[0] {
 			Statement::RecordPointerDeclaration(statement) => statement.position,
@@ -5711,7 +5786,7 @@ mod tests {
 			"ExampleDb",
 		);
 		let program = parse_program(
-			"with exampledb;\nfn Main(args: [text]) int { for rec cust in Customers { displn(cust.Name); } return 0; }"
+			"with exampledb;\nfn Main(args: [text]): int { for rec cust in Customers { displn(cust.Name); } return 0; }"
 		);
 		let variable_position = match &program.functions[0].body.statements[0] {
 			Statement::ForRecord(statement) => statement.variable.position,
@@ -5739,7 +5814,7 @@ mod tests {
 			"ExampleDb",
 		);
 		let program = parse_program(
-			"with exampledb;\nfn Main(args: [text]) int { rec mut cust = find first Customers where Id == 1; cust.Name = 'Ada'; return 0; cust.Id = 2; }"
+			"with exampledb;\nfn Main(args: [text]): int { rec mut cust = find first Customers where Id == 1; cust.Name = 'Ada'; return 0; cust.Id = 2; }"
 		);
 		let declaration_position = match &program.functions[0].body.statements[0] {
 			Statement::RecordPointerDeclaration(statement) => statement.position,
@@ -5767,7 +5842,7 @@ mod tests {
 			"ExampleDb",
 		);
 		let program = parse_program(
-			"with exampledb;\nfn Main(args: [text]) int { rec cust = find first Customers; rec copy = cust; return 0; }"
+			"with exampledb;\nfn Main(args: [text]): int { rec cust = find first Customers; rec copy = cust; return 0; }"
 		);
 		let declaration_position = match &program.functions[0].body.statements[0] {
 			Statement::RecordPointerDeclaration(statement) => statement.position,
@@ -5793,9 +5868,9 @@ mod tests {
 		let program = parse_program(
 			concat!(
 				"with exampledb;\n",
-				"fn Visit(cust: rec Customers) void {}\n",
-				"fn Borrow(cust: &rec Customers) void {}\n",
-				"fn Main(args: [text]) int {\n",
+				"fn Visit(cust: rec Customers) {}\n",
+				"fn Borrow(cust: &rec Customers) {}\n",
+				"fn Main(args: [text]): int {\n",
 				"  rec custValue = find first Customers;\n",
 				"  rec mut custRef = find first Customers;\n",
 				"  Visit(custValue);\n",
@@ -5849,7 +5924,7 @@ mod tests {
 			"ExampleDb",
 		);
 		let program = parse_program(
-			"with exampledb;\nfn Main(args: [text]) int { rec cust = find first Customers; rec ord = find first Orders where CustomerId == cust.Id; return 0; }"
+			"with exampledb;\nfn Main(args: [text]): int { rec cust = find first Customers; rec ord = find first Orders where CustomerId == cust.Id; return 0; }"
 		);
 		let declaration_position = match &program.functions[0].body.statements[0] {
 			Statement::RecordPointerDeclaration(statement) => statement.position,
@@ -5877,7 +5952,7 @@ mod tests {
 			"ExampleDb",
 		);
 		let program = parse_program(
-			"with exampledb;\nfn Main(args: [text]) int { rec cust = find first Customers; displn(cust.name); return cust.Id; }"
+			"with exampledb;\nfn Main(args: [text]): int { rec cust = find first Customers; displn(cust.name); return cust.Id; }"
 		);
 		let declaration_position = match &program.functions[0].body.statements[0] {
 			Statement::RecordPointerDeclaration(statement) => statement.position,
@@ -5910,7 +5985,7 @@ mod tests {
 		let program = parse_program(
 			concat!(
 				"with exampledb;\n",
-				"fn Main(args: [text]) int {\n",
+				"fn Main(args: [text]): int {\n",
 				"  for rec customer in Customers {\n",
 				"    rec firstOrder = find first Orders where CustomerId == customer.Id;\n",
 				"    var orderCount: int = count Orders where CustomerId == customer.Id;\n",
@@ -6061,7 +6136,7 @@ mod tests {
 		let program = parse_program(
 			concat!(
 				"with exampledb;\n",
-				"fn Main(args: [text]) int {\n",
+				"fn Main(args: [text]): int {\n",
 				"  var minimumId: int = 1;\n",
 				"  var customerCount: int = count Customers where Id >= minimumId and Id != minimumId;\n",
 				"  rec firstCustomer = find first Customers where Id >= minimumId;\n",
@@ -6148,7 +6223,7 @@ mod tests {
 			"ExampleDb",
 		);
 		let program = parse_program(
-			"with exampledb;\nfn Visit(cust: rec Customers, other: &rec Customers) void {}"
+			"with exampledb;\nfn Visit(cust: rec Customers, other: &rec Customers) {}"
 		);
 		let first_parameter = &program.functions[0].parameters[0];
 		let second_parameter = &program.functions[0].parameters[1];
@@ -6260,6 +6335,31 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_bare_return_from_value_returning_function() {
+		let program = parse_program(
+			"fn Value(): int { return; }\n\
+			fn Main(args: [text]): int { return Value(); }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(error.message, "Function must return a value of type `int`.");
+	}
+
+	#[test]
+	fn rejects_built_in_without_return_type_in_value_context() {
+		let program = parse_program(
+			"fn Main(args: [text]): int { var result: int = displn('x'); return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(error.message, "Built-in function `displn` does not return a value.");
+	}
+
+	#[test]
 	fn rejects_create_statement_for_non_new_record_pointer() {
 		let schema = sqlite_test_schema(
 			r#"
@@ -6272,7 +6372,7 @@ mod tests {
 			"ExampleDb",
 		);
 		let program = parse_program(
-			"with exampledb;\nfn Main(args: [text]) int { rec mut cust = find first Customers where Id == 1; create cust; return 0; }"
+			"with exampledb;\nfn Main(args: [text]): int { rec mut cust = find first Customers where Id == 1; create cust; return 0; }"
 		);
 		let mut analyzer = SemanticAnalyzer::new();
 		let error = analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap_err();
@@ -6281,9 +6381,22 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_fallthrough_from_value_returning_function() {
+		let program = parse_program(
+			"fn Value(flag: bool): int { if flag { return 1; } }\n\
+			fn Main(args: [text]): int { return Value(true); }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(error.message, "Function `Value` must return a value of type `int` on all paths.");
+	}
+
+	#[test]
 	fn rejects_public_nested_function_declaration() {
 		let program = parse_program(
-			"fn Outer() void { pub fn Inner() void {} }"
+			"fn Outer() { pub fn Inner() {} }"
 		);
 		let mut analyzer = SemanticAnalyzer::new();
 		let error = analyzer.analyze_program(&program).unwrap_err();
@@ -6310,7 +6423,7 @@ mod tests {
 		let program = parse_program(
 			concat!(
 				"with exampledb;\n",
-				"fn Main(args: [text]) int {\n",
+				"fn Main(args: [text]): int {\n",
 				"  var marker: int = 0;\n",
 				"  for rec conditionalParent in Customers {\n",
 				"    if conditionalParent.Id > 0 {\n",
@@ -6410,6 +6523,32 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_user_function_without_return_type_in_value_context() {
+		let program = parse_program(
+			"fn Log() {}\n\
+			fn Main(args: [text]): int { var result: int = Log(); return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(error.message, "Function `Log` does not return a value.");
+	}
+
+	#[test]
+	fn rejects_value_return_from_function_without_return_type() {
+		let program = parse_program(
+			"fn Log() { return 1; }\n\
+			fn Main(args: [text]): int { Log(); return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(error.message, "A function without a return type cannot return a value.");
+	}
+
+	#[test]
 	fn retains_reads_from_reachable_branches_and_excludes_dead_code() {
 		let schema = sqlite_test_schema(
 			r#"
@@ -6426,7 +6565,7 @@ mod tests {
 		let program = parse_program(
 			concat!(
 				"with exampledb;\n",
-				"fn Main(args: [text]) int {\n",
+				"fn Main(args: [text]): int {\n",
 				"  rec cust = find first Customers;\n",
 				"  var useName: bool = true;\n",
 				"  if useName { displn(cust.Name); } else { var id: int = cust.Id; }\n",

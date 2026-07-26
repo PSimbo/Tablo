@@ -182,7 +182,77 @@ impl BuiltInFunction {
 		}
 	}
 
-	pub fn return_type(self, argument_types: &[DataType]) -> Option<DataType> {
+	pub fn produces_runtime_value(self) -> bool {
+		match self {
+			Self::BoolCast
+			| Self::Contains
+			| Self::CountOf
+			| Self::DateCast
+			| Self::Day
+			| Self::DecCast
+			| Self::Exists
+			| Self::FirstOf
+			| Self::Format
+			| Self::Hour
+			| Self::IndexOf
+			| Self::IntCast
+			| Self::LastOf
+			| Self::Len
+			| Self::Locked
+			| Self::Minute
+			| Self::Month
+			| Self::Second
+			| Self::SeqNext
+			| Self::Split
+			| Self::TextCast
+			| Self::Trim
+			| Self::Year => true,
+			Self::Disp | Self::Displn => false,
+		}
+	}
+
+	pub fn return_type(self, argument_types: &[DataType]) -> Result<Option<DataType>, ()> {
+		if matches!(self, Self::Disp | Self::Displn) {
+			return match argument_types {
+				[arg] if matches!(arg.without_nullability(), DataType::Text) => Ok(None),
+				_ => Err(()),
+			};
+		}
+
+		self.value_return_type(argument_types).map(Some).ok_or(())
+	}
+
+	pub fn supports_arity(self, argument_count: usize) -> bool {
+		match self {
+			Self::Contains
+			| Self::CountOf
+			| Self::Format
+			| Self::IndexOf
+			| Self::Split => argument_count == 2,
+			Self::FirstOf
+			| Self::LastOf => argument_count >= 1,
+			Self::BoolCast
+			| Self::DateCast
+			| Self::Day
+			| Self::DecCast
+			| Self::Disp
+			| Self::Displn
+			| Self::Exists
+			| Self::Hour
+			| Self::IntCast
+			| Self::Len
+			| Self::Locked
+			| Self::Minute
+			| Self::Month
+			| Self::Second
+			| Self::SeqNext
+			| Self::TextCast
+			| Self::Trim
+			| Self::Year => argument_count == 1,
+		}
+	}
+
+	fn value_return_type(self, argument_types: &[DataType]) -> Option<DataType> {
 		match self {
 			Self::Contains => match argument_types {
 				[left, right]
@@ -220,10 +290,7 @@ impl BuiltInFunction {
 				[arg] if matches!(arg.without_nullability(), DataType::Date | DataType::Timestamp | DataType::TimestampTz) => Some(DataType::Int),
 				_ => None,
 			},
-			Self::Disp | Self::Displn => match argument_types {
-				[arg] if matches!(arg.without_nullability(), DataType::Text) => Some(DataType::Void),
-				_ => None,
-			},
+			Self::Disp | Self::Displn => None,
 			Self::Exists | Self::Locked => match argument_types {
 				[arg] if matches!(arg.without_nullability(), DataType::RecordPointer(_)) => {
 					Some(DataType::Bool)
@@ -309,63 +376,16 @@ impl BuiltInFunction {
 			Self::TextCast | Self::DecCast | Self::BoolCast => None,
 		}
 	}
+}
 
-	pub fn supports_arity(self, argument_count: usize) -> bool {
-		match self {
-			Self::Contains
-			| Self::CountOf
-			| Self::Format
-			| Self::IndexOf
-			| Self::Split => argument_count == 2,
-			Self::FirstOf
-			| Self::LastOf => argument_count >= 1,
-			Self::BoolCast
-			| Self::DateCast
-			| Self::Day
-			| Self::DecCast
-			| Self::Disp
-			| Self::Displn
-			| Self::Exists
-			| Self::Hour
-			| Self::IntCast
-			| Self::Len
-			| Self::Locked
-			| Self::Minute
-			| Self::Month
-			| Self::Second
-			| Self::SeqNext
-			| Self::TextCast
-			| Self::Trim
-			| Self::Year => argument_count == 1,
-		}
-	}
+#[cfg(test)]
+mod tests {
+	use super::*;
 
-	pub fn produces_runtime_value(self) -> bool {
-		match self {
-			Self::BoolCast
-			| Self::Contains
-			| Self::CountOf
-			| Self::DateCast
-			| Self::Day
-			| Self::DecCast
-			| Self::Exists
-			| Self::FirstOf
-			| Self::Format
-			| Self::Hour
-			| Self::IndexOf
-			| Self::IntCast
-			| Self::LastOf
-			| Self::Len
-			| Self::Locked
-			| Self::Minute
-			| Self::Month
-			| Self::Second
-			| Self::SeqNext
-			| Self::Split
-			| Self::TextCast
-			| Self::Trim
-			| Self::Year => true,
-			Self::Disp | Self::Displn => false,
-		}
+	#[test]
+	fn distinguishes_invalid_no_return_and_value_return_signatures() {
+		assert_eq!(BuiltInFunction::Disp.return_type(&[DataType::Text]), Ok(None));
+		assert_eq!(BuiltInFunction::Len.return_type(&[DataType::Text]), Ok(Some(DataType::Int)));
+		assert_eq!(BuiltInFunction::Len.return_type(&[DataType::Bool]), Err(()));
 	}
 }

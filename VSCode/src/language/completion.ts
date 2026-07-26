@@ -45,9 +45,11 @@ const KEYWORD_ITEMS = [
 	keyword("const"),
 	keyword("continue"),
 	keyword("count"),
+	keyword("default"),
 	keyword("desc"),
 	keyword("else"),
 	keyword("enum"),
+	keyword("exists"),
 	keyword("find"),
 	keyword("first"),
 	keyword("fn"),
@@ -55,6 +57,7 @@ const KEYWORD_ITEMS = [
 	keyword("if"),
 	keyword("in"),
 	keyword("last"),
+	keyword("locked"),
 	keyword("mut"),
 	keyword("not"),
 	keyword("obj"),
@@ -78,7 +81,6 @@ const TYPE_ITEMS = [
 	typeItem("dec"),
 	typeItem("int"),
 	typeItem("text"),
-	typeItem("void"),
 ];
 
 const BUILT_IN_ITEMS = [
@@ -87,11 +89,9 @@ const BUILT_IN_ITEMS = [
 	builtIn("dec", "Cast an enum to its `dec` backing value."),
 	builtIn("disp", "Write text to stdout."),
 	builtIn("displn", "Write text plus a trailing newline to stdout."),
-	builtIn("exists", "Check whether a record pointer references a row."),
 	builtIn("format", "Format an `int` or `dec` value as `text` according to a numeric format string."),
 	builtIn("int", "Cast an enum to its `int` backing value."),
 	builtIn("len", "Return the length of an array."),
-	builtIn("locked", "Check whether a record pointer is locked."),
 	builtIn("text", "Cast an enum to its `text` backing value."),
 ];
 

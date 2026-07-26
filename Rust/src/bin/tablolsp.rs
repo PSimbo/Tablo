@@ -500,7 +500,7 @@ mod tests {
 		server.open_documents.insert(
 			String::from("file:///tmp/example.tablo"),
 			OpenDocument {
-				text: String::from("fn Helper(value: int) int { var localValue: int = value; return localValue; }\nfn Main(args: [text]) int { Hel }"),
+				text: String::from("fn Helper(value: int): int { var localValue: int = value; return localValue; }\nfn Main(args: [text]): int { Hel }"),
 				version: 1,
 			},
 		);
@@ -509,7 +509,7 @@ mod tests {
 			"file:///tmp/example.tablo",
 			Position {
 				line: 1,
-				character: 32,
+				character: 33,
 			},
 		);
 		let labels = items.into_iter()
@@ -529,7 +529,7 @@ mod tests {
 		let source_path = source_dir.join("main.tablo");
 		std::fs::create_dir_all(&source_dir).unwrap();
 		std::fs::write(&config_path, "[databases]\n").unwrap();
-		std::fs::write(&source_path, "fn Main(args: [text]) int { return 0; }").unwrap();
+		std::fs::write(&source_path, "fn Main(args: [text]): int { return 0; }").unwrap();
 
 		assert_eq!(discover_project_config_path(&source_path), Some(config_path.clone()));
 
@@ -550,36 +550,36 @@ mod tests {
 				"textDocument": {
 					"uri": "file:///tmp/example.tablo",
 					"version": 1,
-					"text": "fn Helper() int { return 1; }"
+					"text": "fn Helper(): int { return 1; }"
 				}
 			}),
 		).unwrap();
 
 		let output = String::from_utf8(output).unwrap();
-		assert!(!output.contains("Standalone Tablo programs must define `fn Main(args: [text]) int`."));
+		assert!(!output.contains("Standalone Tablo programs must define `fn Main(args: [text]): int`."));
 		assert!(output.contains("\"diagnostics\":[]"));
 	}
 
 	#[test]
 	fn highlights_full_span_for_assignment_type_error_on_string_literal() {
-		let source = "fn Main(args: [text]) int { var x: int = 'abc'; return 0; }";
+		let source = "fn Main(args: [text]): int { var x: int = 'abc'; return 0; }";
 		let diagnostic = diagnostic_to_json(diagnostic_for_tablo_error(
 			source,
 			TabloError::Compile(CompileError {
 				message: String::from("Cannot assign a value of type `text` to a variable of type `int`."),
-				position: 41,
+				position: 42,
 			}),
 		));
 		let diagnostic = diagnostic.to_string();
 
 		assert!(diagnostic.contains("Cannot assign a value of type `text` to a variable of type `int`."));
-		assert!(diagnostic.contains("\"character\":41"));
-		assert!(diagnostic.contains("\"character\":46"));
+		assert!(diagnostic.contains("\"character\":42"));
+		assert!(diagnostic.contains("\"character\":47"));
 	}
 
 	#[test]
 	fn highlights_full_span_for_unknown_table_field_diagnostic() {
-		let source = "with ExampleDb;\nfn Main(args: [text]) int { count Customers where MissingField == 1; return 0; }";
+		let source = "with ExampleDb;\nfn Main(args: [text]): int { count Customers where MissingField == 1; return 0; }";
 		let diagnostic = diagnostic_to_json(diagnostic_for_tablo_error(
 			source,
 			TabloError::Compile(CompileError {

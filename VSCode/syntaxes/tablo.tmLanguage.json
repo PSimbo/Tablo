@@ -124,6 +124,10 @@
         {
           "name": "keyword.declaration.tablo",
           "match": "\\b(?:var|const|rec|mut|obj|pub)\\b"
+        },
+        {
+          "name": "keyword.other.default.tablo",
+          "match": "\\bdefault\\b"
         }
       ]
     },
@@ -152,6 +156,10 @@
         {
           "name": "keyword.operator.logical.tablo",
           "match": "&&|\\|\\||\\^|!"
+        },
+        {
+          "name": "keyword.operator.word.tablo",
+          "match": "\\b(?:and|or|xor|not|exists|locked)\\b"
         },
         {
           "name": "keyword.operator.arithmetic.tablo",
@@ -213,7 +221,7 @@
       "patterns": [
         {
           "name": "storage.type.primitive.tablo",
-          "match": "\\b(?:int|dec|text|bool|void)\\b"
+          "match": "\\b(?:int|dec|text|bool)\\b"
         },
         {
           "name": "storage.type.object.tablo",

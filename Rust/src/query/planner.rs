@@ -805,7 +805,7 @@ mod tests {
 	fn does_not_offer_cross_database_query_optimization() {
 		let program = parse_program(
 			concat!(
-				"fn Main(args: [text]) int {\n",
+				"fn Main(args: [text]): int {\n",
 				"  for rec customer in Customers {\n",
 				"    for rec customerOrder in Orders where CustomerId == customer.Id {}\n",
 				"  }\n",
@@ -884,9 +884,9 @@ mod tests {
 	fn nested_function_queries_are_not_enclosed_by_declaration_context() {
 		let program = parse_program(
 			concat!(
-				"fn Main(args: [text]) int {\n",
+				"fn Main(args: [text]): int {\n",
 				"  for rec customer in Customers {\n",
-				"    fn CountOrders() int { return count Orders; }\n",
+				"    fn CountOrders(): int { return count Orders; }\n",
 				"  }\n",
 				"  return 0;\n",
 				"}",
@@ -917,7 +917,7 @@ mod tests {
 	fn records_nested_query_structure_with_independent_execution() {
 		let program = parse_program(
 			concat!(
-				"fn Main(args: [text]) int {\n",
+				"fn Main(args: [text]): int {\n",
 				"  for rec customer in Customers {\n",
 				"    rec customerOrder = find first Orders;\n",
 				"    for rec item in Items {\n",
@@ -990,7 +990,7 @@ mod tests {
 	fn selects_correlated_count_merge_only_when_backend_supports_it() {
 		let program = parse_program(
 			concat!(
-				"fn Main(args: [text]) int {\n",
+				"fn Main(args: [text]): int {\n",
 				"  for rec customer in Customers {\n",
 				"    var orderCount: int = count Orders where CustomerId == customer.Id;\n",
 				"  }\n",

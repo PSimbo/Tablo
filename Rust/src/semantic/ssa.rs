@@ -1343,7 +1343,7 @@ mod tests {
 	#[test]
 	fn builds_sequential_versions_for_reassignments() {
 		let ssa = analyze_source(
-			"fn Main(args: [text]) int { var x: int = 1; x = 2; return x; }"
+			"fn Main(args: [text]): int { var x: int = 1; x = 2; return x; }"
 		);
 		let function = ssa.function("Main").unwrap();
 		let block = function.block(function.entry_block).unwrap();
@@ -1372,7 +1372,7 @@ mod tests {
 	#[test]
 	fn inserts_phi_node_for_if_else_reassignment() {
 		let ssa = analyze_source(
-			"fn Main(args: [text]) int { var x: int = 1; if true { x = 2; } else { x = 3; } return x; }"
+			"fn Main(args: [text]): int { var x: int = 1; if true { x = 2; } else { x = 3; } return x; }"
 		);
 		let function = ssa.function("Main").unwrap();
 		let join_block = function.blocks.iter()
@@ -1393,7 +1393,7 @@ mod tests {
 	#[test]
 	fn inserts_phi_node_for_loop_carried_assignment() {
 		let ssa = analyze_source(
-			"fn Main(args: [text]) int { var x: int = 0; while x < 10 { x += 1; } return x; }"
+			"fn Main(args: [text]): int { var x: int = 0; while x < 10 { x += 1; } return x; }"
 		);
 		let function = ssa.function("Main").unwrap();
 		let return_read = function.blocks.iter()
@@ -1432,7 +1432,7 @@ mod tests {
 	#[test]
 	fn reports_assigned_but_never_read_local_variable() {
 		let usage = analyze_source_local_usage(
-			"fn Main(args: [text]) int { var x: int = 1; x = 2; return 0; }"
+			"fn Main(args: [text]): int { var x: int = 1; x = 2; return 0; }"
 		);
 		let function = usage.function("Main").unwrap();
 		let x = function.local_by_name("x").unwrap();
@@ -1445,7 +1445,7 @@ mod tests {
 	#[test]
 	fn reports_read_local_variable() {
 		let usage = analyze_source_local_usage(
-			"fn Main(args: [text]) int { var x: int = 1; return x; }"
+			"fn Main(args: [text]): int { var x: int = 1; return x; }"
 		);
 		let function = usage.function("Main").unwrap();
 		let x = function.local_by_name("x").unwrap();
@@ -1457,7 +1457,7 @@ mod tests {
 	#[test]
 	fn reports_unused_local_variable() {
 		let usage = analyze_source_local_usage(
-			"fn Main(args: [text]) int { var x: int = 1; return 0; }"
+			"fn Main(args: [text]): int { var x: int = 1; return 0; }"
 		);
 		let function = usage.function("Main").unwrap();
 		let x = function.local_by_name("x").unwrap();

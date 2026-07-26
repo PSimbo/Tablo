@@ -963,14 +963,14 @@ mod tests {
 
 	#[test]
 	fn tokenizes_function_signature_punctuation() {
-		let mut lexer = Lexer::new(SourceText::new("fn add(a: int, b: int) int { return a; }"));
+		let mut lexer = Lexer::new(SourceText::new("fn add(a: int, b: int): int { return a; }"));
 		let tokens = lexer.tokenize().unwrap();
 
 		assert_eq!(tokens[0].kind, TokenKind::FnKeyword);
 		assert_eq!(tokens[4].kind, TokenKind::Colon);
 		assert_eq!(tokens[6].kind, TokenKind::Comma);
 		assert_eq!(tokens[8].kind, TokenKind::Colon);
-		assert_eq!(tokens[13].kind, TokenKind::ReturnKeyword);
+		assert_eq!(tokens[14].kind, TokenKind::ReturnKeyword);
 	}
 
 	#[test]

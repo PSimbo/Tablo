@@ -956,7 +956,6 @@ fn data_type_name_for_database_runtime(data_type: &DataType) -> &'static str {
 		DataType::Timestamp => "timestamp",
 		DataType::TimestampTz => "timestamptz",
 		DataType::Union(_) => "union",
-		DataType::Void => "void",
 	}
 }
 

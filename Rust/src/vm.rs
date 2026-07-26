@@ -871,7 +871,7 @@ impl VirtualMachine {
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::Return => Ok(ExecutionOutcome::Return(Some(self.pop_value(instruction_index)?))),
-			Instruction::ReturnVoid => Ok(ExecutionOutcome::Return(None)),
+			Instruction::ReturnNoValue => Ok(ExecutionOutcome::Return(None)),
 			Instruction::Subtract => {
 				let rhs = self.pop_numeric(instruction_index)?;
 				let lhs = self.pop_numeric(instruction_index)?;
