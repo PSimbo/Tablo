@@ -99,6 +99,8 @@ pub enum QueryScalarProjectionExpression {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum QueryUnaryOperator {
+	IsNotNull,
+	IsNull,
 	Negate,
 	Not,
 }
@@ -499,7 +501,12 @@ fn query_expression_is_infallible(expression: &QueryExpr) -> bool {
 				&& query_expression_is_infallible(&binary.right)
 		}
 		QueryExpr::Unary(unary) => {
-			unary.operator == QueryUnaryOperator::Not
+			matches!(
+				unary.operator,
+				QueryUnaryOperator::IsNotNull
+					| QueryUnaryOperator::IsNull
+					| QueryUnaryOperator::Not
+			)
 				&& query_expression_is_infallible(&unary.operand)
 		}
 		QueryExpr::Column(_) | QueryExpr::Literal(_) | QueryExpr::Parameter(_) => true,
@@ -907,6 +914,54 @@ mod tests {
 			query.statement,
 			"SELECT COUNT(*) FROM `Customers` WHERE ((LOCATE('Ada', `Customers`.`Name`) > 0) AND (CASE WHEN CHAR_LENGTH('A') = 0 THEN 0 ELSE ((CHAR_LENGTH(`Customers`.`Name`) - CHAR_LENGTH(REPLACE(`Customers`.`Name`, 'A', ''))) DIV CHAR_LENGTH('A')) END >= NULLIF(LOCATE('A', `Customers`.`Name`), 0)))",
 		);
+	}
+
+	#[test]
+	fn lowers_null_checks_for_all_sql_dialects() {
+		let cases = [
+			(
+				DatabaseBackend::Sqlite,
+				"SELECT COUNT(*) FROM \"Customers\" WHERE (\"Customers\".\"Nickname\" IS NULL)",
+				"SELECT COUNT(*) FROM \"Customers\" WHERE (\"Customers\".\"Nickname\" IS NOT NULL)",
+			),
+			(
+				DatabaseBackend::PostgreSql,
+				"SELECT COUNT(*) FROM \"Customers\" WHERE (\"Customers\".\"Nickname\" IS NULL)",
+				"SELECT COUNT(*) FROM \"Customers\" WHERE (\"Customers\".\"Nickname\" IS NOT NULL)",
+			),
+			(
+				DatabaseBackend::MySql,
+				"SELECT COUNT(*) FROM `Customers` WHERE (`Customers`.`Nickname` IS NULL)",
+				"SELECT COUNT(*) FROM `Customers` WHERE (`Customers`.`Nickname` IS NOT NULL)",
+			),
+		];
+
+		for (backend, expected_is_null, expected_is_not_null) in cases {
+			for (operator, expected) in [
+				(QueryUnaryOperator::IsNull, expected_is_null),
+				(QueryUnaryOperator::IsNotNull, expected_is_not_null),
+			] {
+				let lowered = lower_count_query(&QueryCountPlan {
+					backend,
+					database_name: String::from("ExampleDb"),
+					filter: Some(QueryExpr::Unary(QueryUnaryExpr {
+						operand: Box::new(QueryExpr::Column(QueryColumnReference {
+							column_name: String::from("Nickname"),
+							data_type: DataType::Nullable(Box::new(DataType::Text)),
+							table_name: String::from("Customers"),
+						})),
+						operator,
+					})),
+					schema_is_implicit: true,
+					schema_name: String::from("Main"),
+					table_name: String::from("Customers"),
+				}).unwrap();
+				let LoweredBackendQuery::Sql(lowered) = lowered;
+
+				assert_eq!(lowered.statement, expected);
+				assert!(lowered.parameters.is_empty());
+			}
+		}
 	}
 
 	#[test]

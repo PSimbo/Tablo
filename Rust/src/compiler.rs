@@ -349,6 +349,22 @@ impl Compiler {
 				}
 			}
 			Expr::Binary(binary) => {
+				if let Some(value) = semantic_program.constant_boolean_expression(binary.position) {
+					let evaluated_expression = match (binary.left.as_ref(), binary.right.as_ref()) {
+						(Expr::Null(_), Expr::Null(_)) => None,
+						(Expr::Null(_), expression) | (expression, Expr::Null(_)) => Some(expression),
+						_ => unreachable!("Only null comparisons are recorded as constant boolean expressions."),
+					};
+
+					if let Some(evaluated_expression) = evaluated_expression {
+						self.compile_into_with_debug_position(evaluated_expression, semantic_program, emission, debug_position);
+						self.emit(emission, Instruction::Pop, debug_position.unwrap_or(binary.position));
+					}
+
+					self.emit(emission, Instruction::PushBoolean(value), debug_position.unwrap_or(binary.position));
+					return;
+				}
+
 				self.compile_into_with_debug_position(&binary.left, semantic_program, emission, debug_position);
 				self.compile_into_with_debug_position(&binary.right, semantic_program, emission, debug_position);
 				self.emit(emission, binary.operator.instruction(), debug_position.unwrap_or(binary.position));

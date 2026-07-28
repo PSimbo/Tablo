@@ -2093,6 +2093,43 @@ mod tests {
 	}
 
 	#[test]
+	fn compiles_nullable_and_non_nullable_null_checks_for_all_query_backends() {
+		let cases = [
+			(
+				DatabaseBackend::Sqlite,
+				"SELECT COUNT(*) FROM \"Customers\" WHERE ((\"Customers\".\"Notes\" IS NULL) AND 1)",
+			),
+			(
+				DatabaseBackend::PostgreSql,
+				"SELECT COUNT(*) FROM \"Customers\" WHERE ((\"Customers\".\"Notes\" IS NULL) AND TRUE)",
+			),
+			(
+				DatabaseBackend::MySql,
+				"SELECT COUNT(*) FROM `Customers` WHERE ((`Customers`.`Notes` IS NULL) AND TRUE)",
+			),
+		];
+
+		for (backend, expected_statement) in cases {
+			let (program, _) = compile_snippet_with_schema_fixture_and_backends(
+				"with exampledb;\ncount Customers where Notes == null and Id != null",
+				r#"
+					database ExampleDb;
+					schema Main implicit;
+					create table Customers (
+						Id int not null,
+						Notes text null
+					);
+				"#,
+				&[("ExampleDb", backend)],
+			).unwrap();
+			let LoweredBackendQuery::Sql(query) = &program.queries()[0];
+
+			assert_eq!(query.statement, expected_statement);
+			assert!(query.parameters.is_empty());
+		}
+	}
+
+	#[test]
 	fn compiles_postgresql_count_query_through_normal_compiler_path() {
 		let (program, _) = compile_snippet_with_schema_fixture_and_backends(
 			"with exampledb;\nvar minimumId: int = 10;\ncount customers where id >= minimumId",
@@ -6219,6 +6256,16 @@ mod tests {
 		let result = run("fn Main(args: [text]): int { var x: int = 1; bump(x); return x; }\nfn bump(value: int) { return; }").unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn runs_non_nullable_null_comparisons_as_constants_without_skipping_operand_evaluation() {
+		let result = run(
+			"fn bump(value: &int): int { value += 1; return value; }\n\
+			fn Main(args: [text]): int { var value: int = 0; if bump(&value) == null { return -1; } if null != bump(&value) { return value; } return -2; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(2)));
 	}
 
 	#[test]

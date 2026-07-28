@@ -164,6 +164,8 @@ fn lower_expression(expression: &QueryExpr, parameters: &mut Vec<SqlParameter>) 
 		QueryExpr::Unary(unary) => {
 			let operand = lower_expression(&unary.operand, parameters)?;
 			Ok(match unary.operator {
+				QueryUnaryOperator::IsNotNull => format!("({operand} IS NOT NULL)"),
+				QueryUnaryOperator::IsNull => format!("({operand} IS NULL)"),
 				QueryUnaryOperator::Negate => format!("(-{operand})"),
 				QueryUnaryOperator::Not => format!("(NOT {operand})"),
 			})

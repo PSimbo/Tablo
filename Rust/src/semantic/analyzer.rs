@@ -123,6 +123,7 @@ pub struct SemanticAnalyzer {
 	loop_depth: usize,
 	next_function_index: u32,
 	next_local_slot: u32,
+	null_comparison_operands: BTreeSet<usize>,
 	query_optimizations_disabled: bool,
 	root_source_name: Option<String>,
 	semantic_program: SemanticProgram,
@@ -150,6 +151,7 @@ impl SemanticAnalyzer {
 		self.loop_depth = 0;
 		self.next_function_index = 0;
 		self.next_local_slot = 0;
+		self.null_comparison_operands.clear();
 		self.current_source_name = self.root_source_name.clone();
 		self.current_schema_catalog = schema_catalog.cloned();
 		self.semantic_program = SemanticProgram::default();
@@ -295,6 +297,7 @@ impl SemanticAnalyzer {
 			loop_depth: 0,
 			next_function_index: 0,
 			next_local_slot: 0,
+			null_comparison_operands: BTreeSet::new(),
 			query_optimizations_disabled: false,
 			root_source_name: None,
 			semantic_program: SemanticProgram::default(),
@@ -459,12 +462,14 @@ impl SemanticAnalyzer {
 		let rhs_non_null = rhs.is_non_nullable();
 
 		if matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual) {
-			if lhs == &DataType::Null && (rhs == &DataType::Null || rhs.is_nullable()) {
-				return Ok(DataType::Bool);
-			}
-
-			if rhs == &DataType::Null && lhs.is_nullable() {
-				return Ok(DataType::Bool);
+			match (lhs, rhs) {
+				(DataType::Null, DataType::Null) => return Ok(DataType::Bool),
+				(DataType::Null, compared) | (compared, DataType::Null) => {
+					let compared = compared.without_nullability();
+					self.require_equality_operands(compared, compared, position)?;
+					return Ok(DataType::Bool);
+				}
+				_ => {}
 			}
 		}
 
@@ -885,6 +890,16 @@ impl SemanticAnalyzer {
 
 	fn current_scope_contains(&self, name: &str) -> bool {
 		self.locals.contains_in_current_scope(name)
+	}
+
+	fn data_type_from_schema_column(&self, data_type: &SchemaDataType, is_nullable: bool) -> Result<DataType, CompileError> {
+		let data_type = self.data_type_from_schema_type(data_type)?;
+		Ok(if is_nullable {
+			data_type.into_nullable()
+		}
+		else {
+			data_type
+		})
 	}
 
 	fn data_type_from_schema_type(&self, data_type: &SchemaDataType) -> Result<DataType, CompileError> {
@@ -1872,7 +1887,16 @@ impl SemanticAnalyzer {
 			Expr::Binary(BinaryExpr { left, operator, right, .. }) => {
 				let left_type = self.infer_expression_type(left)?;
 				let right_type = self.infer_expression_type(right)?;
-				self.binary_result_type(*operator, &left_type, &right_type, expression.position())
+				let result = self.binary_result_type(*operator, &left_type, &right_type, expression.position())?;
+				self.record_null_comparison_semantics(
+					expression.position(),
+					left,
+					&left_type,
+					*operator,
+					right,
+					&right_type,
+				);
+				Ok(result)
 			}
 			Expr::Boolean(_) => Ok(DataType::Bool),
 			Expr::Call(call) => self.infer_call_type(call)?.ok_or_else(|| {
@@ -2445,7 +2469,16 @@ impl SemanticAnalyzer {
 			Expr::Binary(BinaryExpr { left, operator, right, .. }) => {
 				let left_type = self.infer_query_expression_type(left, table)?;
 				let right_type = self.infer_query_expression_type(right, table)?;
-				self.binary_result_type(*operator, &left_type, &right_type, expression.position())
+				let result = self.binary_result_type(*operator, &left_type, &right_type, expression.position())?;
+				self.record_null_comparison_semantics(
+					expression.position(),
+					left,
+					&left_type,
+					*operator,
+					right,
+					&right_type,
+				);
+				Ok(result)
 			}
 			Expr::Boolean(_) => Ok(DataType::Bool),
 			Expr::Call(CallExpr { arguments, callee, .. }) => {
@@ -2537,22 +2570,25 @@ impl SemanticAnalyzer {
 					return Ok(local.data_type);
 				}
 
-				let (table_name, column_type) = {
+				let (table_name, column_type, is_nullable) = {
 					let resolved_table = self.resolve_table_reference(table)?;
 					let table_name = resolved_table.table().name().to_string();
-					let column_type = resolved_table.table().column(&identifier.name)
-						.map(|column| column.data_type().clone())
-						.ok_or(self.compile_error(
+					let column = resolved_table.table().column(&identifier.name).cloned();
+					let column = column.ok_or(self.compile_error(
 							identifier.position,
 							format!("Field `{}` does not exist on table `{table_name}`.", identifier.name),
 						))?;
-					(table_name, column_type)
+					(table_name, column.data_type().clone(), column.is_nullable())
 				};
 
 				let _ = table_name;
-				self.data_type_from_schema_type(&column_type)
+				self.data_type_from_schema_column(&column_type, is_nullable)
 			}
-			Expr::Index(_) | Expr::New(_) | Expr::ObjectConstruction(_) | Expr::Range(_) | Expr::Ternary(_) => Err(self.compile_error(
+			Expr::Index(_)
+			| Expr::New(_)
+			| Expr::ObjectConstruction(_)
+			| Expr::Range(_)
+			| Expr::Ternary(_) => Err(self.compile_error(
 				expression.position(),
 				String::from("This expression form is not yet supported in `where` clauses."),
 			)),
@@ -2622,7 +2658,7 @@ impl SemanticAnalyzer {
 				));
 			}
 
-			let (resolved_table_name, column_type) = {
+			let (resolved_table_name, column_type, is_nullable) = {
 				let resolved_table = self.resolve_table_reference(table)?;
 				let resolved_table_name = resolved_table.table().name().to_string();
 
@@ -2636,9 +2672,8 @@ impl SemanticAnalyzer {
 				}
 
 				let field = fields[0];
-				let column_type = resolved_table.table().column(&field.name)
-					.map(|column| column.data_type().clone())
-					.ok_or(self.compile_error(
+				let column = resolved_table.table().column(&field.name).cloned();
+				let column = column.ok_or(self.compile_error(
 						field.position,
 						format!(
 							"Field `{}` does not exist on table `{resolved_table_name}`.",
@@ -2646,11 +2681,11 @@ impl SemanticAnalyzer {
 						),
 					))?;
 
-				(resolved_table_name, column_type)
+				(resolved_table_name, column.data_type().clone(), column.is_nullable())
 			};
 
 			let _ = resolved_table_name;
-			return self.data_type_from_schema_type(&column_type);
+			return self.data_type_from_schema_column(&column_type, is_nullable);
 		}
 
 		Err(self.compile_error(
@@ -2698,7 +2733,7 @@ impl SemanticAnalyzer {
 			),
 		))?;
 
-		self.data_type_from_schema_type(column.data_type())
+		self.data_type_from_schema_column(column.data_type(), column.is_nullable())
 	}
 
 	fn infer_ternary_result_type(
@@ -3052,6 +3087,25 @@ impl SemanticAnalyzer {
 			Expr::Binary(BinaryExpr { left, operator, right, .. }) => {
 				let result_type = self.infer_query_expression_type(expression, table)?;
 
+				if let Some(value) = self.semantic_program.constant_boolean_expression(expression.position()) {
+					return Ok(QueryExpr::Literal(QueryLiteral::Boolean(value)));
+				}
+
+				let null_checked_operand = match (left.as_ref(), right.as_ref()) {
+					(Expr::Null(_), operand) | (operand, Expr::Null(_)) => Some(operand),
+					_ => None,
+				};
+				if let Some(operand) = null_checked_operand {
+					return Ok(QueryExpr::Unary(QueryUnaryExpr {
+						operand: Box::new(self.lower_query_expression(operand, table, backend)?),
+						operator: match operator {
+							BinaryOperator::Equal => QueryUnaryOperator::IsNull,
+							BinaryOperator::NotEqual => QueryUnaryOperator::IsNotNull,
+							_ => unreachable!("Only equality operators may compare against `null`."),
+						},
+					}));
+				}
+
 				Ok(QueryExpr::Binary(QueryBinaryExpr {
 					left: Box::new(self.lower_query_expression(left, table, backend)?),
 					operator: self.lower_query_binary_operator(*operator, &result_type),
@@ -3192,7 +3246,7 @@ impl SemanticAnalyzer {
 					}));
 				}
 
-				let (table_name, column_name, column_type) = {
+				let (table_name, column_name, column_type, is_nullable) = {
 					let resolved_table = self.resolve_table_reference(table)?;
 					let table_name = resolved_table.table().name().to_string();
 					let Some(column) = resolved_table.table().column(&identifier.name) else {
@@ -3205,12 +3259,13 @@ impl SemanticAnalyzer {
 						table_name,
 						column.name().to_string(),
 						column.data_type().clone(),
+						column.is_nullable(),
 					)
 				};
 
 				Ok(QueryExpr::Column(QueryColumnReference {
 					column_name,
-					data_type: self.data_type_from_schema_type(&column_type)?,
+					data_type: self.data_type_from_schema_column(&column_type, is_nullable)?,
 					table_name,
 				}))
 			}
@@ -3276,7 +3331,7 @@ impl SemanticAnalyzer {
 			}
 
 			let field = fields[0];
-			let (column_name, column_type) = {
+			let (column_name, column_type, is_nullable) = {
 				let Some(column) = resolved_table.table().column(&field.name) else {
 					return Err(self.compile_error(
 						field.position,
@@ -3286,12 +3341,12 @@ impl SemanticAnalyzer {
 						),
 					));
 				};
-				(column.name().to_string(), column.data_type().clone())
+				(column.name().to_string(), column.data_type().clone(), column.is_nullable())
 			};
 
 			return Ok(QueryExpr::Column(QueryColumnReference {
 				column_name,
-				data_type: self.data_type_from_schema_type(&column_type)?,
+				data_type: self.data_type_from_schema_column(&column_type, is_nullable)?,
 				table_name: resolved_table_name,
 			}));
 		}
@@ -3419,6 +3474,43 @@ impl SemanticAnalyzer {
 				}
 				_ => return None,
 			}
+		}
+	}
+
+	fn record_null_comparison_semantics(
+		&mut self,
+		expression_position: usize,
+		left: &Expr,
+		left_type: &DataType,
+		operator: BinaryOperator,
+		right: &Expr,
+		right_type: &DataType,
+	) {
+		if !matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual) {
+			return;
+		}
+
+		let (compared_expression, compared_type) = match (left_type, right_type) {
+			(DataType::Null, DataType::Null) => {
+				self.semantic_program.constant_boolean_expressions.insert(
+					expression_position,
+					operator == BinaryOperator::Equal,
+				);
+				return;
+			}
+			(DataType::Null, compared_type) => (right, compared_type),
+			(compared_type, DataType::Null) => (left, compared_type),
+			_ => return,
+		};
+
+		if compared_type.is_nullable() {
+			self.null_comparison_operands.insert(compared_expression.position());
+		}
+		else {
+			self.semantic_program.constant_boolean_expressions.insert(
+				expression_position,
+				operator == BinaryOperator::NotEqual,
+			);
 		}
 	}
 
@@ -3662,6 +3754,10 @@ impl SemanticAnalyzer {
 			return None;
 		}
 
+		if !self.null_comparison_operands.contains(&candidate.position()) {
+			return None;
+		}
+
 		Some(candidate.clone())
 	}
 
@@ -3782,7 +3878,10 @@ impl SemanticAnalyzer {
 		let lhs = lhs.without_nullability();
 		let rhs = rhs.without_nullability();
 
-		if lhs == &DataType::Any || rhs == &DataType::Any {
+		if lhs == &DataType::Any
+			|| rhs == &DataType::Any
+			|| matches!(lhs, DataType::Union(_) | DataType::Range(_))
+			|| matches!(rhs, DataType::Union(_) | DataType::Range(_)) {
 			return Err(self.compile_error(
 				position,
 				format!(
@@ -3793,43 +3892,28 @@ impl SemanticAnalyzer {
 			));
 		}
 
-		if matches!(lhs, DataType::Union(_)) || matches!(rhs, DataType::Union(_)) {
-			return Err(self.compile_error(
-				position,
-				format!(
-					"Equality comparison is not supported between `{}` and `{}`.",
-					lhs.name(),
-					rhs.name(),
-				),
-			));
+		match (lhs, rhs) {
+			(DataType::Array(lhs_element), DataType::Array(rhs_element)) => {
+				return self.require_equality_operands(lhs_element, rhs_element, position);
+			}
+			(DataType::Array(_), DataType::EmptyArray)
+			| (DataType::EmptyArray, DataType::Array(_))
+			| (DataType::EmptyArray, DataType::EmptyArray) => return Ok(()),
+			_ => {}
 		}
 
 		if lhs == rhs || (self.is_numeric_type(lhs) && self.is_numeric_type(rhs)) {
 			return Ok(());
 		}
 
-		match (lhs, rhs) {
-			(DataType::Array(lhs_element), DataType::Array(rhs_element)) => self.require_equality_operands(lhs_element, rhs_element, position),
-			(DataType::Array(_), DataType::EmptyArray)
-			| (DataType::EmptyArray, DataType::Array(_))
-			| (DataType::EmptyArray, DataType::EmptyArray) => Ok(()),
-			(DataType::Range(_), _) | (_, DataType::Range(_)) => Err(self.compile_error(
-				position,
-				format!(
-					"Equality comparison is not supported between `{}` and `{}`.",
-					lhs.name(),
-					rhs.name(),
-				),
-			)),
-			_ => Err(self.compile_error(
-				position,
-				format!(
-					"Equality comparison is not supported between `{}` and `{}`.",
-					lhs.name(),
-					rhs.name(),
-				),
-			)),
-		}
+		Err(self.compile_error(
+			position,
+			format!(
+				"Equality comparison is not supported between `{}` and `{}`.",
+				lhs.name(),
+				rhs.name(),
+			),
+		))
 	}
 
 	fn require_ordering_operands(&self, lhs: &DataType, rhs: &DataType, position: usize) -> Result<(), CompileError> {
@@ -5412,6 +5496,7 @@ pub struct SemanticProgram {
 	compiled_find_queries: BTreeMap<usize, LoweredBackendQuery>,
 	compiled_for_record_queries: BTreeMap<usize, LoweredBackendQuery>,
 	compiled_query_for_shapes: BTreeMap<usize, LoweredBackendQuery>,
+	constant_boolean_expressions: BTreeMap<usize, bool>,
 	declaration_slots: BTreeMap<usize, u32>,
 	declaration_types: BTreeMap<usize, DataType>,
 	entry_point_function_index: Option<u32>,
@@ -5482,6 +5567,10 @@ impl SemanticProgram {
 
 	pub fn compiled_query_for_shape(&self, position: usize) -> Option<&LoweredBackendQuery> {
 		self.compiled_query_for_shapes.get(&position)
+	}
+
+	pub fn constant_boolean_expression(&self, position: usize) -> Option<bool> {
+		self.constant_boolean_expressions.get(&position).copied()
 	}
 
 	pub fn declaration_slot(&self, position: usize) -> Option<u32> {
@@ -6980,6 +7069,26 @@ mod tests {
 	}
 
 	#[test]
+	fn records_meaningful_nullable_null_comparison_for_branch_refinement() {
+		let expression = parse_expression("value != null");
+		let mut analyzer = SemanticAnalyzer::new();
+		analyzer.enter_scope();
+		analyzer.declare_local(
+			String::from("value"),
+			LocalBinding {
+				declaration_position: 0,
+				data_type: DataType::Nullable(Box::new(DataType::Text)),
+				is_const: false,
+				slot: 1,
+			},
+		);
+
+		assert_eq!(analyzer.infer_expression_type(&expression).unwrap(), DataType::Bool);
+		assert!(analyzer.refined_expression_for_branch(&expression, true).is_some());
+		assert!(analyzer.refined_expression_for_branch(&expression, false).is_none());
+	}
+
+	#[test]
 	fn records_nested_query_structure_in_semantic_program() {
 		let schema = sqlite_test_schema(
 			r#"
@@ -7128,6 +7237,30 @@ mod tests {
 			inner_query.execution.independent_reason(),
 			Some(PlannedQueryIndependentReason::NoSupportedStrategy),
 		);
+	}
+
+	#[test]
+	fn records_non_nullable_null_comparison_as_constant_without_refinement() {
+		let expression = parse_expression("value != null");
+		let mut analyzer = SemanticAnalyzer::new();
+		analyzer.enter_scope();
+		analyzer.declare_local(
+			String::from("value"),
+			LocalBinding {
+				declaration_position: 0,
+				data_type: DataType::Text,
+				is_const: false,
+				slot: 1,
+			},
+		);
+
+		assert_eq!(analyzer.infer_expression_type(&expression).unwrap(), DataType::Bool);
+		assert_eq!(
+			analyzer.semantic_program.constant_boolean_expression(expression.position()),
+			Some(true),
+		);
+		assert!(analyzer.refined_expression_for_branch(&expression, true).is_none());
+		assert!(analyzer.refined_expression_for_branch(&expression, false).is_none());
 	}
 
 	#[test]
@@ -7460,6 +7593,65 @@ mod tests {
 		let error = analyzer.analyze_program(&program).unwrap_err();
 
 		assert_eq!(error.message, "Function `Inner` cannot be declared `pub` inside another function.");
+	}
+
+	#[test]
+	fn rejects_null_comparison_for_nullable_any_value() {
+		let expression = parse_expression("value == null");
+		let mut analyzer = SemanticAnalyzer::new();
+		analyzer.enter_scope();
+		analyzer.declare_local(
+			String::from("value"),
+			LocalBinding {
+				declaration_position: 0,
+				data_type: DataType::Nullable(Box::new(DataType::Any)),
+				is_const: false,
+				slot: 1,
+			},
+		);
+
+		let error = analyzer.infer_expression_type(&expression).unwrap_err();
+
+		assert_eq!(
+			error.message,
+			"Equality comparison is not supported between `any` and `any`.",
+		);
+	}
+
+	#[test]
+	fn rejects_null_comparison_for_nullable_array_of_any() {
+		let expression = parse_expression("value == null");
+		let mut analyzer = SemanticAnalyzer::new();
+		analyzer.enter_scope();
+		analyzer.declare_local(
+			String::from("value"),
+			LocalBinding {
+				declaration_position: 0,
+				data_type: DataType::Nullable(Box::new(DataType::Array(Box::new(DataType::Any)))),
+				is_const: false,
+				slot: 1,
+			},
+		);
+
+		let error = analyzer.infer_expression_type(&expression).unwrap_err();
+
+		assert_eq!(
+			error.message,
+			"Equality comparison is not supported between `any` and `any`.",
+		);
+	}
+
+	#[test]
+	fn rejects_null_comparison_for_range_value() {
+		let expression = parse_expression("(1:2) == null");
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.infer_expression_type(&expression).unwrap_err();
+
+		assert_eq!(
+			error.message,
+			"Equality comparison is not supported between `range<int>` and `range<int>`.",
+		);
 	}
 
 	#[test]
