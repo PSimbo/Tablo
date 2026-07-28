@@ -1,4 +1,5 @@
 use crate::TabloError;
+use crate::semantic::analyzer::SemanticWarning;
 use crate::semantic::ssa::*;
 use crate::source::*;
 
@@ -51,6 +52,21 @@ pub fn diagnostic_for_tablo_error(source: &str, error: TabloError) -> Diagnostic
 	else {
 		diagnostic_at_position(&source, position, 1, &message)
 	}
+}
+
+pub fn semantic_warning_diagnostics(source: &str, warnings: &[SemanticWarning]) -> Vec<Diagnostic> {
+	let source = SourceText::new(source);
+
+	warnings.iter()
+		.map(|warning| {
+			if let Some((start, end)) = token_span_at_position(&source, warning.position) {
+				diagnostic_for_byte_span(&source, start, end, 2, &warning.message)
+			}
+			else {
+				diagnostic_at_position(&source, warning.position, 2, &warning.message)
+			}
+		})
+		.collect()
 }
 
 pub fn trailing_whitespace_diagnostics(source: &str) -> Vec<Diagnostic> {
@@ -244,6 +260,25 @@ fn choose(right: int): int { return right; }";
 		assert_eq!(diagnostic.range.start.character, 42);
 		assert_eq!(diagnostic.range.end.character, 47);
 		assert_eq!(diagnostic.severity, 1);
+	}
+
+	#[test]
+	fn highlights_presence_operator_semantic_warning() {
+		let diagnostics = semantic_warning_diagnostics(
+			"locked cust",
+			&[
+				SemanticWarning {
+					message: String::from("Example warning."),
+					position: 0,
+					source_name: None,
+				},
+			],
+		);
+
+		assert_eq!(diagnostics.len(), 1);
+		assert_eq!(diagnostics[0].range.start.character, 0);
+		assert_eq!(diagnostics[0].range.end.character, 6);
+		assert_eq!(diagnostics[0].severity, 2);
 	}
 
 	#[test]

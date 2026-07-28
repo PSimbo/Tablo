@@ -94,6 +94,8 @@ impl crate::ast::BinaryOperator {
 impl crate::ast::UnaryOperator {
 	fn instruction(self) -> Instruction {
 		match self {
+			crate::ast::UnaryOperator::Exists => Instruction::Exists,
+			crate::ast::UnaryOperator::Locked => Instruction::Locked,
 			crate::ast::UnaryOperator::Negate => Instruction::Negate,
 			crate::ast::UnaryOperator::Not => Instruction::Not,
 		}
@@ -689,8 +691,15 @@ impl Compiler {
 				self.emit(emission, Instruction::PushTimestampTz(*value), expression_position);
 			}
 			Expr::Unary(UnaryExpr { operand, operator, .. }) => {
-				self.compile_into_with_debug_position(operand, semantic_program, emission, debug_position);
-				self.emit(emission, operator.instruction(), expression_position);
+				if *operator == UnaryOperator::Exists
+					&& let Some((base, field_path)) = field_access_base_and_path(operand) {
+					self.compile_into_with_debug_position(base, semantic_program, emission, debug_position);
+					self.emit(emission, Instruction::FieldPathExists(field_path), expression_position);
+				}
+				else {
+					self.compile_into_with_debug_position(operand, semantic_program, emission, debug_position);
+					self.emit(emission, operator.instruction(), expression_position);
+				}
 			}
 		}
 	}

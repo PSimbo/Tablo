@@ -150,7 +150,7 @@ impl LspServer {
 
 		let validation_result = if let Some(config_path) = discover_project_config_path(&file_path) {
 			match read_schema_catalog_from_runtime_config_path(&config_path) {
-				Ok(schema_catalog) => local_usage_with_source_name_and_schema(source, file_name, &schema_catalog),
+				Ok(schema_catalog) => analyze_with_source_name_and_schema(source, file_name, &schema_catalog),
 				Err(error) => {
 					diagnostics.push(diagnostic_at_start(
 						source,
@@ -166,12 +166,13 @@ impl LspServer {
 			}
 		}
 		else {
-			local_usage_with_source_name(source, file_name)
+			analyze_with_source_name(source, file_name)
 		};
 
 		match validation_result {
-			Ok(local_usage) => {
-				diagnostics.extend(unused_variable_diagnostics(source, &local_usage));
+			Ok(analysis) => {
+				diagnostics.extend(unused_variable_diagnostics(source, &analysis.local_usage));
+				diagnostics.extend(semantic_warning_diagnostics(source, &analysis.warnings));
 				Ok(diagnostics)
 			}
 			Err(error) => {
@@ -619,5 +620,44 @@ mod tests {
 
 		assert!(diagnostic.contains("Field `MissingField` does not exist on table `Customers`."));
 		assert!(diagnostic.contains("\"character\":50"));
+	}
+
+	#[test]
+	fn publishes_read_only_record_pointer_lock_warning() {
+		let temp_dir = unique_temp_directory("tablolsp_locked_warning");
+		let config_path = temp_dir.join("tablo.toml");
+		let schema_path = temp_dir.join("example.schema");
+		let source_path = temp_dir.join("main.tablo");
+		let source = "with ExampleDb;\n\
+			fn Main(args: [text]): int {\n\
+				rec cust = find first Customers;\n\
+				var unavailable: bool = locked cust;\n\
+				return 0;\n\
+			}";
+		std::fs::create_dir_all(&temp_dir).unwrap();
+		std::fs::write(
+			&config_path,
+			format!(
+				"[databases]\nExampleDb = \"sqlite:test.db\"\n\n[schemas]\nExampleDb = \"{}\"\n",
+				schema_path.display(),
+			),
+		).unwrap();
+		std::fs::write(
+			&schema_path,
+			"database ExampleDb;\nschema Main implicit;\ncreate table Customers (Id int not null);",
+		).unwrap();
+		let uri = format!("file://{}", source_path.display());
+		let server = LspServer::new();
+
+		let diagnostics = server.document_diagnostics(&uri, source).unwrap();
+		let warning = diagnostics.iter()
+			.find(|diagnostic| diagnostic.message.contains("`locked` is always false"))
+			.unwrap();
+
+		assert_eq!(warning.severity, 2);
+
+		let _ = std::fs::remove_file(&schema_path);
+		let _ = std::fs::remove_file(&config_path);
+		let _ = std::fs::remove_dir(&temp_dir);
 	}
 }

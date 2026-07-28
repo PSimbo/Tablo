@@ -1228,13 +1228,7 @@ impl Parser {
 	}
 
 	fn parse_negation_expression_with_position(&mut self, position: usize) -> Result<Expr, ParseError> {
-		let operand = self.parse_expression_with_binding_power(BindingPower::Unary, false)?;
-
-		Ok(Expr::Unary(UnaryExpr {
-			operand: Box::new(operand),
-			operator: UnaryOperator::Negate,
-			position,
-		}))
+		self.parse_unary_expression(position, UnaryOperator::Negate)
 	}
 
 	fn parse_new_expression(&mut self, start: usize) -> Result<Expr, ParseError> {
@@ -1247,11 +1241,15 @@ impl Parser {
 	}
 
 	fn parse_not_expression(&mut self, position: usize) -> Result<Expr, ParseError> {
+		self.parse_unary_expression(position, UnaryOperator::Not)
+	}
+
+	fn parse_unary_expression(&mut self, position: usize, operator: UnaryOperator) -> Result<Expr, ParseError> {
 		let operand = self.parse_expression_with_binding_power(BindingPower::Unary, false)?;
 
 		Ok(Expr::Unary(UnaryExpr {
 			operand: Box::new(operand),
-			operator: UnaryOperator::Not,
+			operator,
 			position,
 		}))
 	}
@@ -1576,13 +1574,13 @@ impl Parser {
 			}),
 			TokenKind::FalseKeyword | TokenKind::TrueKeyword => self.parse_boolean_literal(token),
 			TokenKind::FindKeyword => self.parse_find_expression(token.start),
-			TokenKind::ExistsKeyword
-			| TokenKind::Identifier
-			| TokenKind::LockedKeyword => Ok(self.parse_identifier_expression(token)),
+			TokenKind::ExistsKeyword => self.parse_unary_expression(token.start, UnaryOperator::Exists),
+			TokenKind::Identifier => Ok(self.parse_identifier_expression(token)),
 			TokenKind::IntegerLiteral => self.parse_integer_literal(token),
 			TokenKind::InterpolatedStringStart => self.parse_interpolated_string(token),
 			TokenKind::LeftBracket => self.parse_array_literal(token.start),
 			TokenKind::LeftParenthesis => self.parse_group_expression(token.start),
+			TokenKind::LockedKeyword => self.parse_unary_expression(token.start, UnaryOperator::Locked),
 			TokenKind::NewKeyword => self.parse_new_expression(token.start),
 			TokenKind::NotKeyword => self.parse_not_expression(token.start),
 			TokenKind::NullKeyword => Ok(Expr::Null(NullLiteral {
@@ -3633,6 +3631,35 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_exists_over_complete_field_access_expression() {
+		assert_eq!(
+			parse("exists payload.customer.name"),
+			Expr::Unary(UnaryExpr {
+				operand: Box::new(Expr::FieldAccess(FieldAccessExpr {
+					field: IdentifierExpr {
+						name: String::from("name"),
+						position: 0,
+					},
+					object: Box::new(Expr::FieldAccess(FieldAccessExpr {
+						field: IdentifierExpr {
+							name: String::from("customer"),
+							position: 0,
+						},
+						object: Box::new(Expr::Identifier(IdentifierExpr {
+							name: String::from("payload"),
+							position: 0,
+						})),
+						position: 0,
+					})),
+					position: 0,
+				})),
+				operator: UnaryOperator::Exists,
+				position: 0,
+			})
+		);
+	}
+
+	#[test]
 	fn parses_expression_statement_before_final_expression() {
 		assert_eq!(
 			parse_program("var x: int = 1;\nx += 2;\nx"),
@@ -4599,6 +4626,21 @@ mod tests {
 	}
 
 	#[test]
+	fn parses_locked_expression() {
+		assert_eq!(
+			parse("locked record"),
+			Expr::Unary(UnaryExpr {
+				operand: Box::new(Expr::Identifier(IdentifierExpr {
+					name: String::from("record"),
+					position: 0,
+				})),
+				operator: UnaryOperator::Locked,
+				position: 0,
+			})
+		);
+	}
+
+	#[test]
 	fn parses_logical_and_more_tightly_than_or() {
 		assert_eq!(
 			parse("true or false and true"),
@@ -5112,6 +5154,21 @@ mod tests {
 			],
 			with_declarations: vec![],
 		});
+	}
+
+	#[test]
+	fn parses_parenthesized_exists_as_operator_expression() {
+		assert_eq!(
+			parse("exists(record)"),
+			Expr::Unary(UnaryExpr {
+				operand: Box::new(Expr::Identifier(IdentifierExpr {
+					name: String::from("record"),
+					position: 0,
+				})),
+				operator: UnaryOperator::Exists,
+				position: 0,
+			})
+		);
 	}
 
 	#[test]

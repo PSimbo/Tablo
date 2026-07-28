@@ -8,16 +8,14 @@ const BUILTIN_DAY: u8 = BUILTIN_DATE_CAST + 1;
 const BUILTIN_DEC_CAST: u8 = BUILTIN_DAY + 1;
 const BUILTIN_DISP: u8 = BUILTIN_DEC_CAST + 1;
 const BUILTIN_DISPLN: u8 = BUILTIN_DISP + 1;
-const BUILTIN_EXISTS: u8 = BUILTIN_DISPLN + 1;
-const BUILTIN_FIRST_OF: u8 = BUILTIN_EXISTS + 1;
+const BUILTIN_FIRST_OF: u8 = BUILTIN_DISPLN + 1;
 const BUILTIN_FORMAT: u8 = BUILTIN_FIRST_OF + 1;
 const BUILTIN_HOUR: u8 = BUILTIN_FORMAT + 1;
 const BUILTIN_INDEX_OF: u8 = BUILTIN_HOUR + 1;
 const BUILTIN_INT_CAST: u8 = BUILTIN_INDEX_OF + 1;
 const BUILTIN_LAST_OF: u8 = BUILTIN_INT_CAST + 1;
 const BUILTIN_LEN: u8 = BUILTIN_LAST_OF + 1;
-const BUILTIN_LOCKED: u8 = BUILTIN_LEN + 1;
-const BUILTIN_MINUTE: u8 = BUILTIN_LOCKED + 1;
+const BUILTIN_MINUTE: u8 = BUILTIN_LEN + 1;
 const BUILTIN_MONTH: u8 = BUILTIN_MINUTE + 1;
 const BUILTIN_SECOND: u8 = BUILTIN_MONTH + 1;
 const BUILTIN_SEQ_NEXT: u8 = BUILTIN_SECOND + 1;
@@ -36,7 +34,6 @@ pub enum BuiltInFunction {
 	DecCast,
 	Disp,
 	Displn,
-	Exists,
 	FirstOf,
 	Format,
 	Hour,
@@ -44,7 +41,6 @@ pub enum BuiltInFunction {
 	IntCast,
 	LastOf,
 	Len,
-	Locked,
 	Minute,
 	Month,
 	Second,
@@ -66,7 +62,6 @@ impl BuiltInFunction {
 			Self::DecCast,
 			Self::Disp,
 			Self::Displn,
-			Self::Exists,
 			Self::FirstOf,
 			Self::Format,
 			Self::Hour,
@@ -74,7 +69,6 @@ impl BuiltInFunction {
 			Self::IntCast,
 			Self::LastOf,
 			Self::Len,
-			Self::Locked,
 			Self::Minute,
 			Self::Month,
 			Self::Second,
@@ -96,7 +90,6 @@ impl BuiltInFunction {
 			BUILTIN_DEC_CAST => Some(Self::DecCast),
 			BUILTIN_DISP => Some(Self::Disp),
 			BUILTIN_DISPLN => Some(Self::Displn),
-			BUILTIN_EXISTS => Some(Self::Exists),
 			BUILTIN_FIRST_OF => Some(Self::FirstOf),
 			BUILTIN_FORMAT => Some(Self::Format),
 			BUILTIN_HOUR => Some(Self::Hour),
@@ -104,7 +97,6 @@ impl BuiltInFunction {
 			BUILTIN_INT_CAST => Some(Self::IntCast),
 			BUILTIN_LAST_OF => Some(Self::LastOf),
 			BUILTIN_LEN => Some(Self::Len),
-			BUILTIN_LOCKED => Some(Self::Locked),
 			BUILTIN_MINUTE => Some(Self::Minute),
 			BUILTIN_MONTH => Some(Self::Month),
 			BUILTIN_SECOND => Some(Self::Second),
@@ -127,7 +119,6 @@ impl BuiltInFunction {
 			"dec" => Some(Self::DecCast),
 			"disp" => Some(Self::Disp),
 			"displn" => Some(Self::Displn),
-			"exists" => Some(Self::Exists),
 			"firstof" => Some(Self::FirstOf),
 			"format" => Some(Self::Format),
 			"hour" => Some(Self::Hour),
@@ -135,7 +126,6 @@ impl BuiltInFunction {
 			"int" => Some(Self::IntCast),
 			"lastof" => Some(Self::LastOf),
 			"len" => Some(Self::Len),
-			"locked" => Some(Self::Locked),
 			"minute" => Some(Self::Minute),
 			"month" => Some(Self::Month),
 			"second" => Some(Self::Second),
@@ -158,7 +148,6 @@ impl BuiltInFunction {
 			Self::DecCast => BUILTIN_DEC_CAST,
 			Self::Disp => BUILTIN_DISP,
 			Self::Displn => BUILTIN_DISPLN,
-			Self::Exists => BUILTIN_EXISTS,
 			Self::FirstOf => BUILTIN_FIRST_OF,
 			Self::Format => BUILTIN_FORMAT,
 			Self::Hour => BUILTIN_HOUR,
@@ -166,7 +155,6 @@ impl BuiltInFunction {
 			Self::IntCast => BUILTIN_INT_CAST,
 			Self::LastOf => BUILTIN_LAST_OF,
 			Self::Len => BUILTIN_LEN,
-			Self::Locked => BUILTIN_LOCKED,
 			Self::Minute => BUILTIN_MINUTE,
 			Self::Month => BUILTIN_MONTH,
 			Self::Second => BUILTIN_SECOND,
@@ -188,7 +176,6 @@ impl BuiltInFunction {
 			Self::DecCast => "dec",
 			Self::Disp => "disp",
 			Self::Displn => "displn",
-			Self::Exists => "exists",
 			Self::FirstOf => "firstof",
 			Self::Format => "format",
 			Self::Hour => "hour",
@@ -196,7 +183,6 @@ impl BuiltInFunction {
 			Self::IntCast => "int",
 			Self::LastOf => "lastof",
 			Self::Len => "len",
-			Self::Locked => "locked",
 			Self::Minute => "minute",
 			Self::Month => "month",
 			Self::Second => "second",
@@ -216,7 +202,6 @@ impl BuiltInFunction {
 			| Self::DateCast
 			| Self::Day
 			| Self::DecCast
-			| Self::Exists
 			| Self::FirstOf
 			| Self::Format
 			| Self::Hour
@@ -224,7 +209,6 @@ impl BuiltInFunction {
 			| Self::IntCast
 			| Self::LastOf
 			| Self::Len
-			| Self::Locked
 			| Self::Minute
 			| Self::Month
 			| Self::Second
@@ -287,9 +271,6 @@ impl BuiltInFunction {
 			Self::Displn => vec![
 				Self::signature(&[("fmt", Text)], None),
 			],
-			Self::Exists => vec![
-				Self::signature(&[("v", RecordPointer)], Some(DataType::Bool)),
-			],
 			Self::FirstOf => vec![
 				Self::variadic_signature("v1", Any, "v2", ArrayAny, DataType::Bool),
 			],
@@ -321,9 +302,6 @@ impl BuiltInFunction {
 			Self::Len => vec![
 				Self::signature(&[("v", ArrayAny)], Some(DataType::Int)),
 				Self::signature(&[("str", Text)], Some(DataType::Int)),
-			],
-			Self::Locked => vec![
-				Self::signature(&[("v", RecordPointer)], Some(DataType::Bool)),
 			],
 			Self::Minute => vec![
 				Self::signature(&[("t", Time)], Some(DataType::Int)),
@@ -380,11 +358,9 @@ impl BuiltInFunction {
 			| Self::DecCast
 			| Self::Disp
 			| Self::Displn
-			| Self::Exists
 			| Self::Hour
 			| Self::IntCast
 			| Self::Len
-			| Self::Locked
 			| Self::Minute
 			| Self::Month
 			| Self::Second
@@ -450,12 +426,6 @@ impl BuiltInFunction {
 				_ => None,
 			},
 			Self::Disp | Self::Displn => None,
-			Self::Exists | Self::Locked => match argument_types {
-				[arg] if matches!(arg.without_nullability(), DataType::RecordPointer(_)) => {
-					Some(DataType::Bool)
-				}
-				_ => None,
-			},
 			Self::FirstOf | Self::LastOf => match argument_types {
 				[] => None,
 				_ => Some(DataType::Bool),
@@ -571,7 +541,6 @@ pub enum BuiltInParameterType {
 	Dec,
 	EnumBacked(DataType),
 	Int,
-	RecordPointer,
 	Sequence,
 	Text,
 	Time,
@@ -591,7 +560,6 @@ impl BuiltInParameterType {
 			Self::Dec => String::from("dec"),
 			Self::EnumBacked(backing_type) => format!("<{}-backed enum>", backing_type.name()),
 			Self::Int => String::from("int"),
-			Self::RecordPointer => String::from("rec <table>"),
 			Self::Sequence => String::from("seq <sequence>"),
 			Self::Text => String::from("text"),
 			Self::Time => String::from("time"),
@@ -679,10 +647,6 @@ mod tests {
 		assert_eq!(
 			BuiltInFunction::SeqNext.signatures()[0].parameters[0].data_type,
 			BuiltInParameterType::Sequence,
-		);
-		assert_eq!(
-			BuiltInFunction::Exists.signatures()[0].parameters[0].data_type,
-			BuiltInParameterType::RecordPointer,
 		);
 		assert_eq!(
 			BuiltInFunction::IntCast.signatures()[2].parameters[0].data_type,

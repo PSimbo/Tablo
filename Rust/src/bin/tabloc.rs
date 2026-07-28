@@ -61,7 +61,7 @@ fn main() {
 			}
 		};
 
-		compile_with_source_name_and_schema(
+		compile_with_source_name_and_schema_report(
 			source.as_str(),
 			args.input_path.display().to_string(),
 			&output_path,
@@ -77,7 +77,7 @@ fn main() {
 			}
 		};
 
-		compile_with_source_name_and_schema(
+		compile_with_source_name_and_schema_report(
 			source.as_str(),
 			args.input_path.display().to_string(),
 			&output_path,
@@ -85,12 +85,22 @@ fn main() {
 		)
 	}
 	else {
-		compile_with_source_name(source.as_str(), args.input_path.display().to_string(), &output_path)
+		compile_with_source_name_report(source.as_str(), args.input_path.display().to_string(), &output_path)
 	};
 
-	if let Err(error) = compile_result {
-		eprintln!("{}", error.format_with_source_name(&source, Some(args.input_path.to_string_lossy().as_ref())));
-		std::process::exit(1);
+	match compile_result {
+		Ok(report) => {
+			for warning in report.warnings {
+				eprintln!(
+					"{}",
+					warning.format_with_source_name(&source, Some(args.input_path.to_string_lossy().as_ref())),
+				);
+			}
+		}
+		Err(error) => {
+			eprintln!("{}", error.format_with_source_name(&source, Some(args.input_path.to_string_lossy().as_ref())));
+			std::process::exit(1);
+		}
 	}
 }
 

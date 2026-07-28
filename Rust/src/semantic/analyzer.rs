@@ -7,6 +7,7 @@ use crate::compiler::CompileError;
 use crate::format_string::*;
 use crate::query::*;
 use crate::schema::*;
+use crate::source::SourceText;
 
 use super::scope::ScopeStack;
 
@@ -101,186 +102,6 @@ pub struct ResolvedTableReference {
 	pub schema_is_implicit: bool,
 	pub schema_name: String,
 	pub table_name: String,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct SemanticProgram {
-	active_databases: Vec<String>,
-	built_in_call_targets: BTreeMap<usize, BuiltInFunction>,
-	call_argument_bindings: BTreeMap<usize, Vec<CallArgumentBinding>>,
-	call_argument_reference_slots: BTreeMap<usize, Vec<Option<u32>>>,
-	call_return_types: BTreeMap<usize, DataType>,
-	call_targets: BTreeMap<usize, u32>,
-	compiled_count_queries: BTreeMap<usize, LoweredBackendQuery>,
-	compiled_find_queries: BTreeMap<usize, LoweredBackendQuery>,
-	compiled_for_record_queries: BTreeMap<usize, LoweredBackendQuery>,
-	compiled_query_for_shapes: BTreeMap<usize, LoweredBackendQuery>,
-	declaration_slots: BTreeMap<usize, u32>,
-	declaration_types: BTreeMap<usize, DataType>,
-	entry_point_function_index: Option<u32>,
-	entry_point_position: Option<usize>,
-	enum_declarations: BTreeMap<String, EnumDeclaration>,
-	enum_variant_values: BTreeMap<usize, EnumValue>,
-	enum_variants: BTreeMap<String, BTreeMap<String, EnumValue>>,
-	for_record_limit_slots: BTreeMap<usize, u32>,
-	function_declaration_targets: BTreeMap<usize, u32>,
-	group_boundary_calls: BTreeMap<usize, GroupBoundaryCallInfo>,
-	identifier_slots: BTreeMap<usize, u32>,
-	iterator_slots: BTreeMap<usize, u32>,
-	lowered_count_queries: BTreeMap<usize, QueryCountPlan>,
-	lowered_find_queries: BTreeMap<usize, QueryFindPlan>,
-	lowered_for_record_queries: BTreeMap<usize, QueryForPlan>,
-	new_record_layouts: BTreeMap<usize, NewRecordLayout>,
-	object_declarations: BTreeMap<String, ObjectDeclaration>,
-	query_plan: ProgramQueryPlan,
-	query_for_shapes: BTreeMap<usize, QueryForShape>,
-	query_projected_value_bindings: BTreeMap<usize, QueryProjectedValueBinding>,
-	record_pointer_bindings: BTreeMap<usize, RecordPointerBindingInfo>,
-	resolved_sequences: BTreeMap<usize, ResolvedSequenceReference>,
-	resolved_tables: BTreeMap<usize, ResolvedTableReference>,
-	sequence_call_targets: BTreeMap<usize, ResolvedSequenceReference>,
-}
-
-impl SemanticProgram {
-	pub fn active_databases(&self) -> &[String] {
-		&self.active_databases
-	}
-
-	pub fn built_in_call_target(&self, position: usize) -> Option<BuiltInFunction> {
-		self.built_in_call_targets.get(&position).copied()
-	}
-
-	pub fn call_argument_bindings(&self, position: usize) -> Option<&[CallArgumentBinding]> {
-		self.call_argument_bindings.get(&position).map(Vec::as_slice)
-	}
-
-	pub fn call_argument_reference_slots(&self, position: usize) -> Option<&[Option<u32>]> {
-		self.call_argument_reference_slots.get(&position).map(Vec::as_slice)
-	}
-
-	pub fn call_return_type(&self, position: usize) -> Option<DataType> {
-		self.call_return_types.get(&position).cloned()
-	}
-
-	pub fn call_returns_value(&self, position: usize) -> bool {
-		self.call_return_types.contains_key(&position)
-	}
-
-	pub fn call_target(&self, position: usize) -> Option<u32> {
-		self.call_targets.get(&position).copied()
-	}
-
-	pub fn compiled_count_query(&self, position: usize) -> Option<&LoweredBackendQuery> {
-		self.compiled_count_queries.get(&position)
-	}
-
-	pub fn compiled_find_query(&self, position: usize) -> Option<&LoweredBackendQuery> {
-		self.compiled_find_queries.get(&position)
-	}
-
-	pub fn compiled_for_record_query(&self, position: usize) -> Option<&LoweredBackendQuery> {
-		self.compiled_for_record_queries.get(&position)
-	}
-
-	pub fn compiled_query_for_shape(&self, position: usize) -> Option<&LoweredBackendQuery> {
-		self.compiled_query_for_shapes.get(&position)
-	}
-
-	pub fn declaration_slot(&self, position: usize) -> Option<u32> {
-		self.declaration_slots.get(&position).copied()
-	}
-
-	pub fn declaration_type(&self, position: usize) -> Option<&DataType> {
-		self.declaration_types.get(&position)
-	}
-
-	pub fn entry_point_function_index(&self) -> Option<u32> {
-		self.entry_point_function_index
-	}
-
-	pub fn entry_point_position(&self) -> Option<usize> {
-		self.entry_point_position
-	}
-
-	pub fn enum_declaration(&self, name: &str) -> Option<&EnumDeclaration> {
-		self.enum_declarations.get(name)
-	}
-
-	pub fn enum_variant(&self, enum_name: &str, variant_name: &str) -> Option<&EnumValue> {
-		self.enum_variants.get(enum_name)?.get(variant_name)
-	}
-
-	pub fn enum_variant_value(&self, position: usize) -> Option<&EnumValue> {
-		self.enum_variant_values.get(&position)
-	}
-
-	pub fn for_record_limit_slot(&self, position: usize) -> Option<u32> {
-		self.for_record_limit_slots.get(&position).copied()
-	}
-
-	pub fn function_declaration_target(&self, position: usize) -> Option<u32> {
-		self.function_declaration_targets.get(&position).copied()
-	}
-
-	pub fn group_boundary_call(&self, position: usize) -> Option<&GroupBoundaryCallInfo> {
-		self.group_boundary_calls.get(&position)
-	}
-
-	pub fn identifier_slot(&self, position: usize) -> Option<u32> {
-		self.identifier_slots.get(&position).copied()
-	}
-
-	pub fn iterator_slot(&self, position: usize) -> Option<u32> {
-		self.iterator_slots.get(&position).copied()
-	}
-
-	pub fn lowered_count_query(&self, position: usize) -> Option<&QueryCountPlan> {
-		self.lowered_count_queries.get(&position)
-	}
-
-	pub fn lowered_find_query(&self, position: usize) -> Option<&QueryFindPlan> {
-		self.lowered_find_queries.get(&position)
-	}
-
-	pub fn lowered_for_record_query(&self, position: usize) -> Option<&QueryForPlan> {
-		self.lowered_for_record_queries.get(&position)
-	}
-
-	pub fn new_record_layout(&self, position: usize) -> Option<&NewRecordLayout> {
-		self.new_record_layouts.get(&position)
-	}
-
-	pub fn object_declaration(&self, name: &str) -> Option<&ObjectDeclaration> {
-		self.object_declarations.get(name)
-	}
-
-	pub fn query_for_shape(&self, position: usize) -> Option<&QueryForShape> {
-		self.query_for_shapes.get(&position)
-	}
-
-	pub fn query_plan(&self) -> &ProgramQueryPlan {
-		&self.query_plan
-	}
-
-	pub fn query_projected_value_binding(&self, position: usize) -> Option<&QueryProjectedValueBinding> {
-		self.query_projected_value_bindings.get(&position)
-	}
-
-	pub fn record_pointer_binding(&self, position: usize) -> Option<&RecordPointerBindingInfo> {
-		self.record_pointer_bindings.get(&position)
-	}
-
-	pub fn resolved_sequence(&self, position: usize) -> Option<&ResolvedSequenceReference> {
-		self.resolved_sequences.get(&position)
-	}
-
-	pub fn resolved_table(&self, position: usize) -> Option<&ResolvedTableReference> {
-		self.resolved_tables.get(&position)
-	}
-
-	pub fn sequence_call_target(&self, position: usize) -> Option<&ResolvedSequenceReference> {
-		self.sequence_call_targets.get(&position)
-	}
 }
 
 // This pass is responsible for name resolution and type checking. It does not
@@ -813,11 +634,6 @@ impl SemanticAnalyzer {
 				DataType::Object(format!("__tablo_builtin_{}_enum", backing_type.name()))
 			}
 			BuiltInParameterType::Int => DataType::Int,
-			BuiltInParameterType::RecordPointer => DataType::RecordPointer(RecordPointerType {
-				database_name: String::from("__tablo_builtin"),
-				schema_name: String::from("__tablo_builtin"),
-				table_name: String::from("__tablo_builtin"),
-			}),
 			BuiltInParameterType::Sequence => return None,
 			BuiltInParameterType::Text => DataType::Text,
 			BuiltInParameterType::Time => DataType::Time,
@@ -1541,8 +1357,7 @@ impl SemanticAnalyzer {
 			}
 		}
 
-		let mut ordered_arguments = arguments.iter().collect::<Vec<_>>();
-		let mut argument_types = arguments.iter()
+		let argument_types = arguments.iter()
 			.map(|argument| {
 				let expression = argument.expression().expect("Built-in arguments must be expressions after default-marker validation.");
 				self.infer_expression_type(expression)
@@ -1571,20 +1386,18 @@ impl SemanticAnalyzer {
 			return Ok(Some(return_type));
 		}
 
-		if !matches!(built_in, BuiltInFunction::Exists | BuiltInFunction::Locked) {
-			let signatures = self.built_in_validation_signatures(built_in);
-			let (_, argument_bindings) = self.select_function_overload(
-				"built-in function",
-				built_in.name(),
-				&signatures,
-				arguments,
-				&argument_types.iter().cloned().map(Some).collect::<Vec<_>>(),
-				position,
-			)?;
-			ordered_arguments = Self::call_arguments_in_binding_order(arguments, &argument_bindings);
-			argument_types = Self::call_argument_types_in_binding_order(&argument_types, &argument_bindings);
-			self.semantic_program.call_argument_bindings.insert(position, argument_bindings);
-		}
+		let signatures = self.built_in_validation_signatures(built_in);
+		let (_, argument_bindings) = self.select_function_overload(
+			"built-in function",
+			built_in.name(),
+			&signatures,
+			arguments,
+			&argument_types.iter().cloned().map(Some).collect::<Vec<_>>(),
+			position,
+		)?;
+		let ordered_arguments = Self::call_arguments_in_binding_order(arguments, &argument_bindings);
+		let argument_types = Self::call_argument_types_in_binding_order(&argument_types, &argument_bindings);
+		self.semantic_program.call_argument_bindings.insert(position, argument_bindings);
 
 		let return_type = built_in.return_type(&argument_types).map_err(|_| self.compile_error(
 			arguments.first().map_or(position, |argument| argument.expression().unwrap().position()),
@@ -2321,6 +2134,43 @@ impl SemanticAnalyzer {
 				let operand_type = operand_type.without_nullability().clone();
 
 				match operator {
+					UnaryOperator::Exists => {
+						let is_field_access = matches!(operand.as_ref(), Expr::FieldAccess(_))
+							&& self.semantic_program.enum_variant_value(operand.position()).is_none()
+							&& self.semantic_program.resolved_sequence(operand.position()).is_none();
+
+						if is_field_access || matches!(operand_type, DataType::RecordPointer(_)) {
+							Ok(DataType::Bool)
+						}
+						else {
+							Err(self.compile_error(
+								expression.position(),
+								format!(
+									"Unary `exists` requires a record pointer or field-access operand, found `{}`.",
+									operand_type.name(),
+								),
+							))
+						}
+					}
+					UnaryOperator::Locked => {
+						if matches!(operand_type, DataType::RecordPointer(_)) {
+							if self.is_read_only_record_pointer_expression(operand) {
+								self.record_warning(
+									expression.position(),
+									String::from(
+										"`locked` is always false for a read-only record pointer because no record lock is requested.",
+									),
+								);
+							}
+							Ok(DataType::Bool)
+						}
+						else {
+							Err(self.compile_error(
+								expression.position(),
+								format!("Unary `locked` requires a record pointer operand, found `{}`.", operand_type.name()),
+							))
+						}
+					}
 					UnaryOperator::Negate => {
 						if self.is_numeric_type(&operand_type) {
 							Ok(operand_type)
@@ -2714,6 +2564,17 @@ impl SemanticAnalyzer {
 			Expr::Timestamp(_) => Ok(DataType::Timestamp),
 			Expr::TimestampTz(_) => Ok(DataType::TimestampTz),
 			Expr::Unary(UnaryExpr { operand, operator, .. }) => {
+				if matches!(operator, UnaryOperator::Exists | UnaryOperator::Locked) {
+					return Err(self.compile_error(
+						expression.position(),
+						format!("Unary `{}` is not yet supported in database query expressions.", match operator {
+							UnaryOperator::Exists => "exists",
+							UnaryOperator::Locked => "locked",
+							_ => unreachable!(),
+						}),
+					));
+				}
+
 				let operand_type = self.infer_query_expression_type(operand, table)?;
 
 				match operator {
@@ -2737,6 +2598,7 @@ impl SemanticAnalyzer {
 
 						Ok(DataType::Bool)
 					}
+					UnaryOperator::Exists | UnaryOperator::Locked => unreachable!(),
 				}
 			}
 		}
@@ -2942,6 +2804,15 @@ impl SemanticAnalyzer {
 
 	fn is_numeric_type(&self, data_type: &DataType) -> bool {
 		matches!(data_type.without_nullability(), DataType::Dec | DataType::Int)
+	}
+
+	fn is_read_only_record_pointer_expression(&self, expression: &Expr) -> bool {
+		match expression {
+			Expr::Find(_) => true,
+			Expr::Identifier(identifier) => self.lookup_local(&identifier.name)
+				.is_some_and(|local| local.is_const),
+			_ => false,
+		}
 	}
 
 	fn is_truthy_condition_type(&self, data_type: &DataType) -> bool {
@@ -3354,6 +3225,9 @@ impl SemanticAnalyzer {
 				operator: match operator {
 					UnaryOperator::Negate => QueryUnaryOperator::Negate,
 					UnaryOperator::Not => QueryUnaryOperator::Not,
+					UnaryOperator::Exists | UnaryOperator::Locked => {
+						unreachable!("Presence and lock operators are rejected before database-query lowering.")
+					}
 				},
 			})),
 			_ => Err(self.compile_error(
@@ -3726,6 +3600,23 @@ impl SemanticAnalyzer {
 		}
 
 		Ok(())
+	}
+
+	fn record_warning(&mut self, position: usize, message: String) {
+		let source_name = self.current_source_name.clone();
+		let duplicate = self.semantic_program.warnings.iter().any(|warning| {
+			warning.position == position
+				&& warning.message == message
+				&& warning.source_name == source_name
+		});
+
+		if !duplicate {
+			self.semantic_program.warnings.push(SemanticWarning {
+				message,
+				position,
+				source_name,
+			});
+		}
 	}
 
 	fn refine_expression_type_from_assumptions(&self, expression: &Expr, data_type: DataType) -> DataType {
@@ -5509,6 +5400,222 @@ impl SemanticAnalyzer {
 	}
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SemanticProgram {
+	active_databases: Vec<String>,
+	built_in_call_targets: BTreeMap<usize, BuiltInFunction>,
+	call_argument_bindings: BTreeMap<usize, Vec<CallArgumentBinding>>,
+	call_argument_reference_slots: BTreeMap<usize, Vec<Option<u32>>>,
+	call_return_types: BTreeMap<usize, DataType>,
+	call_targets: BTreeMap<usize, u32>,
+	compiled_count_queries: BTreeMap<usize, LoweredBackendQuery>,
+	compiled_find_queries: BTreeMap<usize, LoweredBackendQuery>,
+	compiled_for_record_queries: BTreeMap<usize, LoweredBackendQuery>,
+	compiled_query_for_shapes: BTreeMap<usize, LoweredBackendQuery>,
+	declaration_slots: BTreeMap<usize, u32>,
+	declaration_types: BTreeMap<usize, DataType>,
+	entry_point_function_index: Option<u32>,
+	entry_point_position: Option<usize>,
+	enum_declarations: BTreeMap<String, EnumDeclaration>,
+	enum_variant_values: BTreeMap<usize, EnumValue>,
+	enum_variants: BTreeMap<String, BTreeMap<String, EnumValue>>,
+	for_record_limit_slots: BTreeMap<usize, u32>,
+	function_declaration_targets: BTreeMap<usize, u32>,
+	group_boundary_calls: BTreeMap<usize, GroupBoundaryCallInfo>,
+	identifier_slots: BTreeMap<usize, u32>,
+	iterator_slots: BTreeMap<usize, u32>,
+	lowered_count_queries: BTreeMap<usize, QueryCountPlan>,
+	lowered_find_queries: BTreeMap<usize, QueryFindPlan>,
+	lowered_for_record_queries: BTreeMap<usize, QueryForPlan>,
+	new_record_layouts: BTreeMap<usize, NewRecordLayout>,
+	object_declarations: BTreeMap<String, ObjectDeclaration>,
+	query_plan: ProgramQueryPlan,
+	query_for_shapes: BTreeMap<usize, QueryForShape>,
+	query_projected_value_bindings: BTreeMap<usize, QueryProjectedValueBinding>,
+	record_pointer_bindings: BTreeMap<usize, RecordPointerBindingInfo>,
+	resolved_sequences: BTreeMap<usize, ResolvedSequenceReference>,
+	resolved_tables: BTreeMap<usize, ResolvedTableReference>,
+	sequence_call_targets: BTreeMap<usize, ResolvedSequenceReference>,
+	warnings: Vec<SemanticWarning>,
+}
+
+impl SemanticProgram {
+	pub fn active_databases(&self) -> &[String] {
+		&self.active_databases
+	}
+
+	pub fn built_in_call_target(&self, position: usize) -> Option<BuiltInFunction> {
+		self.built_in_call_targets.get(&position).copied()
+	}
+
+	pub fn call_argument_bindings(&self, position: usize) -> Option<&[CallArgumentBinding]> {
+		self.call_argument_bindings.get(&position).map(Vec::as_slice)
+	}
+
+	pub fn call_argument_reference_slots(&self, position: usize) -> Option<&[Option<u32>]> {
+		self.call_argument_reference_slots.get(&position).map(Vec::as_slice)
+	}
+
+	pub fn call_return_type(&self, position: usize) -> Option<DataType> {
+		self.call_return_types.get(&position).cloned()
+	}
+
+	pub fn call_returns_value(&self, position: usize) -> bool {
+		self.call_return_types.contains_key(&position)
+	}
+
+	pub fn call_target(&self, position: usize) -> Option<u32> {
+		self.call_targets.get(&position).copied()
+	}
+
+	pub fn compiled_count_query(&self, position: usize) -> Option<&LoweredBackendQuery> {
+		self.compiled_count_queries.get(&position)
+	}
+
+	pub fn compiled_find_query(&self, position: usize) -> Option<&LoweredBackendQuery> {
+		self.compiled_find_queries.get(&position)
+	}
+
+	pub fn compiled_for_record_query(&self, position: usize) -> Option<&LoweredBackendQuery> {
+		self.compiled_for_record_queries.get(&position)
+	}
+
+	pub fn compiled_query_for_shape(&self, position: usize) -> Option<&LoweredBackendQuery> {
+		self.compiled_query_for_shapes.get(&position)
+	}
+
+	pub fn declaration_slot(&self, position: usize) -> Option<u32> {
+		self.declaration_slots.get(&position).copied()
+	}
+
+	pub fn declaration_type(&self, position: usize) -> Option<&DataType> {
+		self.declaration_types.get(&position)
+	}
+
+	pub fn entry_point_function_index(&self) -> Option<u32> {
+		self.entry_point_function_index
+	}
+
+	pub fn entry_point_position(&self) -> Option<usize> {
+		self.entry_point_position
+	}
+
+	pub fn enum_declaration(&self, name: &str) -> Option<&EnumDeclaration> {
+		self.enum_declarations.get(name)
+	}
+
+	pub fn enum_variant(&self, enum_name: &str, variant_name: &str) -> Option<&EnumValue> {
+		self.enum_variants.get(enum_name)?.get(variant_name)
+	}
+
+	pub fn enum_variant_value(&self, position: usize) -> Option<&EnumValue> {
+		self.enum_variant_values.get(&position)
+	}
+
+	pub fn for_record_limit_slot(&self, position: usize) -> Option<u32> {
+		self.for_record_limit_slots.get(&position).copied()
+	}
+
+	pub fn function_declaration_target(&self, position: usize) -> Option<u32> {
+		self.function_declaration_targets.get(&position).copied()
+	}
+
+	pub fn group_boundary_call(&self, position: usize) -> Option<&GroupBoundaryCallInfo> {
+		self.group_boundary_calls.get(&position)
+	}
+
+	pub fn identifier_slot(&self, position: usize) -> Option<u32> {
+		self.identifier_slots.get(&position).copied()
+	}
+
+	pub fn iterator_slot(&self, position: usize) -> Option<u32> {
+		self.iterator_slots.get(&position).copied()
+	}
+
+	pub fn lowered_count_query(&self, position: usize) -> Option<&QueryCountPlan> {
+		self.lowered_count_queries.get(&position)
+	}
+
+	pub fn lowered_find_query(&self, position: usize) -> Option<&QueryFindPlan> {
+		self.lowered_find_queries.get(&position)
+	}
+
+	pub fn lowered_for_record_query(&self, position: usize) -> Option<&QueryForPlan> {
+		self.lowered_for_record_queries.get(&position)
+	}
+
+	pub fn new_record_layout(&self, position: usize) -> Option<&NewRecordLayout> {
+		self.new_record_layouts.get(&position)
+	}
+
+	pub fn object_declaration(&self, name: &str) -> Option<&ObjectDeclaration> {
+		self.object_declarations.get(name)
+	}
+
+	pub fn query_for_shape(&self, position: usize) -> Option<&QueryForShape> {
+		self.query_for_shapes.get(&position)
+	}
+
+	pub fn query_plan(&self) -> &ProgramQueryPlan {
+		&self.query_plan
+	}
+
+	pub fn query_projected_value_binding(&self, position: usize) -> Option<&QueryProjectedValueBinding> {
+		self.query_projected_value_bindings.get(&position)
+	}
+
+	pub fn record_pointer_binding(&self, position: usize) -> Option<&RecordPointerBindingInfo> {
+		self.record_pointer_bindings.get(&position)
+	}
+
+	pub fn resolved_sequence(&self, position: usize) -> Option<&ResolvedSequenceReference> {
+		self.resolved_sequences.get(&position)
+	}
+
+	pub fn resolved_table(&self, position: usize) -> Option<&ResolvedTableReference> {
+		self.resolved_tables.get(&position)
+	}
+
+	pub fn sequence_call_target(&self, position: usize) -> Option<&ResolvedSequenceReference> {
+		self.sequence_call_targets.get(&position)
+	}
+
+	pub fn warnings(&self) -> &[SemanticWarning] {
+		&self.warnings
+	}
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SemanticWarning {
+	pub message: String,
+	pub position: usize,
+	pub source_name: Option<String>,
+}
+
+impl SemanticWarning {
+	pub fn format_with_source_name(&self, source: &str, source_name: Option<&str>) -> String {
+		let warning_source_name = self.source_name.as_deref().or(source_name);
+
+		if warning_source_name != source_name
+			&& let Some(warning_source_name) = warning_source_name
+			&& let Ok(warning_source) = std::fs::read_to_string(warning_source_name) {
+			return SourceText::new(warning_source).format_diagnostic_with_source_name(
+				"Compile warning",
+				self.position,
+				&self.message,
+				Some(warning_source_name),
+			);
+		}
+
+		SourceText::new(source).format_diagnostic_with_source_name(
+			"Compile warning",
+			self.position,
+			&self.message,
+			warning_source_name,
+		)
+	}
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct FunctionOverloadAlias {
 	pub alias_name: String,
@@ -5886,7 +5993,7 @@ mod tests {
 	}
 
 	#[test]
-	fn does_not_record_record_pointer_escapes_for_built_ins_or_unreachable_calls() {
+	fn does_not_record_record_pointer_escapes_for_presence_operators_or_unreachable_calls() {
 		let schema = sqlite_test_schema(
 			r#"
 				database ExampleDb;
@@ -5901,7 +6008,7 @@ mod tests {
 				"fn Visit(cust: rec Customers) {}\n",
 				"fn Main(args: [text]): int {\n",
 				"  rec cust = find first Customers;\n",
-				"  var present: bool = exists(cust);\n",
+				"  var present: bool = exists cust;\n",
 				"  return 0;\n",
 				"  Visit(cust);\n",
 				"}",
@@ -5917,6 +6024,31 @@ mod tests {
 		let semantic_program = analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap();
 
 		assert!(!semantic_program.record_pointer_binding(declaration_position).unwrap().escapes_analysis);
+	}
+
+	#[test]
+	fn does_not_warn_when_locked_is_applied_to_mutable_record_pointer() {
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (Id int not null primary key);
+			"#,
+			"ExampleDb",
+		);
+		let program = parse_program(
+			"with exampledb;\n\
+			fn Main(args: [text]): int {\n\
+				rec mut cust = find first Customers;\n\
+				var unavailable: bool = locked cust;\n\
+				return 0;\n\
+			}",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap();
+
+		assert!(semantic_program.warnings().is_empty());
 	}
 
 	#[test]
@@ -5946,7 +6078,30 @@ mod tests {
 	}
 
 	#[test]
-	fn infers_exists_call_type_for_record_pointer() {
+	fn rejects_exists_operator_for_non_field_value() {
+		let expression = parse_expression("exists value");
+		let mut analyzer = SemanticAnalyzer::new();
+		analyzer.enter_scope();
+		analyzer.declare_local(
+			String::from("value"),
+			LocalBinding {
+				declaration_position: 0,
+				data_type: DataType::Int,
+				is_const: false,
+				slot: 2,
+			},
+		);
+
+		let error = analyzer.infer_expression_type(&expression).unwrap_err();
+
+		assert_eq!(
+			error.message,
+			"Unary `exists` requires a record pointer or field-access operand, found `int`.",
+		);
+	}
+
+	#[test]
+	fn infers_exists_operator_type_for_record_pointer() {
 		let expression = parse_expression("exists(cust)");
 		let mut analyzer = SemanticAnalyzer::new();
 		analyzer.enter_scope();
@@ -7252,6 +7407,26 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_locked_operator_for_non_record_pointer() {
+		let expression = parse_expression("locked value");
+		let mut analyzer = SemanticAnalyzer::new();
+		analyzer.enter_scope();
+		analyzer.declare_local(
+			String::from("value"),
+			LocalBinding {
+				declaration_position: 0,
+				data_type: DataType::Int,
+				is_const: false,
+				slot: 2,
+			},
+		);
+
+		let error = analyzer.infer_expression_type(&expression).unwrap_err();
+
+		assert_eq!(error.message, "Unary `locked` requires a record pointer operand, found `int`.");
+	}
+
+	#[test]
 	fn rejects_named_default_binding_for_variadic_parameter() {
 		let Expr::Call(call) = parse_expression("Collect(values: default)") else {
 			panic!("Expected call expression.");
@@ -7467,5 +7642,34 @@ mod tests {
 		let binding = semantic_program.record_pointer_binding(declaration_position).unwrap();
 
 		assert_eq!(binding.read_fields, BTreeSet::from([String::from("Id"), String::from("Name")]));
+	}
+
+	#[test]
+	fn warns_when_locked_is_applied_to_read_only_record_pointer() {
+		let schema = sqlite_test_schema(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (Id int not null);
+			"#,
+			"ExampleDb",
+		);
+		let program = parse_program(
+			"with exampledb;\n\
+			fn Main(args: [text]): int {\n\
+				rec cust = find first Customers;\n\
+				var unavailable: bool = locked cust;\n\
+				return 0;\n\
+			}",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap();
+
+		assert_eq!(semantic_program.warnings().len(), 1);
+		assert_eq!(
+			semantic_program.warnings()[0].message,
+			"`locked` is always false for a read-only record pointer because no record lock is requested.",
+		);
 	}
 }

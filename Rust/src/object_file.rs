@@ -29,7 +29,9 @@ const OPCODE_DIVIDE: u8 = OPCODE_DELETE_RECORD + 1;
 const OPCODE_DUP2: u8 = OPCODE_DIVIDE + 1;
 const OPCODE_EQUAL: u8 = OPCODE_DUP2 + 1;
 const OPCODE_EXECUTE_QUERY: u8 = OPCODE_EQUAL + 1;
-const OPCODE_GREATER_THAN: u8 = OPCODE_EXECUTE_QUERY + 1;
+const OPCODE_EXISTS: u8 = OPCODE_EXECUTE_QUERY + 1;
+const OPCODE_FIELD_PATH_EXISTS: u8 = OPCODE_EXISTS + 1;
+const OPCODE_GREATER_THAN: u8 = OPCODE_FIELD_PATH_EXISTS + 1;
 const OPCODE_GREATER_THAN_OR_EQUAL: u8 = OPCODE_GREATER_THAN + 1;
 const OPCODE_ITER_HAS_NEXT: u8 = OPCODE_GREATER_THAN_OR_EQUAL + 1;
 const OPCODE_ITER_INIT: u8 = OPCODE_ITER_HAS_NEXT + 1;
@@ -45,7 +47,8 @@ const OPCODE_LOAD_LOCAL: u8 = OPCODE_LOAD_INDEX + 1;
 const OPCODE_LOAD_PROJECTED_VALUE: u8 = OPCODE_LOAD_LOCAL + 1;
 const OPCODE_LOAD_REFERENCE: u8 = OPCODE_LOAD_PROJECTED_VALUE + 1;
 const OPCODE_LOAD_SEQUENCE_CURRENT: u8 = OPCODE_LOAD_REFERENCE + 1;
-const OPCODE_MAKE_ARRAY: u8 = OPCODE_LOAD_SEQUENCE_CURRENT + 1;
+const OPCODE_LOCKED: u8 = OPCODE_LOAD_SEQUENCE_CURRENT + 1;
+const OPCODE_MAKE_ARRAY: u8 = OPCODE_LOCKED + 1;
 const OPCODE_MAKE_OBJECT: u8 = OPCODE_MAKE_ARRAY + 1;
 const OPCODE_MAKE_RANGE: u8 = OPCODE_MAKE_OBJECT + 1;
 const OPCODE_MAKE_RECORD_POINTER: u8 = OPCODE_MAKE_RANGE + 1;
@@ -459,6 +462,8 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_DUP2 => Ok(Instruction::Dup2),
 			OPCODE_EQUAL => Ok(Instruction::Equal),
 			OPCODE_EXECUTE_QUERY => Ok(Instruction::ExecuteQuery(self.read_u32()?)),
+			OPCODE_EXISTS => Ok(Instruction::Exists),
+			OPCODE_FIELD_PATH_EXISTS => Ok(Instruction::FieldPathExists(self.read_string_vec()?)),
 			OPCODE_GREATER_THAN => Ok(Instruction::GreaterThan),
 			OPCODE_GREATER_THAN_OR_EQUAL => Ok(Instruction::GreaterThanOrEqual),
 			OPCODE_ITER_HAS_NEXT => Ok(Instruction::IterHasNext),
@@ -480,6 +485,7 @@ impl<'a> ObjectFileReader<'a> {
 				schema_name: self.read_string()?,
 				sequence_name: self.read_string()?,
 			}),
+			OPCODE_LOCKED => Ok(Instruction::Locked),
 			OPCODE_MAKE_ARRAY => Ok(Instruction::MakeArray(self.read_u32()?)),
 			OPCODE_MAKE_OBJECT => {
 				let field_count = self.read_u32()? as usize;
@@ -905,6 +911,16 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.push(OPCODE_EXECUTE_QUERY);
 			bytes.extend_from_slice(&query_index.to_le_bytes());
 		}
+		Instruction::Exists => bytes.push(OPCODE_EXISTS),
+		Instruction::FieldPathExists(field_path) => {
+			bytes.push(OPCODE_FIELD_PATH_EXISTS);
+			bytes.extend_from_slice(&(field_path.len() as u32).to_le_bytes());
+
+			for field_name in field_path {
+				bytes.extend_from_slice(&(field_name.len() as u32).to_le_bytes());
+				bytes.extend_from_slice(field_name.as_bytes());
+			}
+		}
 		Instruction::GreaterThan => bytes.push(OPCODE_GREATER_THAN),
 		Instruction::GreaterThanOrEqual => bytes.push(OPCODE_GREATER_THAN_OR_EQUAL),
 		Instruction::IterHasNext => bytes.push(OPCODE_ITER_HAS_NEXT),
@@ -957,6 +973,7 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.extend_from_slice(&(sequence_name.len() as u32).to_le_bytes());
 			bytes.extend_from_slice(sequence_name.as_bytes());
 		}
+		Instruction::Locked => bytes.push(OPCODE_LOCKED),
 		Instruction::MakeArray(element_count) => {
 			bytes.push(OPCODE_MAKE_ARRAY);
 			bytes.extend_from_slice(&element_count.to_le_bytes());
@@ -1529,6 +1546,23 @@ mod tests {
 				},
 				schema_is_implicit: true,
 			},
+		]);
+
+		let bytes = write_program(&program);
+		let decoded = read_program(&bytes).unwrap();
+
+		assert_eq!(decoded, program);
+	}
+
+	#[test]
+	fn round_trips_presence_and_lock_operator_instructions() {
+		let program = Program::new(vec![
+			Instruction::LoadLocal(0),
+			Instruction::Exists,
+			Instruction::LoadLocal(0),
+			Instruction::Locked,
+			Instruction::LoadLocal(1),
+			Instruction::FieldPathExists(vec![String::from("customer"), String::from("name")]),
 		]);
 
 		let bytes = write_program(&program);

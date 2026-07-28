@@ -30,7 +30,7 @@ use compiler::{ CompileError , Compiler };
 use database::RuntimeDatabaseConfig;
 use object_file::*;
 use schema::SchemaCatalog;
-use semantic::analyzer::{ FunctionOverloadAlias, SemanticAnalyzer };
+use semantic::analyzer::{ FunctionOverloadAlias, SemanticAnalyzer, SemanticWarning };
 use semantic::ssa::*;
 use source::SourceText;
 use syntax::lexer::{ LexError, Lexer };
@@ -120,6 +120,17 @@ impl Display for TabloError {
 			}
 		}
 	}
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CompilationReport {
+	pub warnings: Vec<SemanticWarning>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SourceAnalysis {
+	pub local_usage: ProgramLocalUsage,
+	pub warnings: Vec<SemanticWarning>,
 }
 
 struct ImportedFunctionTargets {
@@ -379,6 +390,23 @@ impl ModuleLinker {
 	}
 }
 
+pub fn analyze_with_source_name(
+	source: impl Into<String>,
+	source_name: impl Into<String>,
+) -> Result<SourceAnalysis, TabloError> {
+	let source_name = source_name.into();
+	analyze_source_local_usage_with_name_and_schema(source, Some(source_name.as_str()), None)
+}
+
+pub fn analyze_with_source_name_and_schema(
+	source: impl Into<String>,
+	source_name: impl Into<String>,
+	schema_catalog: &SchemaCatalog,
+) -> Result<SourceAnalysis, TabloError> {
+	let source_name = source_name.into();
+	analyze_source_local_usage_with_name_and_schema(source, Some(source_name.as_str()), Some(schema_catalog))
+}
+
 pub fn check(source: impl Into<String>) -> Result<(), TabloError> {
 	compile_to_program_with_name(source, None).map(|_| ())
 }
@@ -406,8 +434,21 @@ pub fn check_with_source_name_and_schema(
 }
 
 pub fn compile(source: impl Into<String>, output_path: impl AsRef<Path>) -> Result<(), TabloError> {
-	let program = compile_to_program_with_name(source, None)?;
-	write_program_to_path(output_path, &program).map_err(TabloError::ObjectFile)
+	compile_report(source, output_path).map(|_| ())
+}
+
+pub fn compile_report(
+	source: impl Into<String>,
+	output_path: impl AsRef<Path>,
+) -> Result<CompilationReport, TabloError> {
+	let (program, warnings) = compile_source_to_program_with_name_and_schema_and_warnings(
+		source,
+		None,
+		CompilationTarget::Standalone,
+		None,
+	)?;
+	write_program_to_path(output_path, &program).map_err(TabloError::ObjectFile)?;
+	Ok(CompilationReport { warnings })
 }
 
 pub fn compile_with_source_name(
@@ -415,9 +456,7 @@ pub fn compile_with_source_name(
 	source_name: impl Into<String>,
 	output_path: impl AsRef<Path>
 ) -> Result<(), TabloError> {
-	let source_name = source_name.into();
-	let program = compile_to_program_with_name(source, Some(source_name.as_str()))?;
-	write_program_to_path(output_path, &program).map_err(TabloError::ObjectFile)
+	compile_with_source_name_report(source, source_name, output_path).map(|_| ())
 }
 
 pub fn compile_with_source_name_and_schema(
@@ -426,14 +465,41 @@ pub fn compile_with_source_name_and_schema(
 	output_path: impl AsRef<Path>,
 	schema_catalog: &SchemaCatalog,
 ) -> Result<(), TabloError> {
+	compile_with_source_name_and_schema_report(source, source_name, output_path, schema_catalog)
+		.map(|_| ())
+}
+
+pub fn compile_with_source_name_and_schema_report(
+	source: impl Into<String>,
+	source_name: impl Into<String>,
+	output_path: impl AsRef<Path>,
+	schema_catalog: &SchemaCatalog,
+) -> Result<CompilationReport, TabloError> {
 	let source_name = source_name.into();
-	let program = compile_source_to_program_with_name_and_schema(
+	let (program, warnings) = compile_source_to_program_with_name_and_schema_and_warnings(
 		source,
 		Some(source_name.as_str()),
 		CompilationTarget::Standalone,
 		Some(schema_catalog),
 	)?;
-	write_program_to_path(output_path, &program).map_err(TabloError::ObjectFile)
+	write_program_to_path(output_path, &program).map_err(TabloError::ObjectFile)?;
+	Ok(CompilationReport { warnings })
+}
+
+pub fn compile_with_source_name_report(
+	source: impl Into<String>,
+	source_name: impl Into<String>,
+	output_path: impl AsRef<Path>
+) -> Result<CompilationReport, TabloError> {
+	let source_name = source_name.into();
+	let (program, warnings) = compile_source_to_program_with_name_and_schema_and_warnings(
+		source,
+		Some(source_name.as_str()),
+		CompilationTarget::Standalone,
+		None,
+	)?;
+	write_program_to_path(output_path, &program).map_err(TabloError::ObjectFile)?;
+	Ok(CompilationReport { warnings })
 }
 
 pub fn discover_project_config_path(file_path: &Path) -> Option<PathBuf> {
@@ -449,6 +515,22 @@ pub fn discover_project_config_path(file_path: &Path) -> Option<PathBuf> {
 	}
 }
 
+pub fn local_usage_with_source_name(
+	source: impl Into<String>,
+	source_name: impl Into<String>,
+) -> Result<ProgramLocalUsage, TabloError> {
+	analyze_with_source_name(source, source_name).map(|analysis| analysis.local_usage)
+}
+
+pub fn local_usage_with_source_name_and_schema(
+	source: impl Into<String>,
+	source_name: impl Into<String>,
+	schema_catalog: &SchemaCatalog,
+) -> Result<ProgramLocalUsage, TabloError> {
+	analyze_with_source_name_and_schema(source, source_name, schema_catalog)
+		.map(|analysis| analysis.local_usage)
+}
+
 pub(crate) fn encode_external_source_diagnostic(
 	category: &str,
 	source_name: &str,
@@ -458,23 +540,6 @@ pub(crate) fn encode_external_source_diagnostic(
 	format!(
 		"{EXTERNAL_SOURCE_DIAGNOSTIC_PREFIX}\u{1f}{category}\u{1f}{source_name}\u{1f}{position}\u{1f}{message}"
 	)
-}
-
-pub fn local_usage_with_source_name(
-	source: impl Into<String>,
-	source_name: impl Into<String>,
-) -> Result<ProgramLocalUsage, TabloError> {
-	let source_name = source_name.into();
-	analyze_source_local_usage_with_name_and_schema(source, Some(source_name.as_str()), None)
-}
-
-pub fn local_usage_with_source_name_and_schema(
-	source: impl Into<String>,
-	source_name: impl Into<String>,
-	schema_catalog: &SchemaCatalog,
-) -> Result<ProgramLocalUsage, TabloError> {
-	let source_name = source_name.into();
-	analyze_source_local_usage_with_name_and_schema(source, Some(source_name.as_str()), Some(schema_catalog))
 }
 
 pub fn run(source: impl Into<String>) -> Result<Option<Value>, TabloError> {
@@ -554,7 +619,7 @@ fn analyze_source_local_usage_with_name_and_schema(
 	source: impl Into<String>,
 	source_name: Option<&str>,
 	schema_catalog: Option<&SchemaCatalog>,
-) -> Result<ProgramLocalUsage, TabloError> {
+) -> Result<SourceAnalysis, TabloError> {
 	let source = SourceText::new(source);
 	let program = parse_source_text(&source)?;
 	validate_module_graph(&program, source_name).map_err(TabloError::Compile)?;
@@ -566,8 +631,16 @@ fn analyze_source_local_usage_with_name_and_schema(
 	let semantic_program = analyzer.analyze_program_with_schema(&linked_program.program, schema_catalog)
 		.map_err(TabloError::Compile)?;
 	let local_usage = analyze_program_local_usage(&linked_program.program, &semantic_program);
+	let root_source_name = linked_program.root_source_file.display_name();
+	let warnings = semantic_program.warnings().iter()
+		.filter(|warning| warning.source_name.as_deref().is_none_or(|name| name == root_source_name))
+		.cloned()
+		.collect();
 
-	Ok(filter_root_source_local_usage(local_usage, &linked_program))
+	Ok(SourceAnalysis {
+		local_usage: filter_root_source_local_usage(local_usage, &linked_program),
+		warnings,
+	})
 }
 
 fn attach_source_debug_info(program: &mut Program, linked_program: &LinkedProgram) {
@@ -634,15 +707,17 @@ fn compile_ast_program_with_schema_and_analyzer(
 	target: CompilationTarget,
 	schema_catalog: Option<&SchemaCatalog>,
 	mut analyzer: SemanticAnalyzer,
-) -> Result<Program, TabloError> {
+) -> Result<(Program, Vec<SemanticWarning>), TabloError> {
 	let semantic_program = match target {
 		CompilationTarget::Snippet => analyzer.analyze_program_with_schema(program, schema_catalog),
 		CompilationTarget::Standalone => analyzer.analyze_standalone_program_with_schema(program, schema_catalog),
 	}.map_err(TabloError::Compile)?;
+	let warnings = semantic_program.warnings().to_vec();
 
 	let mut compiler = Compiler::new();
-	compiler.compile_program_with_existing_semantics(program, &semantic_program)
-		.map_err(TabloError::Compile)
+	let program = compiler.compile_program_with_existing_semantics(program, &semantic_program)
+		.map_err(TabloError::Compile)?;
+	Ok((program, warnings))
 }
 
 fn compile_source_to_program_with_name_and_schema(
@@ -651,6 +726,20 @@ fn compile_source_to_program_with_name_and_schema(
 	target: CompilationTarget,
 	schema_catalog: Option<&SchemaCatalog>,
 ) -> Result<Program, TabloError> {
+	compile_source_to_program_with_name_and_schema_and_warnings(
+		source,
+		source_name,
+		target,
+		schema_catalog,
+	).map(|(program, _)| program)
+}
+
+fn compile_source_to_program_with_name_and_schema_and_warnings(
+	source: impl Into<String>,
+	source_name: Option<&str>,
+	target: CompilationTarget,
+	schema_catalog: Option<&SchemaCatalog>,
+) -> Result<(Program, Vec<SemanticWarning>), TabloError> {
 	let source = SourceText::new(source);
 	let program = parse_source_text(&source)?;
 	validate_module_graph(&program, source_name).map_err(TabloError::Compile)?;
@@ -659,9 +748,14 @@ fn compile_source_to_program_with_name_and_schema(
 	analyzer.set_function_overload_aliases(linked_program.function_overload_aliases.clone());
 	analyzer.set_root_source_name(Some(linked_program.root_source_file.display_name().to_string()));
 	analyzer.set_top_level_function_source_names(linked_program.top_level_function_source_names.clone());
-	let mut program = compile_ast_program_with_schema_and_analyzer(&linked_program.program, target, schema_catalog, analyzer)?;
+	let (mut program, warnings) = compile_ast_program_with_schema_and_analyzer(
+		&linked_program.program,
+		target,
+		schema_catalog,
+		analyzer,
+	)?;
 	attach_source_debug_info(&mut program, &linked_program);
-	Ok(program)
+	Ok((program, warnings))
 }
 
 fn decode_external_source_diagnostic(message: &str) -> Option<(&str, String, usize, String)> {
@@ -1856,6 +1950,32 @@ mod tests {
 	}
 
 	#[test]
+	fn compilation_report_preserves_semantic_warnings() {
+		let schema = schema_catalog_from_fixture_with_backends(
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (Id int not null);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let (_, warnings) = compile_source_to_program_with_name_and_schema_and_warnings(
+			"with ExampleDb;\n\
+			fn Main(args: [text]): int {\n\
+				rec cust = find first Customers;\n\
+				var unavailable: bool = locked cust;\n\
+				return 0;\n\
+			}",
+			Some("main.tablo"),
+			CompilationTarget::Standalone,
+			Some(&schema),
+		).unwrap();
+
+		assert_eq!(warnings.len(), 1);
+		assert!(warnings[0].message.contains("`locked` is always false"));
+	}
+
+	#[test]
 	fn compiles_mysql_count_query_through_normal_compiler_path() {
 		let (program, _) = compile_snippet_with_schema_fixture_and_backends(
 			"with exampledb;\nvar divisor: int = 2;\nvar minimumId: int = 10;\ncount customers where id / divisor >= minimumId",
@@ -2234,7 +2354,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]): int {\n    rec mut cust = find first Customers where Id == 32;\n    delete cust;\n    if cust {\n        return 1;\n    }\n    return 0;\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    rec mut cust = find first Customers where Id == 32;\n    delete cust;\n    if exists cust {\n        return 1;\n    }\n    return 0;\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -2473,6 +2593,39 @@ mod tests {
 			planned_error.to_string(),
 			"Runtime error: Array index 2 is out of bounds for length 1.\nStack trace:\n  at Main (line 1, column 224)",
 		);
+	}
+
+	#[test]
+	fn exists_returns_false_for_field_beyond_null_intermediate_object() {
+		let result = evaluate_snippet(
+			"obj Child { name: text, };\n\
+			obj Example { child: Child?, };\n\
+			var example: Example = Example {};\n\
+			exists example.child.name"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Boolean(false)));
+	}
+
+	#[test]
+	fn exists_returns_true_for_present_object_field_with_null_value() {
+		let result = evaluate_snippet(
+			"obj Example { value: text?, };\nvar example: Example = Example {};\nexists example.value"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
+	fn exists_returns_true_for_recursively_defaulted_object_field() {
+		let result = evaluate_snippet(
+			"obj Child { name: text, };\n\
+			obj Example { child: Child, };\n\
+			var example: Example = Example {};\n\
+			exists example.child.name"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Boolean(true)));
 	}
 
 	#[test]
@@ -2742,6 +2895,32 @@ mod tests {
 		let _ = std::fs::remove_file(&database_path);
 
 		assert_eq!(result, Some(Value::Integer(21)));
+	}
+
+	#[test]
+	fn locked_returns_false_for_sqlite_find_query() {
+		let database_path = create_sqlite_test_database(
+			"locked_returns_false_for_sqlite_find_query",
+			r#"
+				CREATE TABLE Customers (Id INTEGER NOT NULL);
+				INSERT INTO Customers (Id) VALUES (1);
+			"#,
+		);
+		let (program, _) = compile_snippet_with_schema_fixture_and_backends(
+			"with exampledb;\nlocked (find first customers where id == 1)",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (Id int not null);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Boolean(false)));
 	}
 
 	#[test]
@@ -5142,6 +5321,32 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_exists_for_existing_sqlite_find_query() {
+		let database_path = create_sqlite_test_database(
+			"runs_exists_for_existing_sqlite_find_query",
+			r#"
+				CREATE TABLE Customers (Id INTEGER NOT NULL);
+				INSERT INTO Customers (Id) VALUES (1);
+			"#,
+		);
+		let (program, _) = compile_snippet_with_schema_fixture_and_backends(
+			"with exampledb;\nexists (find first customers where id == 1)",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (Id int not null);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
 	fn runs_exists_for_missing_sqlite_find_query() {
 		let database_path = create_sqlite_test_database(
 			"runs_exists_for_missing_sqlite_find_query",
@@ -5154,7 +5359,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_snippet_with_schema_fixture_and_backends(
-			"with exampledb;\nexists(find first customers where id == 999)",
+			"with exampledb;\nexists (find first customers where id == 999)",
 			r#"
 				database ExampleDb;
 				schema Main implicit;

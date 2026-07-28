@@ -555,6 +555,22 @@ impl VirtualMachine {
 				self.stack.push(result);
 				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::Exists => {
+				let value = self.pop_value(instruction_index)?;
+				let Value::RecordPointer(record) = value else {
+					return Err(vm_error(
+						instruction_index,
+						format!("Unary `exists` requires a record pointer operand, found `{}`.", type_name(&value)),
+					));
+				};
+				self.stack.push(Value::Boolean(record.exists));
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::FieldPathExists(field_path) => {
+				let value = self.pop_value(instruction_index)?;
+				self.stack.push(Value::Boolean(field_path_exists(value, field_path, instruction_index)?));
+				Ok(ExecutionOutcome::Continue(None))
+			}
 			Instruction::GreaterThan => {
 				let rhs = self.pop_value(instruction_index)?;
 				let lhs = self.pop_value(instruction_index)?;
@@ -676,6 +692,17 @@ impl VirtualMachine {
 					instruction_index,
 				)?;
 				self.stack.push(Value::Integer(value));
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::Locked => {
+				let value = self.pop_value(instruction_index)?;
+				let Value::RecordPointer(record) = value else {
+					return Err(vm_error(
+						instruction_index,
+						format!("Unary `locked` requires a record pointer operand, found `{}`.", type_name(&value)),
+					));
+				};
+				self.stack.push(Value::Boolean(record.locked));
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::MakeArray(element_count) => {
@@ -1300,17 +1327,6 @@ impl VirtualMachine {
 					format!("Built-in function `displn` expects 1 argument(s), found {}.", arguments.len()),
 				)),
 			},
-			BuiltInFunction::Exists => match arguments.as_slice() {
-				[Value::RecordPointer(record)] => Ok(Some(Value::Boolean(record.exists))),
-				[value] => Err(vm_error(
-					instruction_index,
-					format!("Built-in function `exists` does not accept a `{}` value.", type_name(value)),
-				)),
-				_ => Err(vm_error(
-					instruction_index,
-					format!("Built-in function `exists` expects 1 argument(s), found {}.", arguments.len()),
-				)),
-			},
 			BuiltInFunction::FirstOf => group_boundary_built_in_value(
 				BuiltInFunction::FirstOf,
 				arguments.as_slice(),
@@ -1415,17 +1431,6 @@ impl VirtualMachine {
 				_ => Err(vm_error(
 					instruction_index,
 					format!("Built-in function `len` expects 1 argument(s), found {}.", arguments.len()),
-				)),
-			},
-			BuiltInFunction::Locked => match arguments.as_slice() {
-				[Value::RecordPointer(record)] => Ok(Some(Value::Boolean(record.locked))),
-				[value] => Err(vm_error(
-					instruction_index,
-					format!("Built-in function `locked` does not accept a `{}` value.", type_name(value)),
-				)),
-				_ => Err(vm_error(
-					instruction_index,
-					format!("Built-in function `locked` expects 1 argument(s), found {}.", arguments.len()),
 				)),
 			},
 			BuiltInFunction::Minute => match arguments.as_slice() {
@@ -2152,10 +2157,34 @@ fn evaluate_debug_expression(expression: &Expr, frame: &VmStackFrame) -> Result<
 		Expr::Timestamp(timestamp) => Ok(Value::Timestamp(timestamp.value)),
 		Expr::TimestampTz(timestamp) => Ok(Value::TimestampTz(timestamp.value)),
 		Expr::Unary(unary) => {
-			let value = evaluate_debug_expression(&unary.operand, frame)?;
-
 			match unary.operator {
+				UnaryOperator::Exists => {
+					if let Some((base, field_path)) = field_access_base_and_path(&unary.operand) {
+						let value = evaluate_debug_expression(base, frame)?;
+						return Ok(Value::Boolean(field_path_exists(value, &field_path, unary.position)?));
+					}
+
+					let value = evaluate_debug_expression(&unary.operand, frame)?;
+					let Value::RecordPointer(record) = value else {
+						return Err(vm_error(
+							unary.position,
+							format!("Unary `exists` requires a record pointer operand, found `{}`.", type_name(&value)),
+						));
+					};
+					Ok(Value::Boolean(record.exists))
+				}
+				UnaryOperator::Locked => {
+					let value = evaluate_debug_expression(&unary.operand, frame)?;
+					let Value::RecordPointer(record) = value else {
+						return Err(vm_error(
+							unary.position,
+							format!("Unary `locked` requires a record pointer operand, found `{}`.", type_name(&value)),
+						));
+					};
+					Ok(Value::Boolean(record.locked))
+				}
 				UnaryOperator::Negate => {
+					let value = evaluate_debug_expression(&unary.operand, frame)?;
 					if !matches!(value, Value::Decimal(_) | Value::Integer(_)) {
 						return Err(vm_error(
 							unary.position,
@@ -2165,10 +2194,52 @@ fn evaluate_debug_expression(expression: &Expr, frame: &VmStackFrame) -> Result<
 
 					Ok(negate_value(value))
 				}
-				UnaryOperator::Not => Ok(Value::Boolean(!condition_value(value, unary.position)?)),
+				UnaryOperator::Not => {
+					let value = evaluate_debug_expression(&unary.operand, frame)?;
+					Ok(Value::Boolean(!condition_value(value, unary.position)?))
+				}
 			}
 		}
 	}
+}
+
+fn field_path_exists(mut value: Value, field_path: &[String], instruction_index: usize) -> Result<bool, VmError> {
+	for (index, field_name) in field_path.iter().enumerate() {
+		let is_final_field = index + 1 == field_path.len();
+
+		value = match value {
+			Value::Null => return Ok(false),
+			Value::Object(fields) => {
+				let Some(field_value) = fields.get(field_name) else {
+					return Ok(false);
+				};
+
+				if is_final_field {
+					return Ok(true);
+				}
+
+				field_value.clone()
+			}
+			Value::RecordPointer(record) => {
+				if !record.exists || record.locked {
+					return Ok(false);
+				}
+
+				let Some(field_value) = record.fields.get(&normalize_record_field_name(field_name)) else {
+					return Ok(false);
+				};
+
+				if is_final_field {
+					return Ok(true);
+				}
+
+				resolve_record_field_value(field_value, instruction_index)?
+			}
+			_ => return Ok(false),
+		};
+	}
+
+	Ok(false)
 }
 
 fn group_boundary_built_in_value(
@@ -3010,6 +3081,49 @@ mod tests {
 	}
 
 	#[test]
+	fn evaluates_presence_and_lock_watch_expressions_for_locked_record_pointer() {
+		let frame = VmStackFrame {
+			instruction_index: 0,
+			locals: vec![
+				VmVisibleLocal {
+					declared_type: String::from("record pointer"),
+					is_const: false,
+					name: String::from("cust"),
+					slot: 0,
+					value: Value::RecordPointer(RecordPointerValue {
+						column_names: Vec::new(),
+						exists: true,
+						fields: BTreeMap::new(),
+						group_boundaries: BTreeMap::new(),
+						is_dirty: false,
+						locked: true,
+						original_fields: BTreeMap::new(),
+						primary_key_column_names: Vec::new(),
+						projected_values: BTreeMap::new(),
+						persisted: true,
+						record_type: RecordPointerType {
+							database_name: String::from("ExampleDb"),
+							schema_name: String::from("Main"),
+							table_name: String::from("Customers"),
+						},
+						schema_is_implicit: true,
+					}),
+				},
+			],
+			source_location: None,
+		};
+
+		assert_eq!(
+			VirtualMachine::evaluate_watch_expression("exists cust", &frame).unwrap(),
+			Value::Boolean(true),
+		);
+		assert_eq!(
+			VirtualMachine::evaluate_watch_expression("locked(cust)", &frame).unwrap(),
+			Value::Boolean(true),
+		);
+	}
+
+	#[test]
 	fn evaluates_watch_expression_against_visible_locals() {
 		let frame = VmStackFrame {
 			instruction_index: 0,
@@ -3674,5 +3788,34 @@ mod tests {
 		let result = VirtualMachine::new().run(&program).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(-42)));
+	}
+
+	#[test]
+	fn safely_evaluates_field_presence_watch_expressions() {
+		let frame = VmStackFrame {
+			instruction_index: 0,
+			locals: vec![
+				VmVisibleLocal {
+					declared_type: String::from("object"),
+					is_const: false,
+					name: String::from("payload"),
+					slot: 0,
+					value: Value::Object(BTreeMap::from([
+						(String::from("missingPath"), Value::Null),
+						(String::from("nullField"), Value::Null),
+					])),
+				},
+			],
+			source_location: None,
+		};
+
+		assert_eq!(
+			VirtualMachine::evaluate_watch_expression("exists payload.nullField", &frame).unwrap(),
+			Value::Boolean(true),
+		);
+		assert_eq!(
+			VirtualMachine::evaluate_watch_expression("exists payload.missingPath.name", &frame).unwrap(),
+			Value::Boolean(false),
+		);
 	}
 }

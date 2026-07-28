@@ -210,6 +210,8 @@ pub enum Statement {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnaryOperator {
+	Exists,
+	Locked,
 	Negate,
 	Not,
 }
@@ -686,4 +688,20 @@ impl Expr {
 			Expr::Unary(expression) => expression.position,
 		}
 	}
+}
+
+pub fn field_access_base_and_path(expression: &Expr) -> Option<(&Expr, Vec<String>)> {
+	let Expr::FieldAccess(field_access) = expression else {
+		return None;
+	};
+	let mut fields = vec![field_access.field.name.clone()];
+	let mut object = field_access.object.as_ref();
+
+	while let Expr::FieldAccess(field_access) = object {
+		fields.push(field_access.field.name.clone());
+		object = field_access.object.as_ref();
+	}
+
+	fields.reverse();
+	Some((object, fields))
 }
