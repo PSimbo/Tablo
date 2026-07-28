@@ -135,6 +135,7 @@ pub struct CodeBodyDebugInfo {
 pub struct CompiledFunction {
 	body: CodeBody,
 	name: Option<String>,
+	return_type: Option<DataType>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -206,10 +207,11 @@ impl CodeBody {
 }
 
 impl CompiledFunction {
-	pub fn new(name: Option<String>, body: CodeBody) -> Self {
+	pub fn new(name: Option<String>, return_type: Option<DataType>, body: CodeBody) -> Self {
 		Self {
 			body,
 			name,
+			return_type,
 		}
 	}
 
@@ -219,6 +221,10 @@ impl CompiledFunction {
 
 	pub fn name(&self) -> Option<&str> {
 		self.name.as_deref()
+	}
+
+	pub fn return_type(&self) -> Option<&DataType> {
+		self.return_type.as_ref()
 	}
 }
 
@@ -612,6 +618,7 @@ mod tests {
 		]);
 		let helper = CompiledFunction::new(
 			Some(String::from("helper")),
+			Some(DataType::Int),
 			CodeBody::new(vec![
 				Instruction::PushInteger(2),
 			]),

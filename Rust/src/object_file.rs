@@ -205,7 +205,7 @@ impl<'a> ObjectFileReader<'a> {
 		if version != FORMAT_VERSION {
 			return Err(ObjectFileError {
 				offset: MAGIC_BYTES.len(),
-				message: format!("Unsupported object file version {version}."),
+				message: format!("Unsupported object file version {version}; expected version {FORMAT_VERSION}."),
 			});
 		}
 
@@ -600,9 +600,24 @@ impl<'a> ObjectFileReader<'a> {
 		let function_count = self.read_u32()? as usize;
 		let mut sections = Vec::with_capacity(function_count + 1);
 
-		for index in 0..function_count {
+		for _ in 0..function_count {
+			let name = if self.read_bool()? {
+				Some(self.read_string()?)
+			}
+			else {
+				None
+			};
+
+			let return_type = if self.read_bool()? {
+				Some(self.read_data_type()?)
+			}
+			else {
+				None
+			};
+
 			sections.push(ObjectFileSection::Function(CompiledFunction::new(
-				Some(format!("function_{index}")),
+				name,
+				return_type,
 				self.read_code_body()?,
 			)));
 		}
@@ -1323,7 +1338,20 @@ impl ObjectFileLayout {
 		for section in &self.sections {
 			match section {
 				ObjectFileSection::EntryFunction(_) => {}
-				ObjectFileSection::Function(function) => write_code_body(bytes, function.body()),
+				ObjectFileSection::Function(function) => {
+					bytes.push(u8::from(function.name().is_some()));
+					if let Some(name) = function.name() {
+						bytes.extend_from_slice(&(name.len() as u32).to_le_bytes());
+						bytes.extend_from_slice(name.as_bytes());
+					}
+
+					bytes.push(u8::from(function.return_type().is_some()));
+					if let Some(return_type) = function.return_type() {
+						write_data_type(bytes, return_type);
+					}
+
+					write_code_body(bytes, function.body());
+				}
 				ObjectFileSection::EntryCode(_) => {}
 			}
 		}
@@ -1435,6 +1463,21 @@ mod tests {
 		assert_eq!(error, ObjectFileError {
 			offset: 0,
 			message: String::from("Invalid object file magic bytes."),
+		});
+	}
+
+	#[test]
+	fn rejects_previous_object_file_version() {
+		let mut bytes = write_program(&Program::new(vec![
+			Instruction::PushInteger(1),
+		]));
+		bytes[MAGIC_BYTES.len()..MAGIC_BYTES.len() + 2].copy_from_slice(&1_u16.to_le_bytes());
+
+		let error = read_program(&bytes).unwrap_err();
+
+		assert_eq!(error, ObjectFileError {
+			offset: MAGIC_BYTES.len(),
+			message: String::from("Unsupported object file version 1; expected version 2."),
 		});
 	}
 
@@ -1629,11 +1672,21 @@ mod tests {
 			vec![
 				CompiledFunction::new(
 					Some(String::from("add")),
+					Some(DataType::Int),
 					CodeBody::new(vec![
 						Instruction::LoadLocal(0),
 						Instruction::LoadLocal(1),
 						Instruction::Add,
 						Instruction::Return,
+					]),
+				),
+				CompiledFunction::new(
+					Some(String::from("log")),
+					None,
+					CodeBody::new(vec![
+						Instruction::LoadLocal(0),
+						Instruction::CallBuiltIn(BuiltInFunction::Displn, 1),
+						Instruction::ReturnNoValue,
 					]),
 				),
 			],
@@ -1642,25 +1695,9 @@ mod tests {
 		let bytes = write_program(&program);
 		let decoded = read_program(&bytes).unwrap();
 
-		assert_eq!(decoded, Program::from_parts_with_functions(
-			ConstantPool::default(),
-			CodeBody::new(vec![
-				Instruction::PushInteger(1),
-				Instruction::PushInteger(2),
-				Instruction::Call(0, 2),
-			]),
-			vec![
-				CompiledFunction::new(
-					Some(String::from("function_0")),
-					CodeBody::new(vec![
-						Instruction::LoadLocal(0),
-						Instruction::LoadLocal(1),
-						Instruction::Add,
-						Instruction::Return,
-					]),
-				),
-			],
-		));
+		assert_eq!(decoded, program);
+		assert_eq!(decoded.functions()[0].return_type(), Some(&DataType::Int));
+		assert_eq!(decoded.functions()[1].return_type(), None);
 	}
 
 	#[test]

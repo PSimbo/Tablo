@@ -258,6 +258,7 @@ impl Compiler {
 		Ok((
 			CompiledFunction::new(
 				Some(function.name.clone()),
+				function.return_type.clone(),
 				CodeBody::new(emission.instructions),
 			),
 			CodeBodyDebugInfo::new(Some(function.name.clone()), emission.positions, emission.locals, None),

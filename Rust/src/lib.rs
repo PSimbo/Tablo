@@ -4843,6 +4843,34 @@ mod tests {
 	}
 
 	#[test]
+	fn round_trips_canonical_argument_plan_through_object_file() {
+		let output_path = unique_test_output_path("round_trips_canonical_argument_plan_through_object_file");
+		compile(
+			"fn Main(args: [text]): int {\n\
+			    return inspect(reordered: 3, requested: default, 4, 5);\n\
+			}\n\
+			fn inspect(\n\
+			    missing: text?,\n\
+			    declared: int = 2,\n\
+			    requested: int = 7,\n\
+			    reordered: int = 0,\n\
+			    ...values: [int]\n\
+			): int {\n\
+			    return (missing == null ? 10000 : 0)\n\
+			        + declared * 1000\n\
+			        + requested * 100\n\
+			        + reordered * 10\n\
+			        + len(values);\n\
+			}",
+			&output_path,
+		).unwrap();
+		let result = run_file(&output_path).unwrap();
+		let _ = std::fs::remove_file(&output_path);
+
+		assert_eq!(result, Some(Value::Integer(12732)));
+	}
+
+	#[test]
 	fn runs_38_digit_decimal_literal() {
 		let result = evaluate_snippet("3.1415926535897932384626433832795028841").unwrap();
 
