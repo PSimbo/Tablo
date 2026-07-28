@@ -378,29 +378,42 @@ impl Compiler {
 				}
 
 				let reference_slots = semantic_program.call_argument_reference_slots(expression.position());
+				let mut materialized_argument_indices = vec![None; arguments.len()];
+				let mut materialized_argument_count = 0_u32;
 
 				for (index, argument) in arguments.iter().enumerate() {
+					let Some(argument_expression) = argument.expression() else {
+						continue;
+					};
 					if let Some(Some(slot)) = reference_slots.and_then(|slots| slots.get(index)) {
 						self.emit(emission, Instruction::LoadReference(*slot), expression_position);
 					}
 					else {
-						self.compile_into_with_debug_position(&argument.value, semantic_program, emission, Some(expression_position));
+						self.compile_into_with_debug_position(argument_expression, semantic_program, emission, Some(expression_position));
 					}
+					materialized_argument_indices[index] = Some(materialized_argument_count);
+					materialized_argument_count += 1;
 				}
 
 				if let Some(built_in) = semantic_program.built_in_call_target(expression.position()) {
-					self.emit(emission, Instruction::CallBuiltIn(built_in, arguments.len() as u32), expression_position);
+					self.emit(emission, Instruction::CallBuiltIn(built_in, materialized_argument_count), expression_position);
 				}
 				else {
 					let argument_bindings = semantic_program.call_argument_bindings(expression.position())
 						.unwrap_or_else(|| panic!("Missing argument bindings for call expression."));
-					let mut next_materialized_index = arguments.len() as u32;
+					let mut next_materialized_index = materialized_argument_count;
 					let mut argument_order = Vec::with_capacity(argument_bindings.len());
 
 					for binding in argument_bindings {
 						match binding {
-							CallArgumentBinding::Supplied(argument_index) => argument_order.push(*argument_index),
-							CallArgumentBinding::Default(default_value) => {
+							CallArgumentBinding::Supplied(argument_index) => {
+								argument_order.push(
+									materialized_argument_indices[*argument_index as usize]
+										.expect("Supplied call argument bindings must refer to expressions.")
+								);
+							}
+							CallArgumentBinding::OmittedDefault(default_value)
+							| CallArgumentBinding::RequestedDefault(default_value) => {
 								self.compile_into_with_debug_position(
 									default_value,
 									semantic_program,
@@ -1589,7 +1602,7 @@ mod tests {
 						is_by_ref: false,
 						name: None,
 						position: 0,
-						value: Expr::Array(ArrayLiteral {
+						value: CallArgumentValue::Expression(Expr::Array(ArrayLiteral {
 							elements: vec![
 								Expr::Integer(IntegerLiteral {
 									position: 0,
@@ -1601,7 +1614,7 @@ mod tests {
 								}),
 							],
 							position: 0,
-						}),
+						})),
 					},
 				],
 				callee: IdentifierExpr {

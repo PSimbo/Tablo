@@ -2034,7 +2034,13 @@ fn evaluate_debug_call(call: &crate::ast::CallExpr, frame: &VmStackFrame) -> Res
 			));
 		}
 
-		arguments.push(evaluate_debug_expression(&argument.value, frame)?);
+		let Some(expression) = argument.expression() else {
+			return Err(vm_error(
+				argument.position,
+				String::from("Watch expressions cannot request a function parameter default."),
+			));
+		};
+		arguments.push(evaluate_debug_expression(expression, frame)?);
 	}
 
 	let mut vm = VirtualMachine::new();

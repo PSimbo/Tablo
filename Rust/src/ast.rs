@@ -36,6 +36,12 @@ pub enum BinaryOperator {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CallArgumentValue {
+	Default(DefaultArgument),
+	Expression(Expr),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataType {
 	Any,
 	Array(Box<DataType>),
@@ -274,7 +280,7 @@ pub struct CallArgument {
 	pub is_by_ref: bool,
 	pub name: Option<IdentifierExpr>,
 	pub position: usize,
-	pub value: Expr,
+	pub value: CallArgumentValue,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -312,6 +318,34 @@ pub struct DateLiteral {
 pub struct DecimalLiteral {
 	pub position: usize,
 	pub value: Decimal,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DefaultArgument {
+	pub position: usize,
+}
+
+impl CallArgument {
+	pub fn default_argument(&self) -> Option<&DefaultArgument> {
+		match &self.value {
+			CallArgumentValue::Default(default) => Some(default),
+			CallArgumentValue::Expression(_) => None,
+		}
+	}
+
+	pub fn expression(&self) -> Option<&Expr> {
+		match &self.value {
+			CallArgumentValue::Default(_) => None,
+			CallArgumentValue::Expression(expression) => Some(expression),
+		}
+	}
+
+	pub fn expression_mut(&mut self) -> Option<&mut Expr> {
+		match &mut self.value {
+			CallArgumentValue::Default(_) => None,
+			CallArgumentValue::Expression(expression) => Some(expression),
+		}
+	}
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

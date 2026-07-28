@@ -452,7 +452,9 @@ impl QueryPlanBuilder {
 			}
 			Expr::Call(call) => {
 				for argument in &call.arguments {
-					self.visit_expression(&argument.value, enclosing_query);
+					if let Some(expression) = argument.expression() {
+						self.visit_expression(expression, enclosing_query);
+					}
 				}
 			}
 			Expr::Count(count) => {

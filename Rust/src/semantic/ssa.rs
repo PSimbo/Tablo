@@ -371,7 +371,9 @@ impl<'a> FunctionSsaBuilder<'a> {
 			| Expr::TimestampTz(_) => {}
 			Expr::Call(call) => {
 				for argument in &call.arguments {
-					self.lower_expression(block_id, &argument.value);
+					if let Some(expression) = argument.expression() {
+						self.lower_expression(block_id, expression);
+					}
 				}
 
 				if let Some(reference_slots) = self.semantic_program.call_argument_reference_slots(call.position) {

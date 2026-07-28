@@ -959,10 +959,21 @@ fn rewrite_expression_calls(
 			rewrite_expression_calls(&mut binary.left, top_level_renames, import_bindings, shadowed_function_names);
 			rewrite_expression_calls(&mut binary.right, top_level_renames, import_bindings, shadowed_function_names);
 		}
-		ast::Expr::Boolean(_) | ast::Expr::Date(_) | ast::Expr::Decimal(_) | ast::Expr::Integer(_) | ast::Expr::Null(_) | ast::Expr::Text(_) | ast::Expr::Time(_) | ast::Expr::TimeTz(_) | ast::Expr::Timestamp(_) | ast::Expr::TimestampTz(_) => {}
+		ast::Expr::Boolean(_)
+		| ast::Expr::Date(_)
+		| ast::Expr::Decimal(_)
+		| ast::Expr::Integer(_)
+		| ast::Expr::Null(_)
+		| ast::Expr::Text(_)
+		| ast::Expr::Time(_)
+		| ast::Expr::TimeTz(_)
+		| ast::Expr::Timestamp(_)
+		| ast::Expr::TimestampTz(_) => {}
 		ast::Expr::Call(call) => {
 			for argument in &mut call.arguments {
-				rewrite_expression_calls(&mut argument.value, top_level_renames, import_bindings, shadowed_function_names);
+				if let Some(expression) = argument.expression_mut() {
+					rewrite_expression_calls(expression, top_level_renames, import_bindings, shadowed_function_names);
+				}
 			}
 
 			if !shadowed_function_names.iter().any(|name| name == &call.callee.name) {
@@ -1384,6 +1395,32 @@ mod tests {
 		let path = directory.join(file_name);
 		fs::write(&path, source).unwrap();
 		path
+	}
+
+	#[test]
+	fn accepts_recursively_composed_default_expressions() {
+		let result = run(
+			"obj Sample { Value: int, };\n\
+			enum Choice { One }\n\
+			fn Identity(value: int): int { return value; }\n\
+			fn Evaluate(\n\
+			    literalValue: int = 1,\n\
+			    calculatedValue: int = day(@2026-07-28) - 27,\n\
+			    enumValue: Choice = Choice.One,\n\
+			    arrayValue: [int] = [1, 2],\n\
+			    indexedValue: int = [10, 20][1],\n\
+			    objectValue: Sample = Sample { Value: 1 },\n\
+			    fieldValue: int = Sample { Value: 1 }.Value,\n\
+			    selectedValue: int = true ? 1 : 0,\n\
+			    calledValue: int = Identity(1)\n\
+			): int {\n\
+			    return literalValue + calculatedValue + int(enumValue) + arrayValue[1]\n\
+			        + indexedValue / 10 + objectValue.Value + fieldValue + selectedValue + calledValue;\n\
+			}\n\
+			fn Main(args: [text]): int { return Evaluate(); }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(9)));
 	}
 
 	#[test]
@@ -2141,6 +2178,54 @@ mod tests {
 		let _ = std::fs::remove_file(&database_path);
 
 		assert_eq!(result, Some(Value::Integer(0)));
+	}
+
+	#[test]
+	fn evaluates_explicit_arguments_before_defaults_in_the_specified_orders() {
+		let database_path = create_sqlite_test_database(
+			"evaluates_explicit_arguments_before_defaults_in_the_specified_orders",
+			r#"
+				CREATE TABLE CallOrder (
+					Id INTEGER PRIMARY KEY AUTOINCREMENT,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO CallOrder (Name) VALUES ('Initial');
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\n\
+			fn NextValue(): int { return seqnext(CallOrder); }\n\
+			fn Combine(\n\
+			    firstValue: int = NextValue(),\n\
+			    secondValue: int = NextValue(),\n\
+			    thirdValue: int = NextValue()\n\
+			): int {\n\
+			    return firstValue * 100 + secondValue * 10 + thirdValue;\n\
+			}\n\
+			fn Main(args: [text]): int {\n\
+			    const ordered: int = Combine(secondValue: NextValue(), firstValue: NextValue(), thirdValue: default);\n\
+			    const allDefault: int = Combine();\n\
+			    const fullyExplicit: int = Combine(firstValue: 1, secondValue: 2, thirdValue: 9);\n\
+			    return ordered == 324 and allDefault == 567 and fullyExplicit == 129 and CallOrder == 7 ? 1 : 0;\n\
+			}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table CallOrder (
+					Id int not null,
+					Name text not null
+				);
+				create sequence CallOrder;
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(1)));
 	}
 
 	#[test]
@@ -3136,7 +3221,10 @@ mod tests {
 		let TabloError::Compile(error) = error else {
 			panic!("Expected a compile error.");
 		};
-		assert_eq!(error.message, "Variable `left` is not declared in this scope.");
+		assert_eq!(
+			error.message,
+			"A default expression cannot directly reference a variable, constant, or parameter.",
+		);
 	}
 
 	#[test]
@@ -3169,6 +3257,58 @@ mod tests {
 			assert_eq!(
 				error.message,
 				format!("By-reference parameter `{expected_name}` cannot define a default value."),
+			);
+		}
+	}
+
+	#[test]
+	fn rejects_direct_name_captures_in_default_expressions() {
+		for (source, expected_name) in [
+			(
+				"fn Invalid(base: int, value: int = base) {}\nfn Main(args: [text]): int { return 0; }",
+				"base",
+			),
+			(
+				"fn Main(args: [text]): int { var callerValue: int = 1; return Invalid(); }\nfn Invalid(value: int = callerValue): int { return value; }",
+				"callerValue",
+			),
+			(
+				"fn Main(args: [text]): int { var localValue: int = 1; fn Invalid(value: int = localValue) {} return 0; }",
+				"localValue",
+			),
+			(
+				"fn Main(args: [text]): int { const localValue: int = 1; fn Invalid(value: int = localValue) {} return 0; }",
+				"localValue",
+			),
+		] {
+			let error = run(source).unwrap_err();
+			let TabloError::Compile(error) = error else {
+				panic!("Expected a compile error.");
+			};
+
+			assert_eq!(
+				error.message,
+				"A default expression cannot directly reference a variable, constant, or parameter.",
+			);
+			assert_eq!(&source[error.position..error.position + expected_name.len()], expected_name);
+		}
+	}
+
+	#[test]
+	fn rejects_disallowed_default_expression_forms() {
+		for source in [
+			"fn Invalid(value: any = (target = 1)) {}\nfn Main(args: [text]): int { return 0; }",
+			"fn Invalid(value: any = (1:2)) {}\nfn Main(args: [text]): int { return 0; }",
+			"fn Invalid(value: int = count Customers) {}\nfn Main(args: [text]): int { return 0; }",
+		] {
+			let error = run(source).unwrap_err();
+			let TabloError::Compile(error) = error else {
+				panic!("Expected a compile error.");
+			};
+
+			assert_eq!(
+				error.message,
+				"This expression form is not permitted in a function parameter default.",
 			);
 		}
 	}
@@ -3420,6 +3560,47 @@ mod tests {
 			panic!("Expected a compile error.");
 		};
 		assert_eq!(error.message, "Named arguments are not yet supported for built-in functions.");
+	}
+
+	#[test]
+	fn rejects_named_default_for_built_in_without_declared_default() {
+		let source = "fn Main(args: [text]): int { return len(value: default); }";
+		let error = run(source).unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from(
+				"`default` cannot be used when calling built-in function `len` because it has no declared parameter default."
+			),
+			position: source.find("default").unwrap(),
+		}));
+	}
+
+	#[test]
+	fn rejects_named_default_for_by_reference_parameter() {
+		let source =
+			"fn Main(args: [text]): int { return inspect(value: default); }\n\
+			fn inspect(value: &int): int { return value; }";
+		let error = run(source).unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("`default` cannot be used for by-reference parameter `value`."),
+			position: source.find("default").unwrap(),
+		}));
+	}
+
+	#[test]
+	fn rejects_named_default_for_parameter_without_declared_default() {
+		let source =
+			"fn Main(args: [text]): int { return inspect(value: default); }\n\
+			fn inspect(value: int?): int { return value == null ? 1 : 0; }";
+		let error = run(source).unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from(
+				"`default` can only be used for parameter `value` when it declares a default expression."
+			),
+			position: source.find("default").unwrap(),
+		}));
 	}
 
 	#[test]
@@ -3755,6 +3936,66 @@ mod tests {
 	}
 
 	#[test]
+	fn resolves_default_expression_calls_in_the_declaration_scope() {
+		let result = run(
+			"fn DefaultValue(): int { return 1; }\n\
+			fn ReadDefault(value: int = DefaultValue()): int { return value; }\n\
+			fn Main(args: [text]): int {\n\
+			    fn DefaultValue(): int { return 2; }\n\
+			    return ReadDefault();\n\
+			}"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn resolves_imported_default_expression_calls_in_the_declaration_module() {
+		let root_path = write_test_source_file(
+			"resolves_imported_default_expression_calls_in_the_declaration_module",
+			"main.tablo",
+			"use ReadDefault from './Helpers';\n\
+			fn DefaultValue(): int { return 9; }\n\
+			fn Main(args: [text]): int { return ReadDefault(); }",
+		);
+		let helper_path = root_path.parent().unwrap().join("Helpers.tablo");
+		fs::write(
+			&helper_path,
+			"fn DefaultValue(): int { return 7; }\n\
+			pub fn ReadDefault(value: int = DefaultValue()): int { return value; }",
+		).unwrap();
+		let source = fs::read_to_string(&root_path).unwrap();
+		let program = compile_source_to_program_with_name_and_schema(
+			source,
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap();
+
+		let result = run_program(&program).unwrap();
+
+		let _ = fs::remove_file(helper_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
+
+		assert_eq!(result, Some(Value::Integer(7)));
+	}
+
+	#[test]
+	fn resolves_nested_default_expression_calls_in_the_declaration_scope() {
+		let result = run(
+			"fn Main(args: [text]): int { return Outer(); }\n\
+			fn Outer(): int {\n\
+			    fn DefaultValue(): int { return 5; }\n\
+			    fn ReadDefault(value: int = DefaultValue()): int { return value; }\n\
+			    return ReadDefault();\n\
+			}"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(5)));
+	}
+
+	#[test]
 	fn returns_lex_error_from_single_call_api() {
 		let error = run("1 ? 2").unwrap_err();
 
@@ -4072,6 +4313,16 @@ mod tests {
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(7)));
+	}
+
+	#[test]
+	fn runs_call_with_explicitly_requested_default() {
+		let result = run(
+			"fn Main(args: [text]): int { return inspect(value: default); }\n\
+			fn inspect(value: int? = 7): int { return value == 7 ? 1 : 0; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
 	}
 
 	#[test]
@@ -5020,6 +5271,17 @@ mod tests {
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(21)));
+	}
+
+	#[test]
+	fn runs_named_default_marker_inside_parameter_default_expression() {
+		let result = run(
+			"fn Main(args: [text]): int { return calculate(); }\n\
+			fn Identity(value: int = 6): int { return value; }\n\
+			fn calculate(value: int = Identity(value: default)): int { return value + 1; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(7)));
 	}
 
 	#[test]
@@ -6476,6 +6738,17 @@ mod tests {
 		let _ = std::fs::remove_file(&database_path);
 
 		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn uses_named_default_marker_for_overload_binding_without_a_type() {
+		let result = run(
+			"fn Main(args: [text]): int { return resolve(radix: default); }\n\
+			fn resolve(radix: int = 10): int { return radix; }\n\
+			fn resolve(prefix: text = ''): int { return len(prefix); }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(10)));
 	}
 
 	#[test]

@@ -383,7 +383,29 @@ impl Parser {
 				else {
 					false
 				};
-				let value = self.parse_assignment_expression()?;
+				let value = if self.current().is_some_and(|token| token.kind == TokenKind::DefaultKeyword) {
+					let default_keyword = self.next().unwrap();
+
+					if name.is_none() {
+						return Err(ParseError {
+							message: String::from("`default` may only be used as the value of a named argument."),
+							position: default_keyword.start,
+						});
+					}
+					if is_by_ref {
+						return Err(ParseError {
+							message: String::from("`default` cannot be passed by reference."),
+							position: default_keyword.start,
+						});
+					}
+
+					CallArgumentValue::Default(DefaultArgument {
+						position: default_keyword.start,
+					})
+				}
+				else {
+					CallArgumentValue::Expression(self.parse_assignment_expression()?)
+				};
 				if let Some(name) = &name
 					&& arguments.iter().any(|argument: &CallArgument| {
 						argument.name.as_ref().is_some_and(|existing| existing.name == name.name)
@@ -1527,6 +1549,10 @@ impl Parser {
 			TokenKind::Dash => self.parse_negation_expression_with_position(token.start),
 			TokenKind::DateLiteral => self.parse_temporal_literal(token),
 			TokenKind::DecimalLiteral => self.parse_decimal_literal(token),
+			TokenKind::DefaultKeyword => Err(ParseError {
+				message: String::from("`default` may only be used as the value of a named argument."),
+				position: token.start,
+			}),
 			TokenKind::DateKeyword
 			| TokenKind::DecKeyword
 			| TokenKind::BoolKeyword
@@ -2364,7 +2390,16 @@ mod tests {
 			is_by_ref: argument.is_by_ref,
 			name: argument.name.map(normalize_identifier),
 			position: 0,
-			value: normalize_expr(argument.value),
+			value: match argument.value {
+				CallArgumentValue::Default(_) => {
+					CallArgumentValue::Default(DefaultArgument {
+						position: 0,
+					})
+				}
+				CallArgumentValue::Expression(expression) => {
+					CallArgumentValue::Expression(normalize_expr(expression))
+				}
+			},
 		}
 	}
 
@@ -2800,13 +2835,13 @@ mod tests {
 			named_call.arguments[0].name.as_ref().map(|name| name.name.as_str()),
 			Some("value"),
 		);
-		assert!(matches!(named_call.arguments[0].value, Expr::Identifier(_)));
+		assert!(matches!(named_call.arguments[0].value, CallArgumentValue::Expression(Expr::Identifier(_))));
 
 		let Expr::Call(range_call) = parse("Example((value:upperBound))") else {
 			panic!("Expected a function call.");
 		};
 		assert_eq!(range_call.arguments[0].name, None);
-		assert!(matches!(range_call.arguments[0].value, Expr::Range(_)));
+		assert!(matches!(range_call.arguments[0].value, CallArgumentValue::Expression(Expr::Range(_))));
 	}
 
 	#[test]
@@ -3237,10 +3272,10 @@ mod tests {
 						is_by_ref: true,
 						name: None,
 						position: 0,
-						value: Expr::Identifier(IdentifierExpr {
+						value: CallArgumentValue::Expression(Expr::Identifier(IdentifierExpr {
 							name: String::from("x"),
 							position: 0,
-						}),
+						})),
 					},
 				],
 				callee: IdentifierExpr {
@@ -3310,10 +3345,10 @@ mod tests {
 						is_by_ref: false,
 						name: None,
 						position: 0,
-						value: Expr::Identifier(IdentifierExpr {
+						value: CallArgumentValue::Expression(Expr::Identifier(IdentifierExpr {
 							name: String::from("value"),
 							position: 0,
-						}),
+						})),
 					},
 				],
 				callee: IdentifierExpr {
@@ -3876,10 +3911,10 @@ mod tests {
 											is_by_ref: false,
 											name: None,
 											position: 0,
-											value: Expr::Identifier(IdentifierExpr {
+											value: CallArgumentValue::Expression(Expr::Identifier(IdentifierExpr {
 												name: String::from("countryCode"),
 												position: 0,
-											}),
+											})),
 										},
 									],
 									callee: IdentifierExpr {
@@ -4058,19 +4093,19 @@ mod tests {
 						is_by_ref: false,
 						name: None,
 						position: 0,
-						value: Expr::Integer(IntegerLiteral {
+						value: CallArgumentValue::Expression(Expr::Integer(IntegerLiteral {
 							position: 0,
 							value: 1,
-						}),
+						})),
 					},
 					CallArgument {
 						is_by_ref: false,
 						name: None,
 						position: 0,
-						value: Expr::Integer(IntegerLiteral {
+						value: CallArgumentValue::Expression(Expr::Integer(IntegerLiteral {
 							position: 0,
 							value: 2,
-						}),
+						})),
 					},
 				],
 				callee: IdentifierExpr {
@@ -4140,19 +4175,19 @@ mod tests {
 							is_by_ref: false,
 							name: None,
 							position: 0,
-							value: Expr::Integer(IntegerLiteral {
+							value: CallArgumentValue::Expression(Expr::Integer(IntegerLiteral {
 								position: 0,
 								value: 1,
-							}),
+							})),
 						},
 						CallArgument {
 							is_by_ref: false,
 							name: None,
 							position: 0,
-							value: Expr::Integer(IntegerLiteral {
+							value: CallArgumentValue::Expression(Expr::Integer(IntegerLiteral {
 								position: 0,
 								value: 2,
-							}),
+							})),
 						},
 					],
 					callee: IdentifierExpr {
@@ -4657,6 +4692,22 @@ mod tests {
 		assert!(call.arguments[1].is_by_ref);
 		assert_eq!(call.arguments[2].name, None);
 		assert!(!call.arguments[2].is_by_ref);
+	}
+
+	#[test]
+	fn parses_named_default_call_argument_as_a_marker() {
+		let Expr::Call(call) = parse("Example(value: default)") else {
+			panic!("Expected a function call.");
+		};
+
+		assert_eq!(call.arguments.len(), 1);
+		assert_eq!(call.arguments[0].name.as_ref().map(|name| name.name.as_str()), Some("value"));
+		assert_eq!(
+			call.arguments[0].value,
+			CallArgumentValue::Default(DefaultArgument {
+				position: 0,
+			}),
+		);
 	}
 
 	#[test]
@@ -6107,6 +6158,22 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_default_as_a_general_or_positional_expression() {
+		for (source, expected_position) in [
+			("default", 0),
+			("Example(default)", 8),
+		] {
+			let mut lexer = Lexer::new(SourceText::new(source));
+			let tokens = lexer.tokenize().unwrap();
+			let mut parser = Parser::new(tokens);
+			let error = parser.parse_expression().unwrap_err();
+
+			assert_eq!(error.message, "`default` may only be used as the value of a named argument.");
+			assert_eq!(error.position, expected_position);
+		}
+	}
+
+	#[test]
 	fn rejects_duplicate_named_call_arguments() {
 		let mut lexer = Lexer::new(SourceText::new("Example(value: 1, value: 2)"));
 		let tokens = lexer.tokenize().unwrap();
@@ -6174,6 +6241,17 @@ mod tests {
 
 		assert_eq!(error.message, "Expected `)` to close grouped expression, found ``.");
 		assert_eq!(error.position, 6);
+	}
+
+	#[test]
+	fn rejects_passing_default_marker_by_reference() {
+		let mut lexer = Lexer::new(SourceText::new("Example(value: &default)"));
+		let tokens = lexer.tokenize().unwrap();
+		let mut parser = Parser::new(tokens);
+		let error = parser.parse_expression().unwrap_err();
+
+		assert_eq!(error.message, "`default` cannot be passed by reference.");
+		assert_eq!(error.position, 16);
 	}
 
 	#[test]
