@@ -396,11 +396,69 @@ impl Compiler {
 				}
 
 				if let Some(built_in) = semantic_program.built_in_call_target(expression.position()) {
+					if let Some(argument_bindings) = semantic_program.call_argument_bindings(expression.position()) {
+						let argument_order = argument_bindings.iter()
+							.flat_map(|binding| {
+								match binding {
+									CallArgumentBinding::Supplied(argument_index) => {
+										vec![materialized_argument_indices[*argument_index as usize]
+											.expect("Supplied call argument bindings must refer to expressions.")]
+									}
+									CallArgumentBinding::Variadic(argument_indices) => {
+										argument_indices.iter()
+											.map(|argument_index| {
+												materialized_argument_indices[*argument_index as usize]
+													.expect("Variadic call argument bindings must refer to expressions.")
+											})
+											.collect()
+									}
+									CallArgumentBinding::OmittedDefault(_)
+									| CallArgumentBinding::OmittedNull
+									| CallArgumentBinding::RequestedDefault(_) => {
+										unreachable!("Built-in functions do not have omitted arguments.")
+									}
+								}
+							})
+							.collect::<Vec<_>>();
+						let requires_reordering = argument_order.iter().enumerate()
+							.any(|(parameter_index, argument_index)| parameter_index as u32 != *argument_index);
+						if requires_reordering {
+							self.emit(
+								emission,
+								Instruction::ReorderCallArguments(argument_order),
+								expression_position,
+							);
+						}
+					}
 					self.emit(emission, Instruction::CallBuiltIn(built_in, materialized_argument_count), expression_position);
 				}
 				else {
 					let argument_bindings = semantic_program.call_argument_bindings(expression.position())
 						.unwrap_or_else(|| panic!("Missing argument bindings for call expression."));
+					let variadic_materialized_index = argument_bindings.iter()
+						.find_map(|binding| {
+							let CallArgumentBinding::Variadic(argument_indices) = binding else {
+								return None;
+							};
+							let variadic_count = argument_indices.len() as u32;
+							let array_index = materialized_argument_count - variadic_count;
+
+							for (offset, argument_index) in argument_indices.iter().enumerate() {
+								assert_eq!(
+									materialized_argument_indices[*argument_index as usize],
+									Some(array_index + offset as u32),
+									"Trailing variadic arguments must be contiguous at the top of the call stack.",
+								);
+							}
+
+							self.emit(
+								emission,
+								Instruction::MakeArray(variadic_count),
+								expression_position,
+							);
+							materialized_argument_count = array_index + 1;
+							Some(array_index)
+						});
 					let mut next_materialized_index = materialized_argument_count;
 					let mut argument_order = Vec::with_capacity(argument_bindings.len());
 
@@ -427,6 +485,12 @@ impl Compiler {
 								self.emit(emission, Instruction::PushNull, expression_position);
 								argument_order.push(next_materialized_index);
 								next_materialized_index += 1;
+							}
+							CallArgumentBinding::Variadic(_) => {
+								argument_order.push(
+									variadic_materialized_index
+										.expect("Variadic call bindings must have a materialized array.")
+								);
 							}
 						}
 					}

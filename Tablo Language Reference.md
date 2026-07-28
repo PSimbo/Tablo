@@ -1563,13 +1563,13 @@ Each explicitly supplied argument expression is evaluated exactly once, from lef
 
 ~~~
 // `Next()` is called first for `second` and then for `first`.
-Example(second: Next(), first: Next());
+Example(second: Next(), "first": Next());
 ~~~
 
 After all explicitly supplied arguments have been evaluated, omitted by-value parameters are initialized in parameter declaration order. A parameter explicitly bound to `default` is initialized as though it had been omitted. A declared default expression is evaluated exactly once for each call in which its parameter is omitted or explicitly bound to `default`. It is not evaluated when that parameter is supplied with an expression. An omitted nullable parameter without a declared default receives `null` without evaluating an expression.
 
 ~~~
-fn Example(first: int = Next(), second: int = Next()) {
+fn Example("first": int = Next(), second: int = Next()) {
 }
 
 // `Next()` is called first for `first` and then for `second`.

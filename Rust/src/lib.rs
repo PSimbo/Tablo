@@ -30,7 +30,7 @@ use compiler::{ CompileError , Compiler };
 use database::RuntimeDatabaseConfig;
 use object_file::*;
 use schema::SchemaCatalog;
-use semantic::analyzer::SemanticAnalyzer;
+use semantic::analyzer::{ FunctionOverloadAlias, SemanticAnalyzer };
 use semantic::ssa::*;
 use source::SourceText;
 use syntax::lexer::{ LexError, Lexer };
@@ -122,6 +122,11 @@ impl Display for TabloError {
 	}
 }
 
+struct ImportedFunctionTargets {
+	position: usize,
+	target_names: Vec<String>,
+}
+
 #[derive(Clone)]
 struct LinkedModule {
 	exported_functions: BTreeMap<String, String>,
@@ -131,6 +136,7 @@ struct LinkedModule {
 }
 
 struct LinkedProgram {
+	function_overload_aliases: Vec<FunctionOverloadAlias>,
 	function_source_files: Vec<SourceFileDebugInfo>,
 	function_source_indices: Vec<u32>,
 	program: ast::AstProgram,
@@ -140,17 +146,38 @@ struct LinkedProgram {
 
 #[derive(Default)]
 struct ModuleLinker {
+	function_overload_aliases: Vec<FunctionOverloadAlias>,
 	loaded_modules: BTreeMap<PathBuf, LinkedModule>,
+	next_import_alias_id: u32,
 	next_module_id: u32,
 }
 
 impl ModuleLinker {
+	fn add_imported_function_target(
+		imported_functions: &mut BTreeMap<String, ImportedFunctionTargets>,
+		name: &str,
+		target_name: &str,
+		position: usize,
+	) {
+		let targets = imported_functions.entry(name.to_string())
+			.or_insert_with(|| ImportedFunctionTargets {
+				position,
+				target_names: Vec::new(),
+			});
+		targets.position = position;
+
+		if !targets.target_names.iter().any(|existing| existing == target_name) {
+			targets.target_names.push(target_name.to_string());
+		}
+	}
+
 	fn collect_import_bindings(
 		&mut self,
 		program: &ast::AstProgram,
 		base_directory: &Path,
+		source_name: &str,
 	) -> Result<BTreeMap<String, String>, CompileError> {
-		let mut import_bindings = BTreeMap::new();
+		let mut imported_functions = BTreeMap::<String, ImportedFunctionTargets>::new();
 
 		for statement in &program.statements {
 			let ast::Statement::Use(use_declaration) = statement else {
@@ -172,17 +199,64 @@ impl ModuleLinker {
 						});
 					};
 
-					import_bindings.insert(imported_name.name.clone(), target_name.clone());
+					Self::add_imported_function_target(
+						&mut imported_functions,
+						&imported_name.name,
+						target_name,
+						imported_name.position,
+					);
 				}
 			}
 			else {
 				for (name, target_name) in &linked_module.exported_functions {
-					import_bindings.insert(name.clone(), target_name.clone());
+					Self::add_imported_function_target(
+						&mut imported_functions,
+						name,
+						target_name,
+						use_declaration.position,
+					);
 				}
 			}
 		}
 
+		let mut import_bindings = BTreeMap::new();
+		for (display_name, targets) in imported_functions {
+			let alias_name = format!(
+				"__tablo_import_{}_{}",
+				self.next_import_alias_id,
+				display_name,
+			);
+			self.next_import_alias_id += 1;
+			import_bindings.insert(display_name.clone(), alias_name.clone());
+			self.function_overload_aliases.push(FunctionOverloadAlias {
+				alias_name,
+				display_name,
+				position: targets.position,
+				source_name: source_name.to_string(),
+				target_names: targets.target_names,
+			});
+		}
+
 		Ok(import_bindings)
+	}
+
+	fn include_local_function_overloads(
+		&mut self,
+		import_bindings: &BTreeMap<String, String>,
+		local_targets: &BTreeMap<String, String>,
+	) {
+		for (source_name, alias_name) in import_bindings {
+			let Some(local_target) = local_targets.get(source_name) else {
+				continue;
+			};
+			let alias = self.function_overload_aliases.iter_mut()
+				.find(|alias| alias.alias_name == *alias_name)
+				.unwrap_or_else(|| panic!("Missing imported function alias `{alias_name}`."));
+
+			if !alias.target_names.iter().any(|target| target == local_target) {
+				alias.target_names.push(local_target.clone());
+			}
+		}
 	}
 
 	fn linked_function_count(&self) -> usize {
@@ -267,10 +341,15 @@ impl ModuleLinker {
 			},
 		})?;
 		let base_directory = module_path.parent().unwrap_or_else(|| Path::new("."));
-		let import_bindings = self.collect_import_bindings(&program, base_directory)?;
+		let import_bindings = self.collect_import_bindings(
+			&program,
+			base_directory,
+			&module_key.display().to_string(),
+		)?;
 		let module_id = self.next_module_id;
 		self.next_module_id += 1;
 		let top_level_renames = build_top_level_function_renames(&program, module_id);
+		self.include_local_function_overloads(&import_bindings, &top_level_renames);
 		let source_file = SourceFileDebugInfo::from_source(module_key.display().to_string(), &source_text);
 
 		for function in &mut program.functions {
@@ -481,6 +560,7 @@ fn analyze_source_local_usage_with_name_and_schema(
 	validate_module_graph(&program, source_name).map_err(TabloError::Compile)?;
 	let linked_program = link_program_modules(&program, &source, source_name).map_err(TabloError::Compile)?;
 	let mut analyzer = SemanticAnalyzer::new();
+	analyzer.set_function_overload_aliases(linked_program.function_overload_aliases.clone());
 	analyzer.set_root_source_name(Some(linked_program.root_source_file.display_name().to_string()));
 	analyzer.set_top_level_function_source_names(linked_program.top_level_function_source_names.clone());
 	let semantic_program = analyzer.analyze_program_with_schema(&linked_program.program, schema_catalog)
@@ -576,6 +656,7 @@ fn compile_source_to_program_with_name_and_schema(
 	validate_module_graph(&program, source_name).map_err(TabloError::Compile)?;
 	let linked_program = link_program_modules(&program, &source, source_name).map_err(TabloError::Compile)?;
 	let mut analyzer = SemanticAnalyzer::new();
+	analyzer.set_function_overload_aliases(linked_program.function_overload_aliases.clone());
 	analyzer.set_root_source_name(Some(linked_program.root_source_file.display_name().to_string()));
 	analyzer.set_top_level_function_source_names(linked_program.top_level_function_source_names.clone());
 	let mut program = compile_ast_program_with_schema_and_analyzer(&linked_program.program, target, schema_catalog, analyzer)?;
@@ -805,6 +886,7 @@ fn link_program_modules(
 
 	let Some(source_name) = source_name else {
 		return Ok(LinkedProgram {
+			function_overload_aliases: Vec::new(),
 			function_source_files: Vec::new(),
 			function_source_indices: collect_function_source_indices(program, 0),
 			program: program.clone(),
@@ -817,6 +899,7 @@ fn link_program_modules(
 
 	if first_use_statement(program).is_none() {
 		return Ok(LinkedProgram {
+			function_overload_aliases: Vec::new(),
 			function_source_files: Vec::new(),
 			function_source_indices: collect_function_source_indices(program, 0),
 			program: program.clone(),
@@ -830,7 +913,15 @@ fn link_program_modules(
 	let root_path = Path::new(source_name);
 	let root_directory = root_path.parent().unwrap_or_else(|| Path::new("."));
 	let mut linker = ModuleLinker::default();
-	let import_bindings = linker.collect_import_bindings(program, root_directory)?;
+	let import_bindings = linker.collect_import_bindings(
+		program,
+		root_directory,
+		&root_display_name,
+	)?;
+	let root_function_targets = program.functions.iter()
+		.map(|function| (function.name.clone(), function.name.clone()))
+		.collect();
+	linker.include_local_function_overloads(&import_bindings, &root_function_targets);
 	let mut linked_program = program.clone();
 
 	for function in &mut linked_program.functions {
@@ -877,6 +968,7 @@ fn link_program_modules(
 	}
 
 	Ok(LinkedProgram {
+		function_overload_aliases: linker.function_overload_aliases,
 		function_source_files: imported_source_files,
 		function_source_indices,
 		program: linked_program,
@@ -977,10 +1069,10 @@ fn rewrite_expression_calls(
 			}
 
 			if !shadowed_function_names.iter().any(|name| name == &call.callee.name) {
-				if let Some(renamed) = top_level_renames.get(&call.callee.name) {
+				if let Some(renamed) = import_bindings.get(&call.callee.name) {
 					call.callee.name = renamed.clone();
 				}
-				else if let Some(renamed) = import_bindings.get(&call.callee.name) {
+				else if let Some(renamed) = top_level_renames.get(&call.callee.name) {
 					call.callee.name = renamed.clone();
 				}
 			}
@@ -1395,6 +1487,19 @@ mod tests {
 		let path = directory.join(file_name);
 		fs::write(&path, source).unwrap();
 		path
+	}
+
+	#[test]
+	fn accepts_optional_overloads_distinguished_by_parameter_name() {
+		let result = run(
+			"fn format(value: int, radix: int = 10): int { return radix; }\n\
+			fn format(value: int, prefix: text = ''): int { return len(prefix); }\n\
+			fn Main(args: [text]): int {\n\
+			    return format(1, radix: 16) + format(1, prefix: 'xx');\n\
+			}"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(18)));
 	}
 
 	#[test]
@@ -2261,6 +2366,13 @@ mod tests {
 	}
 
 	#[test]
+	fn evaluates_named_argument_for_built_in_function() {
+		let result = evaluate_snippet("len(str: 'abc')").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
 	fn executes_merged_correlated_count_with_independent_fallback() {
 		let database_path = create_sqlite_test_database(
 			"executes_merged_correlated_count_with_independent_fallback",
@@ -2541,6 +2653,23 @@ mod tests {
 		let _ = std::fs::remove_file(&database_path);
 
 		assert_eq!(result, Some(Value::Integer(10)));
+	}
+
+	#[test]
+	fn ignores_return_types_and_default_contents_when_validating_overloads() {
+		let error = run(
+			"fn resolve(value: int = 1): int { return value; }\n\
+			fn resolve(value: int = 2): text { return 'duplicate'; }\n\
+			fn Main(args: [text]): int { return 0; }"
+		).unwrap_err();
+
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+		assert_eq!(
+			error.message,
+			"Function overload `resolve` duplicates an existing callable signature in this scope.",
+		);
 	}
 
 	#[test]
@@ -2877,6 +3006,72 @@ mod tests {
 	}
 
 	#[test]
+	fn merges_compatible_overloads_imported_from_multiple_modules() {
+		let root_path = write_test_source_file(
+			"merges_compatible_overloads_imported_from_multiple_modules_root",
+			"main.tablo",
+			"use Convert from './IntegerHelpers';\n\
+			use Convert from './TextHelpers';\n\
+			fn Main(args: [text]): int { return Convert(2) + Convert('x'); }",
+		);
+		let integer_path = root_path.parent().unwrap().join("IntegerHelpers.tablo");
+		let text_path = root_path.parent().unwrap().join("TextHelpers.tablo");
+		fs::write(
+			&integer_path,
+			"pub fn Convert(value: int): int { return value; }",
+		).unwrap();
+		fs::write(
+			&text_path,
+			"pub fn Convert(value: text): int { return 10; }",
+		).unwrap();
+
+		let program = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap();
+		let result = run_program(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(12)));
+
+		let _ = fs::remove_file(integer_path);
+		let _ = fs::remove_file(text_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
+	}
+
+	#[test]
+	fn merges_local_and_imported_function_overloads() {
+		let root_path = write_test_source_file(
+			"merges_local_and_imported_function_overloads_root",
+			"main.tablo",
+			"use Convert from './Helpers';\n\
+			fn Convert(value: int): int { return value; }\n\
+			fn Main(args: [text]): int { return Convert(2) + Convert('x'); }",
+		);
+		let helper_path = root_path.parent().unwrap().join("Helpers.tablo");
+		fs::write(
+			&helper_path,
+			"pub fn Convert(value: text): int { return 10; }",
+		).unwrap();
+
+		let program = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap();
+		let result = run_program(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(12)));
+
+		let _ = fs::remove_file(helper_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
+	}
+
+	#[test]
 	fn omits_synthetic_entry_frame_from_standalone_runtime_stack_trace() {
 		let source = "fn inner(): int {\n  var xs: [int] = [1];\n  return xs[2];\n}\nfn Main(args: [text]): int {\n  return inner();\n}";
 		let error = run(source).unwrap_err();
@@ -2996,6 +3191,24 @@ mod tests {
 	}
 
 	#[test]
+	fn preserves_evaluation_order_and_references_with_variadic_arguments() {
+		let result = run(
+			"fn next(counter: &int): int { counter += 1; return counter; }\n\
+			fn store(target: &int, head: int, ...values: [int]) {\n\
+			    target = head * 100 + values[1] * 10 + values[2];\n\
+			}\n\
+			fn Main(args: [text]): int {\n\
+			    var counter: int = 0;\n\
+			    var result: int = 0;\n\
+			    store(target: &result, head: next(&counter), next(&counter), next(&counter));\n\
+			    return result == 123 and counter == 3 ? 1 : 0;\n\
+			}"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
 	fn rejects_39_digit_decimal_source_text() {
 		let error = evaluate_snippet("3.14159265358979323846264338327950288415").unwrap_err();
 
@@ -3016,7 +3229,44 @@ mod tests {
 		let TabloError::Compile(error) = error else {
 			panic!("Expected a compile error.");
 		};
-		assert_eq!(error.message, "Call to function `choose` is ambiguous between multiple overloads.");
+		assert_eq!(
+			error.message,
+			"Call to function `choose` is ambiguous between the following overloads: `choose(value: int = default)`, `choose(value: text = default)`.",
+		);
+	}
+
+	#[test]
+	fn rejects_ambiguous_fixed_and_variadic_overload_call() {
+		let error = run(
+			"fn choose(value: int): int { return 1; }\n\
+			fn choose(...values: [int]): int { return 2; }\n\
+			fn Main(args: [text]): int { return choose(1); }"
+		).unwrap_err();
+
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+		assert_eq!(
+			error.message,
+			"Call to function `choose` is ambiguous between the following overloads: `choose(value: int)`, `choose(...values: [int])`.",
+		);
+	}
+
+	#[test]
+	fn rejects_ambiguous_overload_call_introduced_by_nullable_compatibility() {
+		let error = run(
+			"fn choose(left: int): int { return 1; }\n\
+			fn choose(right: int?): int { return 2; }\n\
+			fn Main(args: [text]): int { return choose(1); }"
+		).unwrap_err();
+
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+		assert_eq!(
+			error.message,
+			"Call to function `choose` is ambiguous between the following overloads: `choose(left: int)`, `choose(right: int?)`.",
+		);
 	}
 
 	#[test]
@@ -3030,7 +3280,10 @@ mod tests {
 		let TabloError::Compile(error) = error else {
 			panic!("Expected a compile error.");
 		};
-		assert_eq!(error.message, "Call to function `choose` is ambiguous between multiple overloads.");
+		assert_eq!(
+			error.message,
+			"Call to function `choose` is ambiguous between the following overloads: `choose(left: int)`, `choose(right: int)`.",
+		);
 	}
 
 	#[test]
@@ -3155,7 +3408,10 @@ mod tests {
 		let TabloError::Compile(error) = error else {
 			panic!("Expected a compile error.");
 		};
-		assert_eq!(error.message, "No overload of function `choose` accepts the supplied arguments.");
+		assert_eq!(
+			error.message,
+			"No overload of function `choose` accepts the supplied arguments. Candidate `choose(value: int)` rejected argument for parameter `value`: expected `int`, found `bool`. Candidate `choose(value: text)` rejected argument for parameter `value`: expected `text`, found `bool`.",
+		);
 	}
 
 	#[test]
@@ -3176,8 +3432,10 @@ mod tests {
 		let error = evaluate_snippet("contains(1, 'x')").unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
-			message: String::from("Built-in function `contains` does not accept an argument of type `int`."),
-			position: 9,
+			message: String::from(
+				"No overload of built-in function `contains` accepts the supplied arguments. Candidate `contains(str: text, sub: text)` rejected argument for parameter `str`: expected `text`, found `int`. Candidate `contains(arr: [text], elem: text)` rejected argument for parameter `arr`: expected `[text]`, found `int`."
+			),
+			position: 8,
 		}));
 	}
 
@@ -3186,8 +3444,10 @@ mod tests {
 		let error = evaluate_snippet("countof(1, 'x')").unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
-			message: String::from("Built-in function `countof` does not accept an argument of type `int`."),
-			position: 8,
+			message: String::from(
+				"No overload of built-in function `countof` accepts the supplied arguments. Candidate `countof(str: text, arr: [text])` rejected argument for parameter `str`: expected `text`, found `int`. Candidate `countof(sub: text, str: text)` rejected argument for parameter `sub`: expected `text`, found `int`."
+			),
+			position: 7,
 		}));
 	}
 
@@ -3376,6 +3636,47 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_fixed_overload_shadowed_by_variadic_parameter_without_call() {
+		let error = run(
+			"fn append(value: int) {}\n\
+			fn append(value: int, ...others: [int]) {}\n\
+			fn Main(args: [text]): int { return 0; }"
+		).unwrap_err();
+
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+		assert_eq!(
+			error.message,
+			"Function overload set `append` is invalid because the following overload cannot be selected uniquely: `append(value: int)`.",
+		);
+	}
+
+	#[test]
+	fn rejects_group_boundary_built_in_without_required_named_argument() {
+		let error = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]): int {\n    for rec cust in Customers group by Country as country {\n        if firstof(v2: [country]) { return 1; }\n    }\n    return 0;\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Country text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap_err();
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+
+		assert_eq!(
+			error.message,
+			"Arguments do not match the parameters of built-in function `firstof`.",
+		);
+	}
+
+	#[test]
 	fn rejects_if_rec_binding_used_inside_its_condition() {
 		let error = compile_source_to_program_with_name_and_schema(
 			"with exampledb;\nfn Main(args: [text]): int { if rec user = find first Customers where Id == 1 and user.Id == 1 { return user.Id; } return -1; }",
@@ -3399,6 +3700,19 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_implicit_int_to_decimal_function_argument_conversion() {
+		let error = run(
+			"fn Main(args: [text]): int { accept(1); return 0; }\n\
+			fn accept(value: dec) {}"
+		).unwrap_err();
+
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+		assert_eq!(error.message, "Cannot assign a value of type `int` to a variable of type `dec`.");
+	}
+
+	#[test]
 	fn rejects_implicit_outer_variable_capture_in_nested_function_source_text() {
 		let error = run(
 			"fn Main(args: [text]): int { var x: int = 1; fn inner(): int { return x; } return inner(); }"
@@ -3417,8 +3731,10 @@ mod tests {
 		let error = evaluate_snippet("indexof(1, 'x')").unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
-			message: String::from("Built-in function `indexof` does not accept an argument of type `int`."),
-			position: 8,
+			message: String::from(
+				"No overload of built-in function `indexof` accepts the supplied arguments. Candidate `indexof(str: text, arr: [text])` rejected argument for parameter `str`: expected `text`, found `int`. Candidate `indexof(sub: text, str: text)` rejected argument for parameter `sub`: expected `text`, found `int`."
+			),
+			position: 7,
 		}));
 	}
 
@@ -3453,6 +3769,17 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_invalid_named_literal_numeric_format_string_at_compile_time() {
+		let source = "format(pattern: 'x.00', v: 12.0)";
+		let error = evaluate_snippet(source).unwrap_err();
+
+		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
+			message: String::from("Invalid numeric format string: Decimal numeric format strings must use `1` as the whole-digit marker."),
+			position: source.find("'x.00'").unwrap(),
+		}));
+	}
+
+	#[test]
 	fn rejects_invalid_text_to_date_cast_at_runtime() {
 		let error = evaluate_snippet("date('2026-02-30')").unwrap_err();
 
@@ -3477,8 +3804,10 @@ mod tests {
 		let error = evaluate_snippet("len(1)").unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
-			message: String::from("Built-in function `len` does not accept an argument of type `int`."),
-			position: 4,
+			message: String::from(
+				"No overload of built-in function `len` accepts the supplied arguments. Candidate `len(v: [any])` rejected argument for parameter `v`: expected `[any]`, found `int`. Candidate `len(str: text)` rejected argument for parameter `str`: expected `text`, found `int`."
+			),
+			position: 3,
 		}));
 	}
 
@@ -3532,6 +3861,24 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_multiple_unselectable_overloads_in_three_function_set() {
+		let error = run(
+			"fn combine(value: int, left: int = 0) {}\n\
+			fn combine(value: int, right: int = 0) {}\n\
+			fn combine(value: int, left: int = 0, right: int = 0) {}\n\
+			fn Main(args: [text]): int { return 0; }"
+		).unwrap_err();
+
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+		assert_eq!(
+			error.message,
+			"Function overload set `combine` is invalid because the following overloads cannot be selected uniquely: `combine(value: int, left: int = default)`, `combine(value: int, right: int = default)`.",
+		);
+	}
+
+	#[test]
 	fn rejects_mysql_sequence_references_during_compilation() {
 		let error = compile_standalone_with_schema_fixture_and_backends(
 			"with exampledb;\nfn Main(args: [text]): int { return seqnext(InvoiceNumber); }",
@@ -3550,16 +3897,6 @@ mod tests {
 			),
 			other => panic!("Expected compile error, found {other:?}."),
 		}
-	}
-
-	#[test]
-	fn rejects_named_argument_for_built_in_function() {
-		let error = evaluate_snippet("len(value: 'abc')").unwrap_err();
-
-		let TabloError::Compile(error) = error else {
-			panic!("Expected a compile error.");
-		};
-		assert_eq!(error.message, "Named arguments are not yet supported for built-in functions.");
 	}
 
 	#[test]
@@ -3601,6 +3938,19 @@ mod tests {
 			),
 			position: source.find("default").unwrap(),
 		}));
+	}
+
+	#[test]
+	fn rejects_named_scalar_for_variadic_parameter() {
+		let error = run(
+			"fn collect(...values: [int]): int { return len(values); }\n\
+			fn Main(args: [text]): int { return collect(values: 1); }"
+		).unwrap_err();
+
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+		assert_eq!(error.message, "Cannot assign a value of type `int` to a variable of type `[int]`.");
 	}
 
 	#[test]
@@ -3665,6 +4015,23 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_non_nullable_overload_shadowed_by_nullable_overload() {
+		let error = run(
+			"fn inspect(value: int) {}\n\
+			fn inspect(value: int?) {}\n\
+			fn Main(args: [text]): int { return 0; }"
+		).unwrap_err();
+
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+		assert_eq!(
+			error.message,
+			"Function overload set `inspect` is invalid because the following overload cannot be selected uniquely: `inspect(value: int)`.",
+		);
+	}
+
+	#[test]
 	fn rejects_non_numeric_range_source_text() {
 		let error = evaluate_snippet("'a':1").unwrap_err();
 
@@ -3682,6 +4049,19 @@ mod tests {
 			message: String::from("Record pointer `cust` must be initialized from a record pointer value, found `int`."),
 			position: 40,
 		}));
+	}
+
+	#[test]
+	fn rejects_nullable_argument_for_non_nullable_parameter() {
+		let error = run(
+			"fn accept(value: int): int { return value; }\n\
+			fn Main(args: [text]): int { var value: int? = 1; return accept(value); }"
+		).unwrap_err();
+
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+		assert_eq!(error.message, "Cannot assign a value of type `int?` to a variable of type `int`.");
 	}
 
 	#[test]
@@ -3768,6 +4148,48 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_scalar_named_group_boundary_variadic_argument() {
+		let error = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]): int {\n    for rec cust in Customers group by Country as country, City {\n        if firstof(v1: country, v2: City) { return 1; }\n    }\n    return 0;\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Country text not null,
+					City text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap_err();
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+
+		assert_eq!(
+			error.message,
+			"Named variadic argument `v2` for built-in function `firstof` must be an array literal of grouping levels.",
+		);
+	}
+
+	#[test]
+	fn rejects_shorter_overload_shadowed_by_optional_parameter() {
+		let error = run(
+			"fn example(value: int) {}\n\
+			fn example(value: int, precision: int = 0) {}\n\
+			fn Main(args: [text]): int { return 0; }"
+		).unwrap_err();
+
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+		assert_eq!(
+			error.message,
+			"Function overload set `example` is invalid because the following overload cannot be selected uniquely: `example(value: int)`.",
+		);
+	}
+
+	#[test]
 	fn rejects_split_with_non_text_argument_source_text() {
 		let error = evaluate_snippet("split(1, ',')").unwrap_err();
 
@@ -3847,6 +4269,69 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_unselectable_nested_function_overload() {
+		let error = run(
+			"fn Main(args: [text]): int {\n\
+			    fn inspect(value: int) {}\n\
+			    fn inspect(value: int?) {}\n\
+			    return 0;\n\
+			}"
+		).unwrap_err();
+
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+		assert_eq!(
+			error.message,
+			"Function overload set `inspect` is invalid because the following overload cannot be selected uniquely: `inspect(value: int)`.",
+		);
+	}
+
+	#[test]
+	fn rejects_unselectable_overload_set_combined_by_imports() {
+		let root_source =
+			"use Inspect from './StrictHelpers';\n\
+			use Inspect from './NullableHelpers';\n\
+			fn Main(args: [text]): int { return 0; }";
+		let root_path = write_test_source_file(
+			"rejects_unselectable_overload_set_combined_by_imports_root",
+			"main.tablo",
+			root_source,
+		);
+		let strict_path = root_path.parent().unwrap().join("StrictHelpers.tablo");
+		let nullable_path = root_path.parent().unwrap().join("NullableHelpers.tablo");
+		fs::write(
+			&strict_path,
+			"pub fn Inspect(value: int) {}",
+		).unwrap();
+		fs::write(
+			&nullable_path,
+			"pub fn Inspect(value: int?) {}",
+		).unwrap();
+
+		let error = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap_err();
+
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+		assert_eq!(
+			error.message,
+			"Function overload set `Inspect` is invalid because the following overload cannot be selected uniquely: `Inspect(value: int)`.",
+		);
+		assert_eq!(error.position, root_source.rfind("Inspect").unwrap());
+
+		let _ = fs::remove_file(strict_path);
+		let _ = fs::remove_file(nullable_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
+	}
+
+	#[test]
 	fn rejects_use_without_source_file_path() {
 		let error = compile_source_to_program_with_name_and_schema(
 			"use './Helpers';\nfn Main(args: [text]): int { return 0; }",
@@ -3915,6 +4400,13 @@ mod tests {
 	}
 
 	#[test]
+	fn reorders_named_arguments_for_built_in_function() {
+		let result = evaluate_snippet("contains(sub: 'abl', str: 'Tablo')").unwrap();
+
+		assert_eq!(result, Some(Value::Boolean(true)));
+	}
+
+	#[test]
 	fn reports_unsupported_postgresql_query_expression_at_its_source_position() {
 		let source = "with exampledb;\ncount Customers where len(Name) > 0";
 		let error = compile_snippet_with_schema_fixture_and_backends(
@@ -3947,6 +4439,19 @@ mod tests {
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn resolves_fixed_and_variadic_overloads_without_preference() {
+		let result = run(
+			"fn choose(value: int, label: text): int { return 1; }\n\
+			fn choose(value: int, ...others: [int]): int { return 2; }\n\
+			fn Main(args: [text]): int {\n\
+			    return choose(1, 'label') * 10 + choose(1, 2, 3);\n\
+			}"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(12)));
 	}
 
 	#[test]
@@ -5168,6 +5673,13 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_int_cast_with_named_argument_source_text() {
+		let result = evaluate_snippet("int(v: true)").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
 	fn runs_integer_range_source_text() {
 		let result = evaluate_snippet("0:10").unwrap();
 
@@ -5231,6 +5743,42 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_named_and_mixed_group_boundary_built_in_arguments() {
+		let database_path = create_sqlite_test_database(
+			"runs_named_and_mixed_group_boundary_built_in_arguments",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Country TEXT NOT NULL,
+					City TEXT NOT NULL
+				);
+				INSERT INTO Customers (Id, Country, City) VALUES (30, 'US', 'New York');
+				INSERT INTO Customers (Id, Country, City) VALUES (20, 'CA', 'Toronto');
+				INSERT INTO Customers (Id, Country, City) VALUES (10, 'CA', 'Ottawa');
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]): int {\n    var firstCountries: int = 0;\n    var lastCountries: int = 0;\n    var namedArrayCities: int = 0;\n    var trailingCities: int = 0;\n    for rec cust in Customers group by Country as country, City {\n        if firstof(v1: country) {\n            firstCountries += 1;\n        }\n        if lastof(v1: country) {\n            lastCountries += 1;\n        }\n        if firstof(v2: [City], v1: country) {\n            namedArrayCities += 1;\n        }\n        if lastof(v1: country, City) {\n            trailingCities += 1;\n        }\n    }\n    return firstCountries * 1000 + lastCountries * 100 + namedArrayCities * 10 + trailingCities;\n}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Country text not null,
+					City text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(2233)));
+	}
+
+	#[test]
 	fn runs_named_arguments_in_parameter_order() {
 		let result = run(
 			"fn Main(args: [text]): int { return subtract(right: 2, left: 9); }\n\
@@ -5252,6 +5800,40 @@ mod tests {
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(21)));
+	}
+
+	#[test]
+	fn runs_named_built_in_arguments_in_database_query() {
+		let database_path = create_sqlite_test_database(
+			"runs_named_built_in_arguments_in_database_query",
+			r#"
+				CREATE TABLE Customers (
+					Id INTEGER NOT NULL,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO Customers (Id, Name) VALUES
+					(1, '  Ada Lovelace  '),
+					(2, 'Bea');
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]): int { rec cust = find first Customers where contains(sub: 'Ada', str: trim(str: Name)); if cust { return cust.Id; } return 0; }",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(1)));
 	}
 
 	#[test]
@@ -5803,6 +6385,39 @@ mod tests {
 		let _ = std::fs::remove_file(&database_path);
 
 		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn runs_seqnext_with_named_sequence_argument() {
+		let database_path = create_sqlite_test_database(
+			"runs_seqnext_with_named_sequence_argument",
+			r#"
+				CREATE TABLE InvoiceNumber (
+					Id INTEGER PRIMARY KEY AUTOINCREMENT,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO InvoiceNumber (Name) VALUES ('First');
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\nfn Main(args: [text]): int { return seqnext(s: InvoiceNumber); }",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table InvoiceNumber (
+					Id int not null,
+					Name text not null
+				);
+				create sequence InvoiceNumber;
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(2)));
 	}
 
 	#[test]
@@ -6587,6 +7202,34 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_variadic_calls_with_trailing_and_named_array_arguments() {
+		let result = run(
+			"fn summarize(head: int = 1, ...values: [int]): int {\n\
+			    return head * 1000\n\
+			        + len(values) * 100\n\
+			        + (len(values) > 0 ? values[1] * 10 : 0)\n\
+			        + (len(values) > 1 ? values[2] : 0);\n\
+			}\n\
+			fn Main(args: [text]): int {\n\
+			    const empty: int = summarize(4);\n\
+			    const positional: int = summarize(4, 2, 3);\n\
+			    const afterNamed: int = summarize(head: 5, 6, 7);\n\
+			    const namedArray: int = summarize(head: 8, values: [9, 1]);\n\
+			    const omittedFixed: int = summarize(values: [7, 6]);\n\
+			    const requestedDefault: int = summarize(head: default, 4, 5);\n\
+			    return empty == 4000\n\
+			        and positional == 4223\n\
+			        and afterNamed == 5267\n\
+			        and namedArray == 8291\n\
+			        and omittedFixed == 1276\n\
+			        and requestedDefault == 1245 ? 1 : 0;\n\
+			}"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
 	fn runs_while_source_text() {
 		let result = run(standalone_body("var x: int = 0;\nwhile x < 3 { x += 1; }\nreturn x;")).unwrap();
 
@@ -6645,6 +7288,28 @@ mod tests {
 	}
 
 	#[test]
+	fn selects_int_overload_without_implicit_decimal_argument_conversion() {
+		let result = run(
+			"fn Main(args: [text]): int { return identify(1); }\n\
+			fn identify(value: int): int { return 1; }\n\
+			fn identify(value: dec): int { return 10; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn selects_nullable_overload_for_nullable_argument() {
+		let result = run(
+			"fn choose(left: int): int { return 1; }\n\
+			fn choose(right: int?): int { return 2; }\n\
+			fn Main(args: [text]): int { var value: int? = null; return choose(value); }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(2)));
+	}
+
+	#[test]
 	fn stringifies_enum_value_as_variant_name() {
 		let result = run(
 			"enum Color { Red, Green: 3, Blue }\nfn Main(args: [text]): int { var color: Color; color = Color.Blue; var message: text = 'Selected: ${ color }'; if message == 'Selected: Blue' { return 1; } return 0; }"
@@ -6664,6 +7329,16 @@ mod tests {
 		let result = run_program_with_arguments(&program, &arguments).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(2)));
+	}
+
+	#[test]
+	fn supplies_non_nullable_argument_to_nullable_parameter() {
+		let result = run(
+			"fn accept(value: int?): int { return value != null ? value : 0; }\n\
+			fn Main(args: [text]): int { return accept(3); }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(3)));
 	}
 
 	#[test]

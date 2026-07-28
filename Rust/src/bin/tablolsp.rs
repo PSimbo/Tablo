@@ -495,6 +495,34 @@ mod tests {
 	use super::*;
 
 	#[test]
+	fn completion_items_include_built_in_signature_details() {
+		let mut server = LspServer::new();
+		server.open_documents.insert(
+			String::from("file:///tmp/example.tablo"),
+			OpenDocument {
+				text: String::from("fn Main(args: [text]): int { cont }"),
+				version: 1,
+			},
+		);
+
+		let items = server.completion_items(
+			"file:///tmp/example.tablo",
+			Position {
+				line: 0,
+				character: 34,
+			},
+		);
+		let contains = items.iter()
+			.find(|item| item.get("label").and_then(JsonValue::as_str) == Some("contains"))
+			.unwrap();
+
+		assert_eq!(
+			contains.get("detail").and_then(JsonValue::as_str),
+			Some("contains(str: text, sub: text): bool\ncontains(arr: [text], elem: text): bool"),
+		);
+	}
+
+	#[test]
 	fn completion_items_include_document_symbols_before_cursor() {
 		let mut server = LspServer::new();
 		server.open_documents.insert(

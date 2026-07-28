@@ -877,6 +877,14 @@ impl Parser {
 				position: name.start,
 			});
 		}
+
+		if is_variadic && is_by_ref {
+			return Err(ParseError {
+				message: String::from("A variadic parameter may not be passed by reference."),
+				position: name.start,
+			});
+		}
+
 		if is_variadic && !matches!(&data_type, FunctionParameterType::Value(DataType::Array(_))) {
 			return Err(ParseError {
 				message: String::from("A variadic parameter must have an array type."),
@@ -6221,6 +6229,10 @@ mod tests {
 			(
 				"fn Example(...values: [int] = []) {}",
 				"A variadic parameter may not define a default value.",
+			),
+			(
+				"fn Example(...values: &[int]) {}",
+				"A variadic parameter may not be passed by reference.",
 			),
 		] {
 			let mut lexer = Lexer::new(SourceText::new(source));

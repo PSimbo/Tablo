@@ -44,7 +44,8 @@ pub fn diagnostic_for_tablo_error(source: &str, error: TabloError) -> Diagnostic
 		),
 	};
 
-	if let Some((start, end)) = token_span_at_position(&source, position) {
+	if let Some((start, end)) = call_span_at_position(&source, position)
+		.or_else(|| token_span_at_position(&source, position)) {
 		diagnostic_for_byte_span(&source, start, end, 1, &message)
 	}
 	else {
@@ -197,6 +198,37 @@ mod tests {
 	use super::*;
 
 	use crate::compiler::*;
+	use crate::check;
+
+	#[test]
+	fn highlights_full_ambiguous_call() {
+		let source = "\
+fn Main(args: [text]): int { return choose(1); }
+fn choose(left: int): int { return left; }
+fn choose(right: int): int { return right; }";
+		let error = check(source).unwrap_err();
+		let diagnostic = diagnostic_for_tablo_error(source, error);
+
+		assert_eq!(diagnostic.range.start.line, 0);
+		assert_eq!(diagnostic.range.start.character, 36);
+		assert_eq!(diagnostic.range.end.line, 0);
+		assert_eq!(diagnostic.range.end.character, 45);
+	}
+
+	#[test]
+	fn highlights_full_call_for_error_at_opening_parenthesis() {
+		let source = "choose(1, other(2))";
+		let diagnostic = diagnostic_for_tablo_error(
+			source,
+			TabloError::Compile(CompileError {
+				message: String::from("Call to function `choose` is ambiguous."),
+				position: 6,
+			}),
+		);
+
+		assert_eq!(diagnostic.range.start.character, 0);
+		assert_eq!(diagnostic.range.end.character, 19);
+	}
 
 	#[test]
 	fn highlights_full_span_for_assignment_type_error_on_string_literal() {

@@ -1,7 +1,7 @@
 use std::collections::{ BTreeMap, BTreeSet };
 
 use crate::ast::*;
-use crate::builtins::BuiltInFunction;
+use crate::builtins::{ BuiltInFunction, BuiltInParameterType };
 use crate::bytecode::Constant;
 use crate::compiler::CompileError;
 use crate::format_string::*;
@@ -16,6 +16,7 @@ pub enum CallArgumentBinding {
 	OmittedNull,
 	RequestedDefault(Expr),
 	Supplied(u32),
+	Variadic(Vec<u32>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -37,71 +38,10 @@ pub enum RecordPointerOrigin {
 	VariableDeclaration,
 }
 
-// This pass is responsible for name resolution and type checking. It does not
-// emit bytecode directly, but it resolves locals and function targets so code
-// generation can remain simple.
-#[derive(Default)]
-pub struct SemanticAnalyzer {
-	current_non_null_assumptions: Vec<Expr>,
-	current_return_type: Option<DataType>,
-	current_schema_catalog: Option<SchemaCatalog>,
-	current_source_name: Option<String>,
-	enums: ScopeStack<EnumBinding>,
-	find_lock_mode: RecordLockMode,
-	function_depth: usize,
-	functions: ScopeStack<Vec<FunctionSignature>>,
-	group_boundary_contexts: Vec<GroupBoundaryContext>,
-	locals: ScopeStack<LocalBinding>,
-	loop_depth: usize,
-	next_function_index: u32,
-	next_local_slot: u32,
-	query_optimizations_disabled: bool,
-	root_source_name: Option<String>,
-	semantic_program: SemanticProgram,
-	top_level_function_source_names: Vec<String>,
-}
-
-#[derive(Clone)]
-struct EnumBinding {
-	backing_type: DataType,
-	variants: BTreeMap<String, EnumValue>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct FunctionParameterSignature {
-	data_type: DataType,
-	has_default: bool,
-	is_by_ref: bool,
-	is_variadic: bool,
-	name: String,
-}
-
-#[derive(Clone)]
-struct FunctionSignature {
-	function_index: u32,
-	parameter_defaults: Vec<Option<Expr>>,
-	parameters: Vec<FunctionParameterSignature>,
-	return_type: Option<DataType>,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GroupBoundaryCallInfo {
 	pub key_names: Vec<String>,
 	pub record_slot: u32,
-}
-
-#[derive(Clone)]
-struct GroupBoundaryContext {
-	group_keys: Vec<Vec<String>>,
-	record_slot: u32,
-}
-
-#[derive(Clone)]
-struct LocalBinding {
-	declaration_position: usize,
-	data_type: DataType,
-	is_const: bool,
-	slot: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -145,18 +85,6 @@ impl RecordPointerBindingInfo {
 		fields.extend(self.assigned_fields.iter().filter_map(|path| path.split('.').next().map(String::from)));
 		Some(fields)
 	}
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct RecordPointerFieldAssignment {
-	field_path: String,
-	position: usize,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct RecordPointerFieldRead {
-	field_name: String,
-	position: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -355,6 +283,31 @@ impl SemanticProgram {
 	}
 }
 
+// This pass is responsible for name resolution and type checking. It does not
+// emit bytecode directly, but it resolves locals and function targets so code
+// generation can remain simple.
+#[derive(Default)]
+pub struct SemanticAnalyzer {
+	current_non_null_assumptions: Vec<Expr>,
+	current_return_type: Option<DataType>,
+	current_schema_catalog: Option<SchemaCatalog>,
+	current_source_name: Option<String>,
+	enums: ScopeStack<EnumBinding>,
+	find_lock_mode: RecordLockMode,
+	function_depth: usize,
+	functions: ScopeStack<Vec<FunctionSignature>>,
+	function_overload_aliases: Vec<FunctionOverloadAlias>,
+	group_boundary_contexts: Vec<GroupBoundaryContext>,
+	locals: ScopeStack<LocalBinding>,
+	loop_depth: usize,
+	next_function_index: u32,
+	next_local_slot: u32,
+	query_optimizations_disabled: bool,
+	root_source_name: Option<String>,
+	semantic_program: SemanticProgram,
+	top_level_function_source_names: Vec<String>,
+}
+
 impl SemanticAnalyzer {
 	pub fn analyze_program(&mut self, program: &AstProgram) -> Result<SemanticProgram, CompileError> {
 		self.analyze_program_with_schema(program, None)
@@ -386,6 +339,7 @@ impl SemanticAnalyzer {
 		self.collect_scope_enum_declarations(&program.statements)?;
 		self.functions.enter_scope();
 		self.collect_scope_function_signatures(&program.functions, &program.statements)?;
+		self.collect_function_overload_aliases()?;
 
 		for object in &program.objects {
 			self.validate_object_declaration(object)?;
@@ -505,7 +459,7 @@ impl SemanticAnalyzer {
 	}
 
 	pub fn new() -> Self {
-		Self {
+		let analyzer = Self {
 			current_non_null_assumptions: Vec::new(),
 			current_return_type: None,
 			current_schema_catalog: None,
@@ -514,6 +468,7 @@ impl SemanticAnalyzer {
 			find_lock_mode: RecordLockMode::None,
 			function_depth: 0,
 			functions: ScopeStack::default(),
+			function_overload_aliases: Vec::new(),
 			group_boundary_contexts: Vec::new(),
 			locals: ScopeStack::default(),
 			loop_depth: 0,
@@ -523,7 +478,9 @@ impl SemanticAnalyzer {
 			root_source_name: None,
 			semantic_program: SemanticProgram::default(),
 			top_level_function_source_names: Vec::new(),
-		}
+		};
+		analyzer.assert_valid_built_in_overload_sets();
+		analyzer
 	}
 
 	pub fn set_query_optimizations_enabled(&mut self, enabled: bool) {
@@ -540,6 +497,10 @@ impl SemanticAnalyzer {
 
 	pub fn validate_program(&mut self, program: &AstProgram) -> Result<(), CompileError> {
 		self.analyze_program(program).map(|_| ())
+	}
+
+	pub(crate) fn set_function_overload_aliases(&mut self, aliases: Vec<FunctionOverloadAlias>) {
+		self.function_overload_aliases = aliases;
 	}
 
 	fn apply_query_field_selection(
@@ -612,6 +573,18 @@ impl SemanticAnalyzer {
 		}
 
 		Ok(())
+	}
+
+	fn assert_valid_built_in_overload_sets(&self) {
+		for built_in in BuiltInFunction::all() {
+			let signatures = self.built_in_validation_signatures(*built_in);
+			let unselectable = self.unselectable_overload_indices(&signatures);
+			assert!(
+				unselectable.is_empty(),
+				"Built-in function `{}` has unselectable overloads at indices {unselectable:?}.",
+				built_in.name(),
+			);
+		}
 	}
 
 	fn assignment_result_type(
@@ -730,22 +703,49 @@ impl SemanticAnalyzer {
 		signature: &FunctionSignature,
 		arguments: &[CallArgument],
 	) -> Option<Vec<CallArgumentBinding>> {
-		if arguments.len() > signature.parameters.len() {
-			return None;
-		}
-
 		let mut bindings = vec![None; signature.parameters.len()];
 		let mut next_positional_parameter = 0;
 		let mut saw_named_argument = false;
+		let mut saw_variadic_argument = false;
+		let variadic_parameter_index = signature.parameters.iter()
+			.position(|parameter| parameter.is_variadic);
 
 		for (argument_index, argument) in arguments.iter().enumerate() {
 			let parameter_index = if let Some(name) = &argument.name {
+				if saw_variadic_argument {
+					return None;
+				}
 				saw_named_argument = true;
 				signature.parameters.iter().position(|parameter| parameter.name == name.name)?
 			}
 			else {
 				if saw_named_argument {
-					return None;
+					let parameter_index = variadic_parameter_index?;
+					match &mut bindings[parameter_index] {
+						None => {
+							bindings[parameter_index] = Some(CallArgumentBinding::Variadic(vec![argument_index as u32]));
+						}
+						Some(CallArgumentBinding::Variadic(argument_indices)) => {
+							argument_indices.push(argument_index as u32);
+						}
+						Some(_) => return None,
+					}
+					saw_variadic_argument = true;
+					continue;
+				}
+
+				if Some(next_positional_parameter) == variadic_parameter_index {
+					match &mut bindings[next_positional_parameter] {
+						None => {
+							bindings[next_positional_parameter] = Some(CallArgumentBinding::Variadic(vec![argument_index as u32]));
+						}
+						Some(CallArgumentBinding::Variadic(argument_indices)) => {
+							argument_indices.push(argument_index as u32);
+						}
+						Some(_) => return None,
+					}
+					saw_variadic_argument = true;
+					continue;
 				}
 
 				let parameter_index = next_positional_parameter;
@@ -780,7 +780,10 @@ impl SemanticAnalyzer {
 				return None;
 			}
 
-			*binding = if let Some(default_value) = &signature.parameter_defaults[parameter_index] {
+			*binding = if parameter.is_variadic {
+				Some(CallArgumentBinding::Variadic(Vec::new()))
+			}
+			else if let Some(default_value) = &signature.parameter_defaults[parameter_index] {
 				Some(CallArgumentBinding::OmittedDefault(default_value.clone()))
 			}
 			else if parameter.data_type.is_nullable() {
@@ -796,6 +799,205 @@ impl SemanticAnalyzer {
 
 	fn block_guarantees_return(&self, block: &BlockStatement) -> bool {
 		block.statements.iter().any(|statement| self.statement_guarantees_return(statement))
+	}
+
+	fn built_in_validation_data_type(data_type: BuiltInParameterType) -> Option<DataType> {
+		Some(match data_type {
+			BuiltInParameterType::Any => DataType::Any,
+			BuiltInParameterType::ArrayAny => DataType::Array(Box::new(DataType::Any)),
+			BuiltInParameterType::ArrayText => DataType::Array(Box::new(DataType::Text)),
+			BuiltInParameterType::Bool => DataType::Bool,
+			BuiltInParameterType::Date => DataType::Date,
+			BuiltInParameterType::Dec => DataType::Dec,
+			BuiltInParameterType::EnumBacked(backing_type) => {
+				DataType::Object(format!("__tablo_builtin_{}_enum", backing_type.name()))
+			}
+			BuiltInParameterType::Int => DataType::Int,
+			BuiltInParameterType::RecordPointer => DataType::RecordPointer(RecordPointerType {
+				database_name: String::from("__tablo_builtin"),
+				schema_name: String::from("__tablo_builtin"),
+				table_name: String::from("__tablo_builtin"),
+			}),
+			BuiltInParameterType::Sequence => return None,
+			BuiltInParameterType::Text => DataType::Text,
+			BuiltInParameterType::Time => DataType::Time,
+			BuiltInParameterType::TimeTz => DataType::TimeTz,
+			BuiltInParameterType::Timestamp => DataType::Timestamp,
+			BuiltInParameterType::TimestampTz => DataType::TimestampTz,
+		})
+	}
+
+	fn built_in_validation_signatures(&self, built_in: BuiltInFunction) -> Vec<FunctionSignature> {
+		built_in.signatures().into_iter()
+			.enumerate()
+			.filter_map(|(function_index, signature)| {
+				let parameters = signature.parameters.into_iter()
+					.map(|parameter| {
+						Some(FunctionParameterSignature {
+							data_type: Self::built_in_validation_data_type(parameter.data_type)?,
+							has_default: false,
+							is_by_ref: false,
+							is_variadic: parameter.is_variadic,
+							name: parameter.name.to_string(),
+						})
+					})
+					.collect::<Option<Vec<_>>>()?;
+
+				Some(FunctionSignature {
+					function_index: function_index as u32,
+					parameter_defaults: vec![None; parameters.len()],
+					parameters,
+					return_type: signature.return_type,
+				})
+			})
+			.collect()
+	}
+
+	fn call_argument_types_in_binding_order(
+		argument_types: &[DataType],
+		bindings: &[CallArgumentBinding],
+	) -> Vec<DataType> {
+		bindings.iter()
+			.flat_map(|binding| {
+				match binding {
+					CallArgumentBinding::Supplied(argument_index) => {
+						vec![argument_types[*argument_index as usize].clone()]
+					}
+					CallArgumentBinding::Variadic(argument_indices) => {
+						argument_indices.iter()
+							.map(|argument_index| argument_types[*argument_index as usize].clone())
+							.collect()
+					}
+					CallArgumentBinding::OmittedDefault(_)
+					| CallArgumentBinding::OmittedNull
+					| CallArgumentBinding::RequestedDefault(_) => Vec::new(),
+				}
+			})
+			.collect()
+	}
+
+	fn call_arguments_in_binding_order<'a>(
+		arguments: &'a [CallArgument],
+		bindings: &[CallArgumentBinding],
+	) -> Vec<&'a CallArgument> {
+		bindings.iter()
+			.flat_map(|binding| {
+				match binding {
+					CallArgumentBinding::Supplied(argument_index) => {
+						vec![&arguments[*argument_index as usize]]
+					}
+					CallArgumentBinding::Variadic(argument_indices) => {
+						argument_indices.iter()
+							.map(|argument_index| &arguments[*argument_index as usize])
+							.collect()
+					}
+					CallArgumentBinding::OmittedDefault(_)
+					| CallArgumentBinding::OmittedNull
+					| CallArgumentBinding::RequestedDefault(_) => Vec::new(),
+				}
+			})
+			.collect()
+	}
+
+	fn call_binding_accepts_types(
+		&self,
+		parameter: &FunctionParameterSignature,
+		binding: &CallArgumentBinding,
+		arguments: &[CallArgument],
+		argument_types: &[Option<DataType>],
+	) -> bool {
+		self.call_binding_type_rejection(parameter, binding, arguments, argument_types).is_none()
+	}
+
+	fn call_binding_type_rejection(
+		&self,
+		parameter: &FunctionParameterSignature,
+		binding: &CallArgumentBinding,
+		arguments: &[CallArgument],
+		argument_types: &[Option<DataType>],
+	) -> Option<String> {
+		match binding {
+			CallArgumentBinding::Supplied(argument_index) => {
+				let argument_index = *argument_index as usize;
+				let argument = &arguments[argument_index];
+				let argument_type = argument_types[argument_index].as_ref()
+					.expect("Supplied call argument bindings must refer to expressions.");
+				if parameter.is_by_ref != argument.is_by_ref {
+					return Some(if parameter.is_by_ref {
+						format!("requires parameter `{}` to be passed by reference", parameter.name)
+					}
+					else {
+						format!("requires parameter `{}` to be passed by value", parameter.name)
+					});
+				}
+
+				let accepts_type = if parameter.is_by_ref {
+					parameter.data_type == *argument_type
+				}
+				else {
+					self.is_function_argument_assignable(&parameter.data_type, argument_type)
+				};
+				if accepts_type {
+					None
+				}
+				else {
+					Some(format!(
+						"rejected argument for parameter `{}`: expected `{}`, found `{}`",
+						parameter.name,
+						parameter.data_type.name(),
+						argument_type.name(),
+					))
+				}
+			}
+			CallArgumentBinding::Variadic(argument_indices) => {
+				let DataType::Array(element_type) = &parameter.data_type else {
+					return Some(format!("has an invalid variadic parameter `{}`", parameter.name));
+				};
+				argument_indices.iter().find_map(|argument_index| {
+					let argument_index = *argument_index as usize;
+					let argument_type = argument_types[argument_index].as_ref()
+						.expect("Variadic call argument bindings must refer to expressions.");
+					if arguments[argument_index].is_by_ref {
+						Some(format!("requires variadic parameter `{}` to be passed by value", parameter.name))
+					}
+					else if self.is_function_argument_assignable(element_type, argument_type) {
+						None
+					}
+					else {
+						Some(format!(
+							"rejected argument for variadic parameter `{}`: expected `{}`, found `{}`",
+							parameter.name,
+							element_type.name(),
+							argument_type.name(),
+						))
+					}
+				})
+			}
+			CallArgumentBinding::OmittedDefault(_)
+			| CallArgumentBinding::OmittedNull
+			| CallArgumentBinding::RequestedDefault(_) => None,
+		}
+	}
+
+	fn collect_function_overload_aliases(&mut self) -> Result<(), CompileError> {
+		for alias in self.function_overload_aliases.clone() {
+			let mut signatures = Vec::new();
+			for target_name in &alias.target_names {
+				let target_signatures = self.functions.lookup(target_name)
+					.unwrap_or_else(|| panic!("Missing imported function target `{target_name}`."));
+				signatures.extend(target_signatures.iter().cloned());
+			}
+
+			self.current_source_name = Some(alias.source_name.clone());
+			self.validate_function_overload_set(
+				&alias.display_name,
+				&signatures,
+				alias.position,
+			)?;
+			self.functions.declare(alias.alias_name, signatures);
+		}
+		self.current_source_name = self.root_source_name.clone();
+		Ok(())
 	}
 
 	fn collect_object_declarations(&mut self, objects: &[ObjectDeclaration]) -> Result<(), CompileError> {
@@ -834,95 +1036,6 @@ impl SemanticAnalyzer {
 			}
 		}
 
-		Ok(())
-	}
-
-	fn declare_enum_signature(&mut self, enum_declaration: &EnumDeclaration) -> Result<(), CompileError> {
-		if self.enums.contains_in_current_scope(&enum_declaration.name) {
-			return Err(self.compile_error(
-				enum_declaration.position,
-				format!("Enum `{}` is already declared in this scope.", enum_declaration.name),
-			));
-		}
-
-		if self.semantic_program.object_declarations.contains_key(&enum_declaration.name)
-			|| self.semantic_program.enum_declarations.contains_key(&enum_declaration.name) {
-			return Err(self.compile_error(
-				enum_declaration.position,
-				format!("Enum `{}` is already declared in this module.", enum_declaration.name),
-			));
-		}
-
-		let variants = self.resolve_enum_variants(enum_declaration)?;
-		self.enums.declare(enum_declaration.name.clone(), EnumBinding {
-			backing_type: enum_declaration.backing_type.clone(),
-			variants: variants.clone(),
-		});
-		self.semantic_program.enum_declarations.insert(enum_declaration.name.clone(), enum_declaration.clone());
-		self.semantic_program.enum_variants.insert(enum_declaration.name.clone(), variants);
-		Ok(())
-	}
-
-	fn declare_function_signature(&mut self, function: &FunctionDeclaration) -> Result<(), CompileError> {
-		let mut parameters = Vec::with_capacity(function.parameters.len());
-
-		for parameter in &function.parameters {
-			if parameter.is_by_ref && parameter.default_value.is_some() {
-				return Err(self.compile_error(
-					parameter.position,
-					format!("By-reference parameter `{}` cannot define a default value.", parameter.name),
-				));
-			}
-
-			let parameter_type = self.resolve_function_parameter_type(parameter)?;
-			parameters.push(FunctionParameterSignature {
-				data_type: parameter_type,
-				has_default: parameter.default_value.is_some(),
-				is_by_ref: parameter.is_by_ref,
-				is_variadic: parameter.is_variadic,
-				name: parameter.name.clone(),
-			});
-		}
-
-		if let Some(return_type) = &function.return_type {
-			self.validate_declared_data_type(
-				return_type,
-				function.position,
-				format!(
-					"Function `{}` cannot return `{}`.",
-					function.name,
-					return_type.name(),
-				),
-			)?;
-		}
-
-		let function_index = self.next_function_index;
-		let signature = FunctionSignature {
-			function_index,
-			parameter_defaults: function.parameters.iter()
-				.map(|parameter| parameter.default_value.clone())
-				.collect(),
-			parameters,
-			return_type: function.return_type.clone(),
-		};
-
-		if self.functions.contains_in_current_scope(&function.name) {
-			let overloads = self.functions.lookup(&function.name).unwrap();
-			if overloads.iter().any(|existing| existing.parameters == signature.parameters) {
-				return Err(self.compile_error(
-					function.position,
-					format!("Function overload `{}` duplicates an existing callable signature in this scope.", function.name),
-				));
-			}
-
-			self.functions.lookup_mut(&function.name).unwrap().push(signature);
-		}
-		else {
-			self.functions.declare(function.name.clone(), vec![signature]);
-		}
-
-		self.semantic_program.function_declaration_targets.insert(function.position, function_index);
-		self.next_function_index += 1;
 		Ok(())
 	}
 
@@ -1000,8 +1113,128 @@ impl SemanticAnalyzer {
 		}
 	}
 
+	fn declare_enum_signature(&mut self, enum_declaration: &EnumDeclaration) -> Result<(), CompileError> {
+		if self.enums.contains_in_current_scope(&enum_declaration.name) {
+			return Err(self.compile_error(
+				enum_declaration.position,
+				format!("Enum `{}` is already declared in this scope.", enum_declaration.name),
+			));
+		}
+
+		if self.semantic_program.object_declarations.contains_key(&enum_declaration.name)
+			|| self.semantic_program.enum_declarations.contains_key(&enum_declaration.name) {
+			return Err(self.compile_error(
+				enum_declaration.position,
+				format!("Enum `{}` is already declared in this module.", enum_declaration.name),
+			));
+		}
+
+		let variants = self.resolve_enum_variants(enum_declaration)?;
+		self.enums.declare(enum_declaration.name.clone(), EnumBinding {
+			backing_type: enum_declaration.backing_type.clone(),
+			variants: variants.clone(),
+		});
+		self.semantic_program.enum_declarations.insert(enum_declaration.name.clone(), enum_declaration.clone());
+		self.semantic_program.enum_variants.insert(enum_declaration.name.clone(), variants);
+		Ok(())
+	}
+
+	fn declare_function_signature(&mut self, function: &FunctionDeclaration) -> Result<(), CompileError> {
+		let mut parameters = Vec::with_capacity(function.parameters.len());
+
+		for parameter in &function.parameters {
+			if parameter.is_by_ref && parameter.default_value.is_some() {
+				return Err(self.compile_error(
+					parameter.position,
+					format!("By-reference parameter `{}` cannot define a default value.", parameter.name),
+				));
+			}
+
+			let parameter_type = self.resolve_function_parameter_type(parameter)?;
+			parameters.push(FunctionParameterSignature {
+				data_type: parameter_type,
+				has_default: parameter.default_value.is_some(),
+				is_by_ref: parameter.is_by_ref,
+				is_variadic: parameter.is_variadic,
+				name: parameter.name.clone(),
+			});
+		}
+
+		if let Some(return_type) = &function.return_type {
+			self.validate_declared_data_type(
+				return_type,
+				function.position,
+				format!(
+					"Function `{}` cannot return `{}`.",
+					function.name,
+					return_type.name(),
+				),
+			)?;
+		}
+
+		let function_index = self.next_function_index;
+		let signature = FunctionSignature {
+			function_index,
+			parameter_defaults: function.parameters.iter()
+				.map(|parameter| parameter.default_value.clone())
+				.collect(),
+			parameters,
+			return_type: function.return_type.clone(),
+		};
+
+		if self.functions.contains_in_current_scope(&function.name) {
+			let mut overloads = self.functions.lookup(&function.name).unwrap().clone();
+			if overloads.iter().any(|existing| existing.parameters == signature.parameters) {
+				return Err(self.compile_error(
+					function.position,
+					format!("Function overload `{}` duplicates an existing callable signature in this scope.", function.name),
+				));
+			}
+
+			overloads.push(signature.clone());
+			self.validate_function_overload_set(&function.name, &overloads, function.position)?;
+
+			self.functions.lookup_mut(&function.name).unwrap().push(signature);
+		}
+		else {
+			self.functions.declare(function.name.clone(), vec![signature]);
+		}
+
+		self.semantic_program.function_declaration_targets.insert(function.position, function_index);
+		self.next_function_index += 1;
+		Ok(())
+	}
+
 	fn declare_local(&mut self, name: String, local: LocalBinding) {
 		self.locals.declare(name, local);
+	}
+
+	fn describe_function_signature(&self, name: &str, signature: &FunctionSignature) -> String {
+		let parameters = signature.parameters.iter()
+			.map(|parameter| {
+				let variadic = if parameter.is_variadic { "..." } else { "" };
+				let reference = if parameter.is_by_ref { "&" } else { "" };
+				let default = if parameter.has_default { " = default" } else { "" };
+				let data_type = match &parameter.data_type {
+					DataType::RecordPointer(record_pointer) => {
+						format!(
+							"rec {}.{}.{}",
+							record_pointer.database_name,
+							record_pointer.schema_name,
+							record_pointer.table_name,
+						)
+					}
+					other => other.name(),
+				};
+				format!(
+					"{variadic}{}: {reference}{}{default}",
+					parameter.name,
+					data_type,
+				)
+			})
+			.collect::<Vec<_>>()
+			.join(", ");
+		format!("{name}({parameters})")
 	}
 
 	fn effective_object_data_type(&self, data_type: &DataType) -> Option<DataType> {
@@ -1024,6 +1257,26 @@ impl SemanticAnalyzer {
 
 	fn ensure_assignable(&self, target: &DataType, value: &DataType, position: usize) -> Result<(), CompileError> {
 		if self.is_assignable(target, value) {
+			return Ok(());
+		}
+
+		Err(self.compile_error(
+			position,
+			format!(
+				"Cannot assign a value of type `{}` to a variable of type `{}`.",
+				value.name(),
+				target.name(),
+			),
+		))
+	}
+
+	fn ensure_function_argument_assignable(
+		&self,
+		target: &DataType,
+		value: &DataType,
+		position: usize,
+	) -> Result<(), CompileError> {
+		if self.is_function_argument_assignable(target, value) {
 			return Ok(());
 		}
 
@@ -1101,6 +1354,47 @@ impl SemanticAnalyzer {
 		}
 	}
 
+	fn extend_named_call_shapes(
+		parameters: &[FunctionParameterSignature],
+		parameter_index: usize,
+		fixed_parameter_count: usize,
+		shape: FunctionCallShape,
+		shapes: &mut Vec<FunctionCallShape>,
+	) {
+		if parameter_index == fixed_parameter_count {
+			shapes.push(shape);
+			return;
+		}
+
+		let parameter = &parameters[parameter_index];
+		let is_omittable = !parameter.is_by_ref
+			&& (parameter.has_default || parameter.data_type.is_nullable());
+		if is_omittable {
+			Self::extend_named_call_shapes(
+				parameters,
+				parameter_index + 1,
+				fixed_parameter_count,
+				shape.clone(),
+				shapes,
+			);
+		}
+
+		let mut supplied_shape = shape;
+		Self::push_call_shape_argument(
+			&mut supplied_shape,
+			parameter,
+			Some(parameter.name.clone()),
+			parameter.data_type.clone(),
+		);
+		Self::extend_named_call_shapes(
+			parameters,
+			parameter_index + 1,
+			fixed_parameter_count,
+			supplied_shape,
+			shapes,
+		);
+	}
+
 	fn finalize_record_pointer_usage(&mut self, program: &AstProgram) {
 		let reachable_positions = super::ssa::reachable_read_positions(program, &self.semantic_program);
 
@@ -1116,6 +1410,69 @@ impl SemanticAnalyzer {
 				.map(|read| read.field_name.clone())
 				.collect();
 		}
+	}
+
+	fn function_call_shapes(
+		&self,
+		signature: &FunctionSignature,
+		max_variadic_arguments: usize,
+	) -> Vec<FunctionCallShape> {
+		let variadic_parameter_index = signature.parameters.iter()
+			.position(|parameter| parameter.is_variadic);
+		let fixed_parameter_count = variadic_parameter_index.unwrap_or(signature.parameters.len());
+		let mut fixed_shapes = Vec::new();
+
+		for positional_count in 0..=fixed_parameter_count {
+			let mut shape = FunctionCallShape {
+				arguments: Vec::new(),
+				argument_types: Vec::new(),
+			};
+			for parameter in &signature.parameters[..positional_count] {
+				Self::push_call_shape_argument(&mut shape, parameter, None, parameter.data_type.clone());
+			}
+			Self::extend_named_call_shapes(
+				&signature.parameters,
+				positional_count,
+				fixed_parameter_count,
+				shape,
+				&mut fixed_shapes,
+			);
+		}
+
+		let Some(variadic_parameter_index) = variadic_parameter_index else {
+			return fixed_shapes;
+		};
+		let variadic_parameter = &signature.parameters[variadic_parameter_index];
+		let DataType::Array(element_type) = &variadic_parameter.data_type else {
+			unreachable!("Variadic parameters must have array types.");
+		};
+		let mut shapes = Vec::new();
+
+		for fixed_shape in fixed_shapes {
+			let mut named_array_shape = fixed_shape.clone();
+			Self::push_call_shape_argument(
+				&mut named_array_shape,
+				variadic_parameter,
+				Some(variadic_parameter.name.clone()),
+				variadic_parameter.data_type.clone(),
+			);
+			shapes.push(named_array_shape);
+
+			for variadic_count in 0..=max_variadic_arguments {
+				let mut trailing_shape = fixed_shape.clone();
+				for _ in 0..variadic_count {
+					Self::push_call_shape_argument(
+						&mut trailing_shape,
+						variadic_parameter,
+						None,
+						element_type.as_ref().clone(),
+					);
+				}
+				shapes.push(trailing_shape);
+			}
+		}
+
+		shapes
 	}
 
 	fn group_by_item_key_names(&self, item: &crate::ast::GroupByItem) -> Vec<String> {
@@ -1184,7 +1541,8 @@ impl SemanticAnalyzer {
 			}
 		}
 
-		let argument_types = arguments.iter()
+		let mut ordered_arguments = arguments.iter().collect::<Vec<_>>();
+		let mut argument_types = arguments.iter()
 			.map(|argument| {
 				let expression = argument.expression().expect("Built-in arguments must be expressions after default-marker validation.");
 				self.infer_expression_type(expression)
@@ -1213,6 +1571,21 @@ impl SemanticAnalyzer {
 			return Ok(Some(return_type));
 		}
 
+		if !matches!(built_in, BuiltInFunction::Exists | BuiltInFunction::Locked) {
+			let signatures = self.built_in_validation_signatures(built_in);
+			let (_, argument_bindings) = self.select_function_overload(
+				"built-in function",
+				built_in.name(),
+				&signatures,
+				arguments,
+				&argument_types.iter().cloned().map(Some).collect::<Vec<_>>(),
+				position,
+			)?;
+			ordered_arguments = Self::call_arguments_in_binding_order(arguments, &argument_bindings);
+			argument_types = Self::call_argument_types_in_binding_order(&argument_types, &argument_bindings);
+			self.semantic_program.call_argument_bindings.insert(position, argument_bindings);
+		}
+
 		let return_type = built_in.return_type(&argument_types).map_err(|_| self.compile_error(
 			arguments.first().map_or(position, |argument| argument.expression().unwrap().position()),
 			format!(
@@ -1223,7 +1596,7 @@ impl SemanticAnalyzer {
 		))?;
 
 		if built_in == BuiltInFunction::Format {
-			self.validate_format_built_in(arguments, &argument_types)?;
+			self.validate_format_built_in(&ordered_arguments, &argument_types)?;
 		}
 
 		self.semantic_program.built_in_call_targets.insert(position, built_in);
@@ -1269,12 +1642,26 @@ impl SemanticAnalyzer {
 			}
 		}
 
-		let argument_types = arguments.iter()
+		let mut argument_types = arguments.iter()
 			.map(|argument| {
 				let expression = argument.expression().expect("Built-in arguments must be expressions after default-marker validation.");
 				self.infer_query_expression_type(expression, table)
 			})
 			.collect::<Result<Vec<_>, _>>()?;
+
+		let signatures = self.built_in_validation_signatures(built_in);
+		if !signatures.is_empty() {
+			let (_, argument_bindings) = self.select_function_overload(
+				"built-in function",
+				built_in.name(),
+				&signatures,
+				arguments,
+				&argument_types.iter().cloned().map(Some).collect::<Vec<_>>(),
+				position,
+			)?;
+			argument_types = Self::call_argument_types_in_binding_order(&argument_types, &argument_bindings);
+			self.semantic_program.call_argument_bindings.insert(position, argument_bindings);
+		}
 
 		let return_type = built_in.return_type(&argument_types).map_err(|_| self.compile_error(
 			arguments.first().map_or(position, |argument| argument.expression().unwrap().position()),
@@ -1307,6 +1694,7 @@ impl SemanticAnalyzer {
 				});
 			}
 			let (signature, argument_bindings) = self.select_function_overload(
+				"function",
 				&callee.name,
 				&signatures,
 				arguments,
@@ -1317,74 +1705,94 @@ impl SemanticAnalyzer {
 
 			for (parameter_index, binding) in argument_bindings.iter().enumerate() {
 				let parameter = &signature.parameters[parameter_index];
-				let CallArgumentBinding::Supplied(argument_index) = binding else {
-					if let CallArgumentBinding::OmittedDefault(default_value)
-						| CallArgumentBinding::RequestedDefault(default_value) = binding
-						&& matches!(parameter.data_type.without_nullability(), DataType::RecordPointer(_)) {
-						self.record_record_pointer_escape(default_value);
+				let argument_indices = match binding {
+					CallArgumentBinding::Supplied(argument_index) => {
+						std::slice::from_ref(argument_index)
 					}
-					continue;
+					CallArgumentBinding::Variadic(argument_indices) => argument_indices.as_slice(),
+					CallArgumentBinding::OmittedDefault(default_value)
+					| CallArgumentBinding::RequestedDefault(default_value) => {
+						if matches!(parameter.data_type.without_nullability(), DataType::RecordPointer(_)) {
+							self.record_record_pointer_escape(default_value);
+						}
+						continue;
+					}
+					CallArgumentBinding::OmittedNull => continue,
 				};
-				let argument_index = *argument_index as usize;
-				let argument = &arguments[argument_index];
-				let argument_type = argument_types[argument_index].as_ref()
-					.expect("Supplied call argument bindings must refer to expressions.");
-				let expression = argument.expression()
-					.expect("Supplied call argument bindings must refer to expressions.");
-				if parameter.is_by_ref {
-					if !argument.is_by_ref {
-						return Err(self.compile_error(
-							argument.position,
-							format!("Parameter `{}` must be passed by reference.", parameter.name),
-						));
+
+				for argument_index in argument_indices {
+					let argument_index = *argument_index as usize;
+					let argument = &arguments[argument_index];
+					let argument_type = argument_types[argument_index].as_ref()
+						.expect("Supplied call argument bindings must refer to expressions.");
+					let expression = argument.expression()
+						.expect("Supplied call argument bindings must refer to expressions.");
+					if parameter.is_by_ref {
+						if !argument.is_by_ref {
+							return Err(self.compile_error(
+								argument.position,
+								format!("Parameter `{}` must be passed by reference.", parameter.name),
+							));
+						}
+
+						let Expr::Identifier(identifier) = expression else {
+							return Err(self.compile_error(
+								argument.position,
+								String::from("By-reference arguments must be plain identifiers."),
+							));
+						};
+
+						let local = self.lookup_local(&identifier.name).ok_or(self.compile_error(
+							identifier.position,
+							format!("Variable `{}` is not declared in this scope.", identifier.name),
+						))?;
+
+						if local.is_const {
+							return Err(self.compile_error(
+								argument.position,
+								format!("Constant `{}` cannot be passed by reference.", identifier.name),
+							));
+						}
+
+						if argument_type != &parameter.data_type {
+							return Err(self.compile_error(
+								argument.position,
+								format!(
+									"By-reference argument for parameter `{}` must have type `{}`, found `{}`.",
+									parameter.name,
+									parameter.data_type.name(),
+									argument_type.name(),
+								),
+							));
+						}
+
+						reference_slots[argument_index] = Some(local.slot);
+					}
+					else {
+						if argument.is_by_ref {
+							return Err(self.compile_error(
+								argument.position,
+								format!("Parameter `{}` must be passed by value.", parameter.name),
+							));
+						}
+
+						let expected_type = if parameter.is_variadic
+							&& matches!(binding, CallArgumentBinding::Variadic(_)) {
+							let DataType::Array(element_type) = &parameter.data_type else {
+								unreachable!("Variadic parameters must have array types.");
+							};
+							element_type.as_ref()
+						}
+						else {
+							&parameter.data_type
+						};
+						self.ensure_function_argument_assignable(expected_type, argument_type, expression.position())?;
 					}
 
-					let Expr::Identifier(identifier) = expression else {
-						return Err(self.compile_error(
-							argument.position,
-							String::from("By-reference arguments must be plain identifiers."),
-						));
-					};
-
-					let local = self.lookup_local(&identifier.name).ok_or(self.compile_error(
-						identifier.position,
-						format!("Variable `{}` is not declared in this scope.", identifier.name),
-					))?;
-
-					if local.is_const {
-						return Err(self.compile_error(
-							argument.position,
-							format!("Constant `{}` cannot be passed by reference.", identifier.name),
-						));
+					if !parameter.is_variadic
+						&& matches!(parameter.data_type.without_nullability(), DataType::RecordPointer(_)) {
+						self.record_record_pointer_escape(expression);
 					}
-
-					if argument_type != &parameter.data_type {
-						return Err(self.compile_error(
-							argument.position,
-							format!(
-								"By-reference argument for parameter `{}` must have type `{}`, found `{}`.",
-								parameter.name,
-								parameter.data_type.name(),
-								argument_type.name(),
-							),
-						));
-					}
-
-					reference_slots[argument_index] = Some(local.slot);
-				}
-				else {
-					if argument.is_by_ref {
-						return Err(self.compile_error(
-							argument.position,
-							format!("Parameter `{}` must be passed by value.", parameter.name),
-						));
-					}
-
-					self.ensure_assignable(&parameter.data_type, argument_type, expression.position())?;
-				}
-
-				if matches!(parameter.data_type.without_nullability(), DataType::RecordPointer(_)) {
-					self.record_record_pointer_escape(expression);
 				}
 			}
 
@@ -1397,14 +1805,6 @@ impl SemanticAnalyzer {
 			Ok(signature.return_type)
 		}
 		else if let Some(built_in) = BuiltInFunction::from_name(&callee.name) {
-			self.reject_default_arguments_for_built_in(built_in, arguments)?;
-			if let Some(argument) = arguments.iter().find(|argument| argument.name.is_some()) {
-				return Err(self.compile_error(
-					argument.position,
-					String::from("Named arguments are not yet supported for built-in functions."),
-				));
-			}
-
 			self.infer_built_in_call_type(built_in, arguments, *position)
 		}
 		else {
@@ -2029,6 +2429,63 @@ impl SemanticAnalyzer {
 			}
 		}
 
+		let signatures = self.built_in_validation_signatures(built_in);
+		let argument_types = arguments.iter()
+			.map(|argument| {
+				Some(match argument.expression() {
+					Some(Expr::Array(_)) => DataType::Array(Box::new(DataType::Any)),
+					_ => DataType::Any,
+				})
+			})
+			.collect::<Vec<_>>();
+		let (signature, argument_bindings) = self.select_function_overload(
+			"built-in function",
+			built_in.name(),
+			&signatures,
+			arguments,
+			&argument_types,
+			position,
+		)?;
+		let mut grouping_expressions = Vec::new();
+
+		for (parameter, binding) in signature.parameters.iter().zip(argument_bindings.iter()) {
+			match binding {
+				CallArgumentBinding::Supplied(argument_index) if parameter.is_variadic => {
+					let argument = &arguments[*argument_index as usize];
+					let expression = argument.expression()
+						.expect("Built-in arguments must be expressions after default-marker validation.");
+					let Expr::Array(array) = expression else {
+						return Err(self.compile_error(
+							expression.position(),
+							format!(
+								"Named variadic argument `{}` for built-in function `{}` must be an array literal of grouping levels.",
+								parameter.name,
+								built_in.name(),
+							),
+						));
+					};
+					grouping_expressions.extend(array.elements.iter());
+				}
+				CallArgumentBinding::Supplied(argument_index) => {
+					grouping_expressions.push(
+						arguments[*argument_index as usize].expression()
+							.expect("Built-in arguments must be expressions after default-marker validation.")
+					);
+				}
+				CallArgumentBinding::Variadic(argument_indices) => {
+					grouping_expressions.extend(argument_indices.iter().map(|argument_index| {
+						arguments[*argument_index as usize].expression()
+							.expect("Built-in arguments must be expressions after default-marker validation.")
+					}));
+				}
+				CallArgumentBinding::OmittedDefault(_)
+				| CallArgumentBinding::OmittedNull
+				| CallArgumentBinding::RequestedDefault(_) => {
+					unreachable!("Group-boundary built-ins do not have omitted arguments.");
+				}
+			}
+		}
+
 		let Some(context) = self.group_boundary_contexts.last() else {
 			return Err(self.compile_error(
 				position,
@@ -2036,22 +2493,21 @@ impl SemanticAnalyzer {
 			));
 		};
 
-		if arguments.len() > context.group_keys.len() {
+		if grouping_expressions.len() > context.group_keys.len() {
 			return Err(self.compile_error(
 				position,
 				format!(
 					"Built-in function `{}` references {} grouping level(s), but the current loop only has {}.",
 					built_in.name(),
-					arguments.len(),
+					grouping_expressions.len(),
 					context.group_keys.len(),
 				),
 			));
 		}
 
-		let mut key_names = Vec::with_capacity(arguments.len());
+		let mut key_names = Vec::with_capacity(grouping_expressions.len());
 
-		for (index, argument) in arguments.iter().enumerate() {
-			let expression = argument.expression().expect("Built-in arguments must be expressions after default-marker validation.");
+		for (index, expression) in grouping_expressions.iter().enumerate() {
 			let Some(key_name) = simple_group_by_expression_name(expression) else {
 				return Err(self.compile_error(
 					expression.position(),
@@ -2076,6 +2532,7 @@ impl SemanticAnalyzer {
 
 		self.semantic_program.built_in_call_targets.insert(position, built_in);
 		self.semantic_program.call_return_types.insert(position, DataType::Bool);
+		self.semantic_program.call_argument_bindings.insert(position, argument_bindings);
 		self.semantic_program.group_boundary_calls.insert(position, GroupBoundaryCallInfo {
 			key_names,
 			record_slot: context.record_slot,
@@ -2158,6 +2615,7 @@ impl SemanticAnalyzer {
 						});
 					}
 					let (signature, argument_bindings) = self.select_function_overload(
+						"function",
 						&callee.name,
 						&signatures,
 						arguments,
@@ -2166,17 +2624,35 @@ impl SemanticAnalyzer {
 					)?;
 
 					for (parameter_index, binding) in argument_bindings.iter().enumerate() {
-						let CallArgumentBinding::Supplied(argument_index) = binding else {
-							continue;
+						let argument_indices = match binding {
+							CallArgumentBinding::Supplied(argument_index) => std::slice::from_ref(argument_index),
+							CallArgumentBinding::Variadic(argument_indices) => argument_indices.as_slice(),
+							_ => continue,
 						};
-						let argument_index = *argument_index as usize;
-						let argument = &arguments[argument_index];
-						let argument_type = argument_types[argument_index].as_ref()
-							.expect("Supplied call argument bindings must refer to expressions.");
-						let argument_expression = argument.expression()
-							.expect("Supplied call argument bindings must refer to expressions.");
 						let parameter = &signature.parameters[parameter_index];
-						self.ensure_assignable(&parameter.data_type, argument_type, argument_expression.position())?;
+						let expected_type = if matches!(binding, CallArgumentBinding::Variadic(_)) {
+							let DataType::Array(element_type) = &parameter.data_type else {
+								unreachable!("Variadic parameters must have array types.");
+							};
+							element_type.as_ref()
+						}
+						else {
+							&parameter.data_type
+						};
+
+						for argument_index in argument_indices {
+							let argument_index = *argument_index as usize;
+							let argument = &arguments[argument_index];
+							let argument_type = argument_types[argument_index].as_ref()
+								.expect("Supplied call argument bindings must refer to expressions.");
+							let argument_expression = argument.expression()
+								.expect("Supplied call argument bindings must refer to expressions.");
+							self.ensure_function_argument_assignable(
+								expected_type,
+								argument_type,
+								argument_expression.position(),
+							)?;
+						}
 					}
 
 					signature.return_type.ok_or_else(|| self.compile_error(
@@ -2185,22 +2661,7 @@ impl SemanticAnalyzer {
 					))
 				}
 				else if let Some(built_in) = BuiltInFunction::from_name(&callee.name) {
-					self.reject_default_arguments_for_built_in(built_in, arguments)?;
-					if let Some(argument) = arguments.iter().find(|argument| argument.name.is_some()) {
-						return Err(self.compile_error(
-							argument.position,
-							String::from("Named arguments are not yet supported for built-in functions in database queries."),
-						));
-					}
-
-					let query_arguments = arguments.iter().map(|argument| CallArgument {
-						is_by_ref: argument.is_by_ref,
-						name: argument.name.clone(),
-						position: argument.position,
-						value: argument.value.clone(),
-					}).collect::<Vec<_>>();
-
-					self.infer_built_in_call_type_for_query(built_in, &query_arguments, expression.position(), table)
+					self.infer_built_in_call_type_for_query(built_in, arguments, expression.position(), table)
 				}
 				else {
 					Err(self.compile_error(
@@ -2409,12 +2870,21 @@ impl SemanticAnalyzer {
 	}
 
 	fn is_assignable(&self, target: &DataType, value: &DataType) -> bool {
+		self.is_assignable_with_numeric_conversion(target, value, true)
+	}
+
+	fn is_assignable_with_numeric_conversion(
+		&self,
+		target: &DataType,
+		value: &DataType,
+		allow_numeric_conversion: bool,
+	) -> bool {
 		if let Some(target_effective) = self.effective_object_data_type(target) {
-			return self.is_assignable(&target_effective, value);
+			return self.is_assignable_with_numeric_conversion(&target_effective, value, allow_numeric_conversion);
 		}
 
 		if let Some(value_effective) = self.effective_object_data_type(value) {
-			return self.is_assignable(target, &value_effective);
+			return self.is_assignable_with_numeric_conversion(target, &value_effective, allow_numeric_conversion);
 		}
 
 		if target == &DataType::Any {
@@ -2426,13 +2896,13 @@ impl SemanticAnalyzer {
 				return true;
 			}
 			(DataType::Nullable(target_inner), DataType::Nullable(value_inner)) => {
-				return self.is_assignable(target_inner, value_inner);
+				return self.is_assignable_with_numeric_conversion(target_inner, value_inner, allow_numeric_conversion);
 			}
 			(DataType::Nullable(target_inner), DataType::EmptyArray) => {
 				return matches!(target_inner.as_ref(), DataType::Array(_));
 			}
 			(DataType::Nullable(target_inner), _) => {
-				return self.is_assignable(target_inner, value);
+				return self.is_assignable_with_numeric_conversion(target_inner, value, allow_numeric_conversion);
 			}
 			(_, DataType::Nullable(_)) => {
 				return false;
@@ -2440,23 +2910,34 @@ impl SemanticAnalyzer {
 			_ => {}
 		}
 
-		if target == value || (target == &DataType::Dec && value == &DataType::Int) {
+		if target == value
+			|| (allow_numeric_conversion && target == &DataType::Dec && value == &DataType::Int) {
 			return true;
 		}
 
 		match (target, value) {
-			(DataType::Array(target_element), DataType::Array(value_element)) => self.is_assignable(target_element, value_element),
+			(DataType::Array(target_element), DataType::Array(value_element)) => {
+				self.is_assignable_with_numeric_conversion(target_element, value_element, allow_numeric_conversion)
+			}
 			(DataType::Array(_), DataType::EmptyArray) => true,
 			(DataType::Union(target_members), DataType::Union(value_members)) => {
 				value_members.iter().all(|value_member| {
-					target_members.iter().any(|target_member| self.is_assignable(target_member, value_member))
+					target_members.iter().any(|target_member| {
+						self.is_assignable_with_numeric_conversion(target_member, value_member, allow_numeric_conversion)
+					})
 				})
 			}
 			(DataType::Union(target_members), _) => {
-				target_members.iter().any(|target_member| self.is_assignable(target_member, value))
+				target_members.iter().any(|target_member| {
+					self.is_assignable_with_numeric_conversion(target_member, value, allow_numeric_conversion)
+				})
 			}
 			_ => false,
 		}
+	}
+
+	fn is_function_argument_assignable(&self, target: &DataType, value: &DataType) -> bool {
+		self.is_assignable_with_numeric_conversion(target, value, false)
 	}
 
 	fn is_numeric_type(&self, data_type: &DataType) -> bool {
@@ -2707,7 +3188,7 @@ impl SemanticAnalyzer {
 				}))
 			}
 			Expr::Boolean(boolean) => Ok(QueryExpr::Literal(QueryLiteral::Boolean(boolean.value))),
-			Expr::Call(CallExpr { arguments, callee, .. }) => {
+			Expr::Call(CallExpr { arguments, callee, position }) => {
 				let Some(built_in) = BuiltInFunction::from_name(&callee.name) else {
 					return Err(self.compile_error(
 						callee.position,
@@ -2718,11 +3199,36 @@ impl SemanticAnalyzer {
 						),
 					));
 				};
-				self.reject_default_arguments_for_built_in(built_in, arguments)?;
+				if !matches!(
+					built_in,
+					BuiltInFunction::Contains
+						| BuiltInFunction::CountOf
+						| BuiltInFunction::IndexOf
+						| BuiltInFunction::Trim
+						| BuiltInFunction::Day
+						| BuiltInFunction::Month
+						| BuiltInFunction::Year
+						| BuiltInFunction::Hour
+						| BuiltInFunction::Minute
+						| BuiltInFunction::Second
+				) {
+					return Err(self.compile_error(
+						callee.position,
+						format!(
+							"Function `{}` is not supported in `{}` database query expressions.",
+							callee.name,
+							backend.name(),
+						),
+					));
+				}
+				self.infer_built_in_call_type_for_query(built_in, arguments, *position, table)?;
+				let argument_bindings = self.semantic_program.call_argument_bindings(*position)
+					.expect("Built-in query calls must have canonical argument bindings.");
+				let ordered_arguments = Self::call_arguments_in_binding_order(arguments, argument_bindings);
 
 				match built_in {
 					BuiltInFunction::Contains => {
-						let left = arguments[0].expression()
+						let left = ordered_arguments[0].expression()
 							.expect("Built-in arguments must be expressions after default-marker validation.");
 						let left_type = self.infer_query_expression_type(left, table)?;
 
@@ -2754,7 +3260,7 @@ impl SemanticAnalyzer {
 						}
 					}
 					BuiltInFunction::CountOf | BuiltInFunction::IndexOf => {
-						let right = arguments[1].expression()
+						let right = ordered_arguments[1].expression()
 							.expect("Built-in arguments must be expressions after default-marker validation.");
 						let right_type = self.infer_query_expression_type(right, table)?;
 
@@ -2778,20 +3284,11 @@ impl SemanticAnalyzer {
 					| BuiltInFunction::Hour
 					| BuiltInFunction::Minute
 					| BuiltInFunction::Second => {}
-					_ => {
-						return Err(self.compile_error(
-							callee.position,
-							format!(
-								"Function `{}` is not supported in `{}` database query expressions.",
-								callee.name,
-								backend.name(),
-							),
-						));
-					}
+					_ => unreachable!("Unsupported query built-ins are rejected before argument analysis."),
 				}
 
 				Ok(QueryExpr::BuiltInCall(QueryBuiltInCall {
-					arguments: arguments.iter()
+					arguments: ordered_arguments.iter()
 						.enumerate()
 						.map(|(index, argument)| {
 							let argument = argument.expression()
@@ -3007,6 +3504,26 @@ impl SemanticAnalyzer {
 			BinaryOperator::Subtract => "-",
 			BinaryOperator::Xor => "xor",
 		}
+	}
+
+	fn push_call_shape_argument(
+		shape: &mut FunctionCallShape,
+		parameter: &FunctionParameterSignature,
+		name: Option<String>,
+		data_type: DataType,
+	) {
+		shape.arguments.push(CallArgument {
+			is_by_ref: parameter.is_by_ref,
+			name: name.map(|name| IdentifierExpr {
+				name,
+				position: 0,
+			}),
+			position: 0,
+			value: CallArgumentValue::Expression(Expr::Null(NullLiteral {
+				position: 0,
+			})),
+		});
+		shape.argument_types.push(Some(data_type));
 	}
 
 	fn query_field_access_chain<'a>(
@@ -3779,6 +4296,7 @@ impl SemanticAnalyzer {
 
 	fn select_function_overload(
 		&self,
+		callable_kind: &str,
 		name: &str,
 		signatures: &[FunctionSignature],
 		arguments: &[CallArgument],
@@ -3790,59 +4308,58 @@ impl SemanticAnalyzer {
 				self.requested_default_error(signatures, arguments).unwrap_or_else(|| {
 					self.compile_error(
 						position,
-						format!("Arguments do not match the parameters of function `{name}`."),
+						format!("Arguments do not match the parameters of {callable_kind} `{name}`."),
 					)
 				})
 			})?;
 			return Ok((signatures[0].clone(), argument_bindings));
 		}
 
-		let candidates = signatures.iter()
-			.filter_map(|signature| {
-				let argument_bindings = self.bind_call_arguments(signature, arguments)?;
-				let accepts_types = signature.parameters.iter()
-					.zip(argument_bindings.iter())
-					.all(|(parameter, binding)| {
-						let CallArgumentBinding::Supplied(argument_index) = binding else {
-							return true;
-						};
-						let argument_index = *argument_index as usize;
-						let argument = &arguments[argument_index];
-						let argument_type = argument_types[argument_index].as_ref()
-							.expect("Supplied call argument bindings must refer to expressions.");
-						if parameter.is_by_ref != argument.is_by_ref {
-							return false;
-						}
+		let mut candidates = Vec::new();
+		let mut rejections = Vec::new();
+		for signature in signatures {
+			let description = self.describe_function_signature(name, signature);
+			let Some(argument_bindings) = self.bind_call_arguments(signature, arguments) else {
+				rejections.push(format!(
+					"Candidate `{description}` does not match the supplied argument names or count.",
+				));
+				continue;
+			};
 
-						if parameter.is_by_ref {
-							parameter.data_type == *argument_type
-						}
-						else {
-							self.is_assignable(&parameter.data_type, argument_type)
-						}
-					});
-
-				if accepts_types {
-					Some((signature.clone(), argument_bindings))
-				}
-				else {
-					None
-				}
-			})
-			.collect::<Vec<_>>();
+			let rejection = signature.parameters.iter()
+				.zip(argument_bindings.iter())
+				.find_map(|(parameter, binding)| {
+					self.call_binding_type_rejection(parameter, binding, arguments, argument_types)
+				});
+			if let Some(rejection) = rejection {
+				rejections.push(format!("Candidate `{description}` {rejection}."));
+			}
+			else {
+				candidates.push((signature.clone(), argument_bindings));
+			}
+		}
 
 		match candidates.as_slice() {
 			[(signature, argument_bindings)] => Ok((signature.clone(), argument_bindings.clone())),
 			[] => Err(self.requested_default_error(signatures, arguments).unwrap_or_else(|| {
+				let rejection_summary = rejections.join(" ");
 				self.compile_error(
 					position,
-					format!("No overload of function `{name}` accepts the supplied arguments."),
+					format!(
+						"No overload of {callable_kind} `{name}` accepts the supplied arguments. {rejection_summary}",
+					),
 				)
 			})),
-			_ => Err(self.compile_error(
-				position,
-				format!("Call to function `{name}` is ambiguous between multiple overloads."),
-			)),
+			_ => {
+				let overloads = candidates.iter()
+					.map(|(signature, _)| format!("`{}`", self.describe_function_signature(name, signature)))
+					.collect::<Vec<_>>()
+					.join(", ");
+				Err(self.compile_error(
+					position,
+					format!("Call to {callable_kind} `{name}` is ambiguous between the following overloads: {overloads}."),
+				))
+			}
 		}
 	}
 
@@ -3867,6 +4384,27 @@ impl SemanticAnalyzer {
 			}
 			_ => None,
 		}
+	}
+
+	fn signature_accepts_call_shape(
+		&self,
+		signature: &FunctionSignature,
+		shape: &FunctionCallShape,
+	) -> bool {
+		let Some(bindings) = self.bind_call_arguments(signature, &shape.arguments) else {
+			return false;
+		};
+
+		signature.parameters.iter()
+			.zip(bindings.iter())
+			.all(|(parameter, binding)| {
+				self.call_binding_accepts_types(
+					parameter,
+					binding,
+					&shape.arguments,
+					&shape.argument_types,
+				)
+			})
 	}
 
 	fn statement_guarantees_return(&self, statement: &Statement) -> bool {
@@ -3939,6 +4477,29 @@ impl SemanticAnalyzer {
 			Err(SchemaError::UnknownSequence { .. }) => Ok(None),
 			Err(error) => Err(self.schema_error_to_compile_error(position, error)),
 		}
+	}
+
+	fn unselectable_overload_indices(&self, signatures: &[FunctionSignature]) -> Vec<usize> {
+		let max_variadic_arguments = signatures.iter()
+			.map(|signature| signature.parameters.len())
+			.max()
+			.unwrap_or(0) + 1;
+
+		signatures.iter().enumerate()
+			.filter_map(|(target_index, target)| {
+				let has_unique_call = self.function_call_shapes(target, max_variadic_arguments)
+					.iter()
+					.any(|shape| {
+						let matching_indices = signatures.iter().enumerate()
+							.filter_map(|(index, signature)| {
+								self.signature_accepts_call_shape(signature, shape).then_some(index)
+							})
+							.collect::<Vec<_>>();
+						matching_indices.as_slice() == [target_index]
+					});
+				(!has_unique_call).then_some(target_index)
+			})
+			.collect()
 	}
 
 	fn validate_block(&mut self, statements: &[Statement]) -> Result<(), CompileError> {
@@ -4027,13 +4588,13 @@ impl SemanticAnalyzer {
 
 	fn validate_format_built_in(
 		&self,
-		arguments: &[CallArgument],
+		arguments: &[&CallArgument],
 		argument_types: &[DataType],
 	) -> Result<(), CompileError> {
 		let [value_type, _pattern_type] = argument_types else {
 			return Ok(());
 		};
-		let Some(Expr::Text(pattern)) = arguments.get(1).and_then(CallArgument::expression) else {
+		let Some(Expr::Text(pattern)) = arguments.get(1).and_then(|argument| argument.expression()) else {
 			return Ok(());
 		};
 
@@ -4119,13 +4680,6 @@ impl SemanticAnalyzer {
 	}
 
 	fn validate_function_parameter(&mut self, parameter: &FunctionParameter) -> Result<(), CompileError> {
-		if parameter.is_variadic {
-			return Err(self.compile_error(
-				parameter.position,
-				String::from("Variadic parameters are not yet supported."),
-			));
-		}
-
 		let parameter_type = self.resolve_function_parameter_type(parameter)?;
 
 		if self.current_scope_contains(&parameter.name) {
@@ -4241,6 +4795,40 @@ impl SemanticAnalyzer {
 		}
 
 		Ok(())
+	}
+
+	fn validate_function_overload_set(
+		&self,
+		name: &str,
+		signatures: &[FunctionSignature],
+		position: usize,
+	) -> Result<(), CompileError> {
+		let unselectable_indices = self.unselectable_overload_indices(signatures);
+		if unselectable_indices.is_empty() {
+			return Ok(());
+		}
+
+		let descriptions = unselectable_indices.iter()
+			.map(|index| {
+				format!(
+					"`{}`",
+					self.describe_function_signature(name, &signatures[*index]),
+				)
+			})
+			.collect::<Vec<_>>()
+			.join(", ");
+		let noun = if unselectable_indices.len() == 1 {
+			"overload"
+		}
+		else {
+			"overloads"
+		};
+		Err(self.compile_error(
+			position,
+			format!(
+				"Function overload set `{name}` is invalid because the following {noun} cannot be selected uniquely: {descriptions}.",
+			),
+		))
 	}
 
 	fn validate_literal_expression(&mut self, expression: &Expr) -> Result<(), CompileError> {
@@ -4921,6 +5509,70 @@ impl SemanticAnalyzer {
 	}
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct FunctionOverloadAlias {
+	pub alias_name: String,
+	pub display_name: String,
+	pub position: usize,
+	pub source_name: String,
+	pub target_names: Vec<String>,
+}
+
+#[derive(Clone)]
+struct EnumBinding {
+	backing_type: DataType,
+	variants: BTreeMap<String, EnumValue>,
+}
+
+#[derive(Clone)]
+struct FunctionCallShape {
+	arguments: Vec<CallArgument>,
+	argument_types: Vec<Option<DataType>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FunctionParameterSignature {
+	data_type: DataType,
+	has_default: bool,
+	is_by_ref: bool,
+	is_variadic: bool,
+	name: String,
+}
+
+#[derive(Clone)]
+struct FunctionSignature {
+	function_index: u32,
+	parameter_defaults: Vec<Option<Expr>>,
+	parameters: Vec<FunctionParameterSignature>,
+	return_type: Option<DataType>,
+}
+
+#[derive(Clone)]
+struct GroupBoundaryContext {
+	group_keys: Vec<Vec<String>>,
+	record_slot: u32,
+}
+
+#[derive(Clone)]
+struct LocalBinding {
+	declaration_position: usize,
+	data_type: DataType,
+	is_const: bool,
+	slot: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RecordPointerFieldAssignment {
+	field_path: String,
+	position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RecordPointerFieldRead {
+	field_name: String,
+	position: usize,
+}
+
 fn query_binary_operator_name(operator: QueryBinaryOperator) -> &'static str {
 	match operator {
 		QueryBinaryOperator::Add => "+",
@@ -5128,6 +5780,22 @@ mod tests {
 		);
 
 		analyzer.validate_statement(&statement).unwrap();
+	}
+
+	#[test]
+	fn built_in_overload_sets_have_unique_call_shapes() {
+		let analyzer = SemanticAnalyzer::new();
+
+		for built_in in BuiltInFunction::all() {
+			let signatures = analyzer.built_in_validation_signatures(*built_in);
+			let unselectable = analyzer.unselectable_overload_indices(&signatures);
+
+			assert!(
+				unselectable.is_empty(),
+				"Built-in function `{}` has unselectable overloads at indices {unselectable:?}.",
+				built_in.name(),
+			);
+		}
 	}
 
 	#[test]

@@ -19,7 +19,7 @@ pub enum CompletionItemKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompletionItem {
-	pub detail: &'static str,
+	pub detail: String,
 	pub kind: CompletionItemKind,
 	pub label: String,
 }
@@ -55,7 +55,7 @@ pub fn collect_document_completion_items(source: &str) -> Vec<CompletionItem> {
 					items.push(CompletionItem {
 						label: name,
 						kind: CompletionItemKind::LocalSymbol,
-						detail: "Local symbol",
+						detail: String::from("Local symbol"),
 					});
 					index = next_index;
 					continue;
@@ -66,7 +66,7 @@ pub fn collect_document_completion_items(source: &str) -> Vec<CompletionItem> {
 					items.push(CompletionItem {
 						label: name,
 						kind: CompletionItemKind::Enum,
-						detail: "Enum",
+						detail: String::from("Enum"),
 					});
 					index = next_index;
 					continue;
@@ -77,7 +77,7 @@ pub fn collect_document_completion_items(source: &str) -> Vec<CompletionItem> {
 					items.push(CompletionItem {
 						label: name,
 						kind: CompletionItemKind::Function,
-						detail: "Function",
+						detail: String::from("Function"),
 					});
 					index = next_index;
 					continue;
@@ -88,7 +88,7 @@ pub fn collect_document_completion_items(source: &str) -> Vec<CompletionItem> {
 					items.push(CompletionItem {
 						label: name,
 						kind: CompletionItemKind::Object,
-						detail: "Object",
+						detail: String::from("Object"),
 					});
 					index = next_index;
 					continue;
@@ -99,7 +99,7 @@ pub fn collect_document_completion_items(source: &str) -> Vec<CompletionItem> {
 					items.push(CompletionItem {
 						label: name,
 						kind: CompletionItemKind::LocalSymbol,
-						detail: "Local symbol",
+						detail: String::from("Local symbol"),
 					});
 					index = next_index;
 					continue;
@@ -121,54 +121,62 @@ pub fn dedupe_completion_items(items: &mut Vec<CompletionItem>) {
 
 pub fn default_completion_items() -> Vec<CompletionItem> {
 	let mut items = vec![
-		CompletionItem { label: String::from("and"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("any"), kind: CompletionItemKind::Type, detail: "Type" },
-		CompletionItem { label: String::from("asc"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("bool"), kind: CompletionItemKind::Type, detail: "Type" },
-		CompletionItem { label: String::from("break"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("by"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("const"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("continue"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("count"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("date"), kind: CompletionItemKind::Type, detail: "Type" },
-		CompletionItem { label: String::from("dec"), kind: CompletionItemKind::Type, detail: "Type" },
-		CompletionItem { label: String::from("delete"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("desc"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("else"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("enum"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("false"), kind: CompletionItemKind::Literal, detail: "Literal" },
-		CompletionItem { label: String::from("find"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("first"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("float"), kind: CompletionItemKind::Type, detail: "Type" },
-		CompletionItem { label: String::from("fn"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("for"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("if"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("in"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("int"), kind: CompletionItemKind::Type, detail: "Type" },
-		CompletionItem { label: String::from("last"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("mut"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("not"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("null"), kind: CompletionItemKind::Literal, detail: "Literal" },
-		CompletionItem { label: String::from("obj"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("or"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("order"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("pub"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("rec"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("return"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("text"), kind: CompletionItemKind::Type, detail: "Type" },
-		CompletionItem { label: String::from("time"), kind: CompletionItemKind::Type, detail: "Type" },
-		CompletionItem { label: String::from("timestamp"), kind: CompletionItemKind::Type, detail: "Type" },
-		CompletionItem { label: String::from("timestamptz"), kind: CompletionItemKind::Type, detail: "Type" },
-		CompletionItem { label: String::from("timetz"), kind: CompletionItemKind::Type, detail: "Type" },
-		CompletionItem { label: String::from("true"), kind: CompletionItemKind::Literal, detail: "Literal" },
-		CompletionItem { label: String::from("update"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("var"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("where"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("while"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("with"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
-		CompletionItem { label: String::from("xor"), kind: CompletionItemKind::Keyword, detail: "Keyword" },
+		CompletionItem { label: String::from("and"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("any"), kind: CompletionItemKind::Type, detail: String::from("Type") },
+		CompletionItem { label: String::from("asc"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("bool"), kind: CompletionItemKind::Type, detail: String::from("Type") },
+		CompletionItem { label: String::from("break"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("by"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("const"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("continue"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("count"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("date"), kind: CompletionItemKind::Type, detail: String::from("Type") },
+		CompletionItem { label: String::from("dec"), kind: CompletionItemKind::Type, detail: String::from("Type") },
+		CompletionItem { label: String::from("delete"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("desc"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("else"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("enum"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("false"), kind: CompletionItemKind::Literal, detail: String::from("Literal") },
+		CompletionItem { label: String::from("find"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("first"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("float"), kind: CompletionItemKind::Type, detail: String::from("Type") },
+		CompletionItem { label: String::from("fn"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("for"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("if"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("in"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("int"), kind: CompletionItemKind::Type, detail: String::from("Type") },
+		CompletionItem { label: String::from("last"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("mut"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("not"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("null"), kind: CompletionItemKind::Literal, detail: String::from("Literal") },
+		CompletionItem { label: String::from("obj"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("or"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("order"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("pub"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("rec"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("return"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("text"), kind: CompletionItemKind::Type, detail: String::from("Type") },
+		CompletionItem { label: String::from("time"), kind: CompletionItemKind::Type, detail: String::from("Type") },
+		CompletionItem { label: String::from("timestamp"), kind: CompletionItemKind::Type, detail: String::from("Type") },
+		CompletionItem { label: String::from("timestamptz"), kind: CompletionItemKind::Type, detail: String::from("Type") },
+		CompletionItem { label: String::from("timetz"), kind: CompletionItemKind::Type, detail: String::from("Type") },
+		CompletionItem { label: String::from("true"), kind: CompletionItemKind::Literal, detail: String::from("Literal") },
+		CompletionItem { label: String::from("update"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("var"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("where"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("while"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("with"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("xor"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 	];
-	items.extend(built_in_completion_items());
+	for built_in in built_in_completion_items() {
+		if let Some(existing) = items.iter_mut().find(|item| item.label == built_in.label) {
+			existing.detail.push('\n');
+			existing.detail.push_str(&built_in.detail);
+		}
+		else {
+			items.push(built_in);
+		}
+	}
 	dedupe_completion_items(&mut items);
 	items
 }
@@ -202,7 +210,7 @@ pub fn member_completion_items(
 			.map(|variant| CompletionItem {
 				label: variant.clone(),
 				kind: CompletionItemKind::EnumMember,
-				detail: "Enum member",
+				detail: String::from("Enum member"),
 			})
 			.collect());
 	}
@@ -212,7 +220,7 @@ pub fn member_completion_items(
 			.map(|field| CompletionItem {
 				label: field.name.clone(),
 				kind: CompletionItemKind::Field,
-				detail: "Object field",
+				detail: String::from("Object field"),
 			})
 			.collect());
 	}
@@ -223,7 +231,7 @@ pub fn member_completion_items(
 		.map(|column| CompletionItem {
 			label: String::from(column.name()),
 			kind: CompletionItemKind::Field,
-			detail: "Record field",
+			detail: String::from("Record field"),
 		})
 		.collect())
 }
@@ -244,7 +252,7 @@ fn built_in_completion_items() -> Vec<CompletionItem> {
 		.map(|built_in| CompletionItem {
 			label: String::from(built_in.name()),
 			kind: CompletionItemKind::BuiltInFunction,
-			detail: "Built-in function",
+			detail: built_in.signature_labels().join("\n"),
 		})
 		.collect()
 }
@@ -440,7 +448,7 @@ fn collect_parameter_completion_items(parameters: &str, items: &mut Vec<Completi
 			items.push(CompletionItem {
 				label: name.value,
 				kind: CompletionItemKind::Parameter,
-				detail: "Parameter",
+				detail: String::from("Parameter"),
 			});
 			index = colon_index + 1;
 		}
@@ -1297,6 +1305,36 @@ mod tests {
 	use super::*;
 
 	use crate::schema_fixture::*;
+
+	#[test]
+	fn built_in_completion_items_describe_every_overload() {
+		let items = default_completion_items();
+		let contains = items.iter().find(|item| item.label == "contains").unwrap();
+
+		assert_eq!(
+			contains.detail,
+			"contains(str: text, sub: text): bool\ncontains(arr: [text], elem: text): bool",
+		);
+	}
+
+	#[test]
+	fn built_in_completion_items_omit_absent_return_types() {
+		let items = default_completion_items();
+		let disp = items.iter().find(|item| item.label == "disp").unwrap();
+
+		assert_eq!(disp.detail, "disp(fmt: text)");
+	}
+
+	#[test]
+	fn built_in_completion_signatures_are_preserved_for_type_names() {
+		let items = default_completion_items();
+		let int = items.iter().find(|item| item.label == "int").unwrap();
+
+		assert_eq!(int.kind, CompletionItemKind::Type);
+		assert!(int.detail.starts_with("Type\n"));
+		assert!(int.detail.contains("int(v: bool): int"));
+		assert!(int.detail.contains("int(v: text): int"));
+	}
 
 	#[test]
 	fn completion_items_dedupe_labels() {

@@ -123,6 +123,38 @@ impl SourceText {
 
 }
 
+pub fn call_span_at_position(source: &SourceText, open_paren_index: usize) -> Option<(usize, usize)> {
+	let text = source.as_str();
+	if text.get(open_paren_index..)?.chars().next()? != '(' {
+		return None;
+	}
+
+	let callee_end = text[..open_paren_index].trim_end().len();
+	if callee_end == 0 {
+		return None;
+	}
+
+	let callee_start = if text[..callee_end].ends_with('"') {
+		text[..callee_end - 1].rfind('"')?
+	}
+	else {
+		let mut start = callee_end;
+		for (index, ch) in text[..callee_end].char_indices().rev() {
+			if !is_identifier_char(ch) {
+				break;
+			}
+			start = index;
+		}
+		if start == callee_end {
+			return None;
+		}
+		start
+	};
+	let close_paren_index = find_matching_paren(text, open_paren_index)?;
+
+	Some((callee_start, close_paren_index + 1))
+}
+
 pub fn find_matching_paren(text: &str, open_paren_index: usize) -> Option<usize> {
 	let mut depth = 0;
 	let mut index = open_paren_index;
@@ -411,6 +443,12 @@ fn short_display_name(source_name: &str) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn call_span_at_position_covers_nested_arguments() {
+		let source = SourceText::new("choose(1, other(2))");
+		assert_eq!(call_span_at_position(&source, 6), Some((0, 19)));
+	}
 
 	#[test]
 	fn formats_diagnostic_with_line_and_column() {
