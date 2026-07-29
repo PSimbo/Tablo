@@ -169,11 +169,13 @@ Values of type `any` may be stored in variables, passed to functions, returned f
 
 The `any` type is never implicitly converted to a more specific type. A value of type `any` must first be cast to a more specific type in situations where a specific type is required.
 
-No arithmetic, ordering, logical, or indexing operations are defined directly on `any` values. Such operations require conversion to a more specific type first. Functions may define arguments of type `any`.
+Equality is the only category of operator defined directly for `any` values. No arithmetic, ordering, logical, or indexing operations are defined directly on `any` values. Such operations require conversion to a more specific type first. Functions may define arguments of type `any`.
 
 The `any` type is distinct from `json`. The `json` type represents JSON-domain data, whereas `any` represents an arbitrary Tablo runtime value whose concrete type is not known statically.
 
 Note that the `json` data type does not require that the database backend have explicit support for storing JSON data. Tablo provides functions for converting JSON data to and from strings.
+
+JSON objects are free to contain any number of named fields. The `exists` operator may be used to determine whether a certain field exists. This operator evaluates to `true` even if the field contains a value of `null`. See "Presence and Lock Operators" for its complete semantics.
 
 Beyond the primitive data types listed in this section, custom data types may be defined as objects (see the "Objects" section).
 
@@ -182,11 +184,17 @@ Technically, Tablo supports two more primitive data types: record pointers and s
 Identifiers
 -----------
 
-Identifiers are names that represent data entities such as variables, tables, fields, and records. There are two types: quoted and unquoted.
+Identifiers are names that represent language and database entities such as functions, parameters, variables, object types, object fields, enum types, enum variants, tables, fields, records, and sequences. There are two types: quoted and unquoted.
 
 Unquoted identifiers may only contain the characters "A" to "Z", "a" to "z", "0" to "9", and "_". The first letter must not be a digit. Unquoted identifiers are not case-sensitive.
 
 Quoted identifiers are delimited by `"` characters and may contain one or more Unicode characters (including new lines). Two `"` characters immediately next to one another are not considered delimiters and are treated as a literal `"` character instead. Quoted identifiers are case-sensitive.
+
+These case-sensitivity rules apply uniformly regardless of what an identifier denotes. In particular, unquoted function names, parameter names, object names, object field names, enum names, and enum variant names are all case-insensitive. Case-only differences therefore never distinguish unquoted declarations, unquoted function overload names, unquoted named arguments, or unquoted member references. Compilers and tools should preserve and display the spelling used by the declaration even though unquoted lookup is case-insensitive.
+
+Two quoted identifiers are compared exactly and may therefore differ only by case. An unquoted declaration conflicts with any declaration in the same namespace whose identifier is equal under case-insensitive comparison, whether that other declaration is quoted or unquoted. Likewise, a quoted declaration conflicts with an existing unquoted declaration when their names are equal under case-insensitive comparison.
+
+An unquoted reference uses case-insensitive lookup. If multiple quoted declarations differ only by case and therefore match the same unquoted reference, that reference is ambiguous and the compiler requires a quoted reference to select one of them. A quoted reference uses exact matching.
 
 Note that some tokens that match the definition of an identifier are considered to be reserved words and are not treated as identifiers by the compiler.
 
@@ -354,9 +362,19 @@ Decimal values may be compared with other decimal values. Decimal values may als
 
 Arrays may be compared for equality using `==` and `!=`. Two arrays are equal if and only if they have the same length and each element is equal to the corresponding element in the other array.
 
-The `null` literal may be compared for equality with a nullable or non-nullable value of any type for which equality is defined. A non-nullable value is never equal to `null`, so `value == null` always evaluates to `false` and `value != null` always evaluates to `true` when `value` has a non-nullable type. Such comparisons are valid even when the compiler can determine their result statically.
+The `null` literal may be compared for equality with a nullable or non-nullable value of any type for which equality is defined. A JSON value representing JSON `null` is equal to the `null` literal. Every other non-nullable value is unequal to `null`, so `value == null` always evaluates to `false` and `value != null` always evaluates to `true` when `value` has a non-nullable non-JSON type. Such comparisons are valid even when the compiler can determine their result statically.
 
-Equality operators are not defined directly for `any` values. If equality over dynamically typed values is required, those values must first be converted or validated into more specific types.
+Objects may be compared for equality using `==` and `!=`. Ordinary statically typed object operands must have the same nominal object type, subject to the usual nullable and non-nullable compatibility. Two non-null object values are equal if and only if every field is equal, including private fields and fields within nested objects. Root-array-shaped objects are compared using array equality. Structurally identical values of different nominal object types are not equal.
+
+Object comparison is recursive and terminates as soon as inequality is established without comparing the remaining fields or elements. The compiler is free to compare fields in any order.
+
+JSON values may be compared for equality using `==` and `!=`. JSON values of different kinds are not equal. JSON strings and Boolean values use their ordinary scalar equality, JSON `null` uses the ordinary `null` equality rules, and JSON numbers are equal when they represent the same numeric value; differences in numeric spelling such as `1`, `1.0`, and `1e0` do not affect equality. JSON arrays are equal when they have the same length and corresponding elements are equal in the same order. JSON objects are equal when they contain the same case-sensitive property names and the corresponding values are equal; property order does not affect equality.
+
+Except for `null`, a JSON value is not equal to a statically typed object or other non-JSON value merely because its structure or scalar representation matches. An explicit conversion is required before values from different runtime domains can compare as values of the same type.
+
+Values of type `any` may be compared using `==` and `!=`, including comparison between an `any` operand and a concrete operand. Equality unwraps each `any` operand and compares its contained runtime value using the equality rules for that value. Compatible concrete values use their ordinary equality semantics, including numeric compatibility between `int` and `dec`. Incompatible runtime types are unequal rather than producing a runtime failure. The `any` wrapper does not itself create a distinct value, so an `any` value containing `42` is equal to the concrete integer `42`.
+
+Equality is defined for every value that may be stored in `any` and is evaluated recursively for arrays, objects, JSON values, and nested `any` values. Different nominal object or enum types remain unequal even when their underlying representations match. Equality does not perform truthiness conversion, text-to-number conversion, or any other coercion not already permitted by the ordinary equality rules.
 
 ### Comparison Operators
 
@@ -558,7 +576,25 @@ Objects
 
 Tablo supports a somewhat struct-like, somewhat JSON-like construct called "objects". Objects are like structs in the sense that they allow the user to define custom data types with a fixed field structure. Objects are like JSON in the sense that the outermost element may be an array and the internal structure may be nested arbitrarily deeply. You can think of objects as strongly-typed JSON data.
 
-An object type is declared using the `obj` keyword followed by the object name and its field structure.
+An object type is declared using the `obj` keyword followed by the object name and its field structure. Object types may be declared at module scope or within any nested lexical scope.
+
+By default, an object type may only be referenced within the module in which it is declared. A module-scope object type may be marked with the `pub` keyword to make it available for import by other modules:
+
+~~~
+pub obj Customer {
+  pub id: int,
+  pub name: text,
+  internalCode: text,
+};
+~~~
+
+Only module-scope object declarations may be marked as `pub`. Making an object type public makes its type name available for import, but does not make all of its fields public.
+
+Object fields are private by default. A field must be marked with the `pub` keyword in order to be accessed from outside the module in which its containing object is declared. Code within the declaring module may access both public and private fields. Marking a field as `pub` within a private object does not make either the object or the field importable and is considered a syntax error by the compiler.
+
+A named inline object cannot declare visibility independently. It becomes publicly nameable when it is exposed through a public field of a public object. The same rule applies recursively through a chain of public fields. A named inline object used as the element type of a public root-array-shaped object is also publicly nameable. Fields within named and anonymous inline objects remain private by default and must each use `pub` in order to be accessed from another module.
+
+A public declaration must not expose a private named object type. This restriction applies recursively to object types used within nullable types, arrays, unions, and public nested field structures. Consequently, a public function's parameter and return types, each public object field, and the element type of a public root-array-shaped object may only expose public module-scope object types or publicly nameable inline object types. Private fields may use private object types because they do not form part of the object's public interface.
 
 Each field has a name and a type. A field's type may be a primitive, a known custom data type, an anonymous inline object, or a named inline object. A nullable field type is written by adding `?` after the type. A field may also specify an optional default value using `= <literal>`. Default values are limited to literals rather than arbitrary expressions. String literals, numeric literals, boolean literals, `null`, array literals, and object literals composed only of literals are all valid field defaults.
 
@@ -599,14 +635,14 @@ obj Envelope {
 
 In the example above, `Payload` is named locally within `Envelope`, but its full type name is `Envelope.Payload`.
 
-New instances of a named object type are created by writing the object type name followed by a brace-delimited list of field values:
+Declaring a named field-shaped object type introduces an implicit constructor with the same identifier as the type. The type and constructor form a single paired declaration in the shared lexical namespace rather than conflicting declarations. New instances are constructed by writing the object type name followed by a brace-delimited list of field values:
 
 ~~~
 obj Customer {
   id: int,
   name: text = '',
   isActive: bool = true,
-}
+};
 
 var customer: Customer = Customer {
   id: 1,
@@ -616,23 +652,81 @@ var customer: Customer = Customer {
 
 In the example above, the `isActive` field receives its default value because no explicit value was provided.
 
-Each specified field name must exist on the target object type and must not be repeated. Any omitted fields are populated from their explicit field default if one exists, otherwise from the normal default value for the field's data type. As a result, constructing an object always yields a complete instance. If an omitted field is itself a non-nullable object type, that sub-object is constructed recursively according to the same rules. Nullable fields still default to `null` unless an explicit field default overrides that.
+Each specified field name must exist on the target object type and must not be repeated. Field name uniqueness rules follow the ordinary quoted and unquoted identifier rules. Quoted fields that differ only by case may coexist, but adding an equivalent unquoted field is a compile error because the unquoted name would be ambiguous:
 
-Where the expected type is already known, such as when assigning to an inline object-typed field, the type name may be omitted and only the brace-delimited field list is written.
+~~~
+obj Example {
+  "field": int,
+  "FIELD": int,
+  // Field: int, // Invalid: conflicts with both quoted fields.
+};
+~~~
+
+Given the valid fields above, `value."field"` and `value."FIELD"` select their respective fields exactly, while `value.field` is ambiguous and does not compile.
+
+Code outside the module in which the object is declared may specify values only for public fields. Any omitted fields, including inaccessible private fields, are populated from their explicit field default if one exists, otherwise from the normal default value for the field's data type. As a result, constructing an object always yields a complete instance. If an omitted field is itself a non-nullable object type, that sub-object is constructed recursively according to the same rules. Nullable fields still default to `null` unless an explicit field default overrides that.
+
+Named inline object types introduce implicit constructors in the same way. Anonymous inline objects have no named constructor. Where the expected type is already known, such as when assigning to an anonymous inline object-typed field, the type name is omitted and only the brace-delimited field list is written.
+
+Root-array-shaped objects are constructed using an ordinary array literal in a context where the expected root-array object type is known:
+
+~~~
+var customers: CustomerCollection = [
+  {
+    id: 1,
+    name: 'Alice',
+    location: {},
+  },
+];
+~~~
+
+The array literal is conceptually the root-array type's implicit constructor, but no separately invoked named constructor or `CustomerCollection[...]` syntax is introduced.
 
 Qualified object type names may be used anywhere a data type is expected. This includes local variable declarations, function parameters, return types, array element types, and unions.
 
-Tablo does not currently define constructor syntax for objects. Object creation is performed entirely by supplying zero or more field values and allowing the remaining fields to be populated from defaults.
+Implicit object constructors have no user-defined body and cannot be overloaded. Their scope and visibility are inherited from their object type. An unrelated function may not reuse an object's identifier in the same scope. Tablo does not currently support user-defined constructors, instance methods, static methods, or classes.
 
 Tablo supports bi-directional conversion between JSON data and objects.
 
-Internal fields are accessed using the `.` operator:
+Object fields are accessed using the `.` operator:
 
 ~~~
 var addr1: text = locData.addressLines.line1;
 ~~~
 
-The `exists` prefix operator may be used to distinguish a missing field from a field whose value is `null`. See "Presence and Lock Operators" for its complete semantics.
+Accessing a private field from outside the module in which its containing object is declared is a compile error.
+
+Object declarations may be directly or indirectly recursive, but every cycle in the object type graph must cross either a nullable field or an array boundary. Nullable fields break recursive default construction by defaulting to `null`, while arrays break it by defaulting to `[]`. A cycle composed entirely of non-nullable, non-array object fields is a compile error.
+
+~~~
+obj LinkedNode {
+  next: LinkedNode?, // Valid: the recursive field defaults to null.
+};
+
+obj TreeNode {
+  children: [TreeNode], // Valid: the recursive array defaults to [].
+};
+
+obj InvalidNode {
+  next: InvalidNode, // Invalid: default construction would never terminate.
+};
+~~~
+
+Explicit field defaults must also produce a finite value. An explicit default may instantiate a nullable recursive field or populate a recursive array, but every object literal within that default must eventually terminate the recursion explicitly or through an ordinary nullable or empty-array default. The compiler must reject a default whose recursive expansion would never terminate.
+
+~~~
+obj FiniteDefaultNode {
+  next: FiniteDefaultNode? = { next: null }, // Valid: recursion terminates explicitly.
+};
+
+obj InvalidDefaultNode {
+  next: InvalidDefaultNode? = {}, // Invalid: each default node creates another.
+};
+
+obj InvalidDefaultTree {
+  children: [InvalidDefaultTree] = [{}], // Invalid for the same reason.
+};
+~~~
 
 Arrays
 ------
@@ -721,15 +815,25 @@ var resp: HttpResponseCode = HttpResponseCode.Created;
 Scopes
 ------
 
-Scopes in Tablo are lexical. A variable or function is valid only within the scope in which it is declared and within any nested scopes.
+Scopes in Tablo are lexical. A variable, function, enum type, or object type is valid only within the scope in which it is declared and within any nested scopes.
 
-Variables may be declared within any block or function scope. Functions may be declared either at module scope or within any nested scope.
+Variables may be declared within any block or function scope. Functions and object types may be declared either at module scope or within any nested lexical scope.
 
-If a variable within a nested scope matches the name of a variable in an outer scope then the variable in the nested scope "shadows" the variable in the outer scope. Until the end of the nested scope, references to the variable will resolve to that scope's variable. After the nested scope ends, references to the variable will once again resolve to the outer scope's variable.
+Functions, enum types, object types, and variables share a single lexical namespace. This includes parameters, constants, global variables, and record pointers. Two declarations from different categories may not use the same identifier in the same scope. Valid function overload sets are an exception. The implicit constructor introduced by a named field-shaped object type is also permitted to share that object's identifier because the type and constructor form a single paired declaration.
 
-The same shadowing rules apply to functions. If a function declared in a nested scope has the same name as a function visible from an outer scope then, within the nested scope, unqualified calls to that name resolve to the nested function.
+Object fields and enum variants belong to the member namespace of their containing type rather than the lexical namespace containing that type. Their identifiers still follow the ordinary quoted and unquoted case-sensitivity rules.
 
-Within a given scope, a function may be called before its declaration appears in the source code. Functions do not need to be forward-declared and Tablo provides no syntax for doing so. This rule applies equally to module-scope functions and to functions declared within a nested scope. A nested function is therefore visible throughout the entire scope in which it is declared as well as within any deeper nested scopes.
+Database tables and sequences do not belong to a Tablo module or its lexical namespace. They have application-level identities derived from the configured databases, while `with` statements determine which database entities are visible within a source file. Tables and sequences occupy separate database namespaces and may therefore share the same identifier. A lexical declaration may also share an identifier with a table or sequence because the syntactic context determines which category is being referenced.
+
+Shadowing occurs only between nested lexical scopes. Declaring or importing the same identifier more than once in a single scope is a compile error unless the declarations form a valid function overload set or multiple import paths resolve to the same declaration.
+
+An inner declaration shadows an outer declaration with the same identifier regardless of the categories of the two declarations. For example, an inner variable may shadow an outer function or object type. A function overload set declared in an inner scope shadows the entire overload set with the same name in an outer scope; overloads from different scopes are not merged.
+
+Functions, enum types, object types, and imported declarations are visible throughout their containing scope regardless of where their declaration or `use` statement appears textually. Functions and types therefore do not need to be forward-declared and Tablo provides no syntax for doing so. Local variables become visible from their declaration onward. Function parameters are visible throughout the function body.
+
+When the first component of a qualified name is shadowed, its qualified members are also inaccessible through that name. For example, shadowing `Envelope` also shadows `Envelope.Payload`.
+
+Because database tables and sequences use separate database namespaces, lexical shadowing does not hide them in syntactic contexts that require a table or sequence.
 
 Anonymous scopes are supported and are created using a bare block:
 
@@ -1828,19 +1932,27 @@ The path is resolved relative to the file containing the `use` statement.
 
 `use` statements may appear at file scope or within any nested scope.
 
-Unless otherwise specified, a `use` statement imports all `pub` function declarations from the target module into the scope in which the `use` statement appears. Imported functions may then be called within that scope as well as any nested scopes. For the time being, variables may not be imported by ordinary `use` statements.
+Unless otherwise specified, a `use` statement imports all `pub` function and object declarations from the target module into the scope in which the `use` statement appears. Imported declarations are visible within that scope and any nested scopes. For the time being, variables may not be imported by ordinary `use` statements.
 
-In order to specify a subset of the target module's `pub` functions to import, insert a comma-separated list of function names and the `from` keyword after the `use` keyword.
+In order to specify a subset of the target module's public functions and object types to import, insert a comma-separated list of declaration names and the `from` keyword after the `use` keyword.
 
 ~~~
-use NewV4, NewV7 from '../Common/UuidUtils';
+use Uuid, NewV7 from '../Common/UuidUtils';
 ~~~
 
-Normal function overloading and shadowing rules apply for imported functions, just as if the function had been defined locally. Imported functions do not become visible outside the scope in which the corresponding `use` statement appears. Functions that are not marked `pub` may not be imported from another module.
+Importing a public function also automatically imports every public object type used by the function's parameters and/or return type. This includes object types nested within nullable types, arrays, unions, and named inline types. When a named inline object is exposed by a function signature, its public containing object is imported so that the inline type can be referenced using its qualified name.
 
-Note that `use` statements are *not* simple preprocessor directives for including file content as you may be familiar with from C or C++. Importing a module does not cause that module's own imports to be implicitly imported as well.
+Importing an object type, whether explicitly or automatically, recursively imports the public object types required to describe its public field structure. Private field types are still resolved and retained as compiler dependencies, but they do not become visible in the importing scope. Object-type dependency imports do not import functions that accept or return those types. Importing an object type never causes any function to be imported automatically.
 
-During compilation, Tablo first resolves the module graph and gathers the function declarations visible from each module. Function bodies are compiled only after this resolution step has completed. This allows modules to reference functions declared in each other, including in the presence of circular module dependencies, provided that each function call can be resolved unambiguously. Each function is compiled at most once, even if its containing module is imported by multiple other modules.
+Automatic object-type imports have the same lexical scope as the `use` statement that caused them. If an automatically imported type conflicts with a different declaration in that same scope, the compiler must report an ambiguity. The diagnostic for conflicts arising from automatic imports must clearly distinguish itself from the diagnostic for conflicts arising from explicit imports and must identify the automatically imported type, the function or object import that introduced it, and the declaration or import with which it conflicts.
+
+When a diagnostic must distinguish same-named declarations from different modules, it should qualify each declaration name with the name of its originating module using `.` notation. For this purpose, the module name is the source filename without its `.tablo` extension. Nested object type names retain their complete qualification after the module name, such as `Customers.Envelope.Payload`. This module-qualified notation is descriptive diagnostic output and does not introduce a source-level module namespace or a module-qualified reference syntax. If module names alone are not unique, the diagnostic must also show the canonical relative path of each originating module.
+
+Normal overload rules apply to imported functions. An imported declaration conflicts with a different local or imported declaration using the same identifier in the same scope. Importing the same declaration through multiple explicit or automatic import paths is deduplicated and does not produce a conflict. Imported declarations do not become visible outside the scope in which the corresponding `use` statement appears. Private module-scope functions and object types may not be imported from another module.
+
+Note that `use` statements are *not* simple preprocessor directives for including file content as you may be familiar with from C or C++. Importing a module does not cause that module's own imports to be implicitly imported as well. The automatic import of object types required by a public declaration's interface is a narrowly defined exception and does not re-export unrelated declarations from a dependency module.
+
+During compilation, Tablo first resolves the module graph and gathers the function and object declarations visible from each module. Function bodies are compiled only after this resolution step has completed. This allows modules to reference functions declared in each other, including in the presence of circular module dependencies, provided that each function call can be resolved unambiguously. Each function and object declaration is compiled at most once, even if its containing module is imported by multiple other modules.
 
 Tablo also supports global variables. A variable must be explicitly declared using the `global` keyword in order to be visible outside the module in which it is defined.
 
@@ -2348,15 +2460,15 @@ Production = <Components>
 ~~~
 program = { objectDeclaration | functionDeclaration }
 
-objectDeclaration = `obj` identifier objectShape `;`
+objectDeclaration = [ `pub` ] `obj` identifier objectShape `;`
 objectShape = objectFields | `[` objectElementType `]`
 objectFields = `{` [ objectField { `,` objectField } [ `,` ] ] `}`
-objectField = identifier `:` objectFieldType [ `=` objectDefaultLiteral ]
+objectField = [ `pub` ] identifier `:` objectFieldType [ `=` objectDefaultLiteral ]
 objectFieldType = dataType | inlineObjectShape
 inlineObjectShape = [ `obj` identifier ] objectShape
 objectElementType = dataType | inlineObjectShape
 
-statement = block | blockStatement | simpleStatement
+statement = block | blockStatement | objectDeclaration | simpleStatement
 
 block = `{` { statement } `}`
 
