@@ -59,7 +59,7 @@ impl Parser {
 				Some(_) if self.current_starts_function_declaration() => {
 					functions.push(self.parse_function_declaration()?);
 				}
-				Some(token) if token.kind == TokenKind::ObjKeyword => {
+				Some(_) if self.current_starts_object_declaration() => {
 					objects.extend(self.parse_object_declaration()?);
 				}
 				Some(token) if token.kind == TokenKind::WithKeyword => {
@@ -104,6 +104,16 @@ impl Parser {
 			Some(token) if token.kind == TokenKind::FnKeyword => true,
 			Some(token) if token.kind == TokenKind::PubKeyword => {
 				self.tokens.get(self.position + 1).is_some_and(|next| next.kind == TokenKind::FnKeyword)
+			}
+			_ => false,
+		}
+	}
+
+	fn current_starts_object_declaration(&self) -> bool {
+		match self.current() {
+			Some(token) if token.kind == TokenKind::ObjKeyword => true,
+			Some(token) if token.kind == TokenKind::PubKeyword => {
+				self.tokens.get(self.position + 1).is_some_and(|next| next.kind == TokenKind::ObjKeyword)
 			}
 			_ => false,
 		}
@@ -1293,9 +1303,16 @@ impl Parser {
 	}
 
 	fn parse_object_declaration(&mut self) -> Result<Vec<ObjectDeclaration>, ParseError> {
+		let visibility = if self.current().is_some_and(|token| token.kind == TokenKind::PubKeyword) {
+			self.next();
+			Visibility::Public
+		}
+		else {
+			Visibility::Private
+		};
 		let object_keyword = self.expect_token(TokenKind::ObjKeyword, "Expected `obj` to start object declaration.")?;
 		let name = self.expect_token(TokenKind::Identifier, "Expected object type name.")?;
-		let objects = self.parse_root_object_shape_declaration(name.lexeme, object_keyword.start)?;
+		let objects = self.parse_root_object_shape_declaration(name.lexeme, object_keyword.start, visibility)?;
 		self.expect_token(TokenKind::Semicolon, "Expected `;` after object declaration.")?;
 		Ok(objects)
 	}
@@ -1345,6 +1362,13 @@ impl Parser {
 		&mut self,
 		containing_object_name: &str,
 	) -> Result<(ObjectFieldDeclaration, Vec<ObjectDeclaration>), ParseError> {
+		let visibility = if self.current().is_some_and(|token| token.kind == TokenKind::PubKeyword) {
+			self.next();
+			Visibility::Public
+		}
+		else {
+			Visibility::Private
+		};
 		let name = self.expect_token(TokenKind::Identifier, "Expected object field name.")?;
 		self.expect_token(TokenKind::Colon, "Expected `:` after object field name.")?;
 		let (data_type, mut nested_objects) = self.parse_object_field_data_type(containing_object_name, &name.lexeme, name.start)?;
@@ -1363,6 +1387,7 @@ impl Parser {
 				default_value,
 				name: name.lexeme,
 				position: name.start,
+				visibility,
 			},
 			std::mem::take(&mut nested_objects),
 		))
@@ -1391,8 +1416,14 @@ impl Parser {
 			let object_name = self.expect_token(TokenKind::Identifier, "Expected inline object type name.")?;
 			let qualified_name = format!("{containing_object_name}.{}", object_name.lexeme);
 			(
-				DataType::Object(qualified_name.clone()),
-				self.parse_object_shape_declaration(qualified_name, object_keyword.start)?,
+				DataType::Object(ObjectTypeName::new(qualified_name.clone(), object_keyword.start)),
+				self.parse_object_shape_declaration(
+					qualified_name,
+					object_keyword.start,
+					Some(containing_object_name.to_string()),
+					true,
+					Visibility::Private,
+				)?,
 			)
 		}
 		else if self.current().is_some_and(|token| token.kind == TokenKind::LeftBrace) {
@@ -1402,8 +1433,14 @@ impl Parser {
 			);
 
 			(
-				DataType::Object(qualified_name.clone()),
-				self.parse_object_shape_declaration(qualified_name, field_position)?,
+				DataType::Object(ObjectTypeName::new(qualified_name.clone(), field_position)),
+				self.parse_object_shape_declaration(
+					qualified_name,
+					field_position,
+					Some(containing_object_name.to_string()),
+					false,
+					Visibility::Private,
+				)?,
 			)
 		}
 		else {
@@ -1422,6 +1459,9 @@ impl Parser {
 		&mut self,
 		name: String,
 		position: usize,
+		containing_object_name: Option<String>,
+		has_explicit_name: bool,
+		visibility: Visibility,
 	) -> Result<Vec<ObjectDeclaration>, ParseError> {
 		self.expect_token(TokenKind::LeftBrace, "Expected `{` to start object field list.")?;
 
@@ -1449,9 +1489,12 @@ impl Parser {
 
 		self.expect_token(TokenKind::RightBrace, "Expected `}` to close object declaration.")?;
 		let mut objects = vec![ObjectDeclaration {
+			containing_object_name,
+			has_explicit_name,
 			name,
 			position,
 			shape: ObjectDeclarationShape::Fields(fields),
+			visibility,
 		}];
 		objects.extend(nested_objects);
 		Ok(objects)
@@ -1605,7 +1648,13 @@ impl Parser {
 			TokenKind::BoolKeyword => Ok(DataType::Bool),
 			TokenKind::DateKeyword => Ok(DataType::Date),
 			TokenKind::DecKeyword => Ok(DataType::Dec),
-			TokenKind::Identifier => Ok(DataType::Object(self.parse_qualified_identifier_name(token)?)),
+			TokenKind::Identifier => {
+				let position = token.start;
+				Ok(DataType::Object(ObjectTypeName::new(
+					self.parse_qualified_identifier_name(token)?,
+					position,
+				)))
+			}
 			TokenKind::IntKeyword => Ok(DataType::Int),
 			TokenKind::LeftBracket => {
 				let element_type = self.parse_data_type()?;
@@ -1936,21 +1985,25 @@ impl Parser {
 		&mut self,
 		name: String,
 		position: usize,
+		visibility: Visibility,
 	) -> Result<Vec<ObjectDeclaration>, ParseError> {
 		if self.current().is_some_and(|token| token.kind == TokenKind::LeftBracket) {
 			self.next();
 			let (element_type, nested_objects) = self.parse_object_field_data_type(&name, "Element", position)?;
 			self.expect_token(TokenKind::RightBracket, "Expected `]` to close object array declaration.")?;
 			let mut objects = vec![ObjectDeclaration {
+				containing_object_name: None,
+				has_explicit_name: true,
 				name,
 				position,
 				shape: ObjectDeclarationShape::Array(element_type),
+				visibility,
 			}];
 			objects.extend(nested_objects);
 			return Ok(objects);
 		}
 
-		self.parse_object_shape_declaration(name, position)
+		self.parse_object_shape_declaration(name, position, None, true, visibility)
 	}
 
 	fn parse_sequence_reference(&mut self) -> Result<SequenceReference, ParseError> {
@@ -2669,6 +2722,8 @@ mod tests {
 
 	fn normalize_object_declaration(object: ObjectDeclaration) -> ObjectDeclaration {
 		ObjectDeclaration {
+			containing_object_name: object.containing_object_name,
+			has_explicit_name: object.has_explicit_name,
 			name: object.name,
 			position: 0,
 			shape: match object.shape {
@@ -2677,6 +2732,7 @@ mod tests {
 					fields.into_iter().map(normalize_object_field_declaration).collect()
 				),
 			},
+			visibility: object.visibility,
 		}
 	}
 
@@ -2686,6 +2742,7 @@ mod tests {
 			default_value: field.default_value.map(normalize_expr),
 			name: field.name,
 			position: 0,
+			visibility: field.visibility,
 		}
 	}
 
@@ -2860,34 +2917,43 @@ mod tests {
 			functions: vec![],
 			objects: vec![
 				ObjectDeclaration {
+					containing_object_name: None,
+					has_explicit_name: true,
 					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
-							data_type: DataType::Object(String::from("Outer.inner")),
+							data_type: DataType::Object(String::from("Outer.inner").into()),
 							default_value: None,
 							name: String::from("inner"),
 							position: 0,
+							visibility: Visibility::Private,
 						},
 						ObjectFieldDeclaration {
 							data_type: DataType::Text,
 							default_value: None,
 							name: String::from("label"),
 							position: 0,
+							visibility: Visibility::Private,
 						},
 					]),
 					name: String::from("Outer"),
 					position: 0,
+					visibility: Visibility::Private,
 				},
 				ObjectDeclaration {
+					containing_object_name: Some(String::from("Outer")),
+					has_explicit_name: false,
 					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
 							data_type: DataType::Int,
 							default_value: None,
 							name: String::from("value"),
 							position: 0,
+							visibility: Visibility::Private,
 						},
 					]),
 					name: String::from("Outer.inner"),
 					position: 0,
+					visibility: Visibility::Private,
 				},
 			],
 			result: None,
@@ -2906,28 +2972,36 @@ mod tests {
 			functions: vec![],
 			objects: vec![
 				ObjectDeclaration {
+					containing_object_name: None,
+					has_explicit_name: true,
 					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
-							data_type: DataType::Array(Box::new(DataType::Object(String::from("Outer.items.Element")))),
+							data_type: DataType::Array(Box::new(DataType::Object(String::from("Outer.items.Element").into()))),
 							default_value: None,
 							name: String::from("items"),
 							position: 0,
+							visibility: Visibility::Private,
 						},
 					]),
 					name: String::from("Outer"),
 					position: 0,
+					visibility: Visibility::Private,
 				},
 				ObjectDeclaration {
+					containing_object_name: Some(String::from("Outer")),
+					has_explicit_name: false,
 					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
 							data_type: DataType::Int,
 							default_value: None,
 							name: String::from("value"),
 							position: 0,
+							visibility: Visibility::Private,
 						},
 					]),
 					name: String::from("Outer.items.Element"),
 					position: 0,
+					visibility: Visibility::Private,
 				},
 			],
 			result: None,
@@ -2946,31 +3020,39 @@ mod tests {
 			functions: vec![],
 			objects: vec![
 				ObjectDeclaration {
+					containing_object_name: None,
+					has_explicit_name: true,
 					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
 							data_type: DataType::Union(vec![
 								DataType::Text,
-								DataType::Array(Box::new(DataType::Object(String::from("Envelope.payloadsMember2.Element")))),
+								DataType::Array(Box::new(DataType::Object(String::from("Envelope.payloadsMember2.Element").into()))),
 							]),
 							default_value: None,
 							name: String::from("payloads"),
 							position: 0,
+							visibility: Visibility::Private,
 						},
 					]),
 					name: String::from("Envelope"),
 					position: 0,
+					visibility: Visibility::Private,
 				},
 				ObjectDeclaration {
+					containing_object_name: Some(String::from("Envelope")),
+					has_explicit_name: false,
 					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
 							data_type: DataType::Int,
 							default_value: None,
 							name: String::from("value"),
 							position: 0,
+							visibility: Visibility::Private,
 						},
 					]),
 					name: String::from("Envelope.payloadsMember2.Element"),
 					position: 0,
+					visibility: Visibility::Private,
 				},
 			],
 			result: None,
@@ -2989,31 +3071,39 @@ mod tests {
 			functions: vec![],
 			objects: vec![
 				ObjectDeclaration {
+					containing_object_name: None,
+					has_explicit_name: true,
 					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
 							data_type: DataType::Union(vec![
 								DataType::Text,
-								DataType::Object(String::from("Envelope.payloadMember2")),
+								DataType::Object(String::from("Envelope.payloadMember2").into()),
 							]),
 							default_value: None,
 							name: String::from("payload"),
 							position: 0,
+							visibility: Visibility::Private,
 						},
 					]),
 					name: String::from("Envelope"),
 					position: 0,
+					visibility: Visibility::Private,
 				},
 				ObjectDeclaration {
+					containing_object_name: Some(String::from("Envelope")),
+					has_explicit_name: false,
 					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
 							data_type: DataType::Int,
 							default_value: None,
 							name: String::from("value"),
 							position: 0,
+							visibility: Visibility::Private,
 						},
 					]),
 					name: String::from("Envelope.payloadMember2"),
 					position: 0,
+					visibility: Visibility::Private,
 				},
 			],
 			result: None,
@@ -4770,34 +4860,43 @@ mod tests {
 			functions: vec![],
 			objects: vec![
 				ObjectDeclaration {
+					containing_object_name: None,
+					has_explicit_name: true,
 					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
-							data_type: DataType::Object(String::from("Outer.Inner")),
+							data_type: DataType::Object(String::from("Outer.Inner").into()),
 							default_value: None,
 							name: String::from("inner"),
 							position: 0,
+							visibility: Visibility::Private,
 						},
 						ObjectFieldDeclaration {
 							data_type: DataType::Text,
 							default_value: None,
 							name: String::from("label"),
 							position: 0,
+							visibility: Visibility::Private,
 						},
 					]),
 					name: String::from("Outer"),
 					position: 0,
+					visibility: Visibility::Private,
 				},
 				ObjectDeclaration {
+					containing_object_name: Some(String::from("Outer")),
+					has_explicit_name: true,
 					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
 							data_type: DataType::Int,
 							default_value: None,
 							name: String::from("value"),
 							position: 0,
+							visibility: Visibility::Private,
 						},
 					]),
 					name: String::from("Outer.Inner"),
 					position: 0,
+					visibility: Visibility::Private,
 				},
 			],
 			result: None,
@@ -4816,28 +4915,36 @@ mod tests {
 			functions: vec![],
 			objects: vec![
 				ObjectDeclaration {
+					containing_object_name: None,
+					has_explicit_name: true,
 					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
-							data_type: DataType::Array(Box::new(DataType::Object(String::from("Outer.Item")))),
+							data_type: DataType::Array(Box::new(DataType::Object(String::from("Outer.Item").into()))),
 							default_value: None,
 							name: String::from("items"),
 							position: 0,
+							visibility: Visibility::Private,
 						},
 					]),
 					name: String::from("Outer"),
 					position: 0,
+					visibility: Visibility::Private,
 				},
 				ObjectDeclaration {
+					containing_object_name: Some(String::from("Outer")),
+					has_explicit_name: true,
 					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
 							data_type: DataType::Int,
 							default_value: None,
 							name: String::from("value"),
 							position: 0,
+							visibility: Visibility::Private,
 						},
 					]),
 					name: String::from("Outer.Item"),
 					position: 0,
+					visibility: Visibility::Private,
 				},
 			],
 			result: None,
@@ -4856,31 +4963,39 @@ mod tests {
 			functions: vec![],
 			objects: vec![
 				ObjectDeclaration {
+					containing_object_name: None,
+					has_explicit_name: true,
 					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
 							data_type: DataType::Union(vec![
 								DataType::Text,
-								DataType::Object(String::from("Envelope.Payload")),
+								DataType::Object(String::from("Envelope.Payload").into()),
 							]),
 							default_value: None,
 							name: String::from("payload"),
 							position: 0,
+							visibility: Visibility::Private,
 						},
 					]),
 					name: String::from("Envelope"),
 					position: 0,
+					visibility: Visibility::Private,
 				},
 				ObjectDeclaration {
+					containing_object_name: Some(String::from("Envelope")),
+					has_explicit_name: true,
 					shape: ObjectDeclarationShape::Fields(vec![
 						ObjectFieldDeclaration {
 							data_type: DataType::Int,
 							default_value: None,
 							name: String::from("value"),
 							position: 0,
+							visibility: Visibility::Private,
 						},
 					]),
 					name: String::from("Envelope.Payload"),
 					position: 0,
+					visibility: Visibility::Private,
 				},
 			],
 			result: None,
@@ -5069,6 +5184,8 @@ mod tests {
 				functions: vec![],
 				objects: vec![
 					ObjectDeclaration {
+						containing_object_name: None,
+						has_explicit_name: true,
 						shape: ObjectDeclarationShape::Fields(vec![
 							ObjectFieldDeclaration {
 									data_type: DataType::Text,
@@ -5078,16 +5195,19 @@ mod tests {
 									})),
 									name: String::from("name"),
 									position: 0,
+									visibility: Visibility::Private,
 								},
 								ObjectFieldDeclaration {
 									data_type: DataType::Int,
 									default_value: None,
 									name: String::from("age"),
 									position: 0,
+									visibility: Visibility::Private,
 								},
 						]),
 						name: String::from("Person"),
 						position: 0,
+						visibility: Visibility::Private,
 					},
 				],
 				result: Some(Expr::FieldAccess(FieldAccessExpr {
@@ -5318,7 +5438,7 @@ mod tests {
 						statements: vec![
 							Statement::VariableDeclaration(VariableDeclaration {
 								data_type: DataType::Array(Box::new(DataType::Union(vec![
-									DataType::Object(String::from("Outer.Inner")),
+									DataType::Object(String::from("Outer.Inner").into()),
 									DataType::Text,
 								]))),
 								initial_value: Some(Expr::Array(ArrayLiteral {
@@ -5350,7 +5470,7 @@ mod tests {
 						},
 					],
 					position: 0,
-					return_type: Some(DataType::Object(String::from("Outer.Inner"))),
+					return_type: Some(DataType::Object(String::from("Outer.Inner").into())),
 					visibility: Visibility::Private,
 				},
 			],
@@ -5606,11 +5726,16 @@ mod tests {
 				functions: vec![],
 				objects: vec![
 					ObjectDeclaration {
+						containing_object_name: None,
+						has_explicit_name: true,
 						name: String::from("CustomerCollection"),
 						position: 0,
-						shape: ObjectDeclarationShape::Array(DataType::Object(String::from("CustomerCollection.Element"))),
+						shape: ObjectDeclarationShape::Array(DataType::Object(String::from("CustomerCollection.Element").into())),
+						visibility: Visibility::Private,
 					},
 					ObjectDeclaration {
+						containing_object_name: Some(String::from("CustomerCollection")),
+						has_explicit_name: false,
 						name: String::from("CustomerCollection.Element"),
 						position: 0,
 						shape: ObjectDeclarationShape::Fields(vec![
@@ -5619,8 +5744,10 @@ mod tests {
 								default_value: None,
 								name: String::from("name"),
 								position: 0,
+								visibility: Visibility::Private,
 							},
 						]),
+						visibility: Visibility::Private,
 					},
 				],
 				result: None,
@@ -5638,11 +5765,16 @@ mod tests {
 				functions: vec![],
 				objects: vec![
 					ObjectDeclaration {
+						containing_object_name: None,
+						has_explicit_name: true,
 						name: String::from("CustomerCollection"),
 						position: 0,
-						shape: ObjectDeclarationShape::Array(DataType::Object(String::from("CustomerCollection.Customer"))),
+						shape: ObjectDeclarationShape::Array(DataType::Object(String::from("CustomerCollection.Customer").into())),
+						visibility: Visibility::Private,
 					},
 					ObjectDeclaration {
+						containing_object_name: Some(String::from("CustomerCollection")),
+						has_explicit_name: true,
 						name: String::from("CustomerCollection.Customer"),
 						position: 0,
 						shape: ObjectDeclarationShape::Fields(vec![
@@ -5651,8 +5783,10 @@ mod tests {
 								default_value: None,
 								name: String::from("name"),
 								position: 0,
+								visibility: Visibility::Private,
 							},
 						]),
+						visibility: Visibility::Private,
 					},
 				],
 				result: None,
@@ -6189,16 +6323,20 @@ mod tests {
 				],
 				objects: vec![
 					ObjectDeclaration {
+						containing_object_name: None,
+						has_explicit_name: true,
 						shape: ObjectDeclarationShape::Fields(vec![
 							ObjectFieldDeclaration {
 								data_type: DataType::Text,
 								default_value: None,
 								name: String::from("name"),
 								position: 0,
+								visibility: Visibility::Private,
 							},
 						]),
 						name: String::from("Person"),
 						position: 0,
+						visibility: Visibility::Private,
 					},
 				],
 				result: None,

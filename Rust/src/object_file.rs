@@ -289,7 +289,7 @@ impl<'a> ObjectFileReader<'a> {
 			DATA_TYPE_TAG_DEC => Ok(DataType::Dec),
 			DATA_TYPE_TAG_EMPTY_ARRAY => Ok(DataType::EmptyArray),
 			DATA_TYPE_TAG_INT => Ok(DataType::Int),
-			DATA_TYPE_TAG_OBJECT => Ok(DataType::Object(self.read_string()?)),
+			DATA_TYPE_TAG_OBJECT => Ok(DataType::Object(self.read_string()?.into())),
 			DATA_TYPE_TAG_RANGE => Ok(DataType::Range(Box::new(self.read_data_type()?))),
 			DATA_TYPE_TAG_TEXT => Ok(DataType::Text),
 			DATA_TYPE_TAG_RECORD_POINTER => Ok(DataType::RecordPointer(crate::ast::RecordPointerType {

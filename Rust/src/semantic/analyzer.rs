@@ -11,6 +11,8 @@ use crate::source::SourceText;
 
 use super::scope::ScopeStack;
 
+const BUILT_IN_ENUM_TYPE_PREFIX: &str = "__tablo_builtin_";
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CallArgumentBinding {
 	OmittedDefault(Expr),
@@ -23,6 +25,14 @@ pub enum CallArgumentBinding {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EnumValue {
 	Constant(Constant),
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ObjectTypeReferencePathComponent {
+	ArrayElement,
+	NullableValue,
+	RangeElement,
+	UnionMember(u32),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,6 +76,32 @@ enum CallArgumentBindingError {
 	},
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LexicalDeclarationKind {
+	Enum,
+	Function,
+	Local,
+	Object,
+}
+
+impl LexicalDeclarationKind {
+	fn description(self) -> &'static str {
+		match self {
+			Self::Enum => "an enum",
+			Self::Function => "a function",
+			Self::Local => "a variable",
+			Self::Object => "an object type",
+		}
+	}
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct DeclarationScopeId(u32);
+
+impl DeclarationScopeId {
+	const MODULE: Self = Self(0);
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GroupBoundaryCallInfo {
 	pub key_names: Vec<String>,
@@ -84,6 +120,9 @@ pub struct NewRecordLayout {
 	pub record_type: RecordPointerType,
 	pub schema_is_implicit: bool,
 }
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ObjectTypeId(u32);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordPointerBindingInfo {
@@ -116,6 +155,58 @@ impl RecordPointerBindingInfo {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedObjectType {
+	containing_object_id: Option<ObjectTypeId>,
+	declaration: ObjectDeclaration,
+	display_name: String,
+	has_named_constructor: bool,
+	id: ObjectTypeId,
+	scope_id: DeclarationScopeId,
+	source_name: Option<String>,
+	visibility: Visibility,
+}
+
+impl ResolvedObjectType {
+	pub fn containing_object_id(&self) -> Option<ObjectTypeId> {
+		self.containing_object_id
+	}
+
+	pub fn declaration(&self) -> &ObjectDeclaration {
+		&self.declaration
+	}
+
+	pub fn display_name(&self) -> &str {
+		&self.display_name
+	}
+
+	pub fn has_named_constructor(&self) -> bool {
+		self.has_named_constructor
+	}
+
+	pub fn id(&self) -> ObjectTypeId {
+		self.id
+	}
+
+	pub fn scope_id(&self) -> DeclarationScopeId {
+		self.scope_id
+	}
+
+	pub fn source_name(&self) -> Option<&str> {
+		self.source_name.as_deref()
+	}
+
+	pub fn visibility(&self) -> Visibility {
+		self.visibility
+	}
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedObjectTypeReference {
+	pub object_type_id: ObjectTypeId,
+	pub path: Vec<ObjectTypeReferencePathComponent>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedSequenceReference {
 	pub database_name: String,
 	pub schema_is_implicit: bool,
@@ -140,6 +231,7 @@ pub struct SemanticAnalyzer {
 	current_return_type: Option<DataType>,
 	current_schema_catalog: Option<SchemaCatalog>,
 	current_source_name: Option<String>,
+	declaration_kinds: ScopeStack<LexicalDeclarationKind>,
 	enums: ScopeStack<EnumBinding>,
 	find_lock_mode: RecordLockMode,
 	function_depth: usize,
@@ -151,11 +243,14 @@ pub struct SemanticAnalyzer {
 	next_function_index: u32,
 	next_local_slot: u32,
 	null_comparison_operands: BTreeSet<usize>,
+	object_type_bindings: ScopeStack<ObjectTypeId>,
 	query_optimizations_disabled: bool,
 	root_source_name: Option<String>,
 	semantic_program: SemanticProgram,
 	sequence_aliases: ScopeStack<Option<ResolvedSequenceReference>>,
 	top_level_function_source_names: Vec<String>,
+	top_level_object_display_names: Vec<String>,
+	top_level_object_source_names: Vec<String>,
 }
 
 impl SemanticAnalyzer {
@@ -170,6 +265,7 @@ impl SemanticAnalyzer {
 	) -> Result<SemanticProgram, CompileError> {
 		self.current_non_null_assumptions.clear();
 		self.current_return_type = None;
+		self.declaration_kinds = ScopeStack::default();
 		self.functions = ScopeStack::default();
 		self.enums = ScopeStack::default();
 		self.find_lock_mode = RecordLockMode::None;
@@ -181,22 +277,30 @@ impl SemanticAnalyzer {
 		self.next_function_index = 0;
 		self.next_local_slot = 0;
 		self.null_comparison_operands.clear();
+		self.object_type_bindings = ScopeStack::default();
 		self.current_source_name = self.root_source_name.clone();
 		self.current_schema_catalog = schema_catalog.cloned();
 		self.semantic_program = SemanticProgram::default();
 
 		self.validate_with_declarations(&program.with_declarations, schema_catalog)?;
+		self.declaration_kinds.enter_scope();
+		self.object_type_bindings.enter_scope();
 		self.collect_object_declarations(&program.objects)?;
+		self.current_source_name = self.root_source_name.clone();
 		self.enums.enter_scope();
 		self.collect_scope_enum_declarations(&program.statements)?;
 		self.functions.enter_scope();
 		self.collect_scope_function_signatures(&program.functions, &program.statements)?;
 		self.collect_function_overload_aliases()?;
 
-		for object in &program.objects {
+		for (index, object) in program.objects.iter().enumerate() {
+			self.current_source_name = self.top_level_object_source_names.get(index)
+				.cloned()
+				.or_else(|| self.root_source_name.clone());
 			self.validate_object_declaration(object)?;
 		}
 
+		self.current_source_name = self.root_source_name.clone();
 		for (index, function) in program.functions.iter().enumerate() {
 			self.current_source_name = self.top_level_function_source_names.get(index)
 				.cloned()
@@ -219,6 +323,8 @@ impl SemanticAnalyzer {
 		self.exit_scope();
 		self.functions.exit_scope();
 		self.enums.exit_scope();
+		self.object_type_bindings.exit_scope();
+		self.declaration_kinds.exit_scope();
 		self.finalize_record_pointer_usage(program);
 		self.apply_record_pointer_field_selections()?;
 		let mut query_plan = plan_program_queries(program);
@@ -316,6 +422,7 @@ impl SemanticAnalyzer {
 			current_return_type: None,
 			current_schema_catalog: None,
 			current_source_name: None,
+			declaration_kinds: ScopeStack::default(),
 			enums: ScopeStack::default(),
 			find_lock_mode: RecordLockMode::None,
 			function_depth: 0,
@@ -327,11 +434,14 @@ impl SemanticAnalyzer {
 			next_function_index: 0,
 			next_local_slot: 0,
 			null_comparison_operands: BTreeSet::new(),
+			object_type_bindings: ScopeStack::default(),
 			query_optimizations_disabled: false,
 			root_source_name: None,
 			semantic_program: SemanticProgram::default(),
 			sequence_aliases: ScopeStack::default(),
 			top_level_function_source_names: Vec::new(),
+			top_level_object_display_names: Vec::new(),
+			top_level_object_source_names: Vec::new(),
 		};
 		analyzer.assert_valid_built_in_overload_sets();
 		analyzer
@@ -347,6 +457,14 @@ impl SemanticAnalyzer {
 
 	pub fn set_top_level_function_source_names(&mut self, source_names: Vec<String>) {
 		self.top_level_function_source_names = source_names;
+	}
+
+	pub fn set_top_level_object_display_names(&mut self, display_names: Vec<String>) {
+		self.top_level_object_display_names = display_names;
+	}
+
+	pub fn set_top_level_object_source_names(&mut self, source_names: Vec<String>) {
+		self.top_level_object_source_names = source_names;
 	}
 
 	pub fn validate_program(&mut self, program: &AstProgram) -> Result<(), CompileError> {
@@ -705,7 +823,7 @@ impl SemanticAnalyzer {
 			BuiltInParameterType::Date => DataType::Date,
 			BuiltInParameterType::Dec => DataType::Dec,
 			BuiltInParameterType::EnumBacked(backing_type) => {
-				DataType::Object(format!("__tablo_builtin_{}_enum", backing_type.name()))
+				DataType::Object(format!("{BUILT_IN_ENUM_TYPE_PREFIX}{}_enum", backing_type.name()).into())
 			}
 			BuiltInParameterType::Int => DataType::Int,
 			BuiltInParameterType::Sequence => return None,
@@ -1001,6 +1119,10 @@ impl SemanticAnalyzer {
 				&signatures,
 				alias.position,
 			)?;
+			self.declaration_kinds.declare(
+				alias.alias_name.clone(),
+				LexicalDeclarationKind::Function,
+			);
 			self.functions.declare(alias.alias_name, signatures);
 		}
 		self.current_source_name = self.root_source_name.clone();
@@ -1008,18 +1130,79 @@ impl SemanticAnalyzer {
 	}
 
 	fn collect_object_declarations(&mut self, objects: &[ObjectDeclaration]) -> Result<(), CompileError> {
-		for object in objects {
-			if self.semantic_program.object_declarations.contains_key(&object.name) {
-				return Err(self.compile_error(
+		for (index, object) in objects.iter().enumerate() {
+			self.current_source_name = self.top_level_object_source_names.get(index)
+				.cloned()
+				.or_else(|| self.root_source_name.clone());
+			if let Some(existing) = self.current_scope_declaration_kind(&object.name) {
+				if existing == LexicalDeclarationKind::Object {
+					return Err(self.compile_error(
+						object.position,
+						format!("Object `{}` is already declared in this module.", object.name),
+					));
+				}
+				return Err(self.declaration_conflict_error(
+					"Object",
+					&object.name,
 					object.position,
-					format!("Object `{}` is already declared in this module.", object.name),
+					existing,
 				));
 			}
 
-			self.semantic_program.object_declarations.insert(object.name.clone(), object.clone());
+			let id = ObjectTypeId(
+				u32::try_from(self.semantic_program.object_types.len())
+					.expect("Object type count exceeded the supported identity range."),
+			);
+			self.semantic_program.object_type_ids_by_name.insert(object.name.clone(), id);
+			self.semantic_program.object_types.insert(id, ResolvedObjectType {
+				containing_object_id: None,
+				declaration: object.clone(),
+				display_name: self.top_level_object_display_names.get(index)
+					.cloned()
+					.unwrap_or_else(|| object.name.clone()),
+				has_named_constructor: object.has_explicit_name
+					&& matches!(object.shape, ObjectDeclarationShape::Fields(_)),
+				id,
+				scope_id: DeclarationScopeId::MODULE,
+				source_name: self.current_source_name.clone(),
+				visibility: object.visibility,
+			});
+			self.declaration_kinds.declare(object.name.clone(), LexicalDeclarationKind::Object);
+			self.object_type_bindings.declare(object.name.clone(), id);
 		}
 
+		for object in objects {
+			let Some(containing_name) = &object.containing_object_name else {
+				continue;
+			};
+			let containing_object_id = self.lookup_object_type_id(containing_name)
+				.expect("Parser produced an inline object without its containing declaration.");
+			let object_type_id = self.lookup_object_type_id(&object.name)
+				.expect("Collected object type is missing its resolved identity.");
+			self.semantic_program.object_types.get_mut(&object_type_id)
+				.expect("Collected object type is missing its semantic declaration.")
+				.containing_object_id = Some(containing_object_id);
+		}
+
+		self.resolve_inline_object_visibility();
 		Ok(())
+	}
+
+	fn collect_referenced_object_names(data_type: &DataType, names: &mut BTreeSet<String>) {
+		match data_type {
+			DataType::Array(element_type) | DataType::Nullable(element_type) => {
+				Self::collect_referenced_object_names(element_type, names);
+			}
+			DataType::Object(name) => {
+				names.insert(name.to_string());
+			}
+			DataType::Union(member_types) => {
+				for member_type in member_types {
+					Self::collect_referenced_object_names(member_type, names);
+				}
+			}
+			_ => {}
+		}
 	}
 
 	fn collect_scope_enum_declarations(&mut self, statements: &[Statement]) -> Result<(), CompileError> {
@@ -1074,8 +1257,27 @@ impl SemanticAnalyzer {
 		Ok(())
 	}
 
-	fn current_scope_contains(&self, name: &str) -> bool {
-		self.locals.contains_in_current_scope(name)
+	fn current_scope_declaration_kind(&self, name: &str) -> Option<LexicalDeclarationKind> {
+		if !self.declaration_kinds.contains_in_current_scope(name) {
+			return None;
+		}
+		self.declaration_kinds.lookup(name).copied()
+	}
+
+	fn data_type_display_name(&self, data_type: &DataType) -> String {
+		match data_type {
+			DataType::Array(element_type) => format!("[{}]", self.data_type_display_name(element_type)),
+			DataType::Nullable(inner) => format!("{}?", self.data_type_display_name(inner)),
+			DataType::Object(name) => self.lookup_object_type(name)
+				.map(|object_type| object_type.display_name().to_string())
+				.unwrap_or_else(|| name.name.clone()),
+			DataType::Range(element_type) => format!("range<{}>", self.data_type_display_name(element_type)),
+			DataType::Union(members) => members.iter()
+				.map(|member| self.data_type_display_name(member))
+				.collect::<Vec<_>>()
+				.join(" | "),
+			other => other.name(),
+		}
 	}
 
 	fn data_type_from_schema_column(&self, data_type: &SchemaDataType, is_nullable: bool) -> Result<DataType, CompileError> {
@@ -1130,23 +1332,40 @@ impl SemanticAnalyzer {
 		}
 	}
 
-	fn declare_enum_signature(&mut self, enum_declaration: &EnumDeclaration) -> Result<(), CompileError> {
-		if self.enums.contains_in_current_scope(&enum_declaration.name) {
-			return Err(self.compile_error(
-				enum_declaration.position,
-				format!("Enum `{}` is already declared in this scope.", enum_declaration.name),
-			));
-		}
+	fn declaration_conflict_error(
+		&self,
+		declaration: &str,
+		name: &str,
+		position: usize,
+		existing: LexicalDeclarationKind,
+	) -> CompileError {
+		self.compile_error(
+			position,
+			format!(
+				"{declaration} `{name}` conflicts with {} declared in the same scope.",
+				existing.description(),
+			),
+		)
+	}
 
-		if self.semantic_program.object_declarations.contains_key(&enum_declaration.name)
-			|| self.semantic_program.enum_declarations.contains_key(&enum_declaration.name) {
-			return Err(self.compile_error(
+	fn declare_enum_signature(&mut self, enum_declaration: &EnumDeclaration) -> Result<(), CompileError> {
+		if let Some(existing) = self.current_scope_declaration_kind(&enum_declaration.name) {
+			if existing == LexicalDeclarationKind::Enum {
+				return Err(self.compile_error(
+					enum_declaration.position,
+					format!("Enum `{}` is already declared in this scope.", enum_declaration.name),
+				));
+			}
+			return Err(self.declaration_conflict_error(
+				"Enum",
+				&enum_declaration.name,
 				enum_declaration.position,
-				format!("Enum `{}` is already declared in this module.", enum_declaration.name),
+				existing,
 			));
 		}
 
 		let variants = self.resolve_enum_variants(enum_declaration)?;
+		self.declaration_kinds.declare(enum_declaration.name.clone(), LexicalDeclarationKind::Enum);
 		self.enums.declare(enum_declaration.name.clone(), EnumBinding {
 			backing_type: enum_declaration.backing_type.clone(),
 			variants: variants.clone(),
@@ -1157,6 +1376,21 @@ impl SemanticAnalyzer {
 	}
 
 	fn declare_function_signature(&mut self, function: &FunctionDeclaration) -> Result<(), CompileError> {
+		match self.current_scope_declaration_kind(&function.name) {
+			Some(LexicalDeclarationKind::Function) => {}
+			Some(existing) => {
+				return Err(self.declaration_conflict_error(
+					"Function",
+					&function.name,
+					function.position,
+					existing,
+				));
+			}
+			None => {
+				self.declaration_kinds.declare(function.name.clone(), LexicalDeclarationKind::Function);
+			}
+		}
+
 		let mut parameters = Vec::with_capacity(function.parameters.len());
 
 		for parameter in &function.parameters {
@@ -1238,6 +1472,7 @@ impl SemanticAnalyzer {
 	}
 
 	fn declare_local(&mut self, name: String, local: LocalBinding) {
+		self.declaration_kinds.declare(name.clone(), LexicalDeclarationKind::Local);
 		self.sequence_aliases.declare(name.clone(), None);
 		self.locals.declare(name, local);
 	}
@@ -1280,7 +1515,8 @@ impl SemanticAnalyzer {
 
 	fn effective_object_data_type(&self, data_type: &DataType) -> Option<DataType> {
 		match data_type {
-			DataType::Object(name) => self.semantic_program.object_declaration(name)?
+			DataType::Object(name) => self.lookup_object_type(name)?
+				.declaration()
 				.array_element_type()
 				.map(|element_type| DataType::Array(Box::new(element_type.clone()))),
 			DataType::Nullable(inner) => {
@@ -1288,7 +1524,8 @@ impl SemanticAnalyzer {
 					return None;
 				};
 
-				self.semantic_program.object_declaration(name)?
+				self.lookup_object_type(name)?
+					.declaration()
 					.array_element_type()
 					.map(|element_type| DataType::Array(Box::new(element_type.clone())).into_nullable())
 			}
@@ -1305,8 +1542,8 @@ impl SemanticAnalyzer {
 			position,
 			format!(
 				"Cannot assign a value of type `{}` to a variable of type `{}`.",
-				value.name(),
-				target.name(),
+				self.data_type_display_name(value),
+				self.data_type_display_name(target),
 			),
 		))
 	}
@@ -1325,13 +1562,14 @@ impl SemanticAnalyzer {
 			position,
 			format!(
 				"Cannot assign a value of type `{}` to a variable of type `{}`.",
-				value.name(),
-				target.name(),
+				self.data_type_display_name(value),
+				self.data_type_display_name(target),
 			),
 		))
 	}
 
 	fn enter_scope(&mut self) {
+		self.declaration_kinds.enter_scope();
 		self.locals.enter_scope();
 		self.sequence_aliases.enter_scope();
 	}
@@ -1382,6 +1620,7 @@ impl SemanticAnalyzer {
 	}
 
 	fn exit_scope(&mut self) {
+		self.declaration_kinds.exit_scope();
 		self.locals.exit_scope();
 		self.sequence_aliases.exit_scope();
 	}
@@ -1860,6 +2099,16 @@ impl SemanticAnalyzer {
 			}
 			Ok(signature.return_type)
 		}
+		else if let Some(declaration_kind) = self.declaration_kinds.lookup(&callee.name).copied() {
+			Err(self.compile_error(
+				callee.position,
+				format!(
+					"Identifier `{}` is not callable because it refers to {} in the nearest scope.",
+					callee.name,
+					declaration_kind.description(),
+				),
+			))
+		}
 		else if let Some(built_in) = BuiltInFunction::from_name(&callee.name) {
 			self.infer_built_in_call_type(built_in, arguments, *position)
 		}
@@ -2168,7 +2417,7 @@ impl SemanticAnalyzer {
 					&& self.lookup_local(&identifier.name).is_none()
 					&& let Some(enum_value) = self.enum_variant_binding(&identifier.name, &field.name) {
 					self.semantic_program.enum_variant_values.insert(expression.position(), enum_value.clone());
-					return Ok(DataType::Object(identifier.name.clone()));
+					return Ok(DataType::Object(identifier.name.clone().into()));
 				}
 
 				if let Some(resolved_sequence) = self.try_resolve_sequence_expression(expression)? {
@@ -2190,7 +2439,9 @@ impl SemanticAnalyzer {
 							));
 						}
 
-						if self.semantic_program.object_declaration(&name).and_then(|object| object.array_element_type()).is_some() {
+						if self.lookup_object_type(&name)
+							.and_then(|object| object.declaration().array_element_type())
+							.is_some() {
 							return Err(self.compile_error(
 								field.position,
 								format!("Field access requires an object operand, found `{}`.", DataType::Object(name).name()),
@@ -2300,12 +2551,13 @@ impl SemanticAnalyzer {
 				object_type_name,
 				position,
 			}) => {
-				let object_declaration = self.semantic_program.object_declaration(object_type_name)
+				let object_type_id = self.lookup_object_type_id(object_type_name)
+					.ok_or_else(|| self.unknown_object_type_error(*position, object_type_name))?;
+				let object_declaration = self.semantic_program.object_type(object_type_id)
+					.map(ResolvedObjectType::declaration)
 					.cloned()
-					.ok_or(self.compile_error(
-						*position,
-						format!("Object `{object_type_name}` is not declared in this module."),
-					))?;
+					.expect("Resolved object type binding is missing its semantic declaration.");
+				self.semantic_program.object_construction_type_ids.insert(*position, object_type_id);
 				let object_fields = object_declaration.fields().ok_or(self.compile_error(
 					*position,
 					format!("Object `{object_type_name}` uses array syntax and cannot be constructed with named fields."),
@@ -2343,7 +2595,7 @@ impl SemanticAnalyzer {
 					}
 				}
 
-				Ok(DataType::Object(object_type_name.clone()))
+				Ok(DataType::Object(object_type_name.clone().into()))
 			}
 			Expr::Range(RangeExpr { start, step, end, position }) => {
 				let start_type = self.infer_expression_type(start)?;
@@ -2796,6 +3048,16 @@ impl SemanticAnalyzer {
 						format!("Function `{}` does not return a value.", callee.name),
 					))
 				}
+				else if let Some(declaration_kind) = self.declaration_kinds.lookup(&callee.name).copied() {
+					Err(self.compile_error(
+						callee.position,
+						format!(
+							"Identifier `{}` is not callable because it refers to {} in the nearest scope.",
+							callee.name,
+							declaration_kind.description(),
+						),
+					))
+				}
 				else if let Some(built_in) = BuiltInFunction::from_name(&callee.name) {
 					self.infer_built_in_call_type_for_query(built_in, arguments, expression.position(), table)
 				}
@@ -3060,6 +3322,10 @@ impl SemanticAnalyzer {
 			_ => {}
 		}
 
+		if let Some(matches) = self.named_data_types_have_same_identity(target, value) {
+			return matches;
+		}
+
 		if target == value
 			|| (allow_numeric_conversion && target == &DataType::Dec && value == &DataType::Int) {
 			return true;
@@ -3122,24 +3388,62 @@ impl SemanticAnalyzer {
 		)
 	}
 
+	fn local_declaration_error(
+		&self,
+		declaration: &str,
+		name: &str,
+		position: usize,
+		duplicate_message: String,
+	) -> Option<CompileError> {
+		self.current_scope_declaration_kind(name).map(|existing| {
+			if existing == LexicalDeclarationKind::Local {
+				self.compile_error(position, duplicate_message)
+			}
+			else {
+				self.declaration_conflict_error(declaration, name, position, existing)
+			}
+		})
+	}
+
 	fn lookup_enum(&self, name: &str) -> Option<&EnumBinding> {
+		if self.declaration_kinds.lookup(name) != Some(&LexicalDeclarationKind::Enum) {
+			return None;
+		}
 		self.enums.lookup(name)
 	}
 
 	fn lookup_functions(&self, name: &str) -> Option<&[FunctionSignature]> {
+		if self.declaration_kinds.lookup(name) != Some(&LexicalDeclarationKind::Function) {
+			return None;
+		}
 		self.functions.lookup(name)
 			.map(Vec::as_slice)
 	}
 
 	fn lookup_local(&self, name: &str) -> Option<LocalBinding> {
+		if self.declaration_kinds.lookup(name) != Some(&LexicalDeclarationKind::Local) {
+			return None;
+		}
 		self.locals.lookup(name).cloned()
 	}
 
 	fn lookup_object_field(&self, object_name: &str, field_name: &str) -> Option<&crate::ast::ObjectFieldDeclaration> {
-		self.semantic_program.object_declaration(object_name)?
+		self.lookup_object_type(object_name)?
+			.declaration()
 			.fields()?
 			.iter()
 			.find(|field| field.name == field_name)
+	}
+
+	fn lookup_object_type(&self, name: &str) -> Option<&ResolvedObjectType> {
+		self.semantic_program.object_type(self.lookup_object_type_id(name)?)
+	}
+
+	fn lookup_object_type_id(&self, name: &str) -> Option<ObjectTypeId> {
+		if self.declaration_kinds.lookup(name) != Some(&LexicalDeclarationKind::Object) {
+			return None;
+		}
+		self.object_type_bindings.lookup(name).copied()
 	}
 
 	fn lookup_sequence_alias(&self, name: &str) -> Option<ResolvedSequenceReference> {
@@ -3653,6 +3957,22 @@ impl SemanticAnalyzer {
 		})
 	}
 
+	fn named_data_types_have_same_identity(&self, target: &DataType, value: &DataType) -> Option<bool> {
+		let (DataType::Object(target_name), DataType::Object(value_name)) = (target, value) else {
+			return None;
+		};
+		let target_object_id = self.lookup_object_type_id(target_name);
+		let value_object_id = self.lookup_object_type_id(value_name);
+
+		Some(match (target_object_id, value_object_id) {
+			(Some(target_id), Some(value_id)) => target_id == value_id,
+			(Some(_), None) | (None, Some(_)) => false,
+			(None, None) => target_name == value_name
+				&& (self.lookup_enum(target_name).is_some()
+					|| target_name.starts_with(BUILT_IN_ENUM_TYPE_PREFIX)),
+		})
+	}
+
 	fn numeric_result_type(&self, lhs: &DataType, rhs: &DataType, position: usize) -> Result<DataType, CompileError> {
 		if !self.is_numeric_type(lhs) || !self.is_numeric_type(rhs) {
 			return Err(self.compile_error(
@@ -4136,9 +4456,11 @@ impl SemanticAnalyzer {
 		let lhs = lhs.without_nullability();
 		let rhs = rhs.without_nullability();
 
-		if lhs == &DataType::Any
-			|| rhs == &DataType::Any
-			|| matches!(lhs, DataType::Union(_) | DataType::Range(_))
+		if lhs == &DataType::Any || rhs == &DataType::Any {
+			return Ok(());
+		}
+
+		if matches!(lhs, DataType::Union(_) | DataType::Range(_))
 			|| matches!(rhs, DataType::Union(_) | DataType::Range(_)) {
 			return Err(self.compile_error(
 				position,
@@ -4208,6 +4530,54 @@ impl SemanticAnalyzer {
 				rhs.name(),
 			),
 		))
+	}
+
+	fn resolve_declared_object_type_references(
+		&self,
+		data_type: &DataType,
+		path: &mut Vec<ObjectTypeReferencePathComponent>,
+		references: &mut Vec<ResolvedObjectTypeReference>,
+	) -> Result<(), CompileError> {
+		match data_type {
+			DataType::Array(element_type) => {
+				path.push(ObjectTypeReferencePathComponent::ArrayElement);
+				self.resolve_declared_object_type_references(element_type, path, references)?;
+				path.pop();
+			}
+			DataType::Nullable(inner) => {
+				path.push(ObjectTypeReferencePathComponent::NullableValue);
+				self.resolve_declared_object_type_references(inner, path, references)?;
+				path.pop();
+			}
+			DataType::Object(name) => {
+				if let Some(object_type_id) = self.lookup_object_type_id(name) {
+					references.push(ResolvedObjectTypeReference {
+						object_type_id,
+						path: path.clone(),
+					});
+				}
+				else if self.lookup_enum(name).is_none() {
+					return Err(self.unknown_object_type_error(name.position, name));
+				}
+			}
+			DataType::Range(element_type) => {
+				path.push(ObjectTypeReferencePathComponent::RangeElement);
+				self.resolve_declared_object_type_references(element_type, path, references)?;
+				path.pop();
+			}
+			DataType::Union(members) => {
+				for (index, member) in members.iter().enumerate() {
+					path.push(ObjectTypeReferencePathComponent::UnionMember(
+						u32::try_from(index).expect("Union member count exceeded the supported identity path range."),
+					));
+					self.resolve_declared_object_type_references(member, path, references)?;
+					path.pop();
+				}
+			}
+			_ => {}
+		}
+
+		Ok(())
 	}
 
 	fn resolve_enum_variants(&self, enum_declaration: &EnumDeclaration) -> Result<BTreeMap<String, EnumValue>, CompileError> {
@@ -4318,6 +4688,52 @@ impl SemanticAnalyzer {
 					format!("Parameter `{}` cannot have type `{}`.", parameter.name, parameter.data_type.name()),
 				)?;
 				Ok((data_type.clone(), None))
+			}
+		}
+	}
+
+	fn resolve_inline_object_visibility(&mut self) {
+		loop {
+			let mut exposed_inline_ids = BTreeSet::new();
+			for object_type in self.semantic_program.object_types.values()
+				.filter(|object_type| object_type.visibility == Visibility::Public)
+			{
+				let mut exposed_names = BTreeSet::new();
+				match &object_type.declaration.shape {
+					ObjectDeclarationShape::Array(element_type) => {
+						Self::collect_referenced_object_names(element_type, &mut exposed_names);
+					}
+					ObjectDeclarationShape::Fields(fields) => {
+						for field in fields.iter().filter(|field| field.visibility == Visibility::Public) {
+							Self::collect_referenced_object_names(&field.data_type, &mut exposed_names);
+						}
+					}
+				}
+
+				for name in exposed_names {
+					let Some(exposed_id) = self.lookup_object_type_id(&name) else {
+						continue;
+					};
+					if self.semantic_program.object_type(exposed_id)
+						.is_some_and(|exposed_type| exposed_type.containing_object_id == Some(object_type.id))
+					{
+						exposed_inline_ids.insert(exposed_id);
+					}
+				}
+			}
+
+			let mut changed = false;
+			for id in exposed_inline_ids {
+				let object_type = self.semantic_program.object_types.get_mut(&id)
+					.expect("Exposed inline object type is missing its semantic declaration.");
+				if object_type.visibility == Visibility::Private {
+					object_type.visibility = Visibility::Public;
+					changed = true;
+				}
+			}
+
+			if !changed {
+				break;
 			}
 		}
 	}
@@ -4742,6 +5158,38 @@ impl SemanticAnalyzer {
 		}
 	}
 
+	fn unknown_object_type_error(&self, position: usize, name: &str) -> CompileError {
+		if !name.contains('.') {
+			let matching_inline_names = self.semantic_program.object_types.values()
+				.filter(|object_type| {
+					object_type.containing_object_id().is_some()
+						&& object_type.has_named_constructor()
+						&& object_type.display_name().rsplit('.').next() == Some(name)
+				})
+				.map(|object_type| object_type.display_name())
+				.collect::<Vec<_>>();
+			if let [qualified_name] = matching_inline_names.as_slice() {
+				return self.compile_error(
+					position,
+					format!("Named inline object type `{name}` must be referenced as `{qualified_name}`."),
+				);
+			}
+		}
+
+		if let Some((containing_name, nested_name)) = name.rsplit_once('.')
+			&& self.lookup_object_type(containing_name).is_some() {
+			return self.compile_error(
+				position,
+				format!("Object `{containing_name}` does not contain a named inline object type `{nested_name}`."),
+			);
+		}
+
+		self.compile_error(
+			position,
+			format!("Object type `{name}` is not declared in this module."),
+		)
+	}
+
 	fn unselectable_overload_indices(&self, signatures: &[FunctionSignature]) -> Vec<usize> {
 		let max_variadic_arguments = signatures.iter()
 			.map(|signature| signature.parameters.len())
@@ -4782,10 +5230,36 @@ impl SemanticAnalyzer {
 		Ok(())
 	}
 
-	fn validate_declared_data_type(&self, data_type: &DataType, position: usize, message: String) -> Result<(), CompileError> {
+	fn validate_declared_data_type(
+		&mut self,
+		data_type: &DataType,
+		position: usize,
+		message: String,
+	) -> Result<(), CompileError> {
+		self.validate_declared_data_type_structure(data_type, position, &message)?;
+		let mut references = Vec::new();
+		self.resolve_declared_object_type_references(
+			data_type,
+			&mut Vec::new(),
+			&mut references,
+		)?;
+		if !references.is_empty() {
+			self.semantic_program.object_type_references.insert(position, references);
+		}
+		Ok(())
+	}
+
+	fn validate_declared_data_type_structure(
+		&self,
+		data_type: &DataType,
+		position: usize,
+		message: &str,
+	) -> Result<(), CompileError> {
 		match data_type {
 			DataType::EmptyArray | DataType::Null => Err(self.compile_error(position, message)),
-			DataType::Array(element_type) => self.validate_declared_data_type(element_type, position, message),
+			DataType::Array(element_type) => {
+				self.validate_declared_data_type_structure(element_type, position, message)
+			}
 			DataType::Nullable(inner) => {
 				match inner.as_ref() {
 					DataType::Any => Err(self.compile_error(
@@ -4796,28 +5270,17 @@ impl SemanticAnalyzer {
 						position,
 						String::from("Nullable union types are not yet supported."),
 					)),
-					_ => self.validate_declared_data_type(inner, position, message),
+					_ => self.validate_declared_data_type_structure(inner, position, message),
 				}
 			}
 			DataType::Union(members) => {
 				for member in members {
-					self.validate_declared_data_type(member, position, message.clone())?;
+					self.validate_declared_data_type_structure(member, position, message)?;
 				}
 
 				Ok(())
 			}
-			DataType::Object(name) => {
-				if self.semantic_program.object_declarations.contains_key(name)
-					|| self.lookup_enum(name).is_some() {
-					Ok(())
-				}
-				else {
-					Err(self.compile_error(
-						position,
-						format!("Object type `{name}` is not declared in this module."),
-					))
-				}
-			}
+			DataType::Object(_) => Ok(()),
 			DataType::RecordPointer(_) => Err(self.compile_error(position, message)),
 			_ => Ok(()),
 		}
@@ -4948,11 +5411,13 @@ impl SemanticAnalyzer {
 	fn validate_function_parameter(&mut self, parameter: &FunctionParameter) -> Result<(), CompileError> {
 		let (parameter_type, sequence) = self.resolve_function_parameter_type(parameter)?;
 
-		if self.current_scope_contains(&parameter.name) {
-			return Err(self.compile_error(
-				parameter.position,
-				format!("Parameter `{}` is already declared in this scope.", parameter.name),
-			));
+		if let Some(error) = self.local_declaration_error(
+			"Parameter",
+			&parameter.name,
+			parameter.position,
+			format!("Parameter `{}` is already declared in this scope.", parameter.name),
+		) {
+			return Err(error);
 		}
 
 		let slot = self.next_local_slot;
@@ -5162,6 +5627,9 @@ impl SemanticAnalyzer {
 	}
 
 	fn validate_object_declaration(&mut self, object: &ObjectDeclaration) -> Result<(), CompileError> {
+		let object_visibility = self.lookup_object_type(&object.name)
+			.expect("Object declaration is missing its resolved semantic type.")
+			.visibility();
 		match &object.shape {
 			crate::ast::ObjectDeclarationShape::Array(element_type) => {
 				self.validate_declared_data_type(
@@ -5169,11 +5637,25 @@ impl SemanticAnalyzer {
 					object.position,
 					format!("Array-shaped object `{}` cannot have element type `{}`.", object.name, element_type.name()),
 				)?;
+				if object_visibility == Visibility::Public {
+					self.validate_public_object_type_reference(
+						element_type,
+						object.position,
+						format!("Public root-array object `{}`", object.name),
+					)?;
+				}
 			}
 			crate::ast::ObjectDeclarationShape::Fields(fields) => {
 				let mut field_names = BTreeMap::new();
 
 				for field in fields {
+					if field.visibility == Visibility::Public && object_visibility == Visibility::Private {
+						return Err(self.compile_error(
+							field.position,
+							format!("Field `{}` cannot be public because object `{}` is private.", field.name, object.name),
+						));
+					}
+
 					if field_names.insert(field.name.clone(), ()).is_some() {
 						return Err(self.compile_error(
 							field.position,
@@ -5187,12 +5669,43 @@ impl SemanticAnalyzer {
 						format!("Field `{}` cannot have type `{}`.", field.name, field.data_type.name()),
 					)?;
 
+					if field.visibility == Visibility::Public {
+						self.validate_public_object_type_reference(
+							&field.data_type,
+							field.position,
+							format!("Public field `{}` on object `{}`", field.name, object.name),
+						)?;
+					}
+
 					if let Some(default_value) = &field.default_value {
 						self.validate_literal_expression(default_value)?;
 						let default_type = self.infer_expression_type(default_value)?;
 						self.ensure_assignable(&field.data_type, &default_type, default_value.position())?;
 					}
 				}
+			}
+		}
+
+		Ok(())
+	}
+
+	fn validate_public_object_type_reference(
+		&self,
+		data_type: &DataType,
+		position: usize,
+		declaration_description: String,
+	) -> Result<(), CompileError> {
+		let mut referenced_names = BTreeSet::new();
+		Self::collect_referenced_object_names(data_type, &mut referenced_names);
+		for referenced_name in referenced_names {
+			let Some(object_type) = self.lookup_object_type(&referenced_name) else {
+				continue;
+			};
+			if object_type.visibility() == Visibility::Private {
+				return Err(self.compile_error(
+					position,
+					format!("{declaration_description} cannot expose private object type `{referenced_name}`."),
+				));
 			}
 		}
 
@@ -5332,12 +5845,14 @@ impl SemanticAnalyzer {
 
 				self.enter_scope();
 
-				if self.current_scope_contains(&variable.name) {
+				if let Some(error) = self.local_declaration_error(
+					"Variable",
+					&variable.name,
+					variable.position,
+					format!("Variable `{}` is already declared in this scope.", variable.name),
+				) {
 					self.exit_scope();
-					return Err(self.compile_error(
-						variable.position,
-						format!("Variable `{}` is already declared in this scope.", variable.name),
-					));
+					return Err(error);
 				}
 
 				let loop_variable_slot = self.next_local_slot;
@@ -5454,12 +5969,14 @@ impl SemanticAnalyzer {
 
 				self.enter_scope();
 
-				if self.current_scope_contains(&variable.name) {
+				if let Some(error) = self.local_declaration_error(
+					"Record pointer",
+					&variable.name,
+					variable.position,
+					format!("Record pointer `{}` is already declared in this scope.", variable.name),
+				) {
 					self.exit_scope();
-					return Err(self.compile_error(
-						variable.position,
-						format!("Record pointer `{}` is already declared in this scope.", variable.name),
-					));
+					return Err(error);
 				}
 
 				let loop_variable_slot = self.next_local_slot;
@@ -5568,11 +6085,13 @@ impl SemanticAnalyzer {
 				Ok(())
 			}
 			Statement::RecordPointerDeclaration(RecordPointerDeclaration { initial_value, is_mut, name, position }) => {
-				if self.current_scope_contains(name) {
-					return Err(self.compile_error(
-						*position,
-						format!("Record pointer `{name}` is already declared in this scope."),
-					));
+				if let Some(error) = self.local_declaration_error(
+					"Record pointer",
+					name,
+					*position,
+					format!("Record pointer `{name}` is already declared in this scope."),
+				) {
+					return Err(error);
 				}
 
 				let initial_type = self.infer_expression_type_with_find_lock_mode(
@@ -5685,11 +6204,13 @@ impl SemanticAnalyzer {
 					),
 				)?;
 
-				if self.current_scope_contains(name) {
-					return Err(self.compile_error(
-						*position,
-						format!("Variable `{name}` is already declared in this scope."),
-					));
+				if let Some(error) = self.local_declaration_error(
+					"Variable",
+					name,
+					*position,
+					format!("Variable `{name}` is already declared in this scope."),
+				) {
+					return Err(error);
 				}
 
 				if let Some(initial_value) = initial_value.as_ref() {
@@ -5807,7 +6328,10 @@ pub struct SemanticProgram {
 	lowered_find_queries: BTreeMap<usize, QueryFindPlan>,
 	lowered_for_record_queries: BTreeMap<usize, QueryForPlan>,
 	new_record_layouts: BTreeMap<usize, NewRecordLayout>,
-	object_declarations: BTreeMap<String, ObjectDeclaration>,
+	object_construction_type_ids: BTreeMap<usize, ObjectTypeId>,
+	object_type_ids_by_name: BTreeMap<String, ObjectTypeId>,
+	object_type_references: BTreeMap<usize, Vec<ResolvedObjectTypeReference>>,
+	object_types: BTreeMap<ObjectTypeId, ResolvedObjectType>,
 	query_plan: ProgramQueryPlan,
 	query_for_shapes: BTreeMap<usize, QueryForShape>,
 	query_projected_value_bindings: BTreeMap<usize, QueryProjectedValueBinding>,
@@ -5931,8 +6455,35 @@ impl SemanticProgram {
 		self.new_record_layouts.get(&position)
 	}
 
-	pub fn object_declaration(&self, name: &str) -> Option<&ObjectDeclaration> {
-		self.object_declarations.get(name)
+	pub fn object_construction_type_id(&self, position: usize) -> Option<ObjectTypeId> {
+		self.object_construction_type_ids.get(&position).copied()
+	}
+
+	pub fn object_type(&self, id: ObjectTypeId) -> Option<&ResolvedObjectType> {
+		self.object_types.get(&id)
+	}
+
+	pub fn object_type_by_name(&self, name: &str) -> Option<&ResolvedObjectType> {
+		self.object_type(self.object_type_id(name)?)
+	}
+
+	pub fn object_type_id(&self, name: &str) -> Option<ObjectTypeId> {
+		self.object_type_ids_by_name.get(name).copied()
+	}
+
+	pub fn object_type_id_for_reference(
+		&self,
+		position: usize,
+		path: &[ObjectTypeReferencePathComponent],
+	) -> Option<ObjectTypeId> {
+		self.object_type_references(position)?
+			.iter()
+			.find(|reference| reference.path == path)
+			.map(|reference| reference.object_type_id)
+	}
+
+	pub fn object_type_references(&self, position: usize) -> Option<&[ResolvedObjectTypeReference]> {
+		self.object_type_references.get(&position).map(Vec::as_slice)
 	}
 
 	pub fn query_for_shape(&self, position: usize) -> Option<&QueryForShape> {
@@ -6275,6 +6826,58 @@ mod tests {
 	}
 
 	#[test]
+	fn assigns_stable_object_type_ids_and_preserves_declaration_metadata() {
+		let source = "obj Outer { child: obj Child { value: int, }, anonymous: { value: int, }, };\n\
+			obj Collection [int];\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+		analyzer.set_root_source_name(Some(String::from("models.tablo")));
+
+		let semantic_program = analyzer.analyze_standalone_program(&program).unwrap();
+		let outer_id = semantic_program.object_type_id("Outer").unwrap();
+		let child_id = semantic_program.object_type_id("Outer.Child").unwrap();
+		let anonymous_id = semantic_program.object_type_id("Outer.anonymous").unwrap();
+		let collection_id = semantic_program.object_type_id("Collection").unwrap();
+		let outer = semantic_program.object_type(outer_id).unwrap();
+		let child = semantic_program.object_type(child_id).unwrap();
+		let anonymous = semantic_program.object_type(anonymous_id).unwrap();
+		let collection = semantic_program.object_type(collection_id).unwrap();
+
+		assert_ne!(outer_id, child_id);
+		assert_ne!(child_id, anonymous_id);
+		assert_ne!(outer_id, collection_id);
+		assert_eq!(outer.display_name(), "Outer");
+		assert_eq!(outer.source_name(), Some("models.tablo"));
+		assert_eq!(outer.declaration().position, source.find("obj Outer").unwrap());
+		assert_eq!(child.containing_object_id(), Some(outer_id));
+		assert_eq!(anonymous.containing_object_id(), Some(outer_id));
+		assert_eq!(anonymous.declaration().position, source.find("anonymous:").unwrap());
+		assert_eq!(child.scope_id(), outer.scope_id());
+		assert!(outer.has_named_constructor());
+		assert!(child.has_named_constructor());
+		assert!(!anonymous.has_named_constructor());
+		assert!(!collection.has_named_constructor());
+	}
+
+	#[test]
+	fn binds_object_construction_to_declared_type_identity() {
+		let source = "obj Model { value: int, };\n\
+			fn Main(args: [text]): int { var model: Model = Model {}; return model.value; }";
+		let program = parse_program(source);
+		let construction_position = source.find("Model {}").unwrap() + "Model ".len();
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program(&program).unwrap();
+		let object_type_id = semantic_program.object_type_id("Model").unwrap();
+
+		assert_eq!(
+			semantic_program.object_construction_type_id(construction_position),
+			Some(object_type_id),
+		);
+	}
+
+	#[test]
 	fn built_in_overload_sets_have_unique_call_shapes() {
 		let analyzer = SemanticAnalyzer::new();
 
@@ -6288,6 +6891,39 @@ mod tests {
 				built_in.name(),
 			);
 		}
+	}
+
+	#[test]
+	fn compares_object_types_using_resolved_identity_instead_of_source_spelling() {
+		let program = parse_program(
+			"obj First { value: int, };\n\
+			obj Second { value: int, };",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+		analyzer.declaration_kinds.enter_scope();
+		analyzer.object_type_bindings.enter_scope();
+		analyzer.collect_object_declarations(&program.objects).unwrap();
+		let first_id = analyzer.lookup_object_type_id("First").unwrap();
+		let second_id = analyzer.lookup_object_type_id("Second").unwrap();
+		analyzer.declaration_kinds.declare(
+			String::from("FirstAlias"),
+			LexicalDeclarationKind::Object,
+		);
+		analyzer.declaration_kinds.declare(
+			String::from("SecondAlias"),
+			LexicalDeclarationKind::Object,
+		);
+		analyzer.object_type_bindings.declare(String::from("FirstAlias"), first_id);
+		analyzer.object_type_bindings.declare(String::from("SecondAlias"), second_id);
+
+		assert!(analyzer.is_assignable(
+			&DataType::Object(String::from("First").into()),
+			&DataType::Object(String::from("FirstAlias").into()),
+		));
+		assert!(!analyzer.is_assignable(
+			&DataType::Object(String::from("First").into()),
+			&DataType::Object(String::from("SecondAlias").into()),
+		));
 	}
 
 	#[test]
@@ -6486,6 +7122,46 @@ mod tests {
 	}
 
 	#[test]
+	fn infers_bool_for_null_comparison_with_nullable_any_value() {
+		let expression = parse_expression("value == null");
+		let mut analyzer = SemanticAnalyzer::new();
+		analyzer.enter_scope();
+		analyzer.declare_local(
+			String::from("value"),
+			LocalBinding {
+				declaration_position: 0,
+				data_type: DataType::Nullable(Box::new(DataType::Any)),
+				is_const: false,
+				slot: 1,
+			},
+		);
+
+		let data_type = analyzer.infer_expression_type(&expression).unwrap();
+
+		assert_eq!(data_type, DataType::Bool);
+	}
+
+	#[test]
+	fn infers_bool_for_null_comparison_with_nullable_array_of_any() {
+		let expression = parse_expression("value == null");
+		let mut analyzer = SemanticAnalyzer::new();
+		analyzer.enter_scope();
+		analyzer.declare_local(
+			String::from("value"),
+			LocalBinding {
+				declaration_position: 0,
+				data_type: DataType::Nullable(Box::new(DataType::Array(Box::new(DataType::Any)))),
+				is_const: false,
+				slot: 1,
+			},
+		);
+
+		let data_type = analyzer.infer_expression_type(&expression).unwrap();
+
+		assert_eq!(data_type, DataType::Bool);
+	}
+
+	#[test]
 	fn infers_exists_operator_type_for_record_pointer() {
 		let expression = parse_expression("exists(cust)");
 		let mut analyzer = SemanticAnalyzer::new();
@@ -6645,6 +7321,28 @@ mod tests {
 	}
 
 	#[test]
+	fn inner_local_shadows_outer_function_for_call_resolution() {
+		let program = parse_program(
+			"fn Read(): int { return 1; }\n\
+			fn Main(args: [text]): int {\n\
+				{\n\
+					var Read: int = 2;\n\
+					Read();\n\
+				}\n\
+				return 0;\n\
+			}",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error.message,
+			"Identifier `Read` is not callable because it refers to a variable in the nearest scope.",
+		);
+	}
+
+	#[test]
 	fn lowers_count_query_to_backend_aware_ir() {
 		let schema = sqlite_test_schema(
 			r#"
@@ -6733,7 +7431,7 @@ mod tests {
 			String::from("config"),
 			LocalBinding {
 				declaration_position: 6,
-				data_type: DataType::Object(String::from("Config")),
+				data_type: DataType::Object(String::from("Config").into()),
 				is_const: false,
 				slot: 6,
 			},
@@ -6786,7 +7484,7 @@ mod tests {
 			String::from("config"),
 			LocalBinding {
 				declaration_position: 5,
-				data_type: DataType::Object(String::from("Config")),
+				data_type: DataType::Object(String::from("Config").into()),
 				is_const: false,
 				slot: 5,
 			},
@@ -6937,7 +7635,7 @@ mod tests {
 			String::from("config"),
 			LocalBinding {
 				declaration_position: 5,
-				data_type: DataType::Object(String::from("Config")),
+				data_type: DataType::Object(String::from("Config").into()),
 				is_const: false,
 				slot: 5,
 			},
@@ -6970,6 +7668,23 @@ mod tests {
 			schema_name: String::from("Main"),
 			table_name: String::from("Customers"),
 		});
+	}
+
+	#[test]
+	fn makes_inline_object_publicly_nameable_through_public_field_path() {
+		let source = "pub obj Outer { pub inner: obj Inner { pub value: int, }, };\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program(&program).unwrap();
+		let inner = semantic_program.object_type_by_name("Outer.Inner").unwrap();
+
+		assert_eq!(inner.visibility(), Visibility::Public);
+		assert_eq!(
+			inner.declaration().fields().unwrap()[0].visibility,
+			Visibility::Public,
+		);
 	}
 
 	#[test]
@@ -7044,6 +7759,25 @@ mod tests {
 
 		assert_eq!(binding.identity_fields, identity_fields);
 		assert_eq!(binding.required_query_fields(), Some(required_fields));
+	}
+
+	#[test]
+	fn preserves_private_by_default_object_and_field_visibility() {
+		let source = "pub obj PublicModel { pub exposed: int, hidden: int, };\n\
+			obj PrivateModel { hidden: int, };\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program(&program).unwrap();
+		let public_model = semantic_program.object_type_by_name("PublicModel").unwrap();
+		let private_model = semantic_program.object_type_by_name("PrivateModel").unwrap();
+		let fields = public_model.declaration().fields().unwrap();
+
+		assert_eq!(public_model.visibility(), Visibility::Public);
+		assert_eq!(private_model.visibility(), Visibility::Private);
+		assert_eq!(fields[0].visibility, Visibility::Public);
+		assert_eq!(fields[1].visibility, Visibility::Private);
 	}
 
 	#[test]
@@ -7736,9 +8470,10 @@ mod tests {
 	fn refines_nullable_object_field_access_to_non_null_in_ternary_true_branch() {
 		let expression = parse_expression("config.TestDate != null ? config.TestDate : today");
 		let mut analyzer = SemanticAnalyzer::new();
-		analyzer.semantic_program.object_declarations.insert(
-			String::from("Config"),
+		analyzer.collect_object_declarations(&[
 			crate::ast::ObjectDeclaration {
+				containing_object_name: None,
+				has_explicit_name: true,
 				name: String::from("Config"),
 				position: 0,
 				shape: crate::ast::ObjectDeclarationShape::Fields(vec![
@@ -7747,16 +8482,18 @@ mod tests {
 						default_value: None,
 						name: String::from("TestDate"),
 						position: 0,
+						visibility: Visibility::Private,
 					},
 				]),
+				visibility: Visibility::Private,
 			},
-		);
+		]).unwrap();
 		analyzer.enter_scope();
 		analyzer.declare_local(
 			String::from("config"),
 			LocalBinding {
 				declaration_position: 0,
-				data_type: DataType::Object(String::from("Config")),
+				data_type: DataType::Object(String::from("Config").into()),
 				is_const: false,
 				slot: 1,
 			},
@@ -7823,6 +8560,19 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_equality_comparison_between_incompatible_concrete_types() {
+		let expression = parse_expression("true == 1");
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.infer_expression_type(&expression).unwrap_err();
+
+		assert_eq!(
+			error.message,
+			"Equality comparison is not supported between `bool` and `int`.",
+		);
+	}
+
+	#[test]
 	fn rejects_fallthrough_from_value_returning_function() {
 		let program = parse_program(
 			"fn Value(flag: bool): int { if flag { return 1; } }\n\
@@ -7833,6 +8583,25 @@ mod tests {
 		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
 
 		assert_eq!(error.message, "Function `Value` must return a value of type `int` on all paths.");
+	}
+
+	#[test]
+	fn rejects_local_that_conflicts_with_function_in_same_scope() {
+		let program = parse_program(
+			"fn Main(args: [text]): int {\n\
+				fn Read(): int { return 1; }\n\
+				var Read: int = 2;\n\
+				return Read;\n\
+			}",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error.message,
+			"Variable `Read` conflicts with a function declared in the same scope.",
+		);
 	}
 
 	#[test]
@@ -7853,6 +8622,40 @@ mod tests {
 		let error = analyzer.infer_expression_type(&expression).unwrap_err();
 
 		assert_eq!(error.message, "Unary `locked` requires a record pointer operand, found `int`.");
+	}
+
+	#[test]
+	fn rejects_module_enum_that_conflicts_with_object_type() {
+		let program = parse_program(
+			"obj Shared { value: int, };\n\
+			enum Shared: int { Value: 1 }\n\
+			fn Main(args: [text]): int { return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error.message,
+			"Enum `Shared` conflicts with an object type declared in the same scope.",
+		);
+	}
+
+	#[test]
+	fn rejects_module_function_that_conflicts_with_object_type() {
+		let program = parse_program(
+			"obj Shared { value: int, };\n\
+			fn Shared(): int { return 1; }\n\
+			fn Main(args: [text]): int { return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error.message,
+			"Function `Shared` conflicts with an object type declared in the same scope.",
+		);
 	}
 
 	#[test]
@@ -7882,6 +8685,85 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_null_comparison_for_range_value() {
+		let expression = parse_expression("(1:2) == null");
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.infer_expression_type(&expression).unwrap_err();
+
+		assert_eq!(
+			error.message,
+			"Equality comparison is not supported between `range<int>` and `range<int>`.",
+		);
+	}
+
+	#[test]
+	fn rejects_public_field_behind_private_inline_field_path() {
+		let program = parse_program(
+			"pub obj Outer { inner: obj Inner { pub value: int, }, };\n\
+			fn Main(args: [text]): int { return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error.message,
+			"Field `value` cannot be public because object `Outer.Inner` is private.",
+		);
+	}
+
+	#[test]
+	fn rejects_public_field_exposing_inline_type_from_private_object_path() {
+		let program = parse_program(
+			"obj PrivateOuter { child: obj Child { value: int, }, };\n\
+			pub obj PublicModel { pub child: PrivateOuter.Child, };\n\
+			fn Main(args: [text]): int { return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error.message,
+			"Public field `child` on object `PublicModel` cannot expose private object type `PrivateOuter.Child`.",
+		);
+	}
+
+	#[test]
+	fn rejects_public_field_exposing_private_root_object_type() {
+		let program = parse_program(
+			"obj PrivateModel { value: int, };\n\
+			pub obj PublicModel { pub model: PrivateModel, };\n\
+			fn Main(args: [text]): int { return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error.message,
+			"Public field `model` on object `PublicModel` cannot expose private object type `PrivateModel`.",
+		);
+	}
+
+	#[test]
+	fn rejects_public_field_on_private_object() {
+		let program = parse_program(
+			"obj PrivateModel { pub exposed: int, };\n\
+			fn Main(args: [text]): int { return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error.message,
+			"Field `exposed` cannot be public because object `PrivateModel` is private.",
+		);
+	}
+
+	#[test]
 	fn rejects_public_nested_function_declaration() {
 		let program = parse_program(
 			"fn Outer() { pub fn Inner() {} }"
@@ -7893,61 +8775,19 @@ mod tests {
 	}
 
 	#[test]
-	fn rejects_null_comparison_for_nullable_any_value() {
-		let expression = parse_expression("value == null");
-		let mut analyzer = SemanticAnalyzer::new();
-		analyzer.enter_scope();
-		analyzer.declare_local(
-			String::from("value"),
-			LocalBinding {
-				declaration_position: 0,
-				data_type: DataType::Nullable(Box::new(DataType::Any)),
-				is_const: false,
-				slot: 1,
-			},
+	fn rejects_public_root_array_exposing_private_root_object_type() {
+		let program = parse_program(
+			"pub obj PublicCollection [PrivateModel];\n\
+			obj PrivateModel { value: int, };\n\
+			fn Main(args: [text]): int { return 0; }",
 		);
+		let mut analyzer = SemanticAnalyzer::new();
 
-		let error = analyzer.infer_expression_type(&expression).unwrap_err();
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
 
 		assert_eq!(
 			error.message,
-			"Equality comparison is not supported between `any` and `any`.",
-		);
-	}
-
-	#[test]
-	fn rejects_null_comparison_for_nullable_array_of_any() {
-		let expression = parse_expression("value == null");
-		let mut analyzer = SemanticAnalyzer::new();
-		analyzer.enter_scope();
-		analyzer.declare_local(
-			String::from("value"),
-			LocalBinding {
-				declaration_position: 0,
-				data_type: DataType::Nullable(Box::new(DataType::Array(Box::new(DataType::Any)))),
-				is_const: false,
-				slot: 1,
-			},
-		);
-
-		let error = analyzer.infer_expression_type(&expression).unwrap_err();
-
-		assert_eq!(
-			error.message,
-			"Equality comparison is not supported between `any` and `any`.",
-		);
-	}
-
-	#[test]
-	fn rejects_null_comparison_for_range_value() {
-		let expression = parse_expression("(1:2) == null");
-		let mut analyzer = SemanticAnalyzer::new();
-
-		let error = analyzer.infer_expression_type(&expression).unwrap_err();
-
-		assert_eq!(
-			error.message,
-			"Equality comparison is not supported between `range<int>` and `range<int>`.",
+			"Public root-array object `PublicCollection` cannot expose private object type `PrivateModel`.",
 		);
 	}
 
@@ -8070,6 +8910,41 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_unknown_named_inline_object_on_known_containing_path() {
+		let program = parse_program(
+			"obj Envelope { payload: Envelope.Missing, };\n\
+			fn Main(args: [text]): int { return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error.message,
+			"Object `Envelope` does not contain a named inline object type `Missing`.",
+		);
+	}
+
+	#[test]
+	fn rejects_unqualified_named_inline_object_with_complete_path_suggestion() {
+		let program = parse_program(
+			"obj Envelope {\n\
+				payload: obj Payload { value: int, },\n\
+				previousPayload: Payload,\n\
+			};\n\
+			fn Main(args: [text]): int { return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error.message,
+			"Named inline object type `Payload` must be referenced as `Envelope.Payload`.",
+		);
+	}
+
+	#[test]
 	fn rejects_user_function_without_return_type_in_value_context() {
 		let program = parse_program(
 			"fn Log() {}\n\
@@ -8093,6 +8968,142 @@ mod tests {
 		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
 
 		assert_eq!(error.message, "A function without a return type cannot return a value.");
+	}
+
+	#[test]
+	fn resolves_forward_object_type_reference_to_declared_identity() {
+		let source = "obj Holder { value: Later, };\n\
+			obj Later { value: int, };\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program(&program).unwrap();
+		let later_id = semantic_program.object_type_id("Later").unwrap();
+
+		assert_eq!(
+			semantic_program.object_type_id_for_reference(source.find("value: Later").unwrap(), &[]),
+			Some(later_id),
+		);
+	}
+
+	#[test]
+	fn resolves_named_inline_object_using_complete_containing_path() {
+		let source = "obj Envelope {\n\
+				payload: obj Payload { value: int, },\n\
+				previousPayload: Envelope.Payload,\n\
+			};\n\
+			fn Main(args: [text]): int {\n\
+				var payload: Envelope.Payload = Envelope.Payload { value: 1 };\n\
+				return payload.value;\n\
+			}";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program(&program).unwrap();
+		let payload_id = semantic_program.object_type_id("Envelope.Payload").unwrap();
+		let construction_position = source.find("Envelope.Payload {").unwrap() + "Envelope.Payload ".len();
+
+		assert_eq!(
+			semantic_program.object_type_references(source.find("previousPayload:").unwrap()),
+			Some([ResolvedObjectTypeReference {
+				object_type_id: payload_id,
+				path: vec![],
+			}].as_slice()),
+		);
+		assert_eq!(
+			semantic_program.object_construction_type_id(construction_position),
+			Some(payload_id),
+		);
+	}
+
+	#[test]
+	fn resolves_object_constructions_within_parameter_defaults() {
+		let source = "obj Sample { value: int, };\n\
+			fn Read(\n\
+				value: Sample = Sample { value: 1 },\n\
+				field: int = Sample { value: 2 }.value\n\
+			): int { return value.value + field; }\n\
+			fn Main(args: [text]): int { return Read(); }";
+		let program = parse_program(source);
+		let first_construction_position = source.find("Sample { value: 1 }").unwrap() + "Sample ".len();
+		let second_construction_position = source.find("Sample { value: 2 }").unwrap() + "Sample ".len();
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program(&program).unwrap();
+		let sample_id = semantic_program.object_type_id("Sample").unwrap();
+
+		assert_eq!(
+			semantic_program.object_construction_type_id(first_construction_position),
+			Some(sample_id),
+		);
+		assert_eq!(
+			semantic_program.object_construction_type_id(second_construction_position),
+			Some(sample_id),
+		);
+	}
+
+	#[test]
+	fn resolves_object_references_within_declared_type_shapes() {
+		let source = "obj Model { value: int, };\n\
+			obj Envelope {\n\
+				direct: Model,\n\
+				optional: Model?,\n\
+				items: [Model],\n\
+				choice: text | Model,\n\
+			};\n\
+			fn Transform(value: Model, values: [Model]): Model {\n\
+				var local: Model = value;\n\
+				return local;\n\
+			}\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program(&program).unwrap();
+		let model_id = semantic_program.object_type_id("Model").unwrap();
+		let expected = |path| vec![ResolvedObjectTypeReference {
+			object_type_id: model_id,
+			path,
+		}];
+
+		assert_eq!(
+			semantic_program.object_type_references(source.find("direct:").unwrap()),
+			Some(expected(vec![]).as_slice()),
+		);
+		assert_eq!(
+			semantic_program.object_type_references(source.find("optional:").unwrap()),
+			Some(expected(vec![ObjectTypeReferencePathComponent::NullableValue]).as_slice()),
+		);
+		assert_eq!(
+			semantic_program.object_type_references(source.find("items:").unwrap()),
+			Some(expected(vec![ObjectTypeReferencePathComponent::ArrayElement]).as_slice()),
+		);
+		assert_eq!(
+			semantic_program.object_type_references(source.find("choice:").unwrap()),
+			Some(expected(vec![ObjectTypeReferencePathComponent::UnionMember(1)]).as_slice()),
+		);
+		let transform_position = source.find("fn Transform").unwrap();
+		let value_parameter_position = transform_position
+			+ source[transform_position..].find("value: Model").unwrap();
+		let values_parameter_position = transform_position
+			+ source[transform_position..].find("values: [Model]").unwrap();
+		assert_eq!(
+			semantic_program.object_type_references(value_parameter_position),
+			Some(expected(vec![]).as_slice()),
+		);
+		assert_eq!(
+			semantic_program.object_type_references(values_parameter_position),
+			Some(expected(vec![ObjectTypeReferencePathComponent::ArrayElement]).as_slice()),
+		);
+		assert_eq!(
+			semantic_program.object_type_references(source.find("var local: Model").unwrap()),
+			Some(expected(vec![]).as_slice()),
+		);
+		assert_eq!(
+			semantic_program.object_type_references(transform_position),
+			Some(expected(vec![]).as_slice()),
+		);
 	}
 
 	#[test]

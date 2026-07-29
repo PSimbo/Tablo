@@ -611,7 +611,13 @@ impl Compiler {
 					.unwrap_or_else(|| panic!("Missing resolved record layout for `new` expression."));
 
 				for column in &layout.columns {
-					self.emit_default_value(&column.data_type, semantic_program, emission, expression_position);
+					self.emit_default_value(
+						&column.data_type,
+						semantic_program,
+						emission,
+						expression_position,
+						expression_position,
+					);
 				}
 
 				self.emit(emission, Instruction::MakeRecordPointer {
@@ -625,41 +631,40 @@ impl Compiler {
 				self.emit(emission, Instruction::PushNull, expression_position);
 			}
 			Expr::ObjectConstruction(ObjectConstructionExpr { fields, object_type_name, .. }) => {
-				let object_declaration = semantic_program.object_declaration(object_type_name);
+				let object_type_id = semantic_program.object_construction_type_id(expression.position())
+					.unwrap_or_else(|| panic!(
+						"Missing resolved identity for object construction `{object_type_name}` at position {}.",
+						expression.position(),
+					));
+				let object_declaration = semantic_program.object_type(object_type_id)
+					.map(ResolvedObjectType::declaration)
+					.unwrap_or_else(|| panic!("Missing declaration for resolved object construction `{object_type_name}`."));
+				let object_fields = object_declaration.fields()
+					.unwrap_or_else(|| panic!("Object `{object_type_name}` does not support field-based construction."));
 
-				if let Some(object_declaration) = object_declaration {
-					let object_fields = object_declaration.fields()
-						.unwrap_or_else(|| panic!("Object `{object_type_name}` does not support field-based construction."));
-
-					for field in object_fields {
-						if let Some(provided_field) = fields.iter().find(|provided_field| provided_field.name == field.name) {
-							self.compile_into_with_debug_position(&provided_field.value, semantic_program, emission, debug_position);
-						}
-						else if let Some(default_value) = &field.default_value {
-							self.compile_into_with_debug_position(default_value, semantic_program, emission, debug_position);
-						}
-						else {
-							self.emit_default_value(&field.data_type, semantic_program, emission, expression_position);
-						}
+				for field in object_fields {
+					if let Some(provided_field) = fields.iter().find(|provided_field| provided_field.name == field.name) {
+						self.compile_into_with_debug_position(&provided_field.value, semantic_program, emission, debug_position);
 					}
-
-					self.emit(
-						emission,
-						Instruction::MakeObject(object_fields.iter().map(|field| field.name.clone()).collect()),
-						expression_position,
-					);
-				}
-				else {
-					for field in fields {
-						self.compile_into_with_debug_position(&field.value, semantic_program, emission, debug_position);
+					else if let Some(default_value) = &field.default_value {
+						self.compile_into_with_debug_position(default_value, semantic_program, emission, debug_position);
 					}
-
-					self.emit(
-						emission,
-						Instruction::MakeObject(fields.iter().map(|field| field.name.clone()).collect()),
-						expression_position,
-					);
+					else {
+						self.emit_default_value(
+							&field.data_type,
+							semantic_program,
+							emission,
+							expression_position,
+							field.position,
+						);
+					}
 				}
+
+				self.emit(
+					emission,
+					Instruction::MakeObject(object_fields.iter().map(|field| field.name.clone()).collect()),
+					expression_position,
+				);
 			}
 			Expr::Range(RangeExpr { start, step, end, .. }) => {
 				self.compile_into_with_debug_position(start, semantic_program, emission, debug_position);
@@ -1180,10 +1185,14 @@ impl Compiler {
 				Ok(())
 			}
 			Statement::Use(UseDeclaration { .. }) => Ok(()),
-			Statement::VariableDeclaration(VariableDeclaration { data_type, initial_value, is_const, name, position }) => {
+			Statement::VariableDeclaration(VariableDeclaration { initial_value, is_const, name, position, .. }) => {
 				let slot = semantic_program.declaration_slot(*position).ok_or(self.compile_error(
 					*position,
 					format!("Missing slot for variable declaration `{name}`."),
+				))?;
+				let data_type = semantic_program.declaration_type(*position).ok_or(self.compile_error(
+					*position,
+					format!("Missing type for variable declaration `{name}`."),
 				))?;
 
 				if let Some(initial_value) = initial_value.as_ref() {
@@ -1199,7 +1208,7 @@ impl Compiler {
 					self.emit(emission, Instruction::PushNull, *position);
 				}
 				else {
-					self.emit_default_value(data_type, semantic_program, emission, *position);
+					self.emit_default_value(data_type, semantic_program, emission, *position, *position);
 				}
 				self.emit(emission, Instruction::StoreLocal(slot), *position);
 				self.record_local_debug(
@@ -1275,36 +1284,39 @@ impl Compiler {
 		data_type: &crate::ast::DataType,
 		semantic_program: &SemanticProgram,
 		emission: &mut EmissionState,
-		position: usize,
+		debug_position: usize,
+		type_position: usize,
 	) {
 		match data_type {
 			crate::ast::DataType::Any | crate::ast::DataType::Nullable(_) => {
-				let _ = semantic_program;
-				self.emit(emission, Instruction::PushNull, position);
+				self.emit(emission, Instruction::PushNull, debug_position);
 			}
 			crate::ast::DataType::Array(_) => {
-				self.emit(emission, Instruction::MakeArray(0), position);
+				self.emit(emission, Instruction::MakeArray(0), debug_position);
 			}
 			crate::ast::DataType::Bool => {
-				self.emit(emission, Instruction::PushBoolean(false), position);
+				self.emit(emission, Instruction::PushBoolean(false), debug_position);
 			}
 			crate::ast::DataType::Date => {
-				self.emit(emission, Instruction::PushCurrentDate, position);
+				self.emit(emission, Instruction::PushCurrentDate, debug_position);
 			}
 			crate::ast::DataType::Dec => {
 				self.emit(
 					emission,
 					Instruction::PushDecimal(crate::value::Decimal::from_integer(0)),
-					position,
+					debug_position,
 				);
 			}
 			crate::ast::DataType::Int => {
-				self.emit(emission, Instruction::PushInteger(0), position);
+				self.emit(emission, Instruction::PushInteger(0), debug_position);
 			}
 			crate::ast::DataType::Object(name) => {
-				if let Some(object_declaration) = semantic_program.object_declaration(name) {
+				if let Some(object_type_id) = semantic_program.object_type_id_for_reference(type_position, &[]) {
+					let object_declaration = semantic_program.object_type(object_type_id)
+						.map(ResolvedObjectType::declaration)
+						.expect("Resolved object type reference is missing its declaration.");
 					if object_declaration.array_element_type().is_some() {
-						self.emit(emission, Instruction::MakeArray(0), position);
+						self.emit(emission, Instruction::MakeArray(0), debug_position);
 					}
 					else {
 						let object_fields = object_declaration.fields()
@@ -1315,14 +1327,20 @@ impl Compiler {
 								self.compile_into(default_value, semantic_program, emission);
 							}
 							else {
-								self.emit_default_value(&field.data_type, semantic_program, emission, position);
+								self.emit_default_value(
+									&field.data_type,
+									semantic_program,
+									emission,
+									debug_position,
+									field.position,
+								);
 							}
 						}
 
 						self.emit(
 							emission,
 							Instruction::MakeObject(object_fields.iter().map(|field| field.name.clone()).collect()),
-							position,
+							debug_position,
 						);
 					}
 				}
@@ -1336,28 +1354,28 @@ impl Compiler {
 					let EnumValue::Constant(backing_value) = value;
 					self.emit(emission, Instruction::PushEnumValue {
 						backing_value,
-						enum_name: name.clone(),
+						enum_name: name.to_string(),
 						variant_name: variant.name.clone(),
-					}, position);
+					}, debug_position);
 				}
 				else {
 					panic!("Missing named type declaration for `{name}`.");
 				}
 			}
 			crate::ast::DataType::Text => {
-				self.emit(emission, Instruction::PushText(String::new()), position);
+				self.emit(emission, Instruction::PushText(String::new()), debug_position);
 			}
 			crate::ast::DataType::Time => {
-				self.emit(emission, Instruction::PushCurrentTime, position);
+				self.emit(emission, Instruction::PushCurrentTime, debug_position);
 			}
 			crate::ast::DataType::TimeTz => {
-				self.emit(emission, Instruction::PushCurrentTimeTz, position);
+				self.emit(emission, Instruction::PushCurrentTimeTz, debug_position);
 			}
 			crate::ast::DataType::Timestamp => {
-				self.emit(emission, Instruction::PushCurrentTimestamp, position);
+				self.emit(emission, Instruction::PushCurrentTimestamp, debug_position);
 			}
 			crate::ast::DataType::TimestampTz => {
-				self.emit(emission, Instruction::PushCurrentTimestampTz, position);
+				self.emit(emission, Instruction::PushCurrentTimestampTz, debug_position);
 			}
 			crate::ast::DataType::EmptyArray
 			| crate::ast::DataType::Null
@@ -1631,7 +1649,15 @@ fn statement_position(statement: &Statement) -> usize {
 mod tests {
 	use super::*;
 
+	use crate::source::SourceText;
+	use crate::syntax::lexer::Lexer;
+	use crate::syntax::parser::Parser;
 	use crate::value::*;
+
+	fn parse_program(source: &str) -> AstProgram {
+		let tokens = Lexer::new(SourceText::new(source)).tokenize().unwrap();
+		Parser::new(tokens).parse_program().unwrap()
+	}
 
 	#[test]
 	fn compiles_addition_in_post_order() {
@@ -2145,6 +2171,30 @@ mod tests {
 	}
 
 	#[test]
+	fn compiles_implicit_object_default_using_resolved_declaration_type() {
+		let mut program = parse_program(
+			"obj First { value: int, };\n\
+			obj Second { value: text, };\n\
+			var result: First;",
+		);
+		let semantic_program = SemanticAnalyzer::new().analyze_program(&program).unwrap();
+		let Statement::VariableDeclaration(variable) = &mut program.statements[0] else {
+			panic!("Expected variable declaration.");
+		};
+		variable.data_type = DataType::Object(String::from("Second").into());
+
+		let bytecode = Compiler::new()
+			.compile_program_with_existing_semantics(&program, &semantic_program)
+			.unwrap();
+
+		assert_eq!(bytecode.entry_code().unwrap().instructions, vec![
+			Instruction::PushInteger(0),
+			Instruction::MakeObject(vec![String::from("value")]),
+			Instruction::StoreLocal(0),
+		]);
+	}
+
+	#[test]
 	fn compiles_integer_literal() {
 		let expression = Expr::Integer(IntegerLiteral {
 			position: 0,
@@ -2232,6 +2282,33 @@ mod tests {
 			Instruction::PushInteger(2),
 			Instruction::Multiply,
 			Instruction::Subtract,
+		]);
+	}
+
+	#[test]
+	fn compiles_object_construction_using_resolved_identity() {
+		let mut program = parse_program(
+			"obj First { value: int, };\n\
+			obj Second { value: text, };\n\
+			var result: First = First {};",
+		);
+		let semantic_program = SemanticAnalyzer::new().analyze_program(&program).unwrap();
+		let Statement::VariableDeclaration(variable) = &mut program.statements[0] else {
+			panic!("Expected variable declaration.");
+		};
+		let Some(Expr::ObjectConstruction(construction)) = &mut variable.initial_value else {
+			panic!("Expected object construction initializer.");
+		};
+		construction.object_type_name = String::from("Second");
+
+		let bytecode = Compiler::new()
+			.compile_program_with_existing_semantics(&program, &semantic_program)
+			.unwrap();
+
+		assert_eq!(bytecode.entry_code().unwrap().instructions, vec![
+			Instruction::PushInteger(0),
+			Instruction::MakeObject(vec![String::from("value")]),
+			Instruction::StoreLocal(0),
 		]);
 	}
 

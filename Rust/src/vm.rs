@@ -1983,99 +1983,7 @@ fn divide_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Val
 }
 
 fn equals_value(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
-	let value = match (lhs, rhs) {
-		(Value::Array(lhs), Value::Array(rhs)) => lhs == rhs,
-		(Value::Boolean(lhs), Value::Boolean(rhs)) => lhs == rhs,
-		(Value::Date(lhs), Value::Date(rhs)) => lhs == rhs,
-		(Value::Enum(lhs), Value::Enum(rhs)) => {
-			lhs.enum_name == rhs.enum_name && equals_value(*lhs.backing_value, *rhs.backing_value, instruction_index)? == Value::Boolean(true)
-		}
-		(Value::Null, Value::Null) => true,
-		(Value::Null, _) | (_, Value::Null) => false,
-		(Value::Object(lhs), Value::Object(rhs)) => lhs == rhs,
-		(Value::RecordPointer(lhs), Value::RecordPointer(rhs)) => lhs == rhs,
-		(Value::Text(lhs), Value::Text(rhs)) => lhs == rhs,
-		(Value::Time(lhs), Value::Time(rhs)) => lhs == rhs,
-		(Value::TimeTz(lhs), Value::TimeTz(rhs)) => lhs == rhs,
-		(Value::Timestamp(lhs), Value::Timestamp(rhs)) => lhs == rhs,
-		(Value::TimestampTz(lhs), Value::TimestampTz(rhs)) => lhs == rhs,
-		(lhs @ Value::Enum(_), rhs) | (lhs, rhs @ Value::Enum(_)) => {
-			return Err(vm_error(
-				instruction_index,
-				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
-			));
-		}
-		(lhs @ Value::Iterator(_), rhs) | (lhs, rhs @ Value::Iterator(_)) => {
-			return Err(vm_error(
-				instruction_index,
-				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
-			));
-		}
-		(lhs @ Value::Array(_), rhs) | (lhs, rhs @ Value::Array(_)) => {
-			return Err(vm_error(
-				instruction_index,
-				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
-			));
-		}
-		(lhs @ Value::Date(_), rhs) | (lhs, rhs @ Value::Date(_)) => {
-			return Err(vm_error(
-				instruction_index,
-				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
-			));
-		}
-		(lhs @ Value::Time(_), rhs) | (lhs, rhs @ Value::Time(_)) => {
-			return Err(vm_error(
-				instruction_index,
-				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
-			));
-		}
-		(lhs @ Value::TimeTz(_), rhs) | (lhs, rhs @ Value::TimeTz(_)) => {
-			return Err(vm_error(
-				instruction_index,
-				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
-			));
-		}
-		(lhs @ Value::Timestamp(_), rhs) | (lhs, rhs @ Value::Timestamp(_)) => {
-			return Err(vm_error(
-				instruction_index,
-				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
-			));
-		}
-		(lhs @ Value::TimestampTz(_), rhs) | (lhs, rhs @ Value::TimestampTz(_)) => {
-			return Err(vm_error(
-				instruction_index,
-				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
-			));
-		}
-		(lhs @ Value::Object(_), rhs) | (lhs, rhs @ Value::Object(_)) => {
-			return Err(vm_error(
-				instruction_index,
-				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
-			));
-		}
-		(lhs @ Value::RecordPointer(_), rhs) | (lhs, rhs @ Value::RecordPointer(_)) => {
-			return Err(vm_error(
-				instruction_index,
-				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
-			));
-		}
-		(lhs @ Value::Text(_), rhs) | (lhs, rhs @ Value::Text(_)) => {
-			return Err(vm_error(
-				instruction_index,
-				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
-			));
-		}
-		(lhs @ Value::Boolean(_), rhs) | (lhs, rhs @ Value::Boolean(_)) => {
-			return Err(vm_error(
-				instruction_index,
-				format!("Cannot compare `{}` and `{}` for equality.", type_name(&lhs), type_name(&rhs)),
-			));
-		}
-		(lhs, rhs) => {
-			let (lhs, rhs) = coerce_numeric_values(lhs, rhs, instruction_index)?;
-			compare_decimals(&lhs, &rhs, instruction_index)?.is_eq()
-		}
-	};
+	let value = values_equal(&lhs, &rhs, instruction_index)?;
 
 	Ok(Value::Boolean(value))
 }
@@ -3106,6 +3014,76 @@ fn type_name(value: &Value) -> &'static str {
 	}
 }
 
+fn values_equal(lhs: &Value, rhs: &Value, instruction_index: usize) -> Result<bool, VmError> {
+	match (lhs, rhs) {
+		(Value::Array(lhs), Value::Array(rhs)) => {
+			if lhs.len() != rhs.len() {
+				return Ok(false);
+			}
+
+			for (lhs, rhs) in lhs.iter().zip(rhs) {
+				if !values_equal(lhs, rhs, instruction_index)? {
+					return Ok(false);
+				}
+			}
+
+			Ok(true)
+		}
+		(Value::Boolean(lhs), Value::Boolean(rhs)) => Ok(lhs == rhs),
+		(Value::Date(lhs), Value::Date(rhs)) => Ok(lhs == rhs),
+		(Value::Decimal(lhs), Value::Decimal(rhs)) => {
+			Ok(compare_decimals(lhs, rhs, instruction_index)?.is_eq())
+		}
+		(Value::Decimal(lhs), Value::Integer(rhs)) => {
+			let rhs = Decimal::from_integer_with_scale(*rhs, lhs.scale)
+				.map_err(|message| vm_error(instruction_index, message))?;
+			Ok(compare_decimals(lhs, &rhs, instruction_index)?.is_eq())
+		}
+		(Value::Enum(lhs), Value::Enum(rhs)) => {
+			if lhs.enum_name != rhs.enum_name {
+				return Ok(false);
+			}
+
+			values_equal(&lhs.backing_value, &rhs.backing_value, instruction_index)
+		}
+		(Value::Integer(lhs), Value::Decimal(rhs)) => {
+			let lhs = Decimal::from_integer_with_scale(*lhs, rhs.scale)
+				.map_err(|message| vm_error(instruction_index, message))?;
+			Ok(compare_decimals(&lhs, rhs, instruction_index)?.is_eq())
+		}
+		(Value::Integer(lhs), Value::Integer(rhs)) => Ok(lhs == rhs),
+		(Value::DecimalRange(lhs), Value::DecimalRange(rhs)) => Ok(lhs == rhs),
+		(Value::IntegerRange(lhs), Value::IntegerRange(rhs)) => Ok(lhs == rhs),
+		(Value::Iterator(lhs), Value::Iterator(rhs)) => Ok(lhs == rhs),
+		(Value::Null, Value::Null) => Ok(true),
+		(Value::Object(lhs), Value::Object(rhs)) => {
+			if lhs.len() != rhs.len() {
+				return Ok(false);
+			}
+
+			for (name, lhs) in lhs {
+				let Some(rhs) = rhs.get(name) else {
+					return Ok(false);
+				};
+
+				if !values_equal(lhs, rhs, instruction_index)? {
+					return Ok(false);
+				}
+			}
+
+			Ok(true)
+		}
+		(Value::RecordPointer(lhs), Value::RecordPointer(rhs)) => Ok(lhs == rhs),
+		(Value::Reference(lhs), Value::Reference(rhs)) => Ok(lhs == rhs),
+		(Value::Text(lhs), Value::Text(rhs)) => Ok(lhs == rhs),
+		(Value::Time(lhs), Value::Time(rhs)) => Ok(lhs == rhs),
+		(Value::TimeTz(lhs), Value::TimeTz(rhs)) => Ok(lhs == rhs),
+		(Value::Timestamp(lhs), Value::Timestamp(rhs)) => Ok(lhs == rhs),
+		(Value::TimestampTz(lhs), Value::TimestampTz(rhs)) => Ok(lhs == rhs),
+		_ => Ok(false),
+	}
+}
+
 fn vm_error(instruction_index: usize, message: String) -> VmError {
 	VmError {
 		instruction_index,
@@ -3346,54 +3324,6 @@ mod tests {
 		assert_eq!(error, VmError {
 			instruction_index: 2,
 			message: String::from("Expected a Boolean operand."),
-			source_location: None,
-			stack_trace: vec![
-				super::VmStackFrame {
-					instruction_index: 2,
-					locals: vec![],
-					source_location: None,
-				},
-			],
-		});
-	}
-
-	#[test]
-	fn rejects_mixed_boolean_and_numeric_equality() {
-		let program = Program::new(vec![
-			Instruction::PushBoolean(true),
-			Instruction::PushInteger(1),
-			Instruction::Equal,
-		]);
-
-		let error = VirtualMachine::new().run(&program).unwrap_err();
-
-		assert_eq!(error, VmError {
-			instruction_index: 2,
-			message: String::from("Cannot compare `bool` and `int` for equality."),
-			source_location: None,
-			stack_trace: vec![
-				super::VmStackFrame {
-					instruction_index: 2,
-					locals: vec![],
-					source_location: None,
-				},
-			],
-		});
-	}
-
-	#[test]
-	fn rejects_mixed_text_and_numeric_equality() {
-		let program = Program::new(vec![
-			Instruction::PushText(String::from("1")),
-			Instruction::PushInteger(1),
-			Instruction::Equal,
-		]);
-
-		let error = VirtualMachine::new().run(&program).unwrap_err();
-
-		assert_eq!(error, VmError {
-			instruction_index: 2,
-			message: String::from("Cannot compare `text` and `int` for equality."),
 			source_location: None,
 			stack_trace: vec![
 				super::VmStackFrame {
@@ -3898,5 +3828,31 @@ mod tests {
 			VirtualMachine::evaluate_watch_expression("exists payload.missingPath.name", &frame).unwrap(),
 			Value::Boolean(false),
 		);
+	}
+
+	#[test]
+	fn treats_mixed_boolean_and_numeric_values_as_unequal() {
+		let program = Program::new(vec![
+			Instruction::PushBoolean(true),
+			Instruction::PushInteger(1),
+			Instruction::Equal,
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Boolean(false)));
+	}
+
+	#[test]
+	fn treats_mixed_text_and_numeric_values_as_unequal() {
+		let program = Program::new(vec![
+			Instruction::PushText(String::from("1")),
+			Instruction::PushInteger(1),
+			Instruction::Equal,
+		]);
+
+		let result = VirtualMachine::new().run(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Boolean(false)));
 	}
 }

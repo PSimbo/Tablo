@@ -364,9 +364,17 @@ pub fn token_span_at_position(source: &SourceText, position: usize) -> Option<(u
 		}
 	}
 
-	if current == '"' {
-		let closing_quote_offset = text[position + 1..line_end].find('"')?;
-		let end = position + 1 + closing_quote_offset + 1;
+	if current == '"' || current.is_ascii_alphabetic() || current == '_' {
+		let mut end = read_identifier(text, position)?.end;
+
+		while end < line_end && text[end..line_end].starts_with('.') {
+			let component_start = end + 1;
+			let Some(component) = read_identifier(text, component_start) else {
+				break;
+			};
+			end = component.end;
+		}
+
 		return Some((position, end));
 	}
 
@@ -573,6 +581,12 @@ mod tests {
 
 		let quoted_source = SourceText::new("&\"quoted value\"");
 		assert_eq!(token_span_at_position(&quoted_source, 0), Some((0, 15)));
+	}
+
+	#[test]
+	fn token_span_at_position_covers_qualified_identifier() {
+		let source = SourceText::new("Envelope.\"Payload Type\".Missing");
+		assert_eq!(token_span_at_position(&source, 0), Some((0, 31)));
 	}
 
 	#[test]

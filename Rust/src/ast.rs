@@ -1,3 +1,6 @@
+use std::fmt;
+use std::ops::Deref;
+
 use crate::value::Decimal;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,7 +55,7 @@ pub enum DataType {
 	Int,
 	Null,
 	Nullable(Box<DataType>),
-	Object(String),
+	Object(ObjectTypeName),
 	Range(Box<DataType>),
 	RecordPointer(RecordPointerType),
 	Text,
@@ -90,7 +93,7 @@ impl DataType {
 			Self::Int => String::from("int"),
 			Self::Null => String::from("null"),
 			Self::Nullable(inner) => format!("{}?", inner.name()),
-			Self::Object(name) => name.clone(),
+			Self::Object(name) => name.name.clone(),
 			Self::Range(element_type) => format!("range<{}>", element_type.name()),
 			Self::RecordPointer(_) => String::from("record pointer"),
 			Self::Text => String::from("text"),
@@ -489,9 +492,12 @@ pub struct ObjectConstructionField {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectDeclaration {
+	pub containing_object_name: Option<String>,
+	pub has_explicit_name: bool,
 	pub name: String,
 	pub position: usize,
 	pub shape: ObjectDeclarationShape,
+	pub visibility: Visibility,
 }
 
 impl ObjectDeclaration {
@@ -523,6 +529,50 @@ pub struct ObjectFieldDeclaration {
 	pub default_value: Option<Expr>,
 	pub name: String,
 	pub position: usize,
+	pub visibility: Visibility,
+}
+
+#[derive(Clone, Debug)]
+pub struct ObjectTypeName {
+	pub name: String,
+	pub position: usize,
+}
+
+impl ObjectTypeName {
+	pub fn new(name: String, position: usize) -> Self {
+		Self {
+			name,
+			position,
+		}
+	}
+}
+
+impl Deref for ObjectTypeName {
+	type Target = str;
+
+	fn deref(&self) -> &Self::Target {
+		&self.name
+	}
+}
+
+impl fmt::Display for ObjectTypeName {
+	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+		self.name.fmt(formatter)
+	}
+}
+
+impl From<String> for ObjectTypeName {
+	fn from(name: String) -> Self {
+		Self::new(name, 0)
+	}
+}
+
+impl Eq for ObjectTypeName {}
+
+impl PartialEq for ObjectTypeName {
+	fn eq(&self, other: &Self) -> bool {
+		self.name == other.name
+	}
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

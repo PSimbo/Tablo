@@ -253,6 +253,22 @@ mod tests {
 	}
 
 	#[test]
+	fn highlights_entire_unknown_object_type_name() {
+		let source = "obj Holder { value: MissingType, }; fn Main(args: [text]): int { return 0; }";
+		let diagnostic = diagnostic_for_tablo_error(source, check(source).unwrap_err());
+
+		assert_single_line_span(source, &diagnostic, "MissingType", 0);
+	}
+
+	#[test]
+	fn highlights_entire_unknown_qualified_object_type_name() {
+		let source = "obj Envelope { value: Envelope.Missing, }; fn Main(args: [text]): int { return 0; }";
+		let diagnostic = diagnostic_for_tablo_error(source, check(source).unwrap_err());
+
+		assert_single_line_span(source, &diagnostic, "Envelope.Missing", 0);
+	}
+
+	#[test]
 	fn highlights_full_ambiguous_call() {
 		let source = "\
 fn Main(args: [text]): int { return choose(1); }
@@ -352,6 +368,14 @@ fn choose(right: int): int { return right; }";
 		let diagnostic = diagnostic_for_tablo_error(source, check(source).unwrap_err());
 
 		assert_single_line_span(source, &diagnostic, "value", 0);
+	}
+
+	#[test]
+	fn highlights_partially_qualified_object_type_name() {
+		let source = "obj Envelope { payload: obj Payload { value: int, }, previous: Payload, }; fn Main(args: [text]): int { return 0; }";
+		let diagnostic = diagnostic_for_tablo_error(source, check(source).unwrap_err());
+
+		assert_single_line_span(source, &diagnostic, "Payload", 1);
 	}
 
 	#[test]

@@ -141,9 +141,18 @@ struct ImportedFunctionTargets {
 #[derive(Clone)]
 struct LinkedModule {
 	exported_functions: BTreeMap<String, String>,
+	exported_objects: BTreeMap<String, String>,
 	functions: Vec<ast::FunctionDeclaration>,
+	object_display_names: Vec<String>,
+	objects: Vec<ast::ObjectDeclaration>,
 	source_file: SourceFileDebugInfo,
 	with_declarations: Vec<ast::WithDeclaration>,
+}
+
+#[derive(Default)]
+struct ModuleImportBindings {
+	functions: BTreeMap<String, String>,
+	objects: BTreeMap<String, String>,
 }
 
 struct LinkedProgram {
@@ -153,6 +162,8 @@ struct LinkedProgram {
 	program: ast::AstProgram,
 	root_source_file: SourceFileDebugInfo,
 	top_level_function_source_names: Vec<String>,
+	top_level_object_display_names: Vec<String>,
+	top_level_object_source_names: Vec<String>,
 }
 
 #[derive(Default)]
@@ -187,8 +198,9 @@ impl ModuleLinker {
 		program: &ast::AstProgram,
 		base_directory: &Path,
 		source_name: &str,
-	) -> Result<BTreeMap<String, String>, CompileError> {
+	) -> Result<ModuleImportBindings, CompileError> {
 		let mut imported_functions = BTreeMap::<String, ImportedFunctionTargets>::new();
+		let mut imported_objects = BTreeMap::<String, String>::new();
 
 		for statement in &program.statements {
 			let ast::Statement::Use(use_declaration) = statement else {
@@ -199,7 +211,9 @@ impl ModuleLinker {
 
 			if let Some(imported_names) = &use_declaration.imported_names {
 				for imported_name in imported_names {
-					let Some(target_name) = linked_module.exported_functions.get(&imported_name.name) else {
+					let function_target = linked_module.exported_functions.get(&imported_name.name);
+					let object_target = linked_module.exported_objects.get(&imported_name.name);
+					if function_target.is_none() && object_target.is_none() {
 						return Err(CompileError {
 							message: format!(
 								"Function `{}` is not exported by module `{}`.",
@@ -208,14 +222,19 @@ impl ModuleLinker {
 							),
 							position: imported_name.position,
 						});
-					};
+					}
 
-					Self::add_imported_function_target(
-						&mut imported_functions,
-						&imported_name.name,
-						target_name,
-						imported_name.position,
-					);
+					if let Some(target_name) = function_target {
+						Self::add_imported_function_target(
+							&mut imported_functions,
+							&imported_name.name,
+							target_name,
+							imported_name.position,
+						);
+					}
+					if let Some(target_name) = object_target {
+						imported_objects.insert(imported_name.name.clone(), target_name.clone());
+					}
 				}
 			}
 			else {
@@ -227,10 +246,13 @@ impl ModuleLinker {
 						use_declaration.position,
 					);
 				}
+				for (name, target_name) in &linked_module.exported_objects {
+					imported_objects.insert(name.clone(), target_name.clone());
+				}
 			}
 		}
 
-		let mut import_bindings = BTreeMap::new();
+		let mut function_bindings = BTreeMap::new();
 		for (display_name, targets) in imported_functions {
 			let alias_name = format!(
 				"__tablo_import_{}_{}",
@@ -238,7 +260,7 @@ impl ModuleLinker {
 				display_name,
 			);
 			self.next_import_alias_id += 1;
-			import_bindings.insert(display_name.clone(), alias_name.clone());
+			function_bindings.insert(display_name.clone(), alias_name.clone());
 			self.function_overload_aliases.push(FunctionOverloadAlias {
 				alias_name,
 				display_name,
@@ -248,7 +270,10 @@ impl ModuleLinker {
 			});
 		}
 
-		Ok(import_bindings)
+		Ok(ModuleImportBindings {
+			functions: function_bindings,
+			objects: imported_objects,
+		})
 	}
 
 	fn include_local_function_overloads(
@@ -286,6 +311,31 @@ impl ModuleLinker {
 	fn linked_functions(&self) -> Vec<ast::FunctionDeclaration> {
 		self.loaded_modules.values()
 			.flat_map(|module| module.functions.iter().cloned())
+			.collect()
+	}
+
+	fn linked_object_count(&self) -> usize {
+		self.loaded_modules.values()
+			.map(|module| module.objects.len())
+			.sum()
+	}
+
+	fn linked_object_display_names(&self) -> Vec<String> {
+		self.loaded_modules.values()
+			.flat_map(|module| module.object_display_names.iter().cloned())
+			.collect()
+	}
+
+	fn linked_object_groups(&self) -> Vec<(u32, &[ast::ObjectDeclaration])> {
+		self.loaded_modules.values()
+			.enumerate()
+			.map(|(index, module)| (index as u32 + 1, module.objects.as_slice()))
+			.collect()
+	}
+
+	fn linked_objects(&self) -> Vec<ast::ObjectDeclaration> {
+		self.loaded_modules.values()
+			.flat_map(|module| module.objects.iter().cloned())
 			.collect()
 	}
 
@@ -359,16 +409,42 @@ impl ModuleLinker {
 		)?;
 		let module_id = self.next_module_id;
 		self.next_module_id += 1;
+		let object_renames = build_top_level_object_renames(&program, module_id);
 		let top_level_renames = build_top_level_function_renames(&program, module_id);
-		self.include_local_function_overloads(&import_bindings, &top_level_renames);
+		self.include_local_function_overloads(&import_bindings.functions, &top_level_renames);
 		let source_file = SourceFileDebugInfo::from_source(module_key.display().to_string(), &source_text);
+		let object_display_names = program.objects.iter()
+			.map(|object| object.name.clone())
+			.collect();
+		let exported_objects = program.objects.iter()
+			.filter(|object| {
+				object.containing_object_name.is_none()
+					&& object.visibility == ast::Visibility::Public
+			})
+			.map(|object| {
+				(
+					object.name.clone(),
+					object_renames.get(&object.name)
+						.cloned()
+						.unwrap_or_else(|| object.name.clone()),
+				)
+			})
+			.collect();
+		let mut object_reference_renames = import_bindings.objects;
+		object_reference_renames.extend(object_renames.clone());
 
+		rewrite_object_declaration_type_names(&mut program.objects, &object_reference_renames, true);
 		for function in &mut program.functions {
 			if let Some(renamed) = top_level_renames.get(&function.name) {
 				function.name = renamed.clone();
 			}
 
-			rewrite_function_declaration_calls(function, &top_level_renames, &import_bindings);
+			rewrite_function_declaration_calls(
+				function,
+				&top_level_renames,
+				&import_bindings.functions,
+				&object_reference_renames,
+			);
 		}
 
 		let exported_functions = program.functions.iter()
@@ -381,7 +457,10 @@ impl ModuleLinker {
 			.collect();
 		let linked_module = LinkedModule {
 			exported_functions,
+			exported_objects,
 			functions: program.functions,
+			object_display_names,
+			objects: program.objects,
 			source_file,
 			with_declarations: program.with_declarations,
 		};
@@ -628,6 +707,8 @@ fn analyze_source_local_usage_with_name_and_schema(
 	analyzer.set_function_overload_aliases(linked_program.function_overload_aliases.clone());
 	analyzer.set_root_source_name(Some(linked_program.root_source_file.display_name().to_string()));
 	analyzer.set_top_level_function_source_names(linked_program.top_level_function_source_names.clone());
+	analyzer.set_top_level_object_display_names(linked_program.top_level_object_display_names.clone());
+	analyzer.set_top_level_object_source_names(linked_program.top_level_object_source_names.clone());
 	let semantic_program = analyzer.analyze_program_with_schema(&linked_program.program, schema_catalog)
 		.map_err(TabloError::Compile)?;
 	let local_usage = analyze_program_local_usage(&linked_program.program, &semantic_program);
@@ -674,6 +755,17 @@ fn build_top_level_function_renames(program: &ast::AstProgram, module_id: u32) -
 			(
 				function.name.clone(),
 				format!("__tablo_module_{module_id}_{}", function.name),
+			)
+		})
+		.collect()
+}
+
+fn build_top_level_object_renames(program: &ast::AstProgram, module_id: u32) -> BTreeMap<String, String> {
+	program.objects.iter()
+		.map(|object| {
+			(
+				object.name.clone(),
+				format!("__tablo_module_{module_id}_object_{}", object.name),
 			)
 		})
 		.collect()
@@ -748,6 +840,8 @@ fn compile_source_to_program_with_name_and_schema_and_warnings(
 	analyzer.set_function_overload_aliases(linked_program.function_overload_aliases.clone());
 	analyzer.set_root_source_name(Some(linked_program.root_source_file.display_name().to_string()));
 	analyzer.set_top_level_function_source_names(linked_program.top_level_function_source_names.clone());
+	analyzer.set_top_level_object_display_names(linked_program.top_level_object_display_names.clone());
+	analyzer.set_top_level_object_source_names(linked_program.top_level_object_source_names.clone());
 	let (mut program, warnings) = compile_ast_program_with_schema_and_analyzer(
 		&linked_program.program,
 		target,
@@ -988,6 +1082,12 @@ fn link_program_modules(
 			top_level_function_source_names: program.functions.iter()
 				.map(|_| root_display_name.clone())
 				.collect(),
+			top_level_object_display_names: program.objects.iter()
+				.map(|object| object.name.clone())
+				.collect(),
+			top_level_object_source_names: program.objects.iter()
+				.map(|_| root_display_name.clone())
+				.collect(),
 		});
 	};
 
@@ -999,6 +1099,12 @@ fn link_program_modules(
 			program: program.clone(),
 			root_source_file,
 			top_level_function_source_names: program.functions.iter()
+				.map(|_| root_display_name.clone())
+				.collect(),
+			top_level_object_display_names: program.objects.iter()
+				.map(|object| object.name.clone())
+				.collect(),
+			top_level_object_source_names: program.objects.iter()
 				.map(|_| root_display_name.clone())
 				.collect(),
 		});
@@ -1015,24 +1121,46 @@ fn link_program_modules(
 	let root_function_targets = program.functions.iter()
 		.map(|function| (function.name.clone(), function.name.clone()))
 		.collect();
-	linker.include_local_function_overloads(&import_bindings, &root_function_targets);
+	linker.include_local_function_overloads(&import_bindings.functions, &root_function_targets);
 	let mut linked_program = program.clone();
 
+	rewrite_object_declaration_type_names(&mut linked_program.objects, &import_bindings.objects, false);
 	for function in &mut linked_program.functions {
-		rewrite_function_declaration_calls(function, &BTreeMap::new(), &import_bindings);
+		rewrite_function_declaration_calls(
+			function,
+			&BTreeMap::new(),
+			&import_bindings.functions,
+			&import_bindings.objects,
+		);
 	}
 
 	for statement in &mut linked_program.statements {
-		rewrite_statement_calls(statement, &BTreeMap::new(), &import_bindings, &[]);
+		rewrite_statement_calls(
+			statement,
+			&BTreeMap::new(),
+			&import_bindings.functions,
+			&import_bindings.objects,
+			&[],
+		);
 	}
 
 	if let Some(result) = &mut linked_program.result {
-		rewrite_expression_calls(result, &BTreeMap::new(), &import_bindings, &[]);
+		rewrite_expression_calls(
+			result,
+			&BTreeMap::new(),
+			&import_bindings.functions,
+			&import_bindings.objects,
+			&[],
+		);
 	}
 
 	linked_program.functions = linker.linked_functions()
 		.into_iter()
 		.chain(linked_program.functions)
+		.collect();
+	linked_program.objects = linker.linked_objects()
+		.into_iter()
+		.chain(linked_program.objects)
 		.collect();
 	linked_program.statements.retain(|statement| !matches!(statement, ast::Statement::Use(_)));
 	linked_program.with_declarations = merge_with_declarations(
@@ -1041,6 +1169,8 @@ fn link_program_modules(
 	);
 	let imported_source_files = linker.linked_source_files();
 	let mut top_level_function_source_names = Vec::new();
+	let mut top_level_object_display_names = linker.linked_object_display_names();
+	let mut top_level_object_source_names = Vec::new();
 	let mut function_source_indices = Vec::new();
 
 	for (source_file_index, functions) in linker.linked_function_groups() {
@@ -1052,9 +1182,22 @@ fn link_program_modules(
 		}
 	}
 
+	for (source_file_index, objects) in linker.linked_object_groups() {
+		let display_name = imported_source_files[(source_file_index - 1) as usize].display_name().to_string();
+		top_level_object_source_names.extend(objects.iter().map(|_| display_name.clone()));
+	}
+
 	top_level_function_source_names.extend(
 		linked_program.functions[linker.linked_function_count()..].iter()
 			.map(|_| root_display_name.clone()),
+	);
+	top_level_object_source_names.extend(
+		linked_program.objects[linker.linked_object_count()..].iter()
+			.map(|_| root_display_name.clone()),
+	);
+	top_level_object_display_names.extend(
+		linked_program.objects[linker.linked_object_count()..].iter()
+			.map(|object| object.name.clone()),
 	);
 
 	for function in &linked_program.functions[linker.linked_function_count()..] {
@@ -1068,6 +1211,8 @@ fn link_program_modules(
 		program: linked_program,
 		root_source_file,
 		top_level_function_source_names,
+		top_level_object_display_names,
+		top_level_object_source_names,
 	})
 }
 
@@ -1116,16 +1261,41 @@ fn resolve_module_path(base_directory: &Path, module_path: &str) -> PathBuf {
 	resolved
 }
 
+fn rewrite_data_type_object_names(
+	data_type: &mut ast::DataType,
+	object_renames: &BTreeMap<String, String>,
+) {
+	match data_type {
+		ast::DataType::Array(element_type)
+		| ast::DataType::Nullable(element_type)
+		| ast::DataType::Range(element_type) => {
+			rewrite_data_type_object_names(element_type, object_renames);
+		}
+		ast::DataType::Object(name) => {
+			if let Some(renamed) = object_renames.get(name.name.as_str()) {
+				name.name = renamed.clone();
+			}
+		}
+		ast::DataType::Union(members) => {
+			for member in members {
+				rewrite_data_type_object_names(member, object_renames);
+			}
+		}
+		_ => {}
+	}
+}
+
 fn rewrite_expression_calls(
 	expression: &mut ast::Expr,
 	top_level_renames: &BTreeMap<String, String>,
 	import_bindings: &BTreeMap<String, String>,
+	object_renames: &BTreeMap<String, String>,
 	shadowed_function_names: &[String],
 ) {
 	match expression {
 		ast::Expr::Array(array) => {
 			for element in &mut array.elements {
-				rewrite_expression_calls(element, top_level_renames, import_bindings, shadowed_function_names);
+				rewrite_expression_calls(element, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 			}
 		}
 		ast::Expr::Assignment(assignment) => {
@@ -1135,15 +1305,15 @@ fn rewrite_expression_calls(
 				}
 				ast::AssignmentTarget::Identifier(_) => {}
 				ast::AssignmentTarget::Index(target) => {
-					rewrite_expression_calls(&mut target.index, top_level_renames, import_bindings, shadowed_function_names);
+					rewrite_expression_calls(&mut target.index, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 				}
 			}
 
-			rewrite_expression_calls(&mut assignment.value, top_level_renames, import_bindings, shadowed_function_names);
+			rewrite_expression_calls(&mut assignment.value, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 		}
 		ast::Expr::Binary(binary) => {
-			rewrite_expression_calls(&mut binary.left, top_level_renames, import_bindings, shadowed_function_names);
-			rewrite_expression_calls(&mut binary.right, top_level_renames, import_bindings, shadowed_function_names);
+			rewrite_expression_calls(&mut binary.left, top_level_renames, import_bindings, object_renames, shadowed_function_names);
+			rewrite_expression_calls(&mut binary.right, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 		}
 		ast::Expr::Boolean(_)
 		| ast::Expr::Date(_)
@@ -1158,7 +1328,7 @@ fn rewrite_expression_calls(
 		ast::Expr::Call(call) => {
 			for argument in &mut call.arguments {
 				if let Some(expression) = argument.expression_mut() {
-					rewrite_expression_calls(expression, top_level_renames, import_bindings, shadowed_function_names);
+					rewrite_expression_calls(expression, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 				}
 			}
 
@@ -1173,45 +1343,48 @@ fn rewrite_expression_calls(
 		}
 		ast::Expr::Count(count) => {
 			if let Some(where_clause) = &mut count.where_clause {
-				rewrite_expression_calls(where_clause, top_level_renames, import_bindings, shadowed_function_names);
+				rewrite_expression_calls(where_clause, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 			}
 		}
 		ast::Expr::FieldAccess(field_access) => {
-			rewrite_expression_calls(&mut field_access.object, top_level_renames, import_bindings, shadowed_function_names);
+			rewrite_expression_calls(&mut field_access.object, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 		}
 		ast::Expr::Find(find) => {
 			if let Some(where_clause) = &mut find.where_clause {
-				rewrite_expression_calls(where_clause, top_level_renames, import_bindings, shadowed_function_names);
+				rewrite_expression_calls(where_clause, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 			}
 
 			for order_by in &mut find.order_by {
-				rewrite_expression_calls(&mut order_by.expression, top_level_renames, import_bindings, shadowed_function_names);
+				rewrite_expression_calls(&mut order_by.expression, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 			}
 		}
 		ast::Expr::Identifier(_) | ast::Expr::New(_) => {}
 		ast::Expr::Index(index) => {
-			rewrite_expression_calls(&mut index.array, top_level_renames, import_bindings, shadowed_function_names);
-			rewrite_expression_calls(&mut index.index, top_level_renames, import_bindings, shadowed_function_names);
+			rewrite_expression_calls(&mut index.array, top_level_renames, import_bindings, object_renames, shadowed_function_names);
+			rewrite_expression_calls(&mut index.index, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 		}
 		ast::Expr::ObjectConstruction(object_construction) => {
+			if let Some(renamed) = object_renames.get(&object_construction.object_type_name) {
+				object_construction.object_type_name = renamed.clone();
+			}
 			for field in &mut object_construction.fields {
-				rewrite_expression_calls(&mut field.value, top_level_renames, import_bindings, shadowed_function_names);
+				rewrite_expression_calls(&mut field.value, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 			}
 		}
 		ast::Expr::Range(range) => {
-			rewrite_expression_calls(&mut range.start, top_level_renames, import_bindings, shadowed_function_names);
-			rewrite_expression_calls(&mut range.end, top_level_renames, import_bindings, shadowed_function_names);
+			rewrite_expression_calls(&mut range.start, top_level_renames, import_bindings, object_renames, shadowed_function_names);
+			rewrite_expression_calls(&mut range.end, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 			if let Some(step) = &mut range.step {
-				rewrite_expression_calls(step, top_level_renames, import_bindings, shadowed_function_names);
+				rewrite_expression_calls(step, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 			}
 		}
 		ast::Expr::Ternary(ternary) => {
-			rewrite_expression_calls(&mut ternary.condition, top_level_renames, import_bindings, shadowed_function_names);
-			rewrite_expression_calls(&mut ternary.true_branch, top_level_renames, import_bindings, shadowed_function_names);
-			rewrite_expression_calls(&mut ternary.false_branch, top_level_renames, import_bindings, shadowed_function_names);
+			rewrite_expression_calls(&mut ternary.condition, top_level_renames, import_bindings, object_renames, shadowed_function_names);
+			rewrite_expression_calls(&mut ternary.true_branch, top_level_renames, import_bindings, object_renames, shadowed_function_names);
+			rewrite_expression_calls(&mut ternary.false_branch, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 		}
 		ast::Expr::Unary(unary) => {
-			rewrite_expression_calls(&mut unary.operand, top_level_renames, import_bindings, shadowed_function_names);
+			rewrite_expression_calls(&mut unary.operand, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 		}
 	}
 }
@@ -1220,95 +1393,148 @@ fn rewrite_function_declaration_calls(
 	function: &mut ast::FunctionDeclaration,
 	top_level_renames: &BTreeMap<String, String>,
 	import_bindings: &BTreeMap<String, String>,
+	object_renames: &BTreeMap<String, String>,
 ) {
 	for parameter in &mut function.parameters {
+		if let ast::FunctionParameterType::Value(data_type) = &mut parameter.data_type {
+			rewrite_data_type_object_names(data_type, object_renames);
+		}
 		if let Some(default_value) = &mut parameter.default_value {
-			rewrite_expression_calls(default_value, top_level_renames, import_bindings, &[]);
+			rewrite_expression_calls(default_value, top_level_renames, import_bindings, object_renames, &[]);
 		}
 	}
+	if let Some(return_type) = &mut function.return_type {
+		rewrite_data_type_object_names(return_type, object_renames);
+	}
 
-	rewrite_statements_calls(&mut function.body.statements, top_level_renames, import_bindings, &[]);
+	rewrite_statements_calls(&mut function.body.statements, top_level_renames, import_bindings, object_renames, &[]);
+}
+
+fn rewrite_object_declaration_type_names(
+	objects: &mut [ast::ObjectDeclaration],
+	object_renames: &BTreeMap<String, String>,
+	rename_declarations: bool,
+) {
+	for object in objects {
+		match &mut object.shape {
+			ast::ObjectDeclarationShape::Array(element_type) => {
+				rewrite_data_type_object_names(element_type, object_renames);
+			}
+			ast::ObjectDeclarationShape::Fields(fields) => {
+				for field in fields {
+					rewrite_data_type_object_names(&mut field.data_type, object_renames);
+					if let Some(default_value) = &mut field.default_value {
+						rewrite_expression_calls(
+							default_value,
+							&BTreeMap::new(),
+							&BTreeMap::new(),
+							object_renames,
+							&[],
+						);
+					}
+				}
+			}
+		}
+		if rename_declarations {
+			if let Some(containing_name) = &mut object.containing_object_name
+				&& let Some(renamed) = object_renames.get(containing_name) {
+				*containing_name = renamed.clone();
+			}
+			if let Some(renamed) = object_renames.get(&object.name) {
+				object.name = renamed.clone();
+			}
+		}
+	}
 }
 
 fn rewrite_statement_calls(
 	statement: &mut ast::Statement,
 	top_level_renames: &BTreeMap<String, String>,
 	import_bindings: &BTreeMap<String, String>,
+	object_renames: &BTreeMap<String, String>,
 	shadowed_function_names: &[String],
 ) {
 	match statement {
 		ast::Statement::Block(block) => {
-			rewrite_statements_calls(&mut block.statements, top_level_renames, import_bindings, shadowed_function_names);
+			rewrite_statements_calls(&mut block.statements, top_level_renames, import_bindings, object_renames, shadowed_function_names);
+		}
+		ast::Statement::EnumDeclaration(enum_declaration) => {
+			rewrite_data_type_object_names(&mut enum_declaration.backing_type, object_renames);
+			for variant in &mut enum_declaration.variants {
+				if let Some(value) = &mut variant.value {
+					rewrite_expression_calls(value, top_level_renames, import_bindings, object_renames, shadowed_function_names);
+				}
+			}
 		}
 		ast::Statement::Expression(expression) => {
-			rewrite_expression_calls(expression, top_level_renames, import_bindings, shadowed_function_names);
+			rewrite_expression_calls(expression, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 		}
 		ast::Statement::For(for_statement) => {
-			rewrite_expression_calls(&mut for_statement.iterable, top_level_renames, import_bindings, shadowed_function_names);
-			rewrite_statements_calls(&mut for_statement.body.statements, top_level_renames, import_bindings, shadowed_function_names);
+			rewrite_expression_calls(&mut for_statement.iterable, top_level_renames, import_bindings, object_renames, shadowed_function_names);
+			rewrite_statements_calls(&mut for_statement.body.statements, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 		}
 		ast::Statement::ForRecord(for_statement) => {
 			if let Some(where_clause) = &mut for_statement.where_clause {
-				rewrite_expression_calls(where_clause, top_level_renames, import_bindings, shadowed_function_names);
+				rewrite_expression_calls(where_clause, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 			}
 
 			for order_by in &mut for_statement.order_by {
-				rewrite_expression_calls(&mut order_by.expression, top_level_renames, import_bindings, shadowed_function_names);
+				rewrite_expression_calls(&mut order_by.expression, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 			}
 
 			for group_by in &mut for_statement.group_by {
-				rewrite_expression_calls(&mut group_by.expression, top_level_renames, import_bindings, shadowed_function_names);
+				rewrite_expression_calls(&mut group_by.expression, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 			}
 
 			if let Some(limit) = &mut for_statement.limit {
-				rewrite_expression_calls(limit, top_level_renames, import_bindings, shadowed_function_names);
+				rewrite_expression_calls(limit, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 			}
 
-			rewrite_statements_calls(&mut for_statement.body.statements, top_level_renames, import_bindings, shadowed_function_names);
+			rewrite_statements_calls(&mut for_statement.body.statements, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 		}
 		ast::Statement::FunctionDeclaration(function) => {
-			rewrite_function_declaration_calls(function, top_level_renames, import_bindings);
+			rewrite_function_declaration_calls(function, top_level_renames, import_bindings, object_renames);
 		}
 		ast::Statement::If(if_statement) => {
 			match &mut if_statement.condition {
 				ast::IfCondition::Expression(expression) => {
-					rewrite_expression_calls(expression, top_level_renames, import_bindings, shadowed_function_names);
+					rewrite_expression_calls(expression, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 				}
 				ast::IfCondition::RecordPointerBinding(binding) => {
-					rewrite_expression_calls(&mut binding.initial_value, top_level_renames, import_bindings, shadowed_function_names);
+					rewrite_expression_calls(&mut binding.initial_value, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 				}
 			}
 
-			rewrite_statements_calls(&mut if_statement.then_branch.statements, top_level_renames, import_bindings, shadowed_function_names);
+			rewrite_statements_calls(&mut if_statement.then_branch.statements, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 			if let Some(else_branch) = &mut if_statement.else_branch {
-				rewrite_statement_calls(else_branch, top_level_renames, import_bindings, shadowed_function_names);
+				rewrite_statement_calls(else_branch, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 			}
 		}
 		ast::Statement::RecordPointerDeclaration(record_pointer) => {
-			rewrite_expression_calls(&mut record_pointer.initial_value, top_level_renames, import_bindings, shadowed_function_names);
+			rewrite_expression_calls(&mut record_pointer.initial_value, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 		}
 		ast::Statement::Return(return_statement) => {
 			if let Some(value) = &mut return_statement.value {
-				rewrite_expression_calls(value, top_level_renames, import_bindings, shadowed_function_names);
+				rewrite_expression_calls(value, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 			}
 		}
 		ast::Statement::Transaction(transaction_statement) => {
-			rewrite_statements_calls(&mut transaction_statement.body.statements, top_level_renames, import_bindings, shadowed_function_names);
+			rewrite_statements_calls(&mut transaction_statement.body.statements, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 		}
 		ast::Statement::VariableDeclaration(variable) => {
+			rewrite_data_type_object_names(&mut variable.data_type, object_renames);
 			if let Some(initial_value) = &mut variable.initial_value {
-				rewrite_expression_calls(initial_value, top_level_renames, import_bindings, shadowed_function_names);
+				rewrite_expression_calls(initial_value, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 			}
 		}
 		ast::Statement::While(while_statement) => {
-			rewrite_expression_calls(&mut while_statement.condition, top_level_renames, import_bindings, shadowed_function_names);
-			rewrite_statements_calls(&mut while_statement.body.statements, top_level_renames, import_bindings, shadowed_function_names);
+			rewrite_expression_calls(&mut while_statement.condition, top_level_renames, import_bindings, object_renames, shadowed_function_names);
+			rewrite_statements_calls(&mut while_statement.body.statements, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 		}
 		ast::Statement::Break(_)
 		| ast::Statement::Continue(_)
 		| ast::Statement::Create(_)
 		| ast::Statement::Delete(_)
-		| ast::Statement::EnumDeclaration(_)
 		| ast::Statement::Update(_)
 		| ast::Statement::Use(_) => {}
 	}
@@ -1318,6 +1544,7 @@ fn rewrite_statements_calls(
 	statements: &mut [ast::Statement],
 	top_level_renames: &BTreeMap<String, String>,
 	import_bindings: &BTreeMap<String, String>,
+	object_renames: &BTreeMap<String, String>,
 	shadowed_function_names: &[String],
 ) {
 	let local_function_names = collect_local_function_names(statements);
@@ -1325,7 +1552,7 @@ fn rewrite_statements_calls(
 	visible_shadowed_names.extend(local_function_names);
 
 	for statement in statements {
-		rewrite_statement_calls(statement, top_level_renames, import_bindings, &visible_shadowed_names);
+		rewrite_statement_calls(statement, top_level_renames, import_bindings, object_renames, &visible_shadowed_names);
 	}
 }
 
@@ -1418,16 +1645,37 @@ fn validate_module_imports_in_program(
 			.filter(|function| function.visibility == ast::Visibility::Public)
 			.map(|function| function.name.as_str())
 			.collect::<BTreeSet<_>>();
+		let exported_objects = imported_program.objects.iter()
+			.filter(|object| {
+				object.containing_object_name.is_none()
+					&& object.visibility == ast::Visibility::Public
+			})
+			.map(|object| object.name.as_str())
+			.collect::<BTreeSet<_>>();
+		let declared_objects = imported_program.objects.iter()
+			.filter(|object| object.containing_object_name.is_none())
+			.map(|object| object.name.as_str())
+			.collect::<BTreeSet<_>>();
 
 		if let Some(imported_names) = &use_declaration.imported_names {
 			for imported_name in imported_names {
-				if !exported_functions.contains(imported_name.name.as_str()) {
+				if !exported_functions.contains(imported_name.name.as_str())
+					&& !exported_objects.contains(imported_name.name.as_str()) {
 					return Err(CompileError {
-						message: format!(
-							"Function `{}` is not exported by module `{}`.",
-							imported_name.name,
-							use_declaration.module_path,
-						),
+						message: if declared_objects.contains(imported_name.name.as_str()) {
+							format!(
+								"Object type `{}` is private and cannot be imported from module `{}`.",
+								imported_name.name,
+								use_declaration.module_path,
+							)
+						}
+						else {
+							format!(
+								"Function `{}` is not exported by module `{}`.",
+								imported_name.name,
+								use_declaration.module_path,
+							)
+						},
 						position: imported_name.position,
 					});
 				}
@@ -1511,6 +1759,31 @@ mod tests {
 	fn evaluate_snippet(source: &str) -> Result<Option<Value>, TabloError> {
 		let program = compile_source_to_program_with_name_and_schema(source, None, CompilationTarget::Snippet, None)?;
 		run_program(&program)
+	}
+
+	fn object_type_system_regression_program() -> &'static str {
+		"obj Model {\n\
+			label: text = 'default',\n\
+			child: obj Child { value: int = 2, },\n\
+			items: [obj Item { amount: int, }],\n\
+			choice: int | text = 1,\n\
+		};\n\
+		fn build(): Model {\n\
+			var item: Model.Item = Model.Item { amount: 3 };\n\
+			var model: Model = Model { items: [item], choice: 'selected' };\n\
+			model.child.value += 4;\n\
+			return model;\n\
+		}\n\
+		fn read(model: Model): int {\n\
+			return model.child.value + model.items[1].amount;\n\
+		}\n\
+		fn Main(args: [text]): int {\n\
+			var model: Model = build();\n\
+			var copy: Model = build();\n\
+			if model != copy { return -1; }\n\
+			if model.label != 'default' { return -2; }\n\
+			return read(model);\n\
+		}"
 	}
 
 	fn run_program_with_database_config_and_query_count(
@@ -1620,6 +1893,13 @@ mod tests {
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(9)));
+	}
+
+	#[test]
+	fn applies_numeric_compatibility_when_comparing_any_values() {
+		let result = run("fn Main(args: [text]): int { var dynamic: any = 1; return dynamic == 1.0 ? 1 : 0; }").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
 	}
 
 	#[test]
@@ -1945,6 +2225,27 @@ mod tests {
 			.with_sqlite_database("ExampleDb", &database_path);
 		let result = run_program_with_database_config(&program, database_config).unwrap();
 		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn compares_any_value_with_concrete_value() {
+		let result = run("fn Main(args: [text]): int { var dynamic: any = 1; return dynamic == 1 ? 1 : 0; }").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn compares_any_values_for_equality() {
+		let result = run("fn Main(args: [text]): int { var left: any = 1; var right: any = 1; return left == right ? 1 : 0; }").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn compares_nested_any_values_recursively() {
+		let result = run("fn Main(args: [text]): int { var left: [any] = [1]; var right: [any] = [1.0]; return left == right ? 1 : 0; }").unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
 	}
@@ -2766,6 +3067,39 @@ mod tests {
 	}
 
 	#[test]
+	fn formats_imported_object_types_using_source_facing_names() {
+		let root_path = write_test_source_file(
+			"formats_imported_object_types_using_source_facing_names_root",
+			"main.tablo",
+			"use Run from './Types';\nfn Main(args: [text]): int { return Run(); }",
+		);
+		let types_path = root_path.parent().unwrap().join("Types.tablo");
+		fs::write(
+			&types_path,
+			"obj Shared { value: int, };\npub fn Run(): int {\n\tvar value: int = Shared {};\n\treturn value;\n}",
+		).unwrap();
+		let root_source = fs::read_to_string(&root_path).unwrap();
+
+		let error = compile_source_to_program_with_name_and_schema(
+			root_source.clone(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap_err();
+		let formatted = error.format_with_source_name(&root_source, Some(root_path.to_str().unwrap()));
+
+		assert!(
+			formatted.contains("Cannot assign a value of type `Shared` to a variable of type `int`."),
+			"{formatted}",
+		);
+		assert!(!formatted.contains("__tablo_module_"), "{formatted}");
+
+		let _ = fs::remove_file(types_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
+	}
+
+	#[test]
 	fn formats_missing_function_return_error_with_line_and_column() {
 		let source = "fn Main(args: [text]): int { return add(1, 2); }\nfn add(a: int, b: int): int {\n  a + b;\n}";
 		let error = run(source).unwrap_err();
@@ -2898,6 +3232,48 @@ mod tests {
 
 		assert!(result.is_err());
 		assert_eq!(inserted_count, 1);
+	}
+
+	#[test]
+	fn keeps_same_named_private_object_types_distinct_across_imported_modules() {
+		let root_path = write_test_source_file(
+			"keeps_same_named_private_object_types_distinct_across_imported_modules_root",
+			"main.tablo",
+			"use ValueA from './ModuleA';\n\
+			use ValueB from './ModuleB';\n\
+			fn Main(args: [text]): int { return ValueA() + ValueB(); }",
+		);
+		let module_a_path = root_path.parent().unwrap().join("ModuleA.tablo");
+		let module_b_path = root_path.parent().unwrap().join("ModuleB.tablo");
+		fs::write(
+			&module_a_path,
+			"obj Shared { value: int, };\n\
+			fn BuildA(): Shared { return Shared { value: 2 }; }\n\
+			fn ReadA(item: Shared): int { return item.value; }\n\
+			pub fn ValueA(): int { return ReadA(BuildA()); }",
+		).unwrap();
+		fs::write(
+			&module_b_path,
+			"obj Shared { value: text, };\n\
+			fn BuildB(): Shared { return Shared { value: 'abc' }; }\n\
+			fn ReadB(item: Shared): int { return len(item.value); }\n\
+			pub fn ValueB(): int { return ReadB(BuildB()); }",
+		).unwrap();
+
+		let program = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap();
+		let result = run_program(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(5)));
+
+		let _ = fs::remove_file(module_a_path);
+		let _ = fs::remove_file(module_b_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
 	}
 
 	#[test]
@@ -3869,16 +4245,6 @@ mod tests {
 	}
 
 	#[test]
-	fn rejects_equality_comparison_on_any_values() {
-		let error = run("fn Main(args: [text]): int { var left: any = 1; var right: any = 2; var same: bool = left == right; return 0; }").unwrap_err();
-
-		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
-			message: String::from("Equality comparison is not supported between `any` and `any`."),
-			position: 90,
-		}));
-	}
-
-	#[test]
 	fn rejects_fixed_overload_shadowed_by_variadic_parameter_without_call() {
 		let error = run(
 			"fn append(value: int) {}\n\
@@ -4181,6 +4547,36 @@ mod tests {
 			),
 			position: source.find("default").unwrap(),
 		}));
+	}
+
+	#[test]
+	fn rejects_named_import_of_private_object_type() {
+		let root_path = write_test_source_file(
+			"rejects_named_import_of_private_object_type_root",
+			"main.tablo",
+			"use Shared from './Types';\nfn Main(args: [text]): int { return 0; }",
+		);
+		let types_path = root_path.parent().unwrap().join("Types.tablo");
+		fs::write(&types_path, "obj Shared { number: int, };").unwrap();
+
+		let error = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap_err();
+
+		assert_eq!(
+			error,
+			TabloError::Compile(CompileError {
+				message: String::from("Object type `Shared` is private and cannot be imported from module `./Types`."),
+				position: 4,
+			}),
+		);
+
+		let _ = fs::remove_file(types_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
 	}
 
 	#[test]
@@ -6055,6 +6451,42 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_imported_object_type_across_supported_type_positions() {
+		let root_path = write_test_source_file(
+			"runs_imported_object_type_across_supported_type_positions_root",
+			"main.tablo",
+			"use Shared from './Types';\n\
+			obj Wrapper {\n\
+				item: Shared,\n\
+				items: [Shared],\n\
+				choice: int | Shared = 0,\n\
+			};\n\
+			fn Identity(value: Shared): Shared { return value; }\n\
+			fn Main(args: [text]): int {\n\
+				var shared: Shared = Shared {};\n\
+				var wrapper: Wrapper = Wrapper { item: shared, items: [shared], choice: shared };\n\
+				return Identity(wrapper.item).number + wrapper.items[1].number;\n\
+			}",
+		);
+		let types_path = root_path.parent().unwrap().join("Types.tablo");
+		fs::write(&types_path, "pub obj Shared { pub number: int = 3, };").unwrap();
+
+		let program = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap();
+		let result = run_program(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(6)));
+
+		let _ = fs::remove_file(types_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
+	}
+
+	#[test]
 	fn runs_imported_public_function_that_calls_private_helper() {
 		let root_path = write_test_source_file(
 			"runs_imported_public_function_that_calls_private_helper_root",
@@ -6379,6 +6811,31 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_named_imported_public_object_type() {
+		let root_path = write_test_source_file(
+			"runs_named_imported_public_object_type_root",
+			"main.tablo",
+			"use Shared from './Types';\nfn Main(args: [text]): int { var value: Shared = Shared {}; return value.number; }",
+		);
+		let types_path = root_path.parent().unwrap().join("Types.tablo");
+		fs::write(&types_path, "pub obj Shared { pub number: int = 7, };").unwrap();
+
+		let program = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap();
+		let result = run_program(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(7)));
+
+		let _ = fs::remove_file(types_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
+	}
+
+	#[test]
 	fn runs_named_inline_object_declaration_in_array_field_object_file() {
 		let output_path = unique_test_output_path("runs_named_inline_object_declaration_in_array_field_object_file");
 		compile(
@@ -6648,6 +7105,23 @@ mod tests {
 		let _ = std::fs::remove_file(&output_path);
 
 		assert_eq!(result, Some(Value::Integer(30)));
+	}
+
+	#[test]
+	fn runs_object_type_system_regression_program_after_object_round_trip() {
+		let output_path = unique_test_output_path("runs_object_type_system_regression_program_after_object_round_trip");
+		compile(object_type_system_regression_program(), &output_path).unwrap();
+		let result = run_file(&output_path).unwrap();
+		let _ = std::fs::remove_file(&output_path);
+
+		assert_eq!(result, Some(Value::Integer(9)));
+	}
+
+	#[test]
+	fn runs_object_type_system_regression_program_from_source_text() {
+		let result = run(object_type_system_regression_program()).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(9)));
 	}
 
 	#[test]
@@ -7758,6 +8232,31 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_wildcard_imported_public_object_type() {
+		let root_path = write_test_source_file(
+			"runs_wildcard_imported_public_object_type_root",
+			"main.tablo",
+			"use './Types';\nfn Main(args: [text]): int { var value: Shared = Shared {}; return value.number; }",
+		);
+		let types_path = root_path.parent().unwrap().join("Types.tablo");
+		fs::write(&types_path, "pub obj Shared { pub number: int = 9, };").unwrap();
+
+		let program = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap();
+		let result = run_program(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(9)));
+
+		let _ = fs::remove_file(types_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
+	}
+
+	#[test]
 	fn selects_function_overload_by_named_argument() {
 		let result = run(
 			"fn Main(args: [text]): int { return choose(right: 1); }\n\
@@ -7863,6 +8362,13 @@ mod tests {
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(3)));
+	}
+
+	#[test]
+	fn treats_incompatible_values_stored_in_any_as_unequal() {
+		let result = run("fn Main(args: [text]): int { var dynamic: any = true; return dynamic == 1 ? 1 : 0; }").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(0)));
 	}
 
 	#[test]
