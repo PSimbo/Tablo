@@ -40,6 +40,33 @@ pub enum RecordPointerOrigin {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+enum CallArgumentBindingError {
+	DuplicateParameter {
+		argument_index: usize,
+		parameter_name: String,
+	},
+	InvalidDefault {
+		argument_index: usize,
+	},
+	MissingRequiredParameter {
+		parameter_name: String,
+	},
+	NamedArgumentAfterVariadic {
+		argument_index: usize,
+	},
+	PositionalArgumentAfterNamed {
+		argument_index: usize,
+	},
+	TooManyArguments {
+		argument_index: usize,
+	},
+	UnknownParameter {
+		argument_index: usize,
+		parameter_name: String,
+	},
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GroupBoundaryCallInfo {
 	pub key_names: Vec<String>,
 	pub record_slot: u32,
@@ -127,6 +154,7 @@ pub struct SemanticAnalyzer {
 	query_optimizations_disabled: bool,
 	root_source_name: Option<String>,
 	semantic_program: SemanticProgram,
+	sequence_aliases: ScopeStack<Option<ResolvedSequenceReference>>,
 	top_level_function_source_names: Vec<String>,
 }
 
@@ -147,6 +175,7 @@ impl SemanticAnalyzer {
 		self.find_lock_mode = RecordLockMode::None;
 		self.group_boundary_contexts.clear();
 		self.locals = ScopeStack::default();
+		self.sequence_aliases = ScopeStack::default();
 		self.function_depth = 0;
 		self.loop_depth = 0;
 		self.next_function_index = 0;
@@ -301,6 +330,7 @@ impl SemanticAnalyzer {
 			query_optimizations_disabled: false,
 			root_source_name: None,
 			semantic_program: SemanticProgram::default(),
+			sequence_aliases: ScopeStack::default(),
 			top_level_function_source_names: Vec::new(),
 		};
 		analyzer.assert_valid_built_in_overload_sets();
@@ -528,7 +558,7 @@ impl SemanticAnalyzer {
 		&self,
 		signature: &FunctionSignature,
 		arguments: &[CallArgument],
-	) -> Option<Vec<CallArgumentBinding>> {
+	) -> Result<Vec<CallArgumentBinding>, CallArgumentBindingError> {
 		let mut bindings = vec![None; signature.parameters.len()];
 		let mut next_positional_parameter = 0;
 		let mut saw_named_argument = false;
@@ -539,14 +569,25 @@ impl SemanticAnalyzer {
 		for (argument_index, argument) in arguments.iter().enumerate() {
 			let parameter_index = if let Some(name) = &argument.name {
 				if saw_variadic_argument {
-					return None;
+					return Err(CallArgumentBindingError::NamedArgumentAfterVariadic {
+						argument_index,
+					});
 				}
 				saw_named_argument = true;
-				signature.parameters.iter().position(|parameter| parameter.name == name.name)?
+				signature.parameters.iter()
+					.position(|parameter| parameter.name == name.name)
+					.ok_or_else(|| CallArgumentBindingError::UnknownParameter {
+						argument_index,
+						parameter_name: name.name.clone(),
+					})?
 			}
 			else {
 				if saw_named_argument {
-					let parameter_index = variadic_parameter_index?;
+					let parameter_index = variadic_parameter_index.ok_or(
+						CallArgumentBindingError::PositionalArgumentAfterNamed {
+							argument_index,
+						},
+					)?;
 					match &mut bindings[parameter_index] {
 						None => {
 							bindings[parameter_index] = Some(CallArgumentBinding::Variadic(vec![argument_index as u32]));
@@ -554,7 +595,12 @@ impl SemanticAnalyzer {
 						Some(CallArgumentBinding::Variadic(argument_indices)) => {
 							argument_indices.push(argument_index as u32);
 						}
-						Some(_) => return None,
+						Some(_) => {
+							return Err(CallArgumentBindingError::DuplicateParameter {
+								argument_index,
+								parameter_name: signature.parameters[parameter_index].name.clone(),
+							});
+						}
 					}
 					saw_variadic_argument = true;
 					continue;
@@ -568,7 +614,12 @@ impl SemanticAnalyzer {
 						Some(CallArgumentBinding::Variadic(argument_indices)) => {
 							argument_indices.push(argument_index as u32);
 						}
-						Some(_) => return None,
+						Some(_) => {
+							return Err(CallArgumentBindingError::DuplicateParameter {
+								argument_index,
+								parameter_name: signature.parameters[next_positional_parameter].name.clone(),
+							});
+						}
 					}
 					saw_variadic_argument = true;
 					continue;
@@ -579,16 +630,30 @@ impl SemanticAnalyzer {
 				parameter_index
 			};
 
-			if bindings.get(parameter_index)?.is_some() {
-				return None;
+			let Some(binding) = bindings.get(parameter_index) else {
+				return Err(CallArgumentBindingError::TooManyArguments {
+					argument_index,
+				});
+			};
+			if binding.is_some() {
+				return Err(CallArgumentBindingError::DuplicateParameter {
+					argument_index,
+					parameter_name: signature.parameters[parameter_index].name.clone(),
+				});
 			}
 
 			if argument.default_argument().is_some() {
 				let parameter = &signature.parameters[parameter_index];
 				if parameter.is_by_ref || parameter.is_variadic {
-					return None;
+					return Err(CallArgumentBindingError::InvalidDefault {
+						argument_index,
+					});
 				}
-				let default_value = signature.parameter_defaults[parameter_index].clone()?;
+				let Some(default_value) = signature.parameter_defaults[parameter_index].clone() else {
+					return Err(CallArgumentBindingError::InvalidDefault {
+						argument_index,
+					});
+				};
 				bindings[parameter_index] = Some(CallArgumentBinding::RequestedDefault(default_value));
 			}
 			else {
@@ -603,7 +668,9 @@ impl SemanticAnalyzer {
 
 			let parameter = &signature.parameters[parameter_index];
 			if parameter.is_by_ref {
-				return None;
+				return Err(CallArgumentBindingError::MissingRequiredParameter {
+					parameter_name: parameter.name.clone(),
+				});
 			}
 
 			*binding = if parameter.is_variadic {
@@ -616,11 +683,13 @@ impl SemanticAnalyzer {
 				Some(CallArgumentBinding::OmittedNull)
 			}
 			else {
-				return None;
+				return Err(CallArgumentBindingError::MissingRequiredParameter {
+					parameter_name: parameter.name.clone(),
+				});
 			};
 		}
 
-		bindings.into_iter().collect()
+		Ok(bindings.into_iter().map(Option::unwrap).collect())
 	}
 
 	fn block_guarantees_return(&self, block: &BlockStatement) -> bool {
@@ -660,6 +729,7 @@ impl SemanticAnalyzer {
 							is_by_ref: false,
 							is_variadic: parameter.is_variadic,
 							name: parameter.name.to_string(),
+							sequence: None,
 						})
 					})
 					.collect::<Option<Vec<_>>>()?;
@@ -672,6 +742,100 @@ impl SemanticAnalyzer {
 				})
 			})
 			.collect()
+	}
+
+	fn call_argument_binding_compile_error(
+		&self,
+		callable_kind: &str,
+		name: &str,
+		arguments: &[CallArgument],
+		call_position: usize,
+		error: CallArgumentBindingError,
+	) -> CompileError {
+		match error {
+			CallArgumentBindingError::DuplicateParameter { argument_index, parameter_name } => {
+				let argument = &arguments[argument_index];
+				self.compile_error(
+					argument.name.as_ref().map_or(argument.position, |name| name.position),
+					format!(
+						"Parameter `{parameter_name}` is supplied more than once in the call to {callable_kind} `{name}`.",
+					),
+				)
+			}
+			CallArgumentBindingError::InvalidDefault { argument_index } => {
+				let argument = &arguments[argument_index];
+				self.compile_error(
+					argument.default_argument().map_or(argument.position, |default| default.position),
+					format!("`default` is not valid for this argument to {callable_kind} `{name}`."),
+				)
+			}
+			CallArgumentBindingError::MissingRequiredParameter { parameter_name } => {
+				self.compile_error(
+					call_position,
+					format!(
+						"Required parameter `{parameter_name}` is not supplied in the call to {callable_kind} `{name}`.",
+					),
+				)
+			}
+			CallArgumentBindingError::NamedArgumentAfterVariadic { argument_index } => {
+				let argument = &arguments[argument_index];
+				self.compile_error(
+					argument.name.as_ref().map_or(argument.position, |name| name.position),
+					format!(
+						"A named argument cannot follow trailing variadic arguments in the call to {callable_kind} `{name}`.",
+					),
+				)
+			}
+			CallArgumentBindingError::PositionalArgumentAfterNamed { argument_index } => {
+				self.compile_error(
+					arguments[argument_index].position,
+					format!(
+						"A positional argument cannot follow a named argument unless it binds to a variadic parameter in the call to {callable_kind} `{name}`.",
+					),
+				)
+			}
+			CallArgumentBindingError::TooManyArguments { argument_index } => {
+				self.compile_error(
+					arguments[argument_index].position,
+					format!("Too many arguments were supplied to {callable_kind} `{name}`."),
+				)
+			}
+			CallArgumentBindingError::UnknownParameter { argument_index, parameter_name } => {
+				let argument = &arguments[argument_index];
+				self.compile_error(
+					argument.name.as_ref().map_or(argument.position, |name| name.position),
+					format!(
+						"Named argument `{parameter_name}` does not match any parameter of {callable_kind} `{name}`.",
+					),
+				)
+			}
+		}
+	}
+
+	fn call_argument_binding_rejection_description(&self, error: &CallArgumentBindingError) -> String {
+		match error {
+			CallArgumentBindingError::DuplicateParameter { parameter_name, .. } => {
+				format!("binds parameter `{parameter_name}` more than once")
+			}
+			CallArgumentBindingError::InvalidDefault { .. } => {
+				String::from("uses `default` for a parameter that does not declare a usable default")
+			}
+			CallArgumentBindingError::MissingRequiredParameter { parameter_name } => {
+				format!("does not supply required parameter `{parameter_name}`")
+			}
+			CallArgumentBindingError::NamedArgumentAfterVariadic { .. } => {
+				String::from("places a named argument after trailing variadic arguments")
+			}
+			CallArgumentBindingError::PositionalArgumentAfterNamed { .. } => {
+				String::from("places a positional argument after a named argument without a variadic parameter")
+			}
+			CallArgumentBindingError::TooManyArguments { .. } => {
+				String::from("does not accept this many arguments")
+			}
+			CallArgumentBindingError::UnknownParameter { parameter_name, .. } => {
+				format!("has no parameter named `{parameter_name}`")
+			}
+		}
 	}
 
 	fn call_argument_types_in_binding_order(
@@ -725,9 +889,16 @@ impl SemanticAnalyzer {
 		parameter: &FunctionParameterSignature,
 		binding: &CallArgumentBinding,
 		arguments: &[CallArgument],
+		argument_sequences: &[Option<ResolvedSequenceReference>],
 		argument_types: &[Option<DataType>],
 	) -> bool {
-		self.call_binding_type_rejection(parameter, binding, arguments, argument_types).is_none()
+		self.call_binding_type_rejection(
+			parameter,
+			binding,
+			arguments,
+			argument_sequences,
+			argument_types,
+		).is_none()
 	}
 
 	fn call_binding_type_rejection(
@@ -735,6 +906,7 @@ impl SemanticAnalyzer {
 		parameter: &FunctionParameterSignature,
 		binding: &CallArgumentBinding,
 		arguments: &[CallArgument],
+		argument_sequences: &[Option<ResolvedSequenceReference>],
 		argument_types: &[Option<DataType>],
 	) -> Option<String> {
 		match binding {
@@ -743,6 +915,20 @@ impl SemanticAnalyzer {
 				let argument = &arguments[argument_index];
 				let argument_type = argument_types[argument_index].as_ref()
 					.expect("Supplied call argument bindings must refer to expressions.");
+				if let Some(expected_sequence) = &parameter.sequence {
+					return if !argument.is_by_ref
+						&& argument_sequences[argument_index].as_ref() == Some(expected_sequence) {
+						None
+					}
+					else {
+						Some(format!(
+							"rejected argument for parameter `{}`: expected sequence `{}.{}`",
+							parameter.name,
+							expected_sequence.schema_name,
+							expected_sequence.sequence_name,
+						))
+					};
+				}
 				if parameter.is_by_ref != argument.is_by_ref {
 					return Some(if parameter.is_by_ref {
 						format!("requires parameter `{}` to be passed by reference", parameter.name)
@@ -980,14 +1166,29 @@ impl SemanticAnalyzer {
 					format!("By-reference parameter `{}` cannot define a default value.", parameter.name),
 				));
 			}
+			if matches!(&parameter.data_type, FunctionParameterType::Sequence(_)) {
+				if parameter.is_by_ref {
+					return Err(self.compile_error(
+						parameter.position,
+						format!("Sequence parameter `{}` already refers to its underlying sequence and cannot use `&`.", parameter.name),
+					));
+				}
+				if parameter.default_value.is_some() {
+					return Err(self.compile_error(
+						parameter.position,
+						format!("Sequence parameter `{}` cannot define a default value.", parameter.name),
+					));
+				}
+			}
 
-			let parameter_type = self.resolve_function_parameter_type(parameter)?;
+			let (parameter_type, sequence) = self.resolve_function_parameter_type(parameter)?;
 			parameters.push(FunctionParameterSignature {
 				data_type: parameter_type,
 				has_default: parameter.default_value.is_some(),
 				is_by_ref: parameter.is_by_ref,
 				is_variadic: parameter.is_variadic,
 				name: parameter.name.clone(),
+				sequence,
 			});
 		}
 
@@ -1037,6 +1238,7 @@ impl SemanticAnalyzer {
 	}
 
 	fn declare_local(&mut self, name: String, local: LocalBinding) {
+		self.sequence_aliases.declare(name.clone(), None);
 		self.locals.declare(name, local);
 	}
 
@@ -1046,8 +1248,16 @@ impl SemanticAnalyzer {
 				let variadic = if parameter.is_variadic { "..." } else { "" };
 				let reference = if parameter.is_by_ref { "&" } else { "" };
 				let default = if parameter.has_default { " = default" } else { "" };
-				let data_type = match &parameter.data_type {
-					DataType::RecordPointer(record_pointer) => {
+				let data_type = match (&parameter.sequence, &parameter.data_type) {
+					(Some(sequence), _) => {
+						format!(
+							"seq {}.{}.{}",
+							sequence.database_name,
+							sequence.schema_name,
+							sequence.sequence_name,
+						)
+					}
+					(None, DataType::RecordPointer(record_pointer)) => {
 						format!(
 							"rec {}.{}.{}",
 							record_pointer.database_name,
@@ -1055,7 +1265,7 @@ impl SemanticAnalyzer {
 							record_pointer.table_name,
 						)
 					}
-					other => other.name(),
+					(None, other) => other.name(),
 				};
 				format!(
 					"{variadic}{}: {reference}{}{default}",
@@ -1123,6 +1333,7 @@ impl SemanticAnalyzer {
 
 	fn enter_scope(&mut self) {
 		self.locals.enter_scope();
+		self.sequence_aliases.enter_scope();
 	}
 
 	fn enum_literal_constant(&self, expression: &Expr, data_type: &DataType) -> Option<Constant> {
@@ -1172,6 +1383,7 @@ impl SemanticAnalyzer {
 
 	fn exit_scope(&mut self) {
 		self.locals.exit_scope();
+		self.sequence_aliases.exit_scope();
 	}
 
 	fn expressions_match_for_non_null_refinement(&self, lhs: &Expr, rhs: &Expr) -> bool {
@@ -1256,6 +1468,7 @@ impl SemanticAnalyzer {
 		for positional_count in 0..=fixed_parameter_count {
 			let mut shape = FunctionCallShape {
 				arguments: Vec::new(),
+				argument_sequences: Vec::new(),
 				argument_types: Vec::new(),
 			};
 			for parameter in &signature.parameters[..positional_count] {
@@ -1555,6 +1768,21 @@ impl SemanticAnalyzer {
 						.expect("Supplied call argument bindings must refer to expressions.");
 					let expression = argument.expression()
 						.expect("Supplied call argument bindings must refer to expressions.");
+					if let Some(expected_sequence) = &parameter.sequence {
+						let actual_sequence = self.semantic_program.resolved_sequence(expression.position());
+						if actual_sequence != Some(expected_sequence) {
+							return Err(self.compile_error(
+								expression.position(),
+								format!(
+									"Argument for sequence parameter `{}` must refer to sequence `{}.{}`.",
+									parameter.name,
+									expected_sequence.schema_name,
+									expected_sequence.sequence_name,
+								),
+							));
+						}
+						continue;
+					}
 					if parameter.is_by_ref {
 						if !argument.is_by_ref {
 							return Err(self.compile_error(
@@ -1715,7 +1943,28 @@ impl SemanticAnalyzer {
 			Expr::Assignment(AssignmentExpr { operator, target, value, .. }) => {
 				match target {
 					AssignmentTarget::Identifier(target) => {
-						if let Some(local) = self.lookup_local(&target.name) {
+						if let Some(resolved_sequence) = self.lookup_sequence_alias(&target.name) {
+							if *operator != AssignmentOperator::Assign {
+								let operation = match operator {
+									AssignmentOperator::Assign => "=",
+									AssignmentOperator::AddAssign => "+=",
+									AssignmentOperator::DivideAssign => "/=",
+									AssignmentOperator::ModuloAssign => "%=",
+									AssignmentOperator::MultiplyAssign => "*=",
+									AssignmentOperator::SubtractAssign => "-=",
+								};
+
+								return Err(self.compile_error(
+									expression.position(),
+									format!("Sequence `{}` cannot be assigned using `{operation}`.", target.name),
+								));
+							}
+
+							self.record_resolved_sequence(target.position, &resolved_sequence);
+							let value_type = self.infer_expression_type(value)?;
+							self.assignment_result_type(*operator, &DataType::Int, &value_type, expression.position())
+						}
+						else if let Some(local) = self.lookup_local(&target.name) {
 							self.semantic_program.identifier_slots.insert(target.position, local.slot);
 
 							if local.is_const {
@@ -1970,7 +2219,11 @@ impl SemanticAnalyzer {
 			}
 			Expr::Find(find) => self.infer_find_expression_type(find),
 			Expr::Identifier(IdentifierExpr { name, .. }) => {
-				if let Some(local) = self.lookup_local(name) {
+				if let Some(resolved_sequence) = self.lookup_sequence_alias(name) {
+					self.record_resolved_sequence(expression.position(), &resolved_sequence);
+					Ok(DataType::Int)
+				}
+				else if let Some(local) = self.lookup_local(name) {
 					self.semantic_program.identifier_slots.insert(expression.position(), local.slot);
 					Ok(local.data_type)
 				}
@@ -2889,6 +3142,10 @@ impl SemanticAnalyzer {
 			.find(|field| field.name == field_name)
 	}
 
+	fn lookup_sequence_alias(&self, name: &str) -> Option<ResolvedSequenceReference> {
+		self.sequence_aliases.lookup(name).cloned().flatten()
+	}
+
 	fn lower_count_query(&mut self, count: &CountExpr) -> Result<QueryCountPlan, CompileError> {
 		let (backend, database_name, schema_name, schema_is_implicit, table_name) = {
 			let resolved_table = self.resolve_table_reference(&count.table)?;
@@ -3452,6 +3709,7 @@ impl SemanticAnalyzer {
 				position: 0,
 			})),
 		});
+		shape.argument_sequences.push(parameter.sequence.clone());
 		shape.argument_types.push(Some(data_type));
 	}
 
@@ -4031,27 +4289,35 @@ impl SemanticAnalyzer {
 		Ok(variants)
 	}
 
-	fn resolve_function_parameter_type(&mut self, parameter: &FunctionParameter) -> Result<DataType, CompileError> {
+	fn resolve_function_parameter_type(
+		&mut self,
+		parameter: &FunctionParameter,
+	) -> Result<(DataType, Option<ResolvedSequenceReference>), CompileError> {
 		match &parameter.data_type {
 			FunctionParameterType::RecordPointer(table) => {
 				let resolved_table = self.resolve_table_reference(table)?;
-				Ok(DataType::RecordPointer(RecordPointerType {
+				Ok((DataType::RecordPointer(RecordPointerType {
 					database_name: resolved_table.database().name().to_string(),
 					schema_name: resolved_table.schema().name().to_string(),
 					table_name: resolved_table.table().name().to_string(),
-				}))
+				}), None))
 			}
-			FunctionParameterType::Sequence(_) => Err(self.compile_error(
-				parameter.position,
-				String::from("Sequence parameters are not yet supported."),
-			)),
+			FunctionParameterType::Sequence(sequence) => {
+				let resolved = self.resolve_sequence_reference(sequence)?;
+				Ok((DataType::Int, Some(ResolvedSequenceReference {
+					database_name: resolved.database().name().to_string(),
+					schema_is_implicit: resolved.schema().is_implicit(),
+					schema_name: resolved.schema().name().to_string(),
+					sequence_name: resolved.sequence().name().to_string(),
+				})))
+			}
 			FunctionParameterType::Value(data_type) => {
 				self.validate_declared_data_type(
 					data_type,
 					parameter.position,
 					format!("Parameter `{}` cannot have type `{}`.", parameter.name, parameter.data_type.name()),
 				)?;
-				Ok(data_type.clone())
+				Ok((data_type.clone(), None))
 			}
 		}
 	}
@@ -4278,12 +4544,23 @@ impl SemanticAnalyzer {
 		argument_types: &[Option<DataType>],
 		position: usize,
 	) -> Result<(FunctionSignature, Vec<CallArgumentBinding>), CompileError> {
+		let argument_sequences = arguments.iter()
+			.map(|argument| {
+				argument.expression()
+					.and_then(|expression| self.semantic_program.resolved_sequence(expression.position()))
+					.cloned()
+			})
+			.collect::<Vec<_>>();
+
 		if signatures.len() == 1 {
-			let argument_bindings = self.bind_call_arguments(&signatures[0], arguments).ok_or_else(|| {
+			let argument_bindings = self.bind_call_arguments(&signatures[0], arguments).map_err(|error| {
 				self.requested_default_error(signatures, arguments).unwrap_or_else(|| {
-					self.compile_error(
+					self.call_argument_binding_compile_error(
+						callable_kind,
+						name,
+						arguments,
 						position,
-						format!("Arguments do not match the parameters of {callable_kind} `{name}`."),
+						error,
 					)
 				})
 			})?;
@@ -4294,17 +4571,27 @@ impl SemanticAnalyzer {
 		let mut rejections = Vec::new();
 		for signature in signatures {
 			let description = self.describe_function_signature(name, signature);
-			let Some(argument_bindings) = self.bind_call_arguments(signature, arguments) else {
-				rejections.push(format!(
-					"Candidate `{description}` does not match the supplied argument names or count.",
-				));
-				continue;
+			let argument_bindings = match self.bind_call_arguments(signature, arguments) {
+				Ok(argument_bindings) => argument_bindings,
+				Err(error) => {
+					rejections.push(format!(
+						"Candidate `{description}` {}.",
+						self.call_argument_binding_rejection_description(&error),
+					));
+					continue;
+				}
 			};
 
 			let rejection = signature.parameters.iter()
 				.zip(argument_bindings.iter())
 				.find_map(|(parameter, binding)| {
-					self.call_binding_type_rejection(parameter, binding, arguments, argument_types)
+					self.call_binding_type_rejection(
+						parameter,
+						binding,
+						arguments,
+						&argument_sequences,
+						argument_types,
+					)
 				});
 			if let Some(rejection) = rejection {
 				rejections.push(format!("Candidate `{description}` {rejection}."));
@@ -4366,7 +4653,7 @@ impl SemanticAnalyzer {
 		signature: &FunctionSignature,
 		shape: &FunctionCallShape,
 	) -> bool {
-		let Some(bindings) = self.bind_call_arguments(signature, &shape.arguments) else {
+		let Ok(bindings) = self.bind_call_arguments(signature, &shape.arguments) else {
 			return false;
 		};
 
@@ -4377,6 +4664,7 @@ impl SemanticAnalyzer {
 					parameter,
 					binding,
 					&shape.arguments,
+					&shape.argument_sequences,
 					&shape.argument_types,
 				)
 			})
@@ -4601,6 +4889,7 @@ impl SemanticAnalyzer {
 
 	fn validate_function_declaration(&mut self, function: &FunctionDeclaration) -> Result<(), CompileError> {
 		let saved_locals = std::mem::take(&mut self.locals);
+		let saved_sequence_aliases = std::mem::take(&mut self.sequence_aliases);
 		let saved_function_depth = self.function_depth;
 		let saved_loop_depth = self.loop_depth;
 		let saved_next_local_slot = self.next_local_slot;
@@ -4615,6 +4904,7 @@ impl SemanticAnalyzer {
 		}
 
 		self.locals = ScopeStack::default();
+		self.sequence_aliases = ScopeStack::default();
 		self.function_depth += 1;
 		self.loop_depth = 0;
 		self.next_local_slot = 0;
@@ -4645,6 +4935,7 @@ impl SemanticAnalyzer {
 
 		self.exit_scope();
 		self.locals = saved_locals;
+		self.sequence_aliases = saved_sequence_aliases;
 		self.function_depth = saved_function_depth;
 		self.loop_depth = saved_loop_depth;
 		self.next_local_slot = saved_next_local_slot;
@@ -4655,7 +4946,7 @@ impl SemanticAnalyzer {
 	}
 
 	fn validate_function_parameter(&mut self, parameter: &FunctionParameter) -> Result<(), CompileError> {
-		let parameter_type = self.resolve_function_parameter_type(parameter)?;
+		let (parameter_type, sequence) = self.resolve_function_parameter_type(parameter)?;
 
 		if self.current_scope_contains(&parameter.name) {
 			return Err(self.compile_error(
@@ -4684,6 +4975,9 @@ impl SemanticAnalyzer {
 			is_const: false,
 			slot,
 		});
+		if let Some(sequence) = sequence {
+			self.sequence_aliases.declare(parameter.name.clone(), Some(sequence));
+		}
 
 		Ok(())
 	}
@@ -4694,7 +4988,7 @@ impl SemanticAnalyzer {
 		};
 
 		self.validate_function_parameter_default_expression(default_value)?;
-		let parameter_type = self.resolve_function_parameter_type(parameter)?;
+		let (parameter_type, _) = self.resolve_function_parameter_type(parameter)?;
 		let default_type = self.infer_expression_type(default_value)?;
 		self.ensure_assignable(&parameter_type, &default_type, default_value.position())
 	}
@@ -5723,6 +6017,7 @@ struct EnumBinding {
 #[derive(Clone)]
 struct FunctionCallShape {
 	arguments: Vec<CallArgument>,
+	argument_sequences: Vec<Option<ResolvedSequenceReference>>,
 	argument_types: Vec<Option<DataType>>,
 }
 
@@ -5733,6 +6028,7 @@ struct FunctionParameterSignature {
 	is_by_ref: bool,
 	is_variadic: bool,
 	name: String,
+	sequence: Option<ResolvedSequenceReference>,
 }
 
 #[derive(Clone)]
@@ -7573,12 +7869,13 @@ mod tests {
 				is_by_ref: false,
 				is_variadic: true,
 				name: String::from("values"),
+				sequence: None,
 			}],
 			return_type: None,
 		};
 		let analyzer = SemanticAnalyzer::new();
 
-		assert_eq!(analyzer.bind_call_arguments(&signature, &call.arguments), None);
+		assert!(analyzer.bind_call_arguments(&signature, &call.arguments).is_err());
 		let error = analyzer.requested_default_error(&[signature], &call.arguments).unwrap();
 		assert_eq!(error.message, "`default` cannot be used for variadic parameter `values`.");
 		assert_eq!(error.position, 16);

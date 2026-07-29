@@ -1164,6 +1164,44 @@ mod tests {
 						Value::Text(String::from("Bea")),
 					]),
 				},
+				VmVisibleLocal {
+					declared_type: String::from("text?"),
+					is_const: false,
+					name: String::from("missing"),
+					slot: 2,
+					value: Value::Null,
+				},
+				VmVisibleLocal {
+					declared_type: String::from("text"),
+					is_const: false,
+					name: String::from("name"),
+					slot: 3,
+					value: Value::Text(String::from("Ada")),
+				},
+				VmVisibleLocal {
+					declared_type: String::from("record pointer"),
+					is_const: false,
+					name: String::from("cust"),
+					slot: 4,
+					value: Value::RecordPointer(RecordPointerValue {
+						column_names: Vec::new(),
+						exists: true,
+						fields: BTreeMap::new(),
+						group_boundaries: BTreeMap::new(),
+						is_dirty: false,
+						locked: true,
+						original_fields: BTreeMap::new(),
+						primary_key_column_names: Vec::new(),
+						projected_values: BTreeMap::new(),
+						persisted: true,
+						record_type: RecordPointerType {
+							database_name: String::from("ExampleDb"),
+							schema_name: String::from("Main"),
+							table_name: String::from("Customers"),
+						},
+						schema_is_implicit: true,
+					}),
+				},
 			],
 			source_location: None,
 		};
@@ -1188,6 +1226,27 @@ mod tests {
 		assert_eq!(messages[0].get("body").and_then(|body| body.get("result")), Some(&JsonValue::String(String::from("4"))));
 		assert_eq!(messages[0].get("body").and_then(|body| body.get("type")), Some(&JsonValue::String(String::from("int"))));
 		assert_eq!(messages[0].get("body").and_then(|body| body.get("variablesReference")), Some(&JsonValue::Number(0.into())));
+
+		for (request_seq, expression, expected) in [
+			(2, "missing == null", "true"),
+			(3, "exists cust", "true"),
+			(4, "locked cust", "true"),
+			(5, "contains(sub: 'da', str: name)", "true"),
+		] {
+			let messages = server.handle_evaluate(
+				request_seq,
+				Some(serde_json::json!({
+					"expression": expression,
+					"frameId": 1,
+				})),
+			).unwrap();
+
+			assert_eq!(
+				messages[0].get("body").and_then(|body| body.get("result")),
+				Some(&JsonValue::String(String::from(expected))),
+				"unexpected result for `{expression}`",
+			);
+		}
 	}
 
 	#[test]

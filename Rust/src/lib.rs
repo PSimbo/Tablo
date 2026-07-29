@@ -3738,6 +3738,30 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_different_sequence_for_sequence_parameter() {
+		let error = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\n\
+			fn Advance(sequence: seq InvoiceNumber): int { return seqnext(sequence); }\n\
+			fn Main(args: [text]): int { return Advance(OrderNumber); }",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create sequence InvoiceNumber;
+				create sequence OrderNumber;
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap_err();
+
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+		assert_eq!(
+			error.message,
+			"Argument for sequence parameter `sequence` must refer to sequence `Main.InvoiceNumber`.",
+		);
+	}
+
+	#[test]
 	fn rejects_direct_name_captures_in_default_expressions() {
 		for (source, expected_name) in [
 			(
@@ -3826,7 +3850,10 @@ mod tests {
 		let TabloError::Compile(error) = error else {
 			panic!("Expected a compile error.");
 		};
-		assert_eq!(error.message, "Arguments do not match the parameters of function `subtract`.");
+		assert_eq!(
+			error.message,
+			"Parameter `left` is supplied more than once in the call to function `subtract`.",
+		);
 	}
 
 	#[test]
@@ -3888,7 +3915,7 @@ mod tests {
 
 		assert_eq!(
 			error.message,
-			"Arguments do not match the parameters of built-in function `firstof`.",
+			"Required parameter `v1` is not supplied in the call to built-in function `firstof`.",
 		);
 	}
 
@@ -4221,6 +4248,29 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_no_return_order_by_expression_in_find_query() {
+		let error = compile_snippet_with_schema_fixture_and_backends(
+			"with exampledb;\nfind customers order by disp('x')",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table Customers (
+					Id int not null,
+					Name text not null
+				);
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap_err();
+
+		match error {
+			TabloError::Compile(compile_error) => {
+				assert_eq!(compile_error.message, "Function `disp` is not supported in `sqlite` database query expressions.");
+			}
+			other => panic!("expected compile error, found {other:?}"),
+		}
+	}
+
+	#[test]
 	fn rejects_non_iterable_for_source_text() {
 		let error = evaluate_snippet("for value in 1 {\n}\n").unwrap_err();
 
@@ -4268,6 +4318,29 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_non_sequence_argument_for_sequence_parameter() {
+		let error = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\n\
+			fn Advance(sequence: seq InvoiceNumber): int { return seqnext(sequence); }\n\
+			fn Main(args: [text]): int { return Advance(1); }",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create sequence InvoiceNumber;
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap_err();
+
+		let TabloError::Compile(error) = error else {
+			panic!("Expected a compile error.");
+		};
+		assert_eq!(
+			error.message,
+			"Argument for sequence parameter `sequence` must refer to sequence `Main.InvoiceNumber`.",
+		);
+	}
+
+	#[test]
 	fn rejects_nullable_argument_for_non_nullable_parameter() {
 		let error = run(
 			"fn accept(value: int): int { return value; }\n\
@@ -4287,7 +4360,9 @@ mod tests {
 		).unwrap_err();
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
-			message: String::from("Arguments do not match the parameters of function `inspect`."),
+			message: String::from(
+				"Required parameter `value` is not supplied in the call to function `inspect`."
+			),
 			position: 43,
 		}));
 	}
@@ -4462,7 +4537,10 @@ mod tests {
 		let TabloError::Compile(error) = error else {
 			panic!("Expected a compile error.");
 		};
-		assert_eq!(error.message, "Arguments do not match the parameters of function `subtract`.");
+		assert_eq!(
+			error.message,
+			"Named argument `foo` does not match any parameter of function `subtract`.",
+		);
 	}
 
 	#[test]
@@ -4560,29 +4638,6 @@ mod tests {
 			message: String::from("Module imports require a source file path so relative `use` statements can be resolved."),
 			position: 0,
 		}));
-	}
-
-	#[test]
-	fn rejects_void_order_by_expression_in_find_query() {
-		let error = compile_snippet_with_schema_fixture_and_backends(
-			"with exampledb;\nfind customers order by disp('x')",
-			r#"
-				database ExampleDb;
-				schema Main implicit;
-				create table Customers (
-					Id int not null,
-					Name text not null
-				);
-			"#,
-			&[("ExampleDb", DatabaseBackend::Sqlite)],
-		).unwrap_err();
-
-		match error {
-			TabloError::Compile(compile_error) => {
-				assert_eq!(compile_error.message, "Function `disp` is not supported in `sqlite` database query expressions.");
-			}
-			other => panic!("expected compile error, found {other:?}"),
-		}
 	}
 
 	#[test]
@@ -4714,6 +4769,22 @@ mod tests {
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(5)));
+	}
+
+	#[test]
+	fn resolves_user_defined_and_built_in_overloads_with_the_same_call_rules() {
+		let result = run(
+			"fn Matches(str: text, sub: text): bool { return contains(str, sub); }\n\
+			fn Matches(arr: [text], elem: text): bool { return contains(arr, elem); }\n\
+			fn Main(args: [text]): int {\n\
+			    return contains(sub: 'abl', str: 'Tablo')\n\
+			        and Matches(sub: 'abl', str: 'Tablo')\n\
+			        and contains(elem: 'Ada', arr: ['Ada'])\n\
+			        and Matches(elem: 'Ada', arr: ['Ada']) ? 1 : 0;\n\
+			}"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
 	}
 
 	#[test]
@@ -5117,6 +5188,80 @@ mod tests {
 		let result = run(
 			"fn Main(args: [text]): int { return isMissing(); }\n\
 			fn isMissing(value: text?): int { return value == null ? 1 : 0; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn runs_calls_across_module_nested_named_and_wildcard_scopes() {
+		let root_path = write_test_source_file(
+			"runs_calls_across_module_nested_named_and_wildcard_scopes_root",
+			"main.tablo",
+			"use NamedValue from './NamedHelpers';\n\
+			use './WildcardHelpers';\n\
+			fn ModuleValue(): int { return 1; }\n\
+			fn Main(args: [text]): int {\n\
+			    fn NestedValue(): int { return 2; }\n\
+			    return ModuleValue() + NestedValue() + NamedValue() + WildcardValue();\n\
+			}",
+		);
+		let named_helper_path = root_path.parent().unwrap().join("NamedHelpers.tablo");
+		let wildcard_helper_path = root_path.parent().unwrap().join("WildcardHelpers.tablo");
+		fs::write(
+			&named_helper_path,
+			"pub fn NamedValue(): int { return 4; }",
+		).unwrap();
+		fs::write(
+			&wildcard_helper_path,
+			"pub fn WildcardValue(): int { return 8; }",
+		).unwrap();
+
+		let program = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap();
+		let result = run_program(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(15)));
+
+		let _ = fs::remove_file(named_helper_path);
+		let _ = fs::remove_file(wildcard_helper_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
+	}
+
+	#[test]
+	fn runs_combined_positional_named_defaulted_variadic_and_reference_calls() {
+		let result = run(
+			"fn next(counter: &int): int { counter += 1; return counter; }\n\
+			fn encode(target: &int, a: int = 5, b: int?, ...values: [int]) {\n\
+			    target = a * 1000\n\
+			        + (b != null ? b : 0) * 100\n\
+			        + len(values) * 10\n\
+			        + (len(values) > 0 ? values[1] : 0);\n\
+			}\n\
+			fn Main(args: [text]): int {\n\
+			    var positional: int;\n\
+			    var mixed: int;\n\
+			    var omitted: int;\n\
+			    var requestedDefault: int;\n\
+			    var ordered: int;\n\
+			    var counter: int;\n\
+			    encode(&positional, 1, 2, 3, 4);\n\
+			    encode(target: &mixed, b: 2, a: 1, 3, 4);\n\
+			    encode(target: &omitted);\n\
+			    encode(target: &requestedDefault, a: default, b: 2, 3);\n\
+			    encode(target: &ordered, b: next(&counter), a: next(&counter), next(&counter));\n\
+			    return positional == 1223\n\
+			        and mixed == 1223\n\
+			        and omitted == 5000\n\
+			        and requestedDefault == 5213\n\
+			        and ordered == 2113\n\
+			        and counter == 3 ? 1 : 0;\n\
+			}"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
@@ -5676,6 +5821,23 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_function_calls_with_object_enum_array_and_nullable_parameters() {
+		let result = run(
+			"obj Counter { value: int, };\n\
+			enum Weight { Light: 1, Heavy: 2 }\n\
+			fn Calculate(counter: Counter, weight: Weight, values: [int], label: text?): int {\n\
+			    return counter.value + int(weight) + len(values) + (label != null ? len(label) : 0);\n\
+			}\n\
+			fn Main(args: [text]): int {\n\
+			    var counter: Counter = Counter { value: 3 };\n\
+			    return Calculate(counter, Weight.Heavy, [4, 5], null);\n\
+			}"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(7)));
+	}
+
+	#[test]
 	fn runs_function_calls_with_record_pointer_parameters() {
 		let database_path = create_sqlite_test_database(
 			"runs_function_calls_with_record_pointer_parameters",
@@ -5705,6 +5867,56 @@ mod tests {
 		let _ = std::fs::remove_file(&database_path);
 
 		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn runs_function_calls_with_sequence_parameters() {
+		let database_path = create_sqlite_test_database(
+			"runs_function_calls_with_sequence_parameters",
+			r#"
+				CREATE TABLE InvoiceNumber (
+					Id INTEGER PRIMARY KEY AUTOINCREMENT,
+					Name TEXT NOT NULL
+				);
+				INSERT INTO InvoiceNumber (Name) VALUES ('First');
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\n\
+			fn SetAndAdvance(sequence: seq InvoiceNumber): int {\n\
+			    sequence = 4;\n\
+			    return Advance(sequence);\n\
+			}\n\
+			fn Advance(sequence: seq InvoiceNumber): int {\n\
+			    return seqnext(sequence);\n\
+			}\n\
+			fn ReadShadowed(sequence: seq InvoiceNumber): int {\n\
+			    if true {\n\
+			        var sequence: int = 9;\n\
+			        return sequence;\n\
+			    }\n\
+			    return sequence;\n\
+			}\n\
+			fn Main(args: [text]): int {\n\
+			    return ReadShadowed(InvoiceNumber) == 9 ? SetAndAdvance(sequence: InvoiceNumber) : 0;\n\
+			}",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create table InvoiceNumber (
+					Id int not null,
+					Name text not null
+				);
+				create sequence InvoiceNumber;
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(5)));
 	}
 
 	#[test]
@@ -7554,6 +7766,38 @@ mod tests {
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(20)));
+	}
+
+	#[test]
+	fn selects_function_overload_by_sequence_parameter() {
+		let database_path = create_sqlite_test_database(
+			"selects_function_overload_by_sequence_parameter",
+			r#"
+				CREATE TABLE InvoiceNumber (Id INTEGER PRIMARY KEY AUTOINCREMENT);
+				CREATE TABLE OrderNumber (Id INTEGER PRIMARY KEY AUTOINCREMENT);
+				INSERT INTO InvoiceNumber DEFAULT VALUES;
+				INSERT INTO OrderNumber DEFAULT VALUES;
+			"#,
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;\n\
+			fn Identify(sequence: seq InvoiceNumber): int { return 1; }\n\
+			fn Identify(sequence: seq OrderNumber): int { return 2; }\n\
+			fn Main(args: [text]): int { return Identify(OrderNumber); }",
+			r#"
+				database ExampleDb;
+				schema Main implicit;
+				create sequence InvoiceNumber;
+				create sequence OrderNumber;
+			"#,
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let database_config = RuntimeDatabaseConfig::new()
+			.with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, database_config).unwrap();
+		let _ = std::fs::remove_file(&database_path);
+
+		assert_eq!(result, Some(Value::Integer(2)));
 	}
 
 	#[test]

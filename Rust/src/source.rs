@@ -343,6 +343,27 @@ pub fn token_span_at_position(source: &SourceText, position: usize) -> Option<(u
 		.find('\n')
 		.map_or(text.len(), |offset| position + offset);
 
+	if current == '&' {
+		let identifier_start = position + current.len_utf8();
+		if text[identifier_start..line_end].starts_with('"') {
+			let closing_quote_offset = text[identifier_start + 1..line_end].find('"')?;
+			return Some((position, identifier_start + 1 + closing_quote_offset + 1));
+		}
+
+		let mut end = identifier_start;
+		for (offset, ch) in text[identifier_start..line_end].char_indices() {
+			if !is_identifier_char(ch) {
+				break;
+			}
+
+			end = identifier_start + offset + ch.len_utf8();
+		}
+
+		if end > identifier_start {
+			return Some((position, end));
+		}
+	}
+
 	if current == '"' {
 		let closing_quote_offset = text[position + 1..line_end].find('"')?;
 		let end = position + 1 + closing_quote_offset + 1;
@@ -543,6 +564,15 @@ mod tests {
 	#[test]
 	fn skips_whitespace_text() {
 		assert_eq!(skip_whitespace(" \t\nabc", 0), 3);
+	}
+
+	#[test]
+	fn token_span_at_position_covers_by_reference_identifier() {
+		let source = SourceText::new("&value");
+		assert_eq!(token_span_at_position(&source, 0), Some((0, 6)));
+
+		let quoted_source = SourceText::new("&\"quoted value\"");
+		assert_eq!(token_span_at_position(&quoted_source, 0), Some((0, 15)));
 	}
 
 	#[test]

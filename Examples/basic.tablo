@@ -1,4 +1,4 @@
-fn Main(args: [text]) int {
+fn Main(args: [text]): int {
   var boolVar: bool = true;
   var decVar: dec = 123.456;
   var strVar: text = 'Lorem ipsum dolor: ${decVar}';

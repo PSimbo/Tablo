@@ -550,7 +550,7 @@ pub enum BuiltInParameterType {
 }
 
 impl BuiltInParameterType {
-	fn name(&self) -> String {
+	pub(crate) fn name(&self) -> String {
 		match self {
 			Self::Any => String::from("any"),
 			Self::ArrayAny => String::from("[any]"),

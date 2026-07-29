@@ -18,10 +18,33 @@ pub enum CompletionItemKind {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CallableSignature {
+	pub label: String,
+	pub parameters: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompletionItem {
 	pub detail: String,
 	pub kind: CompletionItemKind,
 	pub label: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignatureHelp {
+	pub active_parameter: usize,
+	pub signatures: Vec<CallableSignature>,
+}
+
+pub fn callable_signatures(source: &str, name: &str) -> Vec<CallableSignature> {
+	let mut signatures = BuiltInFunction::from_name(name)
+		.map(built_in_callable_signatures)
+		.unwrap_or_default();
+	signatures.extend(
+		collect_document_callable_signatures(source).into_iter()
+			.filter_map(|(function_name, signature)| (function_name == name).then_some(signature))
+	);
+	signatures
 }
 
 pub fn collect_document_completion_items(source: &str) -> Vec<CompletionItem> {
@@ -73,11 +96,11 @@ pub fn collect_document_completion_items(source: &str) -> Vec<CompletionItem> {
 				}
 			}
 			"fn" => {
-				if let Some((name, next_index)) = parse_function_completion_items(source, identifier.end, &mut items) {
+				if let Some((name, signature, next_index)) = parse_function_completion_items(source, identifier.end, &mut items) {
 					items.push(CompletionItem {
 						label: name,
 						kind: CompletionItemKind::Function,
-						detail: String::from("Function"),
+						detail: signature.label,
 					});
 					index = next_index;
 					continue;
@@ -115,14 +138,27 @@ pub fn collect_document_completion_items(source: &str) -> Vec<CompletionItem> {
 }
 
 pub fn dedupe_completion_items(items: &mut Vec<CompletionItem>) {
-	let mut seen = std::collections::BTreeSet::new();
-	items.retain(|item| seen.insert(item.label.clone()));
+	let mut merged = Vec::<CompletionItem>::new();
+	let mut indices = std::collections::BTreeMap::<String, usize>::new();
+
+	for item in std::mem::take(items) {
+		if let Some(index) = indices.get(&item.label).copied() {
+			append_completion_detail(&mut merged[index].detail, &item.detail);
+		}
+		else {
+			indices.insert(item.label.clone(), merged.len());
+			merged.push(item);
+		}
+	}
+
+	*items = merged;
 }
 
 pub fn default_completion_items() -> Vec<CompletionItem> {
 	let mut items = vec![
 		CompletionItem { label: String::from("and"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("any"), kind: CompletionItemKind::Type, detail: String::from("Type") },
+		CompletionItem { label: String::from("as"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("asc"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("bool"), kind: CompletionItemKind::Type, detail: String::from("Type") },
 		CompletionItem { label: String::from("break"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
@@ -130,8 +166,10 @@ pub fn default_completion_items() -> Vec<CompletionItem> {
 		CompletionItem { label: String::from("const"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("continue"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("count"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("create"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("date"), kind: CompletionItemKind::Type, detail: String::from("Type") },
 		CompletionItem { label: String::from("dec"), kind: CompletionItemKind::Type, detail: String::from("Type") },
+		CompletionItem { label: String::from("default"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("delete"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("desc"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("else"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
@@ -143,12 +181,16 @@ pub fn default_completion_items() -> Vec<CompletionItem> {
 		CompletionItem { label: String::from("float"), kind: CompletionItemKind::Type, detail: String::from("Type") },
 		CompletionItem { label: String::from("fn"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("for"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("from"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("group"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("if"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("in"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("int"), kind: CompletionItemKind::Type, detail: String::from("Type") },
 		CompletionItem { label: String::from("last"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("limit"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("locked"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("mut"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("new"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("not"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("null"), kind: CompletionItemKind::Literal, detail: String::from("Literal") },
 		CompletionItem { label: String::from("obj"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
@@ -157,13 +199,16 @@ pub fn default_completion_items() -> Vec<CompletionItem> {
 		CompletionItem { label: String::from("pub"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("rec"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("return"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("seq"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("text"), kind: CompletionItemKind::Type, detail: String::from("Type") },
 		CompletionItem { label: String::from("time"), kind: CompletionItemKind::Type, detail: String::from("Type") },
 		CompletionItem { label: String::from("timestamp"), kind: CompletionItemKind::Type, detail: String::from("Type") },
 		CompletionItem { label: String::from("timestamptz"), kind: CompletionItemKind::Type, detail: String::from("Type") },
 		CompletionItem { label: String::from("timetz"), kind: CompletionItemKind::Type, detail: String::from("Type") },
+		CompletionItem { label: String::from("transaction"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("true"), kind: CompletionItemKind::Literal, detail: String::from("Literal") },
 		CompletionItem { label: String::from("update"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("use"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("var"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("where"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("while"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
@@ -181,6 +226,16 @@ pub fn default_completion_items() -> Vec<CompletionItem> {
 	}
 	dedupe_completion_items(&mut items);
 	items
+}
+
+pub fn function_completion_items(source: &str) -> Vec<CompletionItem> {
+	collect_document_callable_signatures(source).into_iter()
+		.map(|(name, signature)| CompletionItem {
+			detail: signature.label,
+			kind: CompletionItemKind::Function,
+			label: name,
+		})
+		.collect()
 }
 
 pub fn member_completion_items(
@@ -238,6 +293,15 @@ pub fn member_completion_items(
 		.collect())
 }
 
+pub fn signature_help(source: &str, cursor_offset: usize) -> Option<SignatureHelp> {
+	let (name, active_parameter) = active_call(source, cursor_offset)?;
+	let signatures = callable_signatures(source, &name);
+	(!signatures.is_empty()).then_some(SignatureHelp {
+		active_parameter,
+		signatures,
+	})
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ObjectFieldInfo {
 	name: String,
@@ -249,12 +313,104 @@ struct ObjectFieldType {
 	type_name: Option<String>,
 }
 
+fn active_call(source: &str, cursor_offset: usize) -> Option<(String, usize)> {
+	enum Delimiter {
+		Brace,
+		Bracket,
+		Parenthesis {
+			call_name: Option<String>,
+			commas: usize,
+		},
+	}
+
+	let source = &source[..cursor_offset.min(source.len())];
+	let mut delimiters = Vec::new();
+	let mut index = 0;
+
+	while index < source.len() {
+		if let Some(comment_end) = skip_comment(source, index) {
+			index = comment_end;
+			continue;
+		}
+		if let Some(string_end) = skip_string_literal(source, index) {
+			index = string_end;
+			continue;
+		}
+
+		let ch = source[index..].chars().next()?;
+		match ch {
+			'{' => delimiters.push(Delimiter::Brace),
+			'[' => delimiters.push(Delimiter::Bracket),
+			'(' => {
+				let call_name = identifier_before(source, index).and_then(|(name, name_start)| {
+					let is_declaration = identifier_before(source, name_start)
+						.is_some_and(|(previous, _)| previous == "fn");
+					(!is_declaration).then_some(name)
+				});
+				delimiters.push(Delimiter::Parenthesis {
+					call_name,
+					commas: 0,
+				});
+			}
+			'}' | ']' | ')' => {
+				delimiters.pop();
+			}
+			',' => {
+				if let Some(Delimiter::Parenthesis { commas, .. }) = delimiters.last_mut() {
+					*commas += 1;
+				}
+			}
+			_ => {}
+		}
+		index += ch.len_utf8();
+	}
+
+	delimiters.into_iter().rev().find_map(|delimiter| {
+		match delimiter {
+			Delimiter::Parenthesis {
+				call_name: Some(name),
+				commas,
+			} => Some((name, commas)),
+			_ => None,
+		}
+	})
+}
+
+fn append_completion_detail(existing: &mut String, additional: &str) {
+	for line in additional.lines() {
+		if existing.lines().any(|existing_line| existing_line == line) {
+			continue;
+		}
+		if !existing.is_empty() {
+			existing.push('\n');
+		}
+		existing.push_str(line);
+	}
+}
+
+fn built_in_callable_signatures(built_in: BuiltInFunction) -> Vec<CallableSignature> {
+	built_in.signatures().into_iter()
+		.map(|signature| CallableSignature {
+			label: signature.label(built_in.name()),
+			parameters: signature.parameters.into_iter()
+				.map(|parameter| {
+					let variadic = if parameter.is_variadic { "..." } else { "" };
+					format!("{variadic}{}: {}", parameter.name, parameter.data_type.name())
+				})
+				.collect(),
+		})
+		.collect()
+}
+
 fn built_in_completion_items() -> Vec<CompletionItem> {
 	BuiltInFunction::all().into_iter()
 		.map(|built_in| CompletionItem {
 			label: String::from(built_in.name()),
 			kind: CompletionItemKind::BuiltInFunction,
-			detail: built_in.signature_labels().join("\n"),
+			detail: built_in_callable_signatures(*built_in).into_iter()
+				.map(|signature| signature.label)
+				.collect::<Vec<_>>()
+				.join("\n"),
 		})
 		.collect()
 }
@@ -308,6 +464,38 @@ fn collect_active_databases(source: &str) -> Vec<String> {
 	databases.sort();
 	databases.dedup_by(|lhs, rhs| lhs.eq_ignore_ascii_case(rhs));
 	databases
+}
+
+fn collect_document_callable_signatures(source: &str) -> Vec<(String, CallableSignature)> {
+	let mut signatures = Vec::new();
+	let mut index = 0;
+
+	while index < source.len() {
+		if let Some(comment_end) = skip_comment(source, index) {
+			index = comment_end;
+			continue;
+		}
+		if let Some(string_end) = skip_string_literal(source, index) {
+			index = string_end;
+			continue;
+		}
+
+		let Some(identifier) = read_identifier(source, index) else {
+			index += source[index..].chars().next().map(char::len_utf8).unwrap_or(1);
+			continue;
+		};
+		if !identifier.quoted
+			&& identifier.value == "fn"
+			&& let Some((name, signature, next_index)) = parse_function_signature(source, identifier.end) {
+			signatures.push((name, signature));
+			index = next_index;
+			continue;
+		}
+
+		index = identifier.end;
+	}
+
+	signatures
 }
 
 fn collect_enum_declarations(source: &str) -> std::collections::BTreeMap<String, Vec<String>> {
@@ -759,6 +947,28 @@ fn find_type_end(source: &str, start: usize) -> usize {
 	index
 }
 
+fn identifier_before(source: &str, end: usize) -> Option<(String, usize)> {
+	let prefix = &source[..end.min(source.len())];
+	let trimmed = prefix.trim_end();
+	let identifier_end = trimmed.len();
+	if identifier_end == 0 {
+		return None;
+	}
+
+	if trimmed.ends_with('"') {
+		let opening = trimmed[..identifier_end - 1].rfind('"')?;
+		let identifier = read_identifier(trimmed, opening)?;
+		return (identifier.end == identifier_end).then_some((identifier.value, opening));
+	}
+
+	let identifier_start = trimmed.char_indices()
+		.rev()
+		.find(|(_, ch)| !is_identifier_char(*ch))
+		.map_or(0, |(index, ch)| index + ch.len_utf8());
+	let identifier = read_identifier(trimmed, identifier_start)?;
+	(identifier.end == identifier_end).then_some((identifier.value, identifier_start))
+}
+
 fn infer_expression_type(
 	source: &str,
 	schema_catalog: Option<&SchemaCatalog>,
@@ -864,7 +1074,19 @@ fn parse_function_completion_items(
 	source: &str,
 	start: usize,
 	items: &mut Vec<CompletionItem>,
-) -> Option<(String, usize)> {
+) -> Option<(String, CallableSignature, usize)> {
+	let (name, signature, next_index) = parse_function_signature(source, start)?;
+	let parameter_start = source[start..].find('(')? + start;
+	let parameter_end = find_matching_paren(source, parameter_start)?;
+	collect_parameter_completion_items(&source[parameter_start + 1..parameter_end], items);
+
+	Some((name, signature, next_index))
+}
+
+fn parse_function_signature(
+	source: &str,
+	start: usize,
+) -> Option<(String, CallableSignature, usize)> {
 	let index = skip_whitespace(source, start);
 	let name = read_identifier(source, index)?;
 	let mut index = skip_whitespace(source, name.end);
@@ -875,10 +1097,29 @@ fn parse_function_completion_items(
 
 	let end_index = find_matching_paren(source, index)?;
 	let parameters = &source[index + 1..end_index];
-	collect_parameter_completion_items(parameters, items);
+	let parameter_labels = split_parameter_labels(parameters);
+	index = skip_whitespace(source, end_index + 1);
+	let return_type = if source[index..].chars().next() == Some(':') {
+		let type_start = skip_whitespace(source, index + 1);
+		let type_end = skip_expression(source, type_start, &["{"]);
+		index = type_end;
+		let return_type = source[type_start..type_end].trim();
+		(!return_type.is_empty()).then_some(return_type)
+	}
+	else {
+		None
+	};
+	let return_suffix = return_type.map(|return_type| format!(": {return_type}")).unwrap_or_default();
+	let label = format!("{}({}){return_suffix}", name.value, parameter_labels.join(", "));
 
-	index = end_index + 1;
-	Some((name.value, index))
+	Some((
+		name.value,
+		CallableSignature {
+			label,
+			parameters: parameter_labels,
+		},
+		index,
+	))
 }
 
 fn parse_if_binding(
@@ -1264,6 +1505,27 @@ fn skip_object_field_tail(body: &str, start: usize) -> usize {
 	index
 }
 
+fn split_parameter_labels(parameters: &str) -> Vec<String> {
+	let mut labels = Vec::new();
+	let mut index = 0;
+
+	while index < parameters.len() {
+		index = skip_whitespace(parameters, index);
+		if index >= parameters.len() {
+			break;
+		}
+
+		let end = skip_expression(parameters, index, &[","]);
+		let label = parameters[index..end].trim();
+		if !label.is_empty() {
+			labels.push(label.to_string());
+		}
+		index = if end < parameters.len() { end + 1 } else { end };
+	}
+
+	labels
+}
+
 fn split_qualified_chain(source: &str) -> Option<Vec<String>> {
 	let mut parts = Vec::new();
 	let mut index = 0;
@@ -1339,6 +1601,40 @@ mod tests {
 	}
 
 	#[test]
+	fn callable_signatures_include_built_in_and_user_parameter_names() {
+		let source = "fn contains(value: int, fallback: int = 0): int { return value; }";
+		let signatures = callable_signatures(source, "contains");
+
+		assert!(signatures.iter().any(|signature| {
+			signature.label == "contains(str: text, sub: text): bool"
+				&& signature.parameters == ["str: text", "sub: text"]
+		}));
+		assert!(signatures.iter().any(|signature| {
+			signature.label == "contains(value: int, fallback: int = 0): int"
+				&& signature.parameters == ["value: int", "fallback: int = 0"]
+		}));
+	}
+
+	#[test]
+	fn callable_signatures_preserve_parameter_modifiers_and_no_return_form() {
+		let source = "fn Inspect(value: &text?, fallback: int = 1, ...rest: [int]) {}";
+		let signatures = callable_signatures(source, "Inspect");
+
+		assert_eq!(signatures, vec![CallableSignature {
+			label: String::from("Inspect(value: &text?, fallback: int = 1, ...rest: [int])"),
+			parameters: vec![
+				String::from("value: &text?"),
+				String::from("fallback: int = 1"),
+				String::from("...rest: [int]"),
+			],
+		}]);
+
+		let first_of = callable_signatures("", "firstof");
+		assert_eq!(first_of[0].parameters, ["v1: any", "...v2: [any]"]);
+		assert_eq!(callable_signatures("", "disp")[0].label, "disp(fmt: text)");
+	}
+
+	#[test]
 	fn completion_items_dedupe_labels() {
 		let items = default_completion_items();
 		let date_count = items.iter().filter(|item| item.label == "date").count();
@@ -1346,6 +1642,30 @@ mod tests {
 
 		assert_eq!(date_count, 1);
 		assert_eq!(text_count, 1);
+	}
+
+	#[test]
+	fn default_completion_items_match_current_migration_keywords() {
+		let items = default_completion_items();
+		let labels = items.iter().map(|item| item.label.as_str()).collect::<Vec<_>>();
+
+		for keyword in [
+			"as",
+			"create",
+			"default",
+			"exists",
+			"from",
+			"group",
+			"limit",
+			"locked",
+			"new",
+			"seq",
+			"transaction",
+			"use",
+		] {
+			assert!(labels.contains(&keyword), "Missing completion keyword `{keyword}`.");
+		}
+		assert!(!labels.contains(&"void"));
 	}
 
 	#[test]
@@ -1357,6 +1677,21 @@ mod tests {
 		assert!(labels.contains(&String::from("Helper")));
 		assert!(labels.contains(&String::from("localValue")));
 		assert!(labels.contains(&String::from("value")));
+	}
+
+	#[test]
+	fn document_completion_items_preserve_user_function_overloads() {
+		let source = "\
+fn Choose(left: int): int { return left; }
+fn Choose(right: text): text { return right; }";
+		let mut items = collect_document_completion_items(source);
+		dedupe_completion_items(&mut items);
+		let choose = items.iter().find(|item| item.label == "Choose").unwrap();
+
+		assert_eq!(
+			choose.detail,
+			"Choose(left: int): int\nChoose(right: text): text",
+		);
 	}
 
 	#[test]
@@ -1409,5 +1744,21 @@ fn Main(args: [text]): int {
 
 		assert!(labels.contains(&String::from("Id")));
 		assert!(labels.contains(&String::from("Name")));
+	}
+
+	#[test]
+	fn signature_help_tracks_active_argument_and_nested_calls() {
+		let source = "\
+fn Choose(left: int, right: text = ''): int { return left; }
+fn Main(args: [text]): int { return Choose(1, trim('x')); }";
+		let outer_cursor = source.find("trim").unwrap();
+		let outer_help = signature_help(source, outer_cursor).unwrap();
+		assert_eq!(outer_help.active_parameter, 1);
+		assert_eq!(outer_help.signatures[0].label, "Choose(left: int, right: text = ''): int");
+
+		let inner_cursor = source.find("'x'").unwrap() + 3;
+		let inner_help = signature_help(source, inner_cursor).unwrap();
+		assert_eq!(inner_help.active_parameter, 0);
+		assert_eq!(inner_help.signatures[0].label, "trim(str: text): text");
 	}
 }

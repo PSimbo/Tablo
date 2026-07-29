@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::ast::*;
-use crate::builtins::BuiltInFunction;
+use crate::builtins::{ BuiltInFunction, BuiltInSignature };
 use crate::bytecode::*;
 use crate::database::{ DatabaseRuntime, RuntimeDatabaseConfig };
 use crate::format_string::*;
@@ -1889,6 +1889,83 @@ fn count_non_overlapping_substrings(value: &str, substring: &str) -> usize {
 	count
 }
 
+fn debug_argument_order_for_signature(
+	signature: &BuiltInSignature,
+	arguments: &[CallArgument],
+) -> Option<Vec<usize>> {
+	let mut bindings = vec![Vec::new(); signature.parameters.len()];
+	let mut next_positional_parameter = 0;
+	let mut saw_named_argument = false;
+	let mut saw_variadic_argument = false;
+	let variadic_parameter_index = signature.parameters.iter()
+		.position(|parameter| parameter.is_variadic);
+
+	for (argument_index, argument) in arguments.iter().enumerate() {
+		let parameter_index = if let Some(name) = &argument.name {
+			if saw_variadic_argument {
+				return None;
+			}
+			saw_named_argument = true;
+			signature.parameters.iter()
+				.position(|parameter| parameter.name == name.name)?
+		}
+		else if saw_named_argument {
+			let parameter_index = variadic_parameter_index?;
+			saw_variadic_argument = true;
+			parameter_index
+		}
+		else {
+			let parameter = signature.parameters.get(next_positional_parameter)?;
+
+			if parameter.is_variadic {
+				saw_variadic_argument = true;
+				next_positional_parameter
+			}
+			else {
+				let parameter_index = next_positional_parameter;
+				next_positional_parameter += 1;
+				parameter_index
+			}
+		};
+
+		if !signature.parameters[parameter_index].is_variadic
+			&& !bindings[parameter_index].is_empty() {
+			return None;
+		}
+		bindings[parameter_index].push(argument_index);
+	}
+
+	if bindings.iter().zip(signature.parameters.iter())
+		.any(|(binding, parameter)| binding.is_empty() && !parameter.is_variadic) {
+		return None;
+	}
+
+	Some(bindings.into_iter().flatten().collect())
+}
+
+fn debug_built_in_argument_order(
+	built_in: BuiltInFunction,
+	call: &crate::ast::CallExpr,
+) -> Result<Vec<usize>, VmError> {
+	let mut matching_orders = built_in.signatures().iter()
+		.filter_map(|signature| debug_argument_order_for_signature(signature, &call.arguments))
+		.collect::<Vec<_>>();
+	matching_orders.sort();
+	matching_orders.dedup();
+
+	match matching_orders.as_slice() {
+		[order] => Ok(order.clone()),
+		[] => Err(vm_error(
+			call.position,
+			format!("Arguments do not match any overload of built-in function `{}`.", built_in.name()),
+		)),
+		_ => Err(vm_error(
+			call.position,
+			format!("Arguments are ambiguous between overloads of built-in function `{}`.", built_in.name()),
+		)),
+	}
+}
+
 fn divide_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
 	match (lhs, rhs) {
 		(Value::Integer(lhs), Value::Integer(rhs)) => {
@@ -2022,7 +2099,7 @@ fn evaluate_debug_call(call: &crate::ast::CallExpr, frame: &VmStackFrame) -> Res
 		));
 	};
 
-	if matches!(built_in, BuiltInFunction::Disp | BuiltInFunction::Displn) {
+	if matches!(built_in, BuiltInFunction::Disp | BuiltInFunction::Displn | BuiltInFunction::SeqNext) {
 		return Err(vm_error(
 			call.position,
 			format!("Built-in function `{}` is not allowed in watch expressions because it has side effects.", built_in.name()),
@@ -2048,6 +2125,10 @@ fn evaluate_debug_call(call: &crate::ast::CallExpr, frame: &VmStackFrame) -> Res
 		arguments.push(evaluate_debug_expression(expression, frame)?);
 	}
 
+	let argument_order = debug_built_in_argument_order(built_in, call)?;
+	let arguments = argument_order.into_iter()
+		.map(|argument_index| arguments[argument_index].clone())
+		.collect();
 	let mut vm = VirtualMachine::new();
 	vm.run_built_in_function(built_in, arguments, call.position)?
 		.ok_or(vm_error(

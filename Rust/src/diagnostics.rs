@@ -216,6 +216,42 @@ mod tests {
 	use crate::compiler::*;
 	use crate::check;
 
+	fn assert_single_line_span(source: &str, diagnostic: &Diagnostic, expected: &str, occurrence: usize) {
+		let start = source.match_indices(expected)
+			.nth(occurrence)
+			.map(|(position, _)| position)
+			.expect("Expected diagnostic text must occur in source.");
+
+		assert_eq!(diagnostic.range.start.line, 0);
+		assert_eq!(diagnostic.range.start.character, start as u32);
+		assert_eq!(diagnostic.range.end.line, 0);
+		assert_eq!(diagnostic.range.end.character, (start + expected.len()) as u32);
+	}
+
+	#[test]
+	fn highlights_constant_rejected_as_by_reference_argument() {
+		let source = "fn Main(args: [text]): int { const value: int = 1; inspect(&value); return 0; } fn inspect(value: &int) {}";
+		let diagnostic = diagnostic_for_tablo_error(source, check(source).unwrap_err());
+
+		assert_single_line_span(source, &diagnostic, "&value", 0);
+	}
+
+	#[test]
+	fn highlights_default_marker_used_as_positional_argument() {
+		let source = "fn Main(args: [text]): int { return inspect(default); } fn inspect(value: int = 1): int { return value; }";
+		let diagnostic = diagnostic_for_tablo_error(source, check(source).unwrap_err());
+
+		assert_single_line_span(source, &diagnostic, "default", 0);
+	}
+
+	#[test]
+	fn highlights_duplicate_named_argument() {
+		let source = "fn Main(args: [text]): int { return inspect(value: 1, value: 2); } fn inspect(value: int): int { return value; }";
+		let diagnostic = diagnostic_for_tablo_error(source, check(source).unwrap_err());
+
+		assert_single_line_span(source, &diagnostic, "value", 1);
+	}
+
 	#[test]
 	fn highlights_full_ambiguous_call() {
 		let source = "\
@@ -247,6 +283,22 @@ fn choose(right: int): int { return right; }";
 	}
 
 	#[test]
+	fn highlights_full_call_when_no_overload_matches() {
+		let source = "fn Main(args: [text]): int { return choose(true); } fn choose(value: int): int { return value; } fn choose(value: text): int { return 0; }";
+		let diagnostic = diagnostic_for_tablo_error(source, check(source).unwrap_err());
+
+		assert_single_line_span(source, &diagnostic, "choose(true)", 0);
+	}
+
+	#[test]
+	fn highlights_full_call_when_required_parameter_is_missing() {
+		let source = "fn Main(args: [text]): int { return inspect(); } fn inspect(value: int): int { return value; }";
+		let diagnostic = diagnostic_for_tablo_error(source, check(source).unwrap_err());
+
+		assert_single_line_span(source, &diagnostic, "inspect()", 0);
+	}
+
+	#[test]
 	fn highlights_full_span_for_assignment_type_error_on_string_literal() {
 		let source = "fn Main(args: [text]): int { var x: int = 'abc'; return 0; }";
 		let diagnostic = diagnostic_for_tablo_error(
@@ -260,6 +312,46 @@ fn choose(right: int): int { return right; }";
 		assert_eq!(diagnostic.range.start.character, 42);
 		assert_eq!(diagnostic.range.end.character, 47);
 		assert_eq!(diagnostic.severity, 1);
+	}
+
+	#[test]
+	fn highlights_invalid_named_argument_value() {
+		let source = "fn Main(args: [text]): int { return inspect(value: true); } fn inspect(value: int): int { return value; }";
+		let diagnostic = diagnostic_for_tablo_error(source, check(source).unwrap_err());
+
+		assert_single_line_span(source, &diagnostic, "true", 0);
+	}
+
+	#[test]
+	fn highlights_invalid_named_default_marker() {
+		let source = "fn Main(args: [text]): int { return inspect(value: default); } fn inspect(value: int): int { return value; }";
+		let diagnostic = diagnostic_for_tablo_error(source, check(source).unwrap_err());
+
+		assert_single_line_span(source, &diagnostic, "default", 0);
+	}
+
+	#[test]
+	fn highlights_invalid_named_variadic_argument_value() {
+		let source = "fn Main(args: [text]): int { return collect(values: true); } fn collect(...values: [int]): int { return len(values); }";
+		let diagnostic = diagnostic_for_tablo_error(source, check(source).unwrap_err());
+
+		assert_single_line_span(source, &diagnostic, "true", 0);
+	}
+
+	#[test]
+	fn highlights_invalid_positional_argument_value() {
+		let source = "fn Main(args: [text]): int { return inspect(true); } fn inspect(value: int): int { return value; }";
+		let diagnostic = diagnostic_for_tablo_error(source, check(source).unwrap_err());
+
+		assert_single_line_span(source, &diagnostic, "true", 0);
+	}
+
+	#[test]
+	fn highlights_named_argument_that_duplicates_positional_binding() {
+		let source = "fn Main(args: [text]): int { return inspect(1, value: 2); } fn inspect(value: int): int { return value; }";
+		let diagnostic = diagnostic_for_tablo_error(source, check(source).unwrap_err());
+
+		assert_single_line_span(source, &diagnostic, "value", 0);
 	}
 
 	#[test]
@@ -279,6 +371,14 @@ fn choose(right: int): int { return right; }";
 		assert_eq!(diagnostics[0].range.start.character, 0);
 		assert_eq!(diagnostics[0].range.end.character, 6);
 		assert_eq!(diagnostics[0].severity, 2);
+	}
+
+	#[test]
+	fn highlights_unknown_named_argument() {
+		let source = "fn Main(args: [text]): int { return inspect(other: 1); } fn inspect(value: int): int { return value; }";
+		let diagnostic = diagnostic_for_tablo_error(source, check(source).unwrap_err());
+
+		assert_single_line_span(source, &diagnostic, "other", 0);
 	}
 
 	#[test]

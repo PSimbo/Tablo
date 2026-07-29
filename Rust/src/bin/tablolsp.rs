@@ -138,7 +138,9 @@ impl LspServer {
 			return Vec::new();
 		};
 		let visible_text = &document.text[..cursor_offset];
-		collect_document_completion_items(visible_text)
+		let mut items = collect_document_completion_items(visible_text);
+		items.extend(function_completion_items(&document.text));
+		items
 	}
 
 	fn document_diagnostics(&self, uri: &str, source: &str) -> Result<Vec<Diagnostic>, String> {
@@ -241,6 +243,10 @@ impl LspServer {
 									"resolveProvider": false,
 									"triggerCharacters": [".", "_"]
 								},
+								"signatureHelpProvider": {
+									"triggerCharacters": ["(", ","],
+									"retriggerCharacters": [","]
+								},
 								"textDocumentSync": {
 									"openClose": true,
 									"change": 1,
@@ -264,6 +270,21 @@ impl LspServer {
 						"jsonrpc": "2.0",
 						"id": id,
 						"result": items
+					}))?;
+				}
+
+				Ok(false)
+			}
+			Some("textDocument/signatureHelp") => {
+				let params: CompletionParams = serde_json::from_value(params)
+					.map_err(|error| format!("Invalid signatureHelp params: {error}"))?;
+				let signature_help = self.signature_help(&params.text_document.uri, params.position);
+
+				if let Some(id) = id {
+					write_lsp_message(writer, &json!({
+						"jsonrpc": "2.0",
+						"id": id,
+						"result": signature_help
 					}))?;
 				}
 
@@ -378,6 +399,26 @@ impl LspServer {
 				return Ok(());
 			}
 		}
+	}
+
+	fn signature_help(&self, uri: &str, position: Position) -> Option<JsonValue> {
+		let document = self.open_documents.get(uri)?;
+		let cursor_offset = source_offset_for_position(&document.text, position.line, position.character)?;
+		let help = signature_help(&document.text, cursor_offset)?;
+		Some(json!({
+			"activeSignature": 0,
+			"activeParameter": help.active_parameter,
+			"signatures": help.signatures.into_iter()
+				.map(|signature| {
+					json!({
+						"label": signature.label,
+						"parameters": signature.parameters.into_iter()
+							.map(|label| json!({ "label": label }))
+							.collect::<Vec<_>>(),
+					})
+				})
+				.collect::<Vec<_>>(),
+		}))
 	}
 }
 
@@ -494,6 +535,54 @@ mod tests {
 	use tablo::utils::unique_temp_directory;
 
 	use super::*;
+
+	#[test]
+	fn accepts_migrated_function_syntax_and_keywords_in_document_diagnostics() {
+		let server = LspServer::new();
+		let source = "\
+obj Config { value: text?, };
+fn void(value: int = 1): int { return value; }
+fn Notify() { return; }
+fn Read(config: Config): int {
+	return exists config.value ? void(value: default) : 0;
+}";
+
+		let diagnostics = server.document_diagnostics("file:///tmp/example.tablo", source).unwrap();
+
+		assert!(diagnostics.is_empty());
+	}
+
+	#[test]
+	fn completion_items_include_all_user_function_overloads() {
+		let mut server = LspServer::new();
+		server.open_documents.insert(
+			String::from("file:///tmp/example.tablo"),
+			OpenDocument {
+				text: String::from(
+					"fn Main(args: [text]): int { return Choose(left: 1); }\n\
+					fn Choose(left: int): int { return left; }\n\
+					fn Choose(right: text): int { return 2; }"
+				),
+				version: 1,
+			},
+		);
+
+		let items = server.completion_items(
+			"file:///tmp/example.tablo",
+			Position {
+				line: 0,
+				character: 43,
+			},
+		);
+		let choose = items.iter()
+			.find(|item| item.get("label").and_then(JsonValue::as_str) == Some("Choose"))
+			.unwrap();
+
+		assert_eq!(
+			choose.get("detail").and_then(JsonValue::as_str),
+			Some("Choose(left: int): int\nChoose(right: text): int"),
+		);
+	}
 
 	#[test]
 	fn completion_items_include_built_in_signature_details() {
@@ -659,5 +748,48 @@ mod tests {
 		let _ = std::fs::remove_file(&schema_path);
 		let _ = std::fs::remove_file(&config_path);
 		let _ = std::fs::remove_dir(&temp_dir);
+	}
+
+	#[test]
+	fn signature_help_includes_all_overloads_and_active_parameter() {
+		let mut server = LspServer::new();
+		let uri = String::from("file:///tmp/example.tablo");
+		let text = String::from(
+			"fn Choose(left: int, right: int = 0): int { return left; }\n\
+			fn Choose(value: text): int { return 2; }\n\
+			fn Main(args: [text]): int { return Choose(1, ); }"
+		);
+		let cursor_character = text.lines().nth(2).unwrap().rfind(')').unwrap() as u32;
+		server.open_documents.insert(
+			uri.clone(),
+			OpenDocument {
+				text,
+				version: 1,
+			},
+		);
+
+		let help = server.signature_help(
+			&uri,
+			Position {
+				line: 2,
+				character: cursor_character,
+			},
+		).unwrap();
+
+		assert_eq!(help.get("activeParameter").and_then(JsonValue::as_u64), Some(1));
+		let signatures = help.get("signatures").and_then(JsonValue::as_array).unwrap();
+		assert_eq!(signatures.len(), 2);
+		assert_eq!(
+			signatures[0].get("label").and_then(JsonValue::as_str),
+			Some("Choose(left: int, right: int = 0): int"),
+		);
+		assert_eq!(
+			signatures[0].get("parameters")
+				.and_then(JsonValue::as_array)
+				.and_then(|parameters| parameters.get(1))
+				.and_then(|parameter| parameter.get("label"))
+				.and_then(JsonValue::as_str),
+			Some("right: int = 0"),
+		);
 	}
 }

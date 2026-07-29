@@ -1467,21 +1467,6 @@ mod tests {
 	}
 
 	#[test]
-	fn rejects_previous_object_file_version() {
-		let mut bytes = write_program(&Program::new(vec![
-			Instruction::PushInteger(1),
-		]));
-		bytes[MAGIC_BYTES.len()..MAGIC_BYTES.len() + 2].copy_from_slice(&1_u16.to_le_bytes());
-
-		let error = read_program(&bytes).unwrap_err();
-
-		assert_eq!(error, ObjectFileError {
-			offset: MAGIC_BYTES.len(),
-			message: String::from("Unsupported object file version 1; expected version 2."),
-		});
-	}
-
-	#[test]
 	fn rejects_unknown_opcode() {
 		let mut bytes = write_program(&Program::new(vec![
 			Instruction::PushInteger(1),
@@ -1493,6 +1478,21 @@ mod tests {
 		assert_eq!(error, ObjectFileError {
 			offset: 15,
 			message: String::from("Unknown opcode 255."),
+		});
+	}
+
+	#[test]
+	fn rejects_unsupported_object_file_version() {
+		let mut bytes = write_program(&Program::new(vec![
+			Instruction::PushInteger(1),
+		]));
+		bytes[MAGIC_BYTES.len()..MAGIC_BYTES.len() + 2].copy_from_slice(&2_u16.to_le_bytes());
+
+		let error = read_program(&bytes).unwrap_err();
+
+		assert_eq!(error, ObjectFileError {
+			offset: MAGIC_BYTES.len(),
+			message: String::from("Unsupported object file version 2; expected version 1."),
 		});
 	}
 
