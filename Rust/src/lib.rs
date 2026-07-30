@@ -8328,6 +8328,38 @@ mod tests {
 	}
 
 	#[test]
+	fn runs_root_array_shaped_object_declaration_with_imported_element_type() {
+		let root_path = write_test_source_file(
+			"runs_root_array_shaped_object_declaration_with_imported_element_type_root",
+			"main.tablo",
+			"use Customer from './Types';\n\
+			obj CustomerCollection [Customer];\n\
+			fn Main(args: [text]): int {\n\
+				var customer: Customer = Customer {};\n\
+				var customers: CustomerCollection = [customer];\n\
+				if customers[1].name == 'Alice' { return 1; }\n\
+				return 0;\n\
+			}",
+		);
+		let types_path = root_path.parent().unwrap().join("Types.tablo");
+		fs::write(&types_path, "pub obj Customer { pub name: text = 'Alice', };").unwrap();
+
+		let program = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap();
+		let result = run_program(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+
+		let _ = fs::remove_file(types_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
+	}
+
+	#[test]
 	fn runs_root_array_shaped_object_declaration_with_named_element_object_file() {
 		let output_path = unique_test_output_path("runs_root_array_shaped_object_declaration_with_named_element_object_file");
 		compile(

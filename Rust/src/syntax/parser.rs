@@ -611,6 +611,7 @@ impl Parser {
 		let mut tokens = self.tokens[start..end].to_vec();
 		tokens.push(Token {
 			end: tokens.last().map_or(0, |token| token.end),
+			is_quoted_identifier: false,
 			kind: TokenKind::EndOfFile,
 			lexeme: String::new(),
 			start: tokens.last().map_or(0, |token| token.end),
@@ -1385,6 +1386,7 @@ impl Parser {
 			ObjectFieldDeclaration {
 				data_type,
 				default_value,
+				is_quoted: name.is_quoted_identifier,
 				name: name.lexeme,
 				position: name.start,
 				visibility,
@@ -2740,6 +2742,7 @@ mod tests {
 		ObjectFieldDeclaration {
 			data_type: field.data_type,
 			default_value: field.default_value.map(normalize_expr),
+			is_quoted: field.is_quoted,
 			name: field.name,
 			position: 0,
 			visibility: field.visibility,
@@ -2923,6 +2926,7 @@ mod tests {
 						ObjectFieldDeclaration {
 							data_type: DataType::Object(String::from("Outer.inner").into()),
 							default_value: None,
+							is_quoted: false,
 							name: String::from("inner"),
 							position: 0,
 							visibility: Visibility::Private,
@@ -2930,6 +2934,7 @@ mod tests {
 						ObjectFieldDeclaration {
 							data_type: DataType::Text,
 							default_value: None,
+							is_quoted: false,
 							name: String::from("label"),
 							position: 0,
 							visibility: Visibility::Private,
@@ -2946,6 +2951,7 @@ mod tests {
 						ObjectFieldDeclaration {
 							data_type: DataType::Int,
 							default_value: None,
+							is_quoted: false,
 							name: String::from("value"),
 							position: 0,
 							visibility: Visibility::Private,
@@ -2978,6 +2984,7 @@ mod tests {
 						ObjectFieldDeclaration {
 							data_type: DataType::Array(Box::new(DataType::Object(String::from("Outer.items.Element").into()))),
 							default_value: None,
+							is_quoted: false,
 							name: String::from("items"),
 							position: 0,
 							visibility: Visibility::Private,
@@ -2994,6 +3001,7 @@ mod tests {
 						ObjectFieldDeclaration {
 							data_type: DataType::Int,
 							default_value: None,
+							is_quoted: false,
 							name: String::from("value"),
 							position: 0,
 							visibility: Visibility::Private,
@@ -3029,6 +3037,7 @@ mod tests {
 								DataType::Array(Box::new(DataType::Object(String::from("Envelope.payloadsMember2.Element").into()))),
 							]),
 							default_value: None,
+							is_quoted: false,
 							name: String::from("payloads"),
 							position: 0,
 							visibility: Visibility::Private,
@@ -3045,6 +3054,7 @@ mod tests {
 						ObjectFieldDeclaration {
 							data_type: DataType::Int,
 							default_value: None,
+							is_quoted: false,
 							name: String::from("value"),
 							position: 0,
 							visibility: Visibility::Private,
@@ -3080,6 +3090,7 @@ mod tests {
 								DataType::Object(String::from("Envelope.payloadMember2").into()),
 							]),
 							default_value: None,
+							is_quoted: false,
 							name: String::from("payload"),
 							position: 0,
 							visibility: Visibility::Private,
@@ -3096,6 +3107,7 @@ mod tests {
 						ObjectFieldDeclaration {
 							data_type: DataType::Int,
 							default_value: None,
+							is_quoted: false,
 							name: String::from("value"),
 							position: 0,
 							visibility: Visibility::Private,
@@ -4866,6 +4878,7 @@ mod tests {
 						ObjectFieldDeclaration {
 							data_type: DataType::Object(String::from("Outer.Inner").into()),
 							default_value: None,
+							is_quoted: false,
 							name: String::from("inner"),
 							position: 0,
 							visibility: Visibility::Private,
@@ -4873,6 +4886,7 @@ mod tests {
 						ObjectFieldDeclaration {
 							data_type: DataType::Text,
 							default_value: None,
+							is_quoted: false,
 							name: String::from("label"),
 							position: 0,
 							visibility: Visibility::Private,
@@ -4889,6 +4903,7 @@ mod tests {
 						ObjectFieldDeclaration {
 							data_type: DataType::Int,
 							default_value: None,
+							is_quoted: false,
 							name: String::from("value"),
 							position: 0,
 							visibility: Visibility::Private,
@@ -4921,6 +4936,7 @@ mod tests {
 						ObjectFieldDeclaration {
 							data_type: DataType::Array(Box::new(DataType::Object(String::from("Outer.Item").into()))),
 							default_value: None,
+							is_quoted: false,
 							name: String::from("items"),
 							position: 0,
 							visibility: Visibility::Private,
@@ -4937,6 +4953,7 @@ mod tests {
 						ObjectFieldDeclaration {
 							data_type: DataType::Int,
 							default_value: None,
+							is_quoted: false,
 							name: String::from("value"),
 							position: 0,
 							visibility: Visibility::Private,
@@ -4972,6 +4989,7 @@ mod tests {
 								DataType::Object(String::from("Envelope.Payload").into()),
 							]),
 							default_value: None,
+							is_quoted: false,
 							name: String::from("payload"),
 							position: 0,
 							visibility: Visibility::Private,
@@ -4988,6 +5006,7 @@ mod tests {
 						ObjectFieldDeclaration {
 							data_type: DataType::Int,
 							default_value: None,
+							is_quoted: false,
 							name: String::from("value"),
 							position: 0,
 							visibility: Visibility::Private,
@@ -5193,6 +5212,7 @@ mod tests {
 										position: 0,
 										value: String::from(""),
 									})),
+									is_quoted: false,
 									name: String::from("name"),
 									position: 0,
 									visibility: Visibility::Private,
@@ -5200,6 +5220,7 @@ mod tests {
 								ObjectFieldDeclaration {
 									data_type: DataType::Int,
 									default_value: None,
+									is_quoted: false,
 									name: String::from("age"),
 									position: 0,
 									visibility: Visibility::Private,
@@ -5742,6 +5763,7 @@ mod tests {
 							ObjectFieldDeclaration {
 								data_type: DataType::Text,
 								default_value: None,
+								is_quoted: false,
 								name: String::from("name"),
 								position: 0,
 								visibility: Visibility::Private,
@@ -5781,6 +5803,7 @@ mod tests {
 							ObjectFieldDeclaration {
 								data_type: DataType::Text,
 								default_value: None,
+								is_quoted: false,
 								name: String::from("name"),
 								position: 0,
 								visibility: Visibility::Private,
@@ -6329,6 +6352,7 @@ mod tests {
 							ObjectFieldDeclaration {
 								data_type: DataType::Text,
 								default_value: None,
+								is_quoted: false,
 								name: String::from("name"),
 								position: 0,
 								visibility: Visibility::Private,
@@ -6358,6 +6382,19 @@ mod tests {
 				],
 			}
 		);
+	}
+
+	#[test]
+	fn preserves_quotedness_of_object_field_declarations() {
+		let program = parse_program(
+			"obj Example { \"CaseSensitive\": int, ordinary: int, };",
+		);
+		let fields = program.objects[0].fields().unwrap();
+
+		assert!(fields[0].is_quoted);
+		assert_eq!(fields[0].name, "CaseSensitive");
+		assert!(!fields[1].is_quoted);
+		assert_eq!(fields[1].name, "ordinary");
 	}
 
 	#[test]

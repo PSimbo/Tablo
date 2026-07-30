@@ -102,6 +102,7 @@ pub enum TokenKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Token {
 	pub end: usize,
+	pub is_quoted_identifier: bool,
 	pub kind: TokenKind,
 	pub lexeme: String,
 	pub start: usize,

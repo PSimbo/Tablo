@@ -95,6 +95,15 @@ impl LexicalDeclarationKind {
 	}
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ObjectDefaultConstructionState {
+	Explicit {
+		object_type_id: ObjectTypeId,
+		position: usize,
+	},
+	Implicit(ObjectTypeId),
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct DeclarationScopeId(u32);
 
@@ -293,12 +302,7 @@ impl SemanticAnalyzer {
 		self.collect_scope_function_signatures(&program.functions, &program.statements)?;
 		self.collect_function_overload_aliases()?;
 
-		for (index, object) in program.objects.iter().enumerate() {
-			self.current_source_name = self.top_level_object_source_names.get(index)
-				.cloned()
-				.or_else(|| self.root_source_name.clone());
-			self.validate_object_declaration(object)?;
-		}
+		self.validate_object_type_graph(&program.objects)?;
 
 		self.current_source_name = self.root_source_name.clone();
 		for (index, function) in program.functions.iter().enumerate() {
@@ -1138,7 +1142,7 @@ impl SemanticAnalyzer {
 				if existing == LexicalDeclarationKind::Object {
 					return Err(self.compile_error(
 						object.position,
-						format!("Object `{}` is already declared in this module.", object.name),
+						format!("Object `{}` is already declared in this scope.", object.name),
 					));
 				}
 				return Err(self.declaration_conflict_error(
@@ -1416,6 +1420,16 @@ impl SemanticAnalyzer {
 			}
 
 			let (parameter_type, sequence) = self.resolve_function_parameter_type(parameter)?;
+
+			if function.visibility == Visibility::Public
+				&& let FunctionParameterType::Value(data_type) = &parameter.data_type {
+				self.validate_public_object_type_reference(
+					data_type,
+					parameter.position,
+					format!("Public function `{}` parameter `{}`", function.name, parameter.name),
+				)?;
+			}
+
 			parameters.push(FunctionParameterSignature {
 				data_type: parameter_type,
 				has_default: parameter.default_value.is_some(),
@@ -1436,6 +1450,14 @@ impl SemanticAnalyzer {
 					return_type.name(),
 				),
 			)?;
+
+			if function.visibility == Visibility::Public {
+				self.validate_public_object_type_reference(
+					return_type,
+					function.position,
+					format!("Public function `{}` return type", function.name),
+				)?;
+			}
 		}
 
 		let function_index = self.next_function_index;
@@ -1564,6 +1586,27 @@ impl SemanticAnalyzer {
 				"Cannot assign a value of type `{}` to a variable of type `{}`.",
 				self.data_type_display_name(value),
 				self.data_type_display_name(target),
+			),
+		))
+	}
+
+	fn ensure_object_field_default_assignable(
+		&self,
+		field: &ObjectFieldDeclaration,
+		value: &DataType,
+		position: usize,
+	) -> Result<(), CompileError> {
+		if self.is_assignable(&field.data_type, value) {
+			return Ok(());
+		}
+
+		Err(self.compile_error(
+			position,
+			format!(
+				"Default value for field `{}` has type `{}`, which is not assignable to `{}`.",
+				field.name,
+				self.data_type_display_name(value),
+				self.data_type_display_name(&field.data_type),
 			),
 		))
 	}
@@ -5286,6 +5329,75 @@ impl SemanticAnalyzer {
 		}
 	}
 
+	fn validate_default_construction_expression(
+		&mut self,
+		expression: &Expr,
+		active: &mut Vec<(ObjectDefaultConstructionState, usize)>,
+		path: &mut Vec<ObjectDefaultPathStep>,
+	) -> Result<(), CompileError> {
+		match expression {
+			Expr::Array(array) => {
+				for element in &array.elements {
+					self.validate_default_construction_expression(element, active, path)?;
+				}
+			}
+			Expr::ObjectConstruction(construction) => {
+				let object_type_id = self.semantic_program.object_construction_type_id(construction.position)
+					.expect("Validated object default construction is missing its resolved identity.");
+				self.validate_explicit_object_default(construction, object_type_id, active, path)?;
+			}
+			_ => {}
+		}
+
+		Ok(())
+	}
+
+	fn validate_default_construction_field(
+		&mut self,
+		object_type: &ResolvedObjectType,
+		field: &ObjectFieldDeclaration,
+		value: Option<&Expr>,
+		active: &mut Vec<(ObjectDefaultConstructionState, usize)>,
+		path: &mut Vec<ObjectDefaultPathStep>,
+	) -> Result<(), CompileError> {
+		let default_value = value.or(field.default_value.as_ref());
+		path.push(ObjectDefaultPathStep {
+			label: format!("{}.{}", object_type.display_name(), field.name),
+			position: default_value.map(Expr::position).unwrap_or(field.position),
+		});
+
+		let result = if let Some(default_value) = default_value {
+			self.validate_default_construction_expression(default_value, active, path)
+		}
+		else {
+			self.validate_implicit_data_type_default(&field.data_type, field.position, active, path)
+		};
+
+		path.pop();
+		result
+	}
+
+	fn validate_default_construction_state(
+		&self,
+		state: ObjectDefaultConstructionState,
+		active: &[(ObjectDefaultConstructionState, usize)],
+		path: &[ObjectDefaultPathStep],
+	) -> Result<(), CompileError> {
+		let Some((_, path_start)) = active.iter().find(|(active_state, _)| *active_state == state) else {
+			return Ok(());
+		};
+		let cycle = path[*path_start..].iter()
+			.map(|step| format!("`{}`", step.label))
+			.collect::<Vec<_>>()
+			.join(" -> ");
+		let position = path.last().map(|step| step.position).unwrap_or(0);
+
+		Err(self.compile_error(
+			position,
+			format!("Object default construction cycle through {cycle} would never terminate."),
+		))
+	}
+
 	fn validate_enum_declaration(&mut self, enum_declaration: &EnumDeclaration) -> Result<(), CompileError> {
 		let binding = self.lookup_enum(&enum_declaration.name).ok_or(self.compile_error(
 			enum_declaration.position,
@@ -5309,6 +5421,50 @@ impl SemanticAnalyzer {
 			));
 		}
 
+		Ok(())
+	}
+
+	fn validate_explicit_object_default(
+		&mut self,
+		construction: &ObjectConstructionExpr,
+		object_type_id: ObjectTypeId,
+		active: &mut Vec<(ObjectDefaultConstructionState, usize)>,
+		path: &mut Vec<ObjectDefaultPathStep>,
+	) -> Result<(), CompileError> {
+		let state = ObjectDefaultConstructionState::Explicit {
+			object_type_id,
+			position: construction.position,
+		};
+		self.validate_default_construction_state(state, active, path)?;
+
+		let object_type = self.semantic_program.object_type(object_type_id)
+			.cloned()
+			.expect("Resolved object default construction is missing its declaration.");
+		let Some(fields) = object_type.declaration().fields() else {
+			return Ok(());
+		};
+		let fields = fields.to_vec();
+		let saved_source_name = self.current_source_name.clone();
+		self.current_source_name = object_type.source_name().map(String::from);
+		active.push((state, path.len()));
+
+		for field in &fields {
+			let provided_value = construction.fields.iter()
+				.find(|provided| provided.name == field.name)
+				.map(|provided| &provided.value);
+			if let Err(error) = self.validate_default_construction_field(
+				&object_type,
+				field,
+				provided_value,
+				active,
+				path,
+			) {
+				return Err(error);
+			}
+		}
+
+		active.pop();
+		self.current_source_name = saved_source_name;
 		Ok(())
 	}
 
@@ -5565,6 +5721,61 @@ impl SemanticAnalyzer {
 		))
 	}
 
+	fn validate_implicit_data_type_default(
+		&mut self,
+		data_type: &DataType,
+		type_position: usize,
+		active: &mut Vec<(ObjectDefaultConstructionState, usize)>,
+		path: &mut Vec<ObjectDefaultPathStep>,
+	) -> Result<(), CompileError> {
+		if !matches!(data_type, DataType::Object(_)) {
+			return Ok(());
+		}
+
+		let Some(object_type_id) = self.semantic_program.object_type_id_for_reference(type_position, &[]) else {
+			return Ok(());
+		};
+
+		self.validate_implicit_object_default(object_type_id, active, path)
+	}
+
+	fn validate_implicit_object_default(
+		&mut self,
+		object_type_id: ObjectTypeId,
+		active: &mut Vec<(ObjectDefaultConstructionState, usize)>,
+		path: &mut Vec<ObjectDefaultPathStep>,
+	) -> Result<(), CompileError> {
+		let state = ObjectDefaultConstructionState::Implicit(object_type_id);
+		self.validate_default_construction_state(state, active, path)?;
+
+		let object_type = self.semantic_program.object_type(object_type_id)
+			.cloned()
+			.expect("Resolved object default is missing its declaration.");
+		let Some(fields) = object_type.declaration().fields() else {
+			return Ok(());
+		};
+		let fields = fields.to_vec();
+		let saved_source_name = self.current_source_name.clone();
+		self.current_source_name = object_type.source_name().map(String::from);
+		active.push((state, path.len()));
+
+		for field in &fields {
+			if let Err(error) = self.validate_default_construction_field(
+				&object_type,
+				field,
+				None,
+				active,
+				path,
+			) {
+				return Err(error);
+			}
+		}
+
+		active.pop();
+		self.current_source_name = saved_source_name;
+		Ok(())
+	}
+
 	fn validate_literal_expression(&mut self, expression: &Expr) -> Result<(), CompileError> {
 		match expression {
 			Expr::Array(array) => {
@@ -5646,7 +5857,7 @@ impl SemanticAnalyzer {
 				}
 			}
 			crate::ast::ObjectDeclarationShape::Fields(fields) => {
-				let mut field_names = BTreeMap::new();
+				let mut declared_fields = Vec::<&ObjectFieldDeclaration>::new();
 
 				for field in fields {
 					if field.visibility == Visibility::Public && object_visibility == Visibility::Private {
@@ -5656,12 +5867,15 @@ impl SemanticAnalyzer {
 						));
 					}
 
-					if field_names.insert(field.name.clone(), ()).is_some() {
+					if declared_fields.iter().any(|existing| {
+						object_field_declarations_conflict(existing, field)
+					}) {
 						return Err(self.compile_error(
 							field.position,
 							format!("Field `{}` is already declared on object `{}`.", field.name, object.name),
 						));
 					}
+					declared_fields.push(field);
 
 					self.validate_declared_data_type(
 						&field.data_type,
@@ -5680,13 +5894,38 @@ impl SemanticAnalyzer {
 					if let Some(default_value) = &field.default_value {
 						self.validate_literal_expression(default_value)?;
 						let default_type = self.infer_expression_type(default_value)?;
-						self.ensure_assignable(&field.data_type, &default_type, default_value.position())?;
+						self.ensure_object_field_default_assignable(field, &default_type, default_value.position())?;
 					}
 				}
 			}
 		}
 
 		Ok(())
+	}
+
+	fn validate_object_default_construction_cycles(&mut self) -> Result<(), CompileError> {
+		let object_type_ids = self.semantic_program.object_types.keys().copied().collect::<Vec<_>>();
+
+		for object_type_id in object_type_ids {
+			self.validate_implicit_object_default(
+				object_type_id,
+				&mut Vec::new(),
+				&mut Vec::new(),
+			)?;
+		}
+
+		Ok(())
+	}
+
+	fn validate_object_type_graph(&mut self, objects: &[ObjectDeclaration]) -> Result<(), CompileError> {
+		for (index, object) in objects.iter().enumerate() {
+			self.current_source_name = self.top_level_object_source_names.get(index)
+				.cloned()
+				.or_else(|| self.root_source_name.clone());
+			self.validate_object_declaration(object)?;
+		}
+
+		self.validate_object_default_construction_cycles()
 	}
 
 	fn validate_public_object_type_reference(
@@ -6605,6 +6844,12 @@ struct LocalBinding {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct ObjectDefaultPathStep {
+	label: String,
+	position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct RecordPointerFieldAssignment {
 	field_path: String,
 	position: usize,
@@ -6614,6 +6859,18 @@ struct RecordPointerFieldAssignment {
 struct RecordPointerFieldRead {
 	field_name: String,
 	position: usize,
+}
+
+fn object_field_declarations_conflict(
+	left: &ObjectFieldDeclaration,
+	right: &ObjectFieldDeclaration,
+) -> bool {
+	if left.is_quoted && right.is_quoted {
+		left.name == right.name
+	}
+	else {
+		left.name.eq_ignore_ascii_case(&right.name)
+	}
 }
 
 fn query_binary_operator_name(operator: QueryBinaryOperator) -> &'static str {
@@ -6823,6 +7080,76 @@ mod tests {
 		);
 
 		analyzer.validate_statement(&statement).unwrap();
+	}
+
+	#[test]
+	fn allows_compatible_literal_object_field_defaults() {
+		let program = parse_program(
+			"obj Child { value: int = 1, };\n\
+			obj Config {\n\
+				quantity: int = 2,\n\
+				label: text? = null,\n\
+				values: [int] = [1, 2],\n\
+				child: Child = Child { value: 3 },\n\
+				choice: int | text = 'ready',\n\
+			};\n\
+			fn Main(args: [text]): int { return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		analyzer.analyze_standalone_program(&program).unwrap();
+	}
+
+	#[test]
+	fn allows_public_function_to_expose_public_named_inline_object_type() {
+		let program = parse_program(
+			"pub obj Envelope {\n\
+				pub payload: obj Payload { pub value: int, },\n\
+			};\n\
+			pub fn Read(value: Envelope.Payload): Envelope.Payload { return value; }\n\
+			fn Main(args: [text]): int { return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		analyzer.analyze_standalone_program(&program).unwrap();
+	}
+
+	#[test]
+	fn allows_quoted_object_fields_that_differ_only_by_case() {
+		let program = parse_program(
+			"obj Model { \"Value\": int, \"value\": text, };\n\
+			fn Main(args: [text]): int { return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		analyzer.analyze_standalone_program(&program).unwrap();
+	}
+
+	#[test]
+	fn allows_recursive_object_defaults_broken_by_nullable_and_array_fields() {
+		let program = parse_program(
+			"obj LinkedNode { next: LinkedNode?, };\n\
+			obj TreeNode { children: [TreeNode], };\n\
+			obj First { other: Second?, };\n\
+			obj Second { origin: First, };\n\
+			fn Main(args: [text]): int { return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		analyzer.analyze_standalone_program(&program).unwrap();
+	}
+
+	#[test]
+	fn allows_terminating_explicit_recursive_object_field_default() {
+		let program = parse_program(
+			"obj LinkedNode {\n\
+				next: LinkedNode? = LinkedNode { next: null },\n\
+			};\n\
+			fn Main(args: [text]): int { return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		analyzer.analyze_standalone_program(&program).unwrap();
 	}
 
 	#[test]
@@ -8480,6 +8807,7 @@ mod tests {
 					crate::ast::ObjectFieldDeclaration {
 						data_type: DataType::Nullable(Box::new(DataType::Date)),
 						default_value: None,
+						is_quoted: false,
 						name: String::from("TestDate"),
 						position: 0,
 						visibility: Visibility::Private,
@@ -8539,6 +8867,24 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_case_insensitive_duplicate_unquoted_object_fields() {
+		let source = "obj Model { Value: int, value: text, };\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error,
+			CompileError {
+				message: String::from("Field `value` is already declared on object `Model`."),
+				position: source.find("value: text").unwrap(),
+			},
+		);
+	}
+
+	#[test]
 	fn rejects_create_statement_for_non_new_record_pointer() {
 		let schema = sqlite_test_schema(
 			r#"
@@ -8560,6 +8906,66 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_direct_implicit_object_default_cycle() {
+		let source = "obj InvalidNode { next: InvalidNode, };\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error,
+			CompileError {
+				message: String::from(
+					"Object default construction cycle through `InvalidNode.next` would never terminate.",
+				),
+				position: source.find("next:").unwrap(),
+			},
+		);
+	}
+
+	#[test]
+	fn rejects_duplicate_module_object_declaration() {
+		let source = "obj Model { alpha: int, };\n\
+			obj Model { beta: int, };\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error,
+			CompileError {
+				message: String::from("Object `Model` is already declared in this scope."),
+				position: source.rfind("obj Model").unwrap(),
+			},
+		);
+	}
+
+	#[test]
+	fn rejects_duplicate_named_inline_object_declaration() {
+		let source = "obj Envelope {\n\
+				alpha: obj Payload { value: int, },\n\
+				beta: obj Payload { value: text, },\n\
+			};\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error,
+			CompileError {
+				message: String::from("Object `Envelope.Payload` is already declared in this scope."),
+				position: source.rfind("obj Payload").unwrap(),
+			},
+		);
+	}
+
+	#[test]
 	fn rejects_equality_comparison_between_incompatible_concrete_types() {
 		let expression = parse_expression("true == 1");
 		let mut analyzer = SemanticAnalyzer::new();
@@ -8569,6 +8975,24 @@ mod tests {
 		assert_eq!(
 			error.message,
 			"Equality comparison is not supported between `bool` and `int`.",
+		);
+	}
+
+	#[test]
+	fn rejects_exact_duplicate_quoted_object_fields() {
+		let source = "obj Model { \"Value\": int, \"Value\": text, };\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error,
+			CompileError {
+				message: String::from("Field `Value` is already declared on object `Model`."),
+				position: source.rfind("\"Value\"").unwrap(),
+			},
 		);
 	}
 
@@ -8583,6 +9007,69 @@ mod tests {
 		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
 
 		assert_eq!(error.message, "Function `Value` must return a value of type `int` on all paths.");
+	}
+
+	#[test]
+	fn rejects_incompatible_object_field_default() {
+		let source = "obj Config { quantity: int = 'many', };\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error,
+			CompileError {
+				message: String::from(
+					"Default value for field `quantity` has type `text`, which is not assignable to `int`.",
+				),
+				position: source.find("'many'").unwrap(),
+			},
+		);
+	}
+
+	#[test]
+	fn rejects_incompatible_object_typed_field_default() {
+		let source = "obj Expected { value: int, };\n\
+			obj Actual { value: int, };\n\
+			obj Config { child: Expected = Actual {}, };\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error,
+			CompileError {
+				message: String::from(
+					"Default value for field `child` has type `Actual`, which is not assignable to `Expected`.",
+				),
+				position: source.find("Actual {}").unwrap() + "Actual ".len(),
+			},
+		);
+	}
+
+	#[test]
+	fn rejects_indirect_implicit_object_default_cycle() {
+		let source = "obj First { other: Second, };\n\
+			obj Second { origin: First, };\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error,
+			CompileError {
+				message: String::from(
+					"Object default construction cycle through `First.other` -> `Second.origin` would never terminate.",
+				),
+				position: source.find("origin: First").unwrap(),
+			},
+		);
 	}
 
 	#[test]
@@ -8685,6 +9172,61 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_nonliteral_expression_in_array_object_field_default() {
+		let source = "obj Config { values: [int] = [1, 1 + 1], };\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error,
+			CompileError {
+				message: String::from("Object field defaults must be literals."),
+				position: source.find("1 + 1").unwrap() + 2,
+			},
+		);
+	}
+
+	#[test]
+	fn rejects_nonliteral_expression_in_object_typed_field_default() {
+		let source = "obj Child { value: int, };\n\
+			obj Config { child: Child = Child { value: 1 + 1 }, };\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error,
+			CompileError {
+				message: String::from("Object field defaults must be literals."),
+				position: source.find("1 + 1").unwrap() + 2,
+			},
+		);
+	}
+
+	#[test]
+	fn rejects_nonliteral_object_field_default() {
+		let source = "obj Config { quantity: int = 1 + 1, };\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error,
+			CompileError {
+				message: String::from("Object field defaults must be literals."),
+				position: source.find("1 + 1").unwrap() + 2,
+			},
+		);
+	}
+
+	#[test]
 	fn rejects_null_comparison_for_range_value() {
 		let expression = parse_expression("(1:2) == null");
 		let mut analyzer = SemanticAnalyzer::new();
@@ -8694,6 +9236,26 @@ mod tests {
 		assert_eq!(
 			error.message,
 			"Equality comparison is not supported between `range<int>` and `range<int>`.",
+		);
+	}
+
+	#[test]
+	fn rejects_null_default_for_non_nullable_object_field() {
+		let source = "obj Config { quantity: int = null, };\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error,
+			CompileError {
+				message: String::from(
+					"Default value for field `quantity` has type `null`, which is not assignable to `int`.",
+				),
+				position: source.find("null").unwrap(),
+			},
 		);
 	}
 
@@ -8748,6 +9310,23 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_public_field_exposing_wrapped_private_object_type() {
+		let program = parse_program(
+			"obj PrivateModel { value: int, };\n\
+			pub obj PublicModel { pub models: [text | PrivateModel?], };\n\
+			fn Main(args: [text]): int { return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error.message,
+			"Public field `models` on object `PublicModel` cannot expose private object type `PrivateModel`.",
+		);
+	}
+
+	#[test]
 	fn rejects_public_field_on_private_object() {
 		let program = parse_program(
 			"obj PrivateModel { pub exposed: int, };\n\
@@ -8760,6 +9339,69 @@ mod tests {
 		assert_eq!(
 			error.message,
 			"Field `exposed` cannot be public because object `PrivateModel` is private.",
+		);
+	}
+
+	#[test]
+	fn rejects_public_function_parameter_exposing_private_named_inline_object_type() {
+		let source = "obj PrivateOuter { child: obj Child { value: int, }, };\n\
+			pub fn Read(value: PrivateOuter.Child) {}\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error,
+			CompileError {
+				message: String::from(
+					"Public function `Read` parameter `value` cannot expose private object type `PrivateOuter.Child`.",
+				),
+				position: source.find("value: PrivateOuter.Child").unwrap(),
+			},
+		);
+	}
+
+	#[test]
+	fn rejects_public_function_parameter_exposing_private_object_type() {
+		let source = "obj PrivateModel { value: int, };\n\
+			pub fn Read(value: [PrivateModel?]) {}\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error,
+			CompileError {
+				message: String::from(
+					"Public function `Read` parameter `value` cannot expose private object type `PrivateModel`.",
+				),
+				position: source.find("value: [PrivateModel?]").unwrap(),
+			},
+		);
+	}
+
+	#[test]
+	fn rejects_public_function_return_exposing_private_object_type() {
+		let source = "obj PrivateModel { value: int, };\n\
+			pub fn Read(): text | PrivateModel { return ''; }\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error,
+			CompileError {
+				message: String::from(
+					"Public function `Read` return type cannot expose private object type `PrivateModel`.",
+				),
+				position: source.find("fn Read").unwrap(),
+			},
 		);
 	}
 
@@ -8778,6 +9420,23 @@ mod tests {
 	fn rejects_public_root_array_exposing_private_root_object_type() {
 		let program = parse_program(
 			"pub obj PublicCollection [PrivateModel];\n\
+			obj PrivateModel { value: int, };\n\
+			fn Main(args: [text]): int { return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error.message,
+			"Public root-array object `PublicCollection` cannot expose private object type `PrivateModel`.",
+		);
+	}
+
+	#[test]
+	fn rejects_public_root_array_exposing_wrapped_private_root_object_type() {
+		let program = parse_program(
+			"pub obj PublicCollection [text | PrivateModel?];\n\
 			obj PrivateModel { value: int, };\n\
 			fn Main(args: [text]): int { return 0; }",
 		);
@@ -8910,6 +9569,68 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_quoted_object_field_conflicting_with_unquoted_field() {
+		let source = "obj Model { value: int, \"VALUE\": text, };\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error,
+			CompileError {
+				message: String::from("Field `VALUE` is already declared on object `Model`."),
+				position: source.find("\"VALUE\"").unwrap(),
+			},
+		);
+	}
+
+	#[test]
+	fn rejects_repeating_explicit_nullable_object_field_default() {
+		let source = "obj InvalidNode {\n\
+				next: InvalidNode? = InvalidNode {},\n\
+			};\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error,
+			CompileError {
+				message: String::from(
+					"Object default construction cycle through `InvalidNode.next` would never terminate.",
+				),
+				position: source.find("InvalidNode {}").unwrap() + "InvalidNode ".len(),
+			},
+		);
+	}
+
+	#[test]
+	fn rejects_repeating_explicit_recursive_array_default() {
+		let source = "obj InvalidTree {\n\
+				children: [InvalidTree] = [InvalidTree {}],\n\
+			};\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error,
+			CompileError {
+				message: String::from(
+					"Object default construction cycle through `InvalidTree.children` would never terminate.",
+				),
+				position: source.find("[InvalidTree {}]").unwrap(),
+			},
+		);
+	}
+
+	#[test]
 	fn rejects_unknown_named_inline_object_on_known_containing_path() {
 		let program = parse_program(
 			"obj Envelope { payload: Envelope.Missing, };\n\
@@ -8922,6 +9643,99 @@ mod tests {
 		assert_eq!(
 			error.message,
 			"Object `Envelope` does not contain a named inline object type `Missing`.",
+		);
+	}
+
+	#[test]
+	fn rejects_unknown_named_inline_object_on_nested_containing_path() {
+		let source = "obj Envelope {\n\
+				payload: obj Payload { value: int, },\n\
+				missing: Envelope.Payload.Missing,\n\
+			};\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error,
+			CompileError {
+				message: String::from("Object `Envelope.Payload` does not contain a named inline object type `Missing`."),
+				position: source.find("Envelope.Payload.Missing").unwrap(),
+			},
+		);
+	}
+
+	#[test]
+	fn rejects_unknown_object_field_type() {
+		let source = "obj Envelope { payload: Missing, };\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error,
+			CompileError {
+				message: String::from("Object type `Missing` is not declared in this module."),
+				position: source.find("Missing").unwrap(),
+			},
+		);
+	}
+
+	#[test]
+	fn rejects_unknown_object_field_type_within_array() {
+		let source = "obj Envelope { payloads: [Missing], };\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error,
+			CompileError {
+				message: String::from("Object type `Missing` is not declared in this module."),
+				position: source.find("Missing").unwrap(),
+			},
+		);
+	}
+
+	#[test]
+	fn rejects_unknown_object_field_type_within_union() {
+		let source = "obj Envelope { payload: text | Missing, };\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error,
+			CompileError {
+				message: String::from("Object type `Missing` is not declared in this module."),
+				position: source.find("Missing").unwrap(),
+			},
+		);
+	}
+
+	#[test]
+	fn rejects_unknown_qualified_object_field_type() {
+		let source = "obj Envelope { payload: Missing.Payload, };\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error,
+			CompileError {
+				message: String::from("Object type `Missing.Payload` is not declared in this module."),
+				position: source.find("Missing.Payload").unwrap(),
+			},
 		);
 	}
 
@@ -8941,6 +9755,24 @@ mod tests {
 		assert_eq!(
 			error.message,
 			"Named inline object type `Payload` must be referenced as `Envelope.Payload`.",
+		);
+	}
+
+	#[test]
+	fn rejects_unquoted_object_field_conflicting_with_quoted_field() {
+		let source = "obj Model { \"Value\": int, value: text, };\n\
+			fn Main(args: [text]): int { return 0; }";
+		let program = parse_program(source);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let error = analyzer.analyze_standalone_program(&program).unwrap_err();
+
+		assert_eq!(
+			error,
+			CompileError {
+				message: String::from("Field `value` is already declared on object `Model`."),
+				position: source.find("value: text").unwrap(),
+			},
 		);
 	}
 
@@ -9051,6 +9883,8 @@ mod tests {
 				optional: Model?,\n\
 				items: [Model],\n\
 				choice: text | Model,\n\
+				payload: obj Payload { value: int, },\n\
+				payloads: [text | Envelope.Payload],\n\
 			};\n\
 			fn Transform(value: Model, values: [Model]): Model {\n\
 				var local: Model = value;\n\
@@ -9083,11 +9917,26 @@ mod tests {
 			semantic_program.object_type_references(source.find("choice:").unwrap()),
 			Some(expected(vec![ObjectTypeReferencePathComponent::UnionMember(1)]).as_slice()),
 		);
+
+		let payload_id = semantic_program.object_type_id("Envelope.Payload").unwrap();
+
+		assert_eq!(
+			semantic_program.object_type_references(source.find("payloads:").unwrap()),
+			Some(vec![ResolvedObjectTypeReference {
+				object_type_id: payload_id,
+				path: vec![
+					ObjectTypeReferencePathComponent::ArrayElement,
+					ObjectTypeReferencePathComponent::UnionMember(1),
+				],
+			}].as_slice()),
+		);
+
 		let transform_position = source.find("fn Transform").unwrap();
 		let value_parameter_position = transform_position
 			+ source[transform_position..].find("value: Model").unwrap();
 		let values_parameter_position = transform_position
 			+ source[transform_position..].find("values: [Model]").unwrap();
+
 		assert_eq!(
 			semantic_program.object_type_references(value_parameter_position),
 			Some(expected(vec![]).as_slice()),

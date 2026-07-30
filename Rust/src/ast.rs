@@ -527,6 +527,7 @@ pub struct ObjectFieldAssignmentTarget {
 pub struct ObjectFieldDeclaration {
 	pub data_type: DataType,
 	pub default_value: Option<Expr>,
+	pub is_quoted: bool,
 	pub name: String,
 	pub position: usize,
 	pub visibility: Visibility,

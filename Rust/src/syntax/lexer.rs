@@ -60,6 +60,7 @@ impl Lexer {
 
 			return Ok(Some(Token {
 				end: self.position,
+				is_quoted_identifier: false,
 				kind: TokenKind::EndOfFile,
 				lexeme: String::new(),
 				start: self.position,
@@ -75,6 +76,7 @@ impl Lexer {
 
 			return Ok(Some(Token {
 				end,
+				is_quoted_identifier: false,
 				kind,
 				lexeme,
 				start,
@@ -87,6 +89,7 @@ impl Lexer {
 
 			return Ok(Some(Token {
 				end,
+				is_quoted_identifier: false,
 				kind,
 				lexeme,
 				start,
@@ -103,6 +106,7 @@ impl Lexer {
 
 			return Ok(Some(Token {
 				end,
+				is_quoted_identifier: true,
 				kind,
 				lexeme,
 				start,
@@ -115,6 +119,7 @@ impl Lexer {
 
 			return Ok(Some(Token {
 				end,
+				is_quoted_identifier: false,
 				kind,
 				lexeme,
 				start,
@@ -127,6 +132,7 @@ impl Lexer {
 
 			return Ok(Some(Token {
 				end,
+				is_quoted_identifier: false,
 				kind,
 				lexeme,
 				start,
@@ -141,6 +147,7 @@ impl Lexer {
 
 				return Ok(Some(Token {
 					end: self.position,
+					is_quoted_identifier: false,
 					kind: TokenKind::PlusEqual,
 					lexeme: String::from("+="),
 					start,
@@ -153,6 +160,7 @@ impl Lexer {
 
 				return Ok(Some(Token {
 					end: self.position,
+					is_quoted_identifier: false,
 					kind: TokenKind::MinusEqual,
 					lexeme: String::from("-="),
 					start,
@@ -165,6 +173,7 @@ impl Lexer {
 
 				return Ok(Some(Token {
 					end: self.position,
+					is_quoted_identifier: false,
 					kind: TokenKind::MultiplyEqual,
 					lexeme: String::from("*="),
 					start,
@@ -177,6 +186,7 @@ impl Lexer {
 
 				return Ok(Some(Token {
 					end: self.position,
+					is_quoted_identifier: false,
 					kind: TokenKind::SlashEqual,
 					lexeme: String::from("/="),
 					start,
@@ -189,6 +199,7 @@ impl Lexer {
 
 				return Ok(Some(Token {
 					end: self.position,
+					is_quoted_identifier: false,
 					kind: TokenKind::PercentEqual,
 					lexeme: String::from("%="),
 					start,
@@ -205,6 +216,7 @@ impl Lexer {
 
 				return Ok(Some(Token {
 					end: self.position,
+					is_quoted_identifier: false,
 					kind: TokenKind::Ellipsis,
 					lexeme: String::from("..."),
 					start,
@@ -222,6 +234,7 @@ impl Lexer {
 
 				return Ok(Some(Token {
 					end: self.position,
+					is_quoted_identifier: false,
 					kind: TokenKind::RightBrace,
 					lexeme: String::from("}"),
 					start,
@@ -236,6 +249,7 @@ impl Lexer {
 
 				return Ok(Some(Token {
 					end: self.position,
+					is_quoted_identifier: false,
 					kind: TokenKind::BangEqual,
 					lexeme: String::from("!="),
 					start,
@@ -247,6 +261,7 @@ impl Lexer {
 
 				return Ok(Some(Token {
 					end: self.position,
+					is_quoted_identifier: false,
 					kind: TokenKind::EqualEqual,
 					lexeme: String::from("=="),
 					start,
@@ -259,6 +274,7 @@ impl Lexer {
 
 				return Ok(Some(Token {
 					end: self.position,
+					is_quoted_identifier: false,
 					kind: TokenKind::GreaterThanOrEqual,
 					lexeme: String::from(">="),
 					start,
@@ -271,6 +287,7 @@ impl Lexer {
 
 				return Ok(Some(Token {
 					end: self.position,
+					is_quoted_identifier: false,
 					kind: TokenKind::LessThanOrEqual,
 					lexeme: String::from("<="),
 					start,
@@ -289,6 +306,7 @@ impl Lexer {
 
 		Ok(Some(Token {
 			end: self.position,
+			is_quoted_identifier: false,
 			kind: token_kind,
 			lexeme: next.to_string(),
 			start,
@@ -492,6 +510,7 @@ impl Lexer {
 
 				return Ok(Token {
 					end: self.position,
+					is_quoted_identifier: false,
 					kind,
 					lexeme: value,
 					start,
@@ -521,6 +540,7 @@ impl Lexer {
 
 				return Ok(Token {
 					end: self.position,
+					is_quoted_identifier: false,
 					kind,
 					lexeme: value,
 					start,
@@ -1222,7 +1242,9 @@ mod tests {
 
 		assert_eq!(tokens.len(), 2);
 		assert_eq!(tokens[0].kind, TokenKind::Identifier);
+		assert!(tokens[0].is_quoted_identifier);
 		assert_eq!(tokens[0].lexeme, "Customer Name");
+		assert!(!tokens[1].is_quoted_identifier);
 		assert_eq!(tokens[1].kind, TokenKind::EndOfFile);
 	}
 
@@ -1233,6 +1255,7 @@ mod tests {
 
 		assert_eq!(tokens.len(), 2);
 		assert_eq!(tokens[0].kind, TokenKind::Identifier);
+		assert!(tokens[0].is_quoted_identifier);
 		assert_eq!(tokens[0].lexeme, "return");
 		assert_eq!(tokens[1].kind, TokenKind::EndOfFile);
 	}
