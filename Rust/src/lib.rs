@@ -41,13 +41,6 @@ use vm::{ VirtualMachine, VmError };
 
 const EXTERNAL_SOURCE_DIAGNOSTIC_PREFIX: &str = "__tablo_external_diagnostic__";
 
-#[cfg_attr(not(test), allow(dead_code))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CompilationTarget {
-	Snippet,
-	Standalone,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TabloError {
 	Compile(CompileError),
@@ -122,6 +115,22 @@ impl Display for TabloError {
 	}
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompilationTarget {
+	Snippet,
+	Standalone,
+}
+
+#[derive(Clone)]
+enum ObjectImportKind {
+	Automatic {
+		trigger_kind: &'static str,
+		trigger_name: String,
+	},
+	Explicit,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CompilationReport {
 	pub warnings: Vec<SemanticWarning>,
@@ -138,21 +147,19 @@ struct ImportedFunctionTargets {
 	target_names: Vec<String>,
 }
 
+struct ImportedObjectBinding {
+	origin: ObjectImportOrigin,
+	target_name: String,
+}
+
 #[derive(Clone)]
 struct LinkedModule {
-	exported_functions: BTreeMap<String, String>,
-	exported_objects: BTreeMap<String, String>,
+	exports: ModuleExports,
 	functions: Vec<ast::FunctionDeclaration>,
 	object_display_names: Vec<String>,
 	objects: Vec<ast::ObjectDeclaration>,
 	source_file: SourceFileDebugInfo,
 	with_declarations: Vec<ast::WithDeclaration>,
-}
-
-#[derive(Default)]
-struct ModuleImportBindings {
-	functions: BTreeMap<String, String>,
-	objects: BTreeMap<String, String>,
 }
 
 struct LinkedProgram {
@@ -166,12 +173,30 @@ struct LinkedProgram {
 	top_level_object_source_names: Vec<String>,
 }
 
+#[derive(Clone, Default)]
+struct ModuleExports {
+	exported_function_object_dependencies: BTreeMap<String, BTreeMap<String, String>>,
+	exported_functions: BTreeMap<String, String>,
+	exported_object_dependencies: BTreeMap<String, BTreeMap<String, String>>,
+	exported_objects: BTreeMap<String, String>,
+	object_dependency_groups: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+#[derive(Default)]
+struct ModuleImportBindings {
+	functions: BTreeMap<String, String>,
+	object_dependency_groups: BTreeMap<String, BTreeMap<String, String>>,
+	objects: BTreeMap<String, String>,
+}
+
 #[derive(Default)]
 struct ModuleLinker {
+	declared_modules: BTreeMap<PathBuf, ModuleExports>,
 	function_overload_aliases: Vec<FunctionOverloadAlias>,
 	loaded_modules: BTreeMap<PathBuf, LinkedModule>,
 	next_import_alias_id: u32,
 	next_module_id: u32,
+	object_target_source_names: BTreeMap<String, String>,
 }
 
 impl ModuleLinker {
@@ -193,14 +218,127 @@ impl ModuleLinker {
 		}
 	}
 
+	fn add_imported_object_binding(
+		imported_objects: &mut BTreeMap<String, ImportedObjectBinding>,
+		name: &str,
+		target_name: &str,
+		origin: ObjectImportOrigin,
+	) -> Result<(), CompileError> {
+		let Some(existing) = imported_objects.get_mut(name) else {
+			imported_objects.insert(name.to_string(), ImportedObjectBinding {
+				origin,
+				target_name: target_name.to_string(),
+			});
+			return Ok(());
+		};
+
+		if existing.target_name == target_name {
+			if matches!(existing.origin.kind, ObjectImportKind::Automatic { .. })
+				&& matches!(origin.kind, ObjectImportKind::Explicit)
+			{
+				existing.origin = origin;
+			}
+			return Ok(());
+		}
+
+		let message = match (&existing.origin.kind, &origin.kind) {
+			(ObjectImportKind::Explicit, ObjectImportKind::Explicit) => format!(
+				"Object type `{name}` is ambiguous because `{}` from module `{}` and `{}` from module `{}` are both imported into this scope.",
+				existing.origin.qualified_name(name),
+				existing.origin.import_module_path,
+				origin.qualified_name(name),
+				origin.import_module_path,
+			),
+			_ => {
+				let (automatic, conflicting) = if matches!(origin.kind, ObjectImportKind::Automatic { .. }) {
+					(&origin, &existing.origin)
+				}
+				else {
+					(&existing.origin, &origin)
+				};
+
+				format!(
+					"{} conflicts with {}.",
+					automatic.automatic_import_description(name),
+					conflicting.import_description(name),
+				)
+			}
+		};
+
+		Err(CompileError {
+			message,
+			position: origin.position,
+		})
+	}
+
+	fn add_imported_object_dependencies(
+		&self,
+		imported_objects: &mut BTreeMap<String, ImportedObjectBinding>,
+		imported_dependency_groups: &mut BTreeMap<String, BTreeMap<String, String>>,
+		linked_module: &ModuleExports,
+		dependencies: &BTreeMap<String, String>,
+		use_declaration: &ast::UseDeclaration,
+		trigger_kind: &'static str,
+		trigger_name: &str,
+		position: usize,
+	) -> Result<(), CompileError> {
+		for (name, target_name) in dependencies {
+			Self::add_imported_object_binding(
+				imported_objects,
+				name,
+				target_name,
+				self.object_import_origin(
+					target_name,
+					use_declaration,
+					ObjectImportKind::Automatic {
+						trigger_kind,
+						trigger_name: trigger_name.to_string(),
+					},
+					position,
+				),
+			)?;
+		}
+
+		for target_name in dependencies.values() {
+			let Some(group) = linked_module.object_dependency_groups.get(target_name) else {
+				continue;
+			};
+
+			for (name, target_name) in group {
+				Self::add_imported_object_binding(
+					imported_objects,
+					name,
+					target_name,
+					self.object_import_origin(
+						target_name,
+						use_declaration,
+						ObjectImportKind::Automatic {
+							trigger_kind,
+							trigger_name: trigger_name.to_string(),
+						},
+						position,
+					),
+				)?;
+			}
+
+			imported_dependency_groups.entry(target_name.clone())
+				.or_default()
+				.extend(group.clone());
+		}
+
+		Ok(())
+	}
+
 	fn collect_import_bindings(
 		&mut self,
 		program: &ast::AstProgram,
 		base_directory: &Path,
+		local_object_targets: &BTreeMap<String, String>,
 		source_name: &str,
 	) -> Result<ModuleImportBindings, CompileError> {
 		let mut imported_functions = BTreeMap::<String, ImportedFunctionTargets>::new();
-		let mut imported_objects = BTreeMap::<String, String>::new();
+		let mut imported_object_dependency_groups = BTreeMap::new();
+		let mut imported_objects = BTreeMap::<String, ImportedObjectBinding>::new();
 
 		for statement in &program.statements {
 			let ast::Statement::Use(use_declaration) = statement else {
@@ -213,6 +351,7 @@ impl ModuleLinker {
 				for imported_name in imported_names {
 					let function_target = linked_module.exported_functions.get(&imported_name.name);
 					let object_target = linked_module.exported_objects.get(&imported_name.name);
+
 					if function_target.is_none() && object_target.is_none() {
 						return Err(CompileError {
 							message: format!(
@@ -231,9 +370,46 @@ impl ModuleLinker {
 							target_name,
 							imported_name.position,
 						);
+
+						if let Some(dependencies) = linked_module.exported_function_object_dependencies.get(&imported_name.name) {
+							self.add_imported_object_dependencies(
+								&mut imported_objects,
+								&mut imported_object_dependency_groups,
+								&linked_module,
+								dependencies,
+								use_declaration,
+								"function",
+								&imported_name.name,
+								imported_name.position,
+							)?;
+						}
 					}
+
 					if let Some(target_name) = object_target {
-						imported_objects.insert(imported_name.name.clone(), target_name.clone());
+						Self::add_imported_object_binding(
+							&mut imported_objects,
+							&imported_name.name,
+							target_name,
+							self.object_import_origin(
+								target_name,
+								use_declaration,
+								ObjectImportKind::Explicit,
+								imported_name.position,
+							),
+						)?;
+
+						if let Some(dependencies) = linked_module.exported_object_dependencies.get(&imported_name.name) {
+							self.add_imported_object_dependencies(
+								&mut imported_objects,
+								&mut imported_object_dependency_groups,
+								&linked_module,
+								dependencies,
+								use_declaration,
+								"object type",
+								&imported_name.name,
+								imported_name.position,
+							)?;
+						}
 					}
 				}
 			}
@@ -245,14 +421,81 @@ impl ModuleLinker {
 						target_name,
 						use_declaration.position,
 					);
+
+					if let Some(dependencies) = linked_module.exported_function_object_dependencies.get(name) {
+						self.add_imported_object_dependencies(
+							&mut imported_objects,
+							&mut imported_object_dependency_groups,
+							&linked_module,
+							dependencies,
+							use_declaration,
+							"function",
+							name,
+							use_declaration.position,
+						)?;
+					}
 				}
+
 				for (name, target_name) in &linked_module.exported_objects {
-					imported_objects.insert(name.clone(), target_name.clone());
+					Self::add_imported_object_binding(
+						&mut imported_objects,
+						name,
+						target_name,
+						self.object_import_origin(
+							target_name,
+							use_declaration,
+							ObjectImportKind::Explicit,
+							use_declaration.position,
+						),
+					)?;
+
+					if let Some(dependencies) = linked_module.exported_object_dependencies.get(name) {
+						self.add_imported_object_dependencies(
+							&mut imported_objects,
+							&mut imported_object_dependency_groups,
+							&linked_module,
+							dependencies,
+							use_declaration,
+							"object type",
+							name,
+							use_declaration.position,
+						)?;
+					}
 				}
 			}
 		}
 
+		for object in &program.objects {
+			let Some(imported) = imported_objects.get(&object.name) else {
+				continue;
+			};
+
+			if local_object_targets.get(&object.name) == Some(&imported.target_name) {
+				continue;
+			}
+
+			let message = match &imported.origin.kind {
+				ObjectImportKind::Automatic { .. } => format!(
+					"{} conflicts with local object `{}`.",
+					imported.origin.automatic_import_description(&object.name),
+					object.name,
+				),
+				ObjectImportKind::Explicit => format!(
+					"Imported object type `{}` from module `{}` conflicts with local object `{}`.",
+					imported.origin.qualified_name(&object.name),
+					imported.origin.import_module_path,
+					object.name,
+				),
+			};
+
+			return Err(CompileError {
+				message,
+				position: imported.origin.position,
+			});
+		}
+
 		let mut function_bindings = BTreeMap::new();
+
 		for (display_name, targets) in imported_functions {
 			let alias_name = format!(
 				"__tablo_import_{}_{}",
@@ -272,7 +515,10 @@ impl ModuleLinker {
 
 		Ok(ModuleImportBindings {
 			functions: function_bindings,
-			objects: imported_objects,
+			object_dependency_groups: imported_object_dependency_groups,
+			objects: imported_objects.into_iter()
+				.map(|(name, binding)| (name, binding.target_name))
+				.collect(),
 		})
 	}
 
@@ -355,11 +601,15 @@ impl ModuleLinker {
 		&mut self,
 		module_path: &Path,
 		use_declaration: &ast::UseDeclaration,
-	) -> Result<LinkedModule, CompileError> {
+	) -> Result<ModuleExports, CompileError> {
 		let module_key = canonical_module_key(module_path);
 
 		if let Some(linked_module) = self.loaded_modules.get(&module_key) {
-			return Ok(linked_module.clone());
+			return Ok(linked_module.exports.clone());
+		}
+
+		if let Some(exports) = self.declared_modules.get(&module_key) {
+			return Ok(exports.clone());
 		}
 
 		let source = std::fs::read_to_string(module_path).map_err(|error| CompileError {
@@ -401,16 +651,30 @@ impl ModuleLinker {
 				position: use_declaration.position,
 			},
 		})?;
-		let base_directory = module_path.parent().unwrap_or_else(|| Path::new("."));
-		let import_bindings = self.collect_import_bindings(
-			&program,
-			base_directory,
-			&module_key.display().to_string(),
-		)?;
+
 		let module_id = self.next_module_id;
 		self.next_module_id += 1;
 		let object_renames = build_top_level_object_renames(&program, module_id);
 		let top_level_renames = build_top_level_function_renames(&program, module_id);
+
+		for target_name in object_renames.values() {
+			self.object_target_source_names.insert(
+				target_name.clone(),
+				module_key.display().to_string(),
+			);
+		}
+
+		self.declared_modules.insert(
+			module_key.clone(),
+			build_declared_module_exports(&program, &object_renames, &top_level_renames),
+		);
+		let base_directory = module_path.parent().unwrap_or_else(|| Path::new("."));
+		let import_bindings = self.collect_import_bindings(
+			&program,
+			base_directory,
+			&object_renames,
+			&module_key.display().to_string(),
+		)?;
 		self.include_local_function_overloads(&import_bindings.functions, &top_level_renames);
 		let source_file = SourceFileDebugInfo::from_source(module_key.display().to_string(), &source_text);
 		let object_display_names = program.objects.iter()
@@ -429,11 +693,14 @@ impl ModuleLinker {
 						.unwrap_or_else(|| object.name.clone()),
 				)
 			})
-			.collect();
+			.collect::<BTreeMap<_, _>>();
+
+		let imported_object_dependency_groups = import_bindings.object_dependency_groups;
 		let mut object_reference_renames = import_bindings.objects;
 		object_reference_renames.extend(object_renames.clone());
 
 		rewrite_object_declaration_type_names(&mut program.objects, &object_reference_renames, true);
+
 		for function in &mut program.functions {
 			if let Some(renamed) = top_level_renames.get(&function.name) {
 				function.name = renamed.clone();
@@ -454,18 +721,167 @@ impl ModuleLinker {
 					.unwrap_or_else(|| function.name.clone());
 				(original_name, function.name.clone())
 			})
+			.collect::<BTreeMap<_, _>>();
+		let object_source_names_by_target = object_reference_renames.iter()
+			.map(|(source_name, target_name)| (target_name.as_str(), source_name.as_str()))
+			.collect::<BTreeMap<_, _>>();
+		let objects_by_target = program.objects.iter()
+			.map(|object| (object.name.as_str(), object))
+			.collect::<BTreeMap<_, _>>();
+		let exported_object_dependencies = exported_objects.iter()
+			.map(|(exported_name, target_name)| {
+				let mut dependency_targets = BTreeSet::new();
+				collect_public_object_dependency_targets(
+					target_name,
+					&objects_by_target,
+					&mut dependency_targets,
+				);
+				let dependencies = dependency_targets.into_iter()
+					.filter_map(|dependency_target| {
+						object_source_names_by_target.get(dependency_target.as_str())
+							.map(|source_name| ((*source_name).to_string(), dependency_target))
+					})
+					.collect::<BTreeMap<String, String>>();
+
+				let mut dependencies = dependencies;
+
+				for target_name in dependencies.values().cloned().collect::<Vec<_>>() {
+					if let Some(imported_dependencies) = imported_object_dependency_groups.get(&target_name) {
+						dependencies.extend(imported_dependencies.clone());
+					}
+				}
+				(exported_name.clone(), dependencies)
+			})
+			.collect::<BTreeMap<_, _>>();
+
+		let exported_function_object_dependencies = program.functions.iter()
+			.filter(|function| function.visibility == ast::Visibility::Public)
+			.map(|function| {
+				let original_name = unmangled_export_name(&function.name, &top_level_renames)
+					.unwrap_or_else(|| function.name.clone());
+				let mut referenced_targets = BTreeSet::new();
+				collect_function_object_type_names(function, &mut referenced_targets);
+				let mut dependencies = referenced_targets.iter()
+					.filter_map(|target_name| {
+						object_source_names_by_target.get(target_name.as_str())
+							.map(|source_name| ((*source_name).to_string(), target_name.clone()))
+					})
+					.collect::<BTreeMap<_, _>>();
+
+				for object_dependencies in exported_object_dependencies.values() {
+					if object_dependencies.values().any(|target_name| referenced_targets.contains(target_name)) {
+						dependencies.extend(object_dependencies.clone());
+					}
+				}
+
+				for target_name in referenced_targets {
+					if let Some(imported_dependencies) = imported_object_dependency_groups.get(&target_name) {
+						dependencies.extend(imported_dependencies.clone());
+					}
+				}
+				(original_name, dependencies)
+			})
 			.collect();
-		let linked_module = LinkedModule {
+
+		let mut object_dependency_groups = imported_object_dependency_groups;
+
+		for (exported_name, target_name) in &exported_objects {
+			let Some(dependencies) = exported_object_dependencies.get(exported_name) else {
+				continue;
+			};
+			object_dependency_groups.insert(target_name.clone(), dependencies.clone());
+		}
+
+		for dependencies in exported_object_dependencies.values() {
+			for target_name in dependencies.values() {
+				object_dependency_groups.entry(target_name.clone())
+					.or_insert_with(|| dependencies.clone());
+			}
+		}
+
+		let exports = ModuleExports {
+			exported_function_object_dependencies,
 			exported_functions,
+			exported_object_dependencies,
 			exported_objects,
+			object_dependency_groups,
+		};
+		let linked_module = LinkedModule {
+			exports: exports.clone(),
 			functions: program.functions,
 			object_display_names,
 			objects: program.objects,
 			source_file,
 			with_declarations: program.with_declarations,
 		};
+		self.declared_modules.insert(module_key.clone(), exports.clone());
 		self.loaded_modules.insert(module_key, linked_module.clone());
-		Ok(linked_module)
+		Ok(exports)
+	}
+
+	fn object_import_origin(
+		&self,
+		target_name: &str,
+		use_declaration: &ast::UseDeclaration,
+		kind: ObjectImportKind,
+		position: usize,
+	) -> ObjectImportOrigin {
+		ObjectImportOrigin {
+			declaration_source_name: self.object_target_source_names.get(target_name)
+				.cloned()
+				.unwrap_or_else(|| use_declaration.module_path.clone()),
+			import_module_path: use_declaration.module_path.clone(),
+			kind,
+			position,
+		}
+	}
+}
+
+#[derive(Clone)]
+struct ObjectImportOrigin {
+	declaration_source_name: String,
+	import_module_path: String,
+	kind: ObjectImportKind,
+	position: usize,
+}
+
+impl ObjectImportOrigin {
+	fn automatic_import_description(&self, object_name: &str) -> String {
+		let ObjectImportKind::Automatic {
+			trigger_kind,
+			trigger_name,
+		} = &self.kind else {
+			panic!("Explicit object import requested as an automatic import description.");
+		};
+
+		format!(
+			"Automatic import of object type `{}` introduced by {} `{}` from module `{}`",
+			self.qualified_name(object_name),
+			trigger_kind,
+			trigger_name,
+			self.import_module_path,
+		)
+	}
+
+	fn import_description(&self, object_name: &str) -> String {
+		match &self.kind {
+			ObjectImportKind::Automatic { .. } => {
+				self.automatic_import_description(object_name)
+			}
+			ObjectImportKind::Explicit => format!(
+				"imported object type `{}` from module `{}`",
+				self.qualified_name(object_name),
+				self.import_module_path,
+			),
+		}
+	}
+
+	fn qualified_name(&self, object_name: &str) -> String {
+		let module_name = Path::new(&self.declaration_source_name)
+			.file_stem()
+			.and_then(|name| name.to_str())
+			.unwrap_or(self.declaration_source_name.as_str());
+		format!("{module_name}.{object_name}")
 	}
 }
 
@@ -701,14 +1117,18 @@ fn analyze_source_local_usage_with_name_and_schema(
 ) -> Result<SourceAnalysis, TabloError> {
 	let source = SourceText::new(source);
 	let program = parse_source_text(&source)?;
+
 	validate_module_graph(&program, source_name).map_err(TabloError::Compile)?;
+
 	let linked_program = link_program_modules(&program, &source, source_name).map_err(TabloError::Compile)?;
 	let mut analyzer = SemanticAnalyzer::new();
+
 	analyzer.set_function_overload_aliases(linked_program.function_overload_aliases.clone());
 	analyzer.set_root_source_name(Some(linked_program.root_source_file.display_name().to_string()));
 	analyzer.set_top_level_function_source_names(linked_program.top_level_function_source_names.clone());
 	analyzer.set_top_level_object_display_names(linked_program.top_level_object_display_names.clone());
 	analyzer.set_top_level_object_source_names(linked_program.top_level_object_source_names.clone());
+
 	let semantic_program = analyzer.analyze_program_with_schema(&linked_program.program, schema_catalog)
 		.map_err(TabloError::Compile)?;
 	let local_usage = analyze_program_local_usage(&linked_program.program, &semantic_program);
@@ -749,6 +1169,100 @@ fn attach_source_debug_info(program: &mut Program, linked_program: &LinkedProgra
 	}
 }
 
+fn build_declared_module_exports(
+	program: &ast::AstProgram,
+	object_renames: &BTreeMap<String, String>,
+	function_renames: &BTreeMap<String, String>,
+) -> ModuleExports {
+	let exported_functions = program.functions.iter()
+		.filter(|function| function.visibility == ast::Visibility::Public)
+		.filter_map(|function| {
+			function_renames.get(&function.name)
+				.map(|target_name| (function.name.clone(), target_name.clone()))
+		})
+		.collect::<BTreeMap<_, _>>();
+	let exported_objects = program.objects.iter()
+		.filter(|object| {
+			object.containing_object_name.is_none()
+				&& object.visibility == ast::Visibility::Public
+		})
+		.filter_map(|object| {
+			object_renames.get(&object.name)
+				.map(|target_name| (object.name.clone(), target_name.clone()))
+		})
+		.collect::<BTreeMap<_, _>>();
+
+	let objects_by_name = program.objects.iter()
+		.map(|object| (object.name.as_str(), object))
+		.collect::<BTreeMap<_, _>>();
+	let exported_object_dependencies = exported_objects.keys()
+		.map(|exported_name| {
+			let mut dependency_names = BTreeSet::new();
+
+			collect_public_object_dependency_targets(
+				exported_name,
+				&objects_by_name,
+				&mut dependency_names,
+			);
+
+			let dependencies = dependency_names.into_iter()
+				.filter_map(|name| {
+					object_renames.get(&name)
+						.map(|target_name| (name, target_name.clone()))
+				})
+				.collect::<BTreeMap<_, _>>();
+			(exported_name.clone(), dependencies)
+		})
+		.collect::<BTreeMap<_, _>>();
+
+	let exported_function_object_dependencies = program.functions.iter()
+		.filter(|function| function.visibility == ast::Visibility::Public)
+		.map(|function| {
+			let mut referenced_names = BTreeSet::new();
+
+			collect_function_object_type_names(function, &mut referenced_names);
+
+			let mut dependencies = referenced_names.iter()
+				.filter_map(|name| {
+					object_renames.get(name)
+						.map(|target_name| (name.clone(), target_name.clone()))
+				})
+				.collect::<BTreeMap<_, _>>();
+
+			for object_dependencies in exported_object_dependencies.values() {
+				if object_dependencies.keys().any(|name| referenced_names.contains(name)) {
+					dependencies.extend(object_dependencies.clone());
+				}
+			}
+			(function.name.clone(), dependencies)
+		})
+		.collect();
+
+	let mut object_dependency_groups = BTreeMap::new();
+
+	for (exported_name, target_name) in &exported_objects {
+		let Some(dependencies) = exported_object_dependencies.get(exported_name) else {
+			continue;
+		};
+		object_dependency_groups.insert(target_name.clone(), dependencies.clone());
+	}
+
+	for dependencies in exported_object_dependencies.values() {
+		for target_name in dependencies.values() {
+			object_dependency_groups.entry(target_name.clone())
+				.or_insert_with(|| dependencies.clone());
+		}
+	}
+
+	ModuleExports {
+		exported_function_object_dependencies,
+		exported_functions,
+		exported_object_dependencies,
+		exported_objects,
+		object_dependency_groups,
+	}
+}
+
 fn build_top_level_function_renames(program: &ast::AstProgram, module_id: u32) -> BTreeMap<String, String> {
 	program.functions.iter()
 		.map(|function| {
@@ -775,6 +1289,42 @@ fn canonical_module_key(module_path: &Path) -> PathBuf {
 	canonicalize_or_original(module_path)
 }
 
+fn collect_data_type_object_names(
+	data_type: &ast::DataType,
+	names: &mut BTreeSet<String>,
+) {
+	match data_type {
+		ast::DataType::Array(element_type)
+		| ast::DataType::Nullable(element_type)
+		| ast::DataType::Range(element_type) => {
+			collect_data_type_object_names(element_type, names);
+		}
+		ast::DataType::Object(name) => {
+			names.insert(name.name.clone());
+		}
+		ast::DataType::Union(members) => {
+			for member in members {
+				collect_data_type_object_names(member, names);
+			}
+		}
+		_ => {}
+	}
+}
+
+fn collect_function_object_type_names(
+	function: &ast::FunctionDeclaration,
+	names: &mut BTreeSet<String>,
+) {
+	for parameter in &function.parameters {
+		if let ast::FunctionParameterType::Value(data_type) = &parameter.data_type {
+			collect_data_type_object_names(data_type, names);
+		}
+	}
+	if let Some(return_type) = &function.return_type {
+		collect_data_type_object_names(return_type, names);
+	}
+}
+
 fn collect_function_source_indices(program: &ast::AstProgram, source_file_index: u32) -> Vec<u32> {
 	let mut source_indices = Vec::new();
 
@@ -792,6 +1342,35 @@ fn collect_local_function_names(statements: &[ast::Statement]) -> Vec<String> {
 			_ => None,
 		})
 		.collect()
+}
+
+fn collect_public_object_dependency_targets(
+	object_name: &str,
+	objects_by_name: &BTreeMap<&str, &ast::ObjectDeclaration>,
+	targets: &mut BTreeSet<String>,
+) {
+	if !targets.insert(object_name.to_string()) {
+		return;
+	}
+	let Some(object) = objects_by_name.get(object_name) else {
+		return;
+	};
+
+	let mut referenced_names = BTreeSet::new();
+	match &object.shape {
+		ast::ObjectDeclarationShape::Array(element_type) => {
+			collect_data_type_object_names(element_type, &mut referenced_names);
+		}
+		ast::ObjectDeclarationShape::Fields(fields) => {
+			for field in fields.iter().filter(|field| field.visibility == ast::Visibility::Public) {
+				collect_data_type_object_names(&field.data_type, &mut referenced_names);
+			}
+		}
+	}
+
+	for referenced_name in referenced_names {
+		collect_public_object_dependency_targets(&referenced_name, objects_by_name, targets);
+	}
 }
 
 fn compile_ast_program_with_schema_and_analyzer(
@@ -1113,18 +1692,41 @@ fn link_program_modules(
 	let root_path = Path::new(source_name);
 	let root_directory = root_path.parent().unwrap_or_else(|| Path::new("."));
 	let mut linker = ModuleLinker::default();
+	let root_module_key = canonical_module_key(root_path);
+	let root_object_names = program.objects.iter()
+		.map(|object| (object.name.clone(), object.name.clone()))
+		.collect::<BTreeMap<_, _>>();
+	let root_function_names = program.functions.iter()
+		.map(|function| (function.name.clone(), function.name.clone()))
+		.collect::<BTreeMap<_, _>>();
+
+	for target_name in root_object_names.values() {
+		linker.object_target_source_names.insert(
+			target_name.clone(),
+			root_module_key.display().to_string(),
+		);
+	}
+
+	linker.declared_modules.insert(
+		root_module_key,
+		build_declared_module_exports(program, &root_object_names, &root_function_names),
+	);
 	let import_bindings = linker.collect_import_bindings(
 		program,
 		root_directory,
+		&root_object_names,
 		&root_display_name,
 	)?;
 	let root_function_targets = program.functions.iter()
 		.map(|function| (function.name.clone(), function.name.clone()))
 		.collect();
+
 	linker.include_local_function_overloads(&import_bindings.functions, &root_function_targets);
+
 	let mut linked_program = program.clone();
 
 	rewrite_object_declaration_type_names(&mut linked_program.objects, &import_bindings.objects, false);
+
 	for function in &mut linked_program.functions {
 		rewrite_function_declaration_calls(
 			function,
@@ -1167,6 +1769,7 @@ fn link_program_modules(
 		&linked_program.with_declarations,
 		&linker.linked_with_declarations(),
 	);
+
 	let imported_source_files = linker.linked_source_files();
 	let mut top_level_function_source_names = Vec::new();
 	let mut top_level_object_display_names = linker.linked_object_display_names();
@@ -2169,6 +2772,77 @@ mod tests {
 	}
 
 	#[test]
+	fn automatically_imports_object_types_from_function_signatures() {
+		let root_path = write_test_source_file(
+			"automatically_imports_object_types_from_function_signatures_root",
+			"main.tablo",
+			"use Make, Read from './Types';\n\
+			fn Main(args: [text]): int {\n\
+				var value: Shared = Make();\n\
+				return Read(value);\n\
+			}",
+		);
+		let types_path = root_path.parent().unwrap().join("Types.tablo");
+		fs::write(
+			&types_path,
+			"pub obj Shared { pub number: int = 11, };\n\
+			pub fn Make(): Shared { return Shared {}; }\n\
+			pub fn Read(value: Shared): int { return value.number; }",
+		).unwrap();
+
+		let program = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap();
+		let result = run_program(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(11)));
+
+		let _ = fs::remove_file(types_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
+	}
+
+	#[test]
+	fn automatically_imports_object_types_from_public_object_fields() {
+		let root_path = write_test_source_file(
+			"automatically_imports_object_types_from_public_object_fields_root",
+			"main.tablo",
+			"use Envelope from './Types';\n\
+			fn Main(args: [text]): int {\n\
+				var detail: Detail = Detail {};\n\
+				var payload: Envelope.Payload = Envelope.Payload { detail: detail };\n\
+				var envelope: Envelope = Envelope { payload: payload };\n\
+				return envelope.payload.detail.number;\n\
+			}",
+		);
+		let types_path = root_path.parent().unwrap().join("Types.tablo");
+		fs::write(
+			&types_path,
+			"pub obj Detail { pub number: int = 13, };\n\
+			pub obj Envelope {\n\
+				pub payload: obj Payload { pub detail: Detail, },\n\
+			};",
+		).unwrap();
+
+		let program = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap();
+		let result = run_program(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(13)));
+
+		let _ = fs::remove_file(types_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
+	}
+
+	#[test]
 	fn clamps_negative_for_record_limit_to_zero_before_query_execution() {
 		let database_path = create_sqlite_test_database(
 			"clamps_negative_for_record_limit_to_zero_before_query_execution",
@@ -2274,6 +2948,125 @@ mod tests {
 
 		assert_eq!(warnings.len(), 1);
 		assert!(warnings[0].message.contains("`locked` is always false"));
+	}
+
+	#[test]
+	fn compiles_circular_module_function_calls() {
+		let root_path = write_test_source_file(
+			"compiles_circular_module_function_calls_root",
+			"main.tablo",
+			"use RunLeft from './Left';\n\
+			fn Main(args: [text]): int { return RunLeft(4); }",
+		);
+		let left_path = root_path.parent().unwrap().join("Left.tablo");
+		let right_path = root_path.parent().unwrap().join("Right.tablo");
+
+		fs::write(
+			&left_path,
+			"use RunRight from './Right';\n\
+			pub fn RunLeft(value: int): int {\n\
+				if value == 0 { return value; }\n\
+				return RunRight(value - 1);\n\
+			}",
+		).unwrap();
+
+		fs::write(
+			&right_path,
+			"use RunLeft from './Left';\n\
+			pub fn RunRight(value: int): int {\n\
+				if value == 0 { return value; }\n\
+				return RunLeft(value - 1);\n\
+			}",
+		).unwrap();
+
+		let program = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap();
+		let result = run_program(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(0)));
+
+		let _ = fs::remove_file(left_path);
+		let _ = fs::remove_file(right_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
+	}
+
+	#[test]
+	fn compiles_circular_module_object_types() {
+		let root_path = write_test_source_file(
+			"compiles_circular_module_object_types_root",
+			"main.tablo",
+			"use Left from './Left';\n\
+			fn Main(args: [text]): int {\n\
+				var left: Left = Left {};\n\
+				var right: Right = Right {};\n\
+				return left.right == null and right.left == null ? 1 : 0;\n\
+			}",
+		);
+		let left_path = root_path.parent().unwrap().join("Left.tablo");
+		let right_path = root_path.parent().unwrap().join("Right.tablo");
+
+		fs::write(
+			&left_path,
+			"use Right from './Right';\n\
+			pub obj Left { pub right: Right?, };",
+		).unwrap();
+		fs::write(
+			&right_path,
+			"use Left from './Left';\n\
+			pub obj Right { pub left: Left?, };",
+		).unwrap();
+
+		let program = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap();
+		let result = run_program(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+
+		let _ = fs::remove_file(left_path);
+		let _ = fs::remove_file(right_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
+	}
+
+	#[test]
+	fn compiles_module_that_imports_from_the_root_module() {
+		let root_path = write_test_source_file(
+			"compiles_module_that_imports_from_the_root_module",
+			"main.tablo",
+			"use Run from './Helper';\n\
+			pub fn RootValue(value: int): int { return value + 1; }\n\
+			fn Main(args: [text]): int { return Run(3); }",
+		);
+		let helper_path = root_path.parent().unwrap().join("Helper.tablo");
+
+		fs::write(
+			&helper_path,
+			"use RootValue from './main';\n\
+			pub fn Run(value: int): int { return RootValue(value); }",
+		).unwrap();
+
+		let program = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap();
+		let result = run_program(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(4)));
+
+		let _ = fs::remove_file(helper_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
 	}
 
 	#[test]
@@ -2671,6 +3464,51 @@ mod tests {
 	}
 
 	#[test]
+	fn deduplicates_object_dependencies_imported_through_diamond_module_graph() {
+		let root_path = write_test_source_file(
+			"deduplicates_object_dependencies_imported_through_diamond_module_graph_root",
+			"main.tablo",
+			"use MakeLeft from './Left';\n\
+			use MakeRight from './Right';\n\
+			fn Main(args: [text]): int {\n\
+				var left: Shared = MakeLeft();\n\
+				var right: Shared = MakeRight();\n\
+				return left == right ? left.number : 0;\n\
+			}",
+		);
+		let types_path = root_path.parent().unwrap().join("Types.tablo");
+		let left_path = root_path.parent().unwrap().join("Left.tablo");
+		let right_path = root_path.parent().unwrap().join("Right.tablo");
+		fs::write(&types_path, "pub obj Shared { pub number: int = 23, };").unwrap();
+		fs::write(
+			&left_path,
+			"use Shared from './Types';\n\
+			pub fn MakeLeft(): Shared { return Shared {}; }",
+		).unwrap();
+		fs::write(
+			&right_path,
+			"use Shared from './Types';\n\
+			pub fn MakeRight(): Shared { return Shared {}; }",
+		).unwrap();
+
+		let program = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap();
+		let result = run_program(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(23)));
+
+		let _ = fs::remove_file(types_path);
+		let _ = fs::remove_file(left_path);
+		let _ = fs::remove_file(right_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
+	}
+
+	#[test]
 	fn defaults_omitted_nullable_date_field_to_null() {
 		let result = evaluate_snippet(
 			"obj Example { when: date?, };\nvar example: Example = Example { };\nexample.when"
@@ -2741,6 +3579,43 @@ mod tests {
 		let _ = std::fs::remove_file(&database_path);
 
 		assert_eq!(result, Some(Value::Integer(0)));
+	}
+
+	#[test]
+	fn does_not_reexport_unrelated_object_imports() {
+		let root_path = write_test_source_file(
+			"does_not_reexport_unrelated_object_imports_root",
+			"main.tablo",
+			"use Number from './Facade';\n\
+			fn Main(args: [text]): int {\n\
+				var shared: Shared;\n\
+				return Number();\n\
+			}",
+		);
+		let types_path = root_path.parent().unwrap().join("Types.tablo");
+		let facade_path = root_path.parent().unwrap().join("Facade.tablo");
+		fs::write(&types_path, "pub obj Shared { pub number: int, };").unwrap();
+		fs::write(
+			&facade_path,
+			"use Shared from './Types';\n\
+			pub fn Number(): int { return 1; }",
+		).unwrap();
+		let root_source = fs::read_to_string(&root_path).unwrap();
+
+		let error = compile_source_to_program_with_name_and_schema(
+			root_source.clone(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap_err();
+		let formatted = error.format_with_source_name(&root_source, Some(root_path.to_str().unwrap()));
+
+		assert!(formatted.contains("Object type `Shared` is not declared in this module."), "{formatted}");
+
+		let _ = fs::remove_file(types_path);
+		let _ = fs::remove_file(facade_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
 	}
 
 	#[test]
@@ -3232,6 +4107,42 @@ mod tests {
 
 		assert!(result.is_err());
 		assert_eq!(inserted_count, 1);
+	}
+
+	#[test]
+	fn keeps_private_field_object_types_out_of_importing_scope() {
+		let root_path = write_test_source_file(
+			"keeps_private_field_object_types_out_of_importing_scope_root",
+			"main.tablo",
+			"use Container from './Types';\n\
+			fn Main(args: [text]): int {\n\
+				var hidden: Hidden;\n\
+				return 0;\n\
+			}",
+		);
+		let types_path = root_path.parent().unwrap().join("Types.tablo");
+		fs::write(
+			&types_path,
+			"obj Hidden { value: int, };\n\
+			pub obj Container { hidden: Hidden, };",
+		).unwrap();
+
+		let error = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap_err();
+		let formatted = error.format_with_source_name(
+			&fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+		);
+
+		assert!(formatted.contains("Object type `Hidden` is not declared in this module."), "{formatted}");
+
+		let _ = fs::remove_file(types_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
 	}
 
 	#[test]
@@ -3798,6 +4709,49 @@ mod tests {
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn preserves_object_dependency_closure_through_intermediary_module() {
+		let root_path = write_test_source_file(
+			"preserves_object_dependency_closure_through_intermediary_module_root",
+			"main.tablo",
+			"use Make from './Facade';\n\
+			fn Main(args: [text]): int {\n\
+				var wrapper: Wrapper = Make();\n\
+				var shared: Shared = wrapper.shared;\n\
+				var detail: Detail = shared.detail;\n\
+				return detail.number;\n\
+			}",
+		);
+		let types_path = root_path.parent().unwrap().join("Types.tablo");
+		let facade_path = root_path.parent().unwrap().join("Facade.tablo");
+		fs::write(
+			&types_path,
+			"pub obj Detail { pub number: int = 19, };\n\
+			pub obj Shared { pub detail: Detail, };",
+		).unwrap();
+		fs::write(
+			&facade_path,
+			"use Shared from './Types';\n\
+			pub obj Wrapper { pub shared: Shared, };\n\
+			pub fn Make(): Wrapper { return Wrapper {}; }",
+		).unwrap();
+
+		let program = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap();
+		let result = run_program(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(19)));
+
+		let _ = fs::remove_file(types_path);
+		let _ = fs::remove_file(facade_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
 	}
 
 	#[test]
@@ -5074,6 +6028,119 @@ mod tests {
 	}
 
 	#[test]
+	fn reports_ambiguous_explicit_object_imports() {
+		let root_path = write_test_source_file(
+			"reports_ambiguous_explicit_object_imports_root",
+			"main.tablo",
+			"use Shared from './Left';\n\
+			use Shared from './Right';\n\
+			fn Main(args: [text]): int { return 0; }",
+		);
+		let left_path = root_path.parent().unwrap().join("Left.tablo");
+		let right_path = root_path.parent().unwrap().join("Right.tablo");
+		fs::write(&left_path, "pub obj Shared { pub left: int, };").unwrap();
+		fs::write(&right_path, "pub obj Shared { pub right: int, };").unwrap();
+		let root_source = fs::read_to_string(&root_path).unwrap();
+
+		let error = compile_source_to_program_with_name_and_schema(
+			root_source.clone(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap_err();
+		let formatted = error.format_with_source_name(&root_source, Some(root_path.to_str().unwrap()));
+
+		assert!(
+			formatted.contains(
+				"Object type `Shared` is ambiguous because `Left.Shared` from module `./Left` and `Right.Shared` from module `./Right` are both imported into this scope."
+			),
+			"{formatted}",
+		);
+
+		let _ = fs::remove_file(left_path);
+		let _ = fs::remove_file(right_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
+	}
+
+	#[test]
+	fn reports_automatic_object_import_conflicting_with_explicit_import() {
+		let root_path = write_test_source_file(
+			"reports_automatic_object_import_conflicting_with_explicit_import_root",
+			"main.tablo",
+			"use Shared from './Left';\n\
+			use Make from './Right';\n\
+			fn Main(args: [text]): int { return 0; }",
+		);
+		let left_path = root_path.parent().unwrap().join("Left.tablo");
+		let right_path = root_path.parent().unwrap().join("Right.tablo");
+		fs::write(&left_path, "pub obj Shared { pub left: int, };").unwrap();
+		fs::write(
+			&right_path,
+			"pub obj Shared { pub right: int, };\n\
+			pub fn Make(): Shared { return Shared {}; }",
+		).unwrap();
+		let root_source = fs::read_to_string(&root_path).unwrap();
+
+		let error = compile_source_to_program_with_name_and_schema(
+			root_source.clone(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap_err();
+		let formatted = error.format_with_source_name(&root_source, Some(root_path.to_str().unwrap()));
+
+		assert!(
+			formatted.contains(
+				"Automatic import of object type `Right.Shared` introduced by function `Make` from module `./Right` conflicts with imported object type `Left.Shared` from module `./Left`."
+			),
+			"{formatted}",
+		);
+
+		let _ = fs::remove_file(left_path);
+		let _ = fs::remove_file(right_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
+	}
+
+	#[test]
+	fn reports_automatic_object_import_conflicting_with_local_object() {
+		let root_path = write_test_source_file(
+			"reports_automatic_object_import_conflicting_with_local_object_root",
+			"main.tablo",
+			"use Make from './Remote';\n\
+			obj Shared { local: int, };\n\
+			fn Main(args: [text]): int { return 0; }",
+		);
+		let remote_path = root_path.parent().unwrap().join("Remote.tablo");
+		fs::write(
+			&remote_path,
+			"pub obj Shared { pub remote: int, };\n\
+			pub fn Make(): Shared { return Shared {}; }",
+		).unwrap();
+		let root_source = fs::read_to_string(&root_path).unwrap();
+
+		let error = compile_source_to_program_with_name_and_schema(
+			root_source.clone(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap_err();
+		let formatted = error.format_with_source_name(&root_source, Some(root_path.to_str().unwrap()));
+
+		assert!(
+			formatted.contains(
+				"Automatic import of object type `Remote.Shared` introduced by function `Make` from module `./Remote` conflicts with local object `Shared`."
+			),
+			"{formatted}",
+		);
+
+		let _ = fs::remove_file(remote_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
+	}
+
+	#[test]
 	fn reports_unsupported_postgresql_query_expression_at_its_source_position() {
 		let source = "with exampledb;\ncount Customers where len(Name) > 0";
 		let error = compile_snippet_with_schema_fixture_and_backends(
@@ -5181,6 +6248,39 @@ mod tests {
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn retains_private_field_object_types_as_compiler_dependencies() {
+		let root_path = write_test_source_file(
+			"retains_private_field_object_types_as_compiler_dependencies_root",
+			"main.tablo",
+			"use Container from './Types';\n\
+			fn Main(args: [text]): int {\n\
+				var container: Container = Container {};\n\
+				return 1;\n\
+			}",
+		);
+		let types_path = root_path.parent().unwrap().join("Types.tablo");
+		fs::write(
+			&types_path,
+			"obj Hidden { value: int = 17, };\n\
+			pub obj Container { hidden: Hidden, };",
+		).unwrap();
+
+		let program = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap();
+		let result = run_program(&program).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+
+		let _ = fs::remove_file(types_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
 	}
 
 	#[test]
