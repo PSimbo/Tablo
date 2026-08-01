@@ -581,7 +581,7 @@ impl DapServer {
 				})
 			}).collect()),
 			Value::Null => Ok(Vec::new()),
-			Value::Object(fields) => Ok(fields.iter().map(|(name, value)| {
+			Value::Object(object) => Ok(object.fields.iter().map(|(name, value)| {
 				let child_reference = self.variables_reference_for_value(value.clone());
 				json!({
 					"name": name,

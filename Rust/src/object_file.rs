@@ -487,16 +487,10 @@ impl<'a> ObjectFileReader<'a> {
 			}),
 			OPCODE_LOCKED => Ok(Instruction::Locked),
 			OPCODE_MAKE_ARRAY => Ok(Instruction::MakeArray(self.read_u32()?)),
-			OPCODE_MAKE_OBJECT => {
-				let field_count = self.read_u32()? as usize;
-				let mut field_names = Vec::with_capacity(field_count);
-
-				for _ in 0..field_count {
-					field_names.push(self.read_string()?);
-				}
-
-				Ok(Instruction::MakeObject(field_names))
-			}
+			OPCODE_MAKE_OBJECT => Ok(Instruction::MakeObject {
+				object_type_id: ObjectTypeId::from_raw(self.read_u32()?),
+				field_names: self.read_string_vec()?,
+			}),
 			OPCODE_MAKE_RECORD_POINTER => Ok(Instruction::MakeRecordPointer {
 				field_names: self.read_string_vec()?,
 				field_types: {
@@ -993,8 +987,9 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.push(OPCODE_MAKE_ARRAY);
 			bytes.extend_from_slice(&element_count.to_le_bytes());
 		}
-		Instruction::MakeObject(field_names) => {
+		Instruction::MakeObject { field_names, object_type_id } => {
 			bytes.push(OPCODE_MAKE_OBJECT);
+			bytes.extend_from_slice(&object_type_id.raw().to_le_bytes());
 			bytes.extend_from_slice(&(field_names.len() as u32).to_le_bytes());
 
 			for field_name in field_names {
@@ -1718,10 +1713,16 @@ mod tests {
 	fn round_trips_program_bytes_with_object_field_path() {
 		let program = Program::new(vec![
 			Instruction::PushInteger(1),
-			Instruction::MakeObject(vec![String::from("value")]),
+			Instruction::MakeObject {
+				field_names: vec![String::from("value")],
+				object_type_id: ObjectTypeId::from_raw(1),
+			},
 			Instruction::LoadFieldPath(vec![String::from("value")]),
 			Instruction::PushInteger(2),
-			Instruction::MakeObject(vec![String::from("value")]),
+			Instruction::MakeObject {
+				field_names: vec![String::from("value")],
+				object_type_id: ObjectTypeId::from_raw(2),
+			},
 			Instruction::PushInteger(3),
 			Instruction::StoreFieldPath(vec![String::from("value")]),
 		]);

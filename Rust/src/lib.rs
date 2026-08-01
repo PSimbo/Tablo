@@ -2364,6 +2364,18 @@ mod tests {
 		run_program(&program)
 	}
 
+	fn nominal_object_equality_program() -> &'static str {
+		"obj Left { value: int, };\n\
+		obj Right { value: int, };\n\
+		fn Main(args: [text]): int {\n\
+			var leftA: any = Left { value: 1 };\n\
+			var leftB: any = Left { value: 1 };\n\
+			var rightValue: any = Right { value: 1 };\n\
+			if leftA != leftB { return -1; }\n\
+			return leftA == rightValue ? -2 : 1;\n\
+		}"
+	}
+
 	fn object_type_system_regression_program() -> &'static str {
 		"obj Model {\n\
 			label: text = 'default',\n\
@@ -2920,6 +2932,13 @@ mod tests {
 	#[test]
 	fn compares_nested_any_values_recursively() {
 		let result = run("fn Main(args: [text]): int { var left: [any] = [1]; var right: [any] = [1.0]; return left == right ? 1 : 0; }").unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn compares_objects_stored_in_any_using_nominal_identity() {
+		let result = run(nominal_object_equality_program()).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
 	}
@@ -4712,6 +4731,18 @@ mod tests {
 	}
 
 	#[test]
+	fn preserves_nominal_object_equality_after_object_round_trip() {
+		let output_path = unique_test_output_path("preserves_nominal_object_equality_after_object_round_trip");
+
+		compile(nominal_object_equality_program(), &output_path).unwrap();
+
+		let result = run_file(&output_path).unwrap();
+		let _ = std::fs::remove_file(&output_path);
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
 	fn preserves_object_dependency_closure_through_intermediary_module() {
 		let root_path = write_test_source_file(
 			"preserves_object_dependency_closure_through_intermediary_module_root",
@@ -4752,6 +4783,25 @@ mod tests {
 		let _ = fs::remove_file(facade_path);
 		let _ = fs::remove_file(&root_path);
 		let _ = fs::remove_dir(root_path.parent().unwrap());
+	}
+
+	#[test]
+	fn preserves_object_value_semantics_across_function_calls_and_nested_mutation() {
+		let result = run(
+			"obj Child { value: int, };\n\
+			obj Model { child: Child, };\n\
+			fn Changed(model: Model): int {\n\
+				model.child.value = 2;\n\
+				return model.child.value;\n\
+			}\n\
+			fn Main(args: [text]): int {\n\
+				var original: Model = Model { child: Child { value: 1 } };\n\
+				var changed: int = Changed(original);\n\
+				return original.child.value * 10 + changed;\n\
+			}"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(12)));
 	}
 
 	#[test]
@@ -8021,12 +8071,15 @@ mod tests {
 		let result = evaluate_snippet(
 			"obj Address { line1: text = 'Unknown', };\nobj Person { name: text = '', address: Address, };\nvar person: Person = Person { name: 'Alice' };\nperson.address"
 		).unwrap();
+		let Some(Value::Object(address)) = result else {
+			panic!("Expected an object value.");
+		};
 
 		assert_eq!(
-			result,
-			Some(Value::Object(std::collections::BTreeMap::from([
+			address.fields,
+			std::collections::BTreeMap::from([
 				(String::from("line1"), Value::Text(String::from("Unknown"))),
-			]))),
+			]),
 		);
 	}
 

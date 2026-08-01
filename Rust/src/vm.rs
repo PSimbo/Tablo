@@ -716,7 +716,7 @@ impl VirtualMachine {
 				self.stack.push(Value::Array(values));
 				Ok(ExecutionOutcome::Continue(None))
 			}
-			Instruction::MakeObject(field_names) => {
+			Instruction::MakeObject { field_names, object_type_id } => {
 				let mut values = Vec::with_capacity(field_names.len());
 
 				for _ in 0..field_names.len() {
@@ -725,7 +725,7 @@ impl VirtualMachine {
 
 				values.reverse();
 				let fields = field_names.iter().cloned().zip(values).collect();
-				self.stack.push(Value::Object(fields));
+				self.stack.push(Value::Object(ObjectValue::new(*object_type_id, fields)));
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::MakeRange => {
@@ -2198,8 +2198,8 @@ fn field_path_exists(mut value: Value, field_path: &[String], instruction_index:
 
 		value = match value {
 			Value::Null => return Ok(false),
-			Value::Object(fields) => {
-				let Some(field_value) = fields.get(field_name) else {
+			Value::Object(object) => {
+				let Some(field_value) = object.fields.get(field_name) else {
 					return Ok(false);
 				};
 
@@ -2385,7 +2385,7 @@ fn load_field_path_value(object: Value, field_path: &[String], instruction_index
 
 fn load_field_value(object: Value, field_name: &str, instruction_index: usize) -> Result<Value, VmError> {
 	match object {
-		Value::Object(fields) => fields.get(field_name).cloned().ok_or(vm_error(
+		Value::Object(object) => object.fields.get(field_name).cloned().ok_or(vm_error(
 			instruction_index,
 			format!("Object does not contain a field named `{field_name}`."),
 		)),
@@ -2718,7 +2718,7 @@ fn store_field_path_into_object(
 	value: Value,
 	instruction_index: usize,
 ) -> Result<Value, VmError> {
-	let Value::Object(mut fields) = object else {
+	let Value::Object(mut object) = object else {
 		return Err(vm_error(
 			instruction_index,
 			String::from("Field assignment requires an object operand."),
@@ -2733,24 +2733,24 @@ fn store_field_path_into_object(
 	};
 
 	if remaining_path.is_empty() {
-		if !fields.contains_key(field_name) {
+		if !object.fields.contains_key(field_name) {
 			return Err(vm_error(
 				instruction_index,
 				format!("Object does not contain a field named `{field_name}`."),
 			));
 		}
 
-		fields.insert(field_name.clone(), value);
-		return Ok(Value::Object(fields));
+		object.fields.insert(field_name.clone(), value);
+		return Ok(Value::Object(object));
 	}
 
-	let child = fields.remove(field_name).ok_or(vm_error(
+	let child = object.fields.remove(field_name).ok_or(vm_error(
 		instruction_index,
 		format!("Object does not contain a field named `{field_name}`."),
 	))?;
 	let updated_child = store_field_path_into_object(child, remaining_path, value, instruction_index)?;
-	fields.insert(field_name.clone(), updated_child);
-	Ok(Value::Object(fields))
+	object.fields.insert(field_name.clone(), updated_child);
+	Ok(Value::Object(object))
 }
 
 fn store_field_path_into_record_pointer(
@@ -2945,10 +2945,10 @@ fn stringify_value(value: &Value) -> String {
 		Value::IntegerRange(value) => value.to_string(),
 		Value::Iterator(_) => String::from("<iterator>"),
 		Value::Null => String::from("null"),
-		Value::Object(fields) => {
+		Value::Object(object) => {
 			let mut result = String::from("{");
 
-			for (index, (name, value)) in fields.iter().enumerate() {
+			for (index, (name, value)) in object.fields.iter().enumerate() {
 				if index > 0 {
 					result.push_str(", ");
 				}
@@ -3057,12 +3057,12 @@ fn values_equal(lhs: &Value, rhs: &Value, instruction_index: usize) -> Result<bo
 		(Value::Iterator(lhs), Value::Iterator(rhs)) => Ok(lhs == rhs),
 		(Value::Null, Value::Null) => Ok(true),
 		(Value::Object(lhs), Value::Object(rhs)) => {
-			if lhs.len() != rhs.len() {
+			if lhs.object_type_id != rhs.object_type_id || lhs.fields.len() != rhs.fields.len() {
 				return Ok(false);
 			}
 
-			for (name, lhs) in lhs {
-				let Some(rhs) = rhs.get(name) else {
+			for (name, lhs) in &lhs.fields {
+				let Some(rhs) = rhs.fields.get(name) else {
 					return Ok(false);
 				};
 
@@ -3199,7 +3199,7 @@ mod tests {
 					is_const: false,
 					name: String::from("config"),
 					slot: 1,
-					value: Value::Object(BTreeMap::from([
+					value: Value::Object(ObjectValue::new(ObjectTypeId::from_raw(1), BTreeMap::from([
 						(
 							String::from("Names"),
 							Value::Array(vec![
@@ -3207,7 +3207,7 @@ mod tests {
 								Value::Text(String::from("Bea")),
 							]),
 						),
-					])),
+					]))),
 				},
 			],
 			source_location: None,
@@ -3811,10 +3811,10 @@ mod tests {
 					is_const: false,
 					name: String::from("payload"),
 					slot: 0,
-					value: Value::Object(BTreeMap::from([
+					value: Value::Object(ObjectValue::new(ObjectTypeId::from_raw(1), BTreeMap::from([
 						(String::from("missingPath"), Value::Null),
 						(String::from("nullField"), Value::Null),
-					])),
+					]))),
 				},
 			],
 			source_location: None,

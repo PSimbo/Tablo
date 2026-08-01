@@ -64,7 +64,10 @@ pub enum Instruction {
 	},
 	Locked,
 	MakeArray(u32),
-	MakeObject(Vec<String>),
+	MakeObject {
+		field_names: Vec<String>,
+		object_type_id: ObjectTypeId,
+	},
 	MakeRange,
 	MakeRecordPointer {
 		field_names: Vec<String>,
@@ -116,6 +119,61 @@ pub enum Instruction {
 	UpdateRecord,
 	UpdateRecordIfChanged,
 	Xor,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ObjectDefaultValue {
+	Array(Vec<ObjectDefaultValue>),
+	Boolean(bool),
+	CurrentDate,
+	CurrentTime,
+	CurrentTimeTz,
+	CurrentTimestamp,
+	CurrentTimestampTz,
+	Date(crate::value::Date),
+	Decimal(crate::value::Decimal),
+	Enum {
+		backing_value: Constant,
+		enum_name: String,
+		variant_name: String,
+	},
+	Integer(i64),
+	Null,
+	Object {
+		fields: Vec<(String, ObjectDefaultValue)>,
+		object_type_id: ObjectTypeId,
+	},
+	Text(String),
+	Time(crate::value::Time),
+	TimeTz(crate::value::TimeTz),
+	Timestamp(crate::value::Timestamp),
+	TimestampTz(crate::value::TimestampTz),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ObjectTypeDescriptorShape {
+	Fields(Vec<ObjectFieldDescriptor>),
+	RootArray(ObjectValueTypeDescriptor),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ObjectValueTypeDescriptor {
+	Any,
+	Array(Box<ObjectValueTypeDescriptor>),
+	Bool,
+	Date,
+	Dec,
+	Enum(String),
+	Int,
+	Nullable(Box<ObjectValueTypeDescriptor>),
+	Object(ObjectTypeId),
+	Range(Box<ObjectValueTypeDescriptor>),
+	Text,
+	Time,
+	TimeTz,
+	Timestamp,
+	TimestampTz,
+	Union(Vec<ObjectValueTypeDescriptor>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -176,11 +234,77 @@ pub struct LocalVariableDebugInfo {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObjectFieldDescriptor {
+	pub(crate) data_type: ObjectValueTypeDescriptor,
+	pub(crate) explicit_default: Option<ObjectDefaultValue>,
+	pub(crate) is_quoted: bool,
+	pub(crate) name: String,
+	pub(crate) visibility: Visibility,
+}
+
+impl ObjectFieldDescriptor {
+	pub fn data_type(&self) -> &ObjectValueTypeDescriptor {
+		&self.data_type
+	}
+
+	pub fn explicit_default(&self) -> Option<&ObjectDefaultValue> {
+		self.explicit_default.as_ref()
+	}
+
+	pub fn is_quoted(&self) -> bool {
+		self.is_quoted
+	}
+
+	pub fn name(&self) -> &str {
+		&self.name
+	}
+
+	pub fn visibility(&self) -> Visibility {
+		self.visibility
+	}
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObjectTypeDescriptor {
+	pub(crate) display_name: String,
+	pub(crate) id: ObjectTypeId,
+	pub(crate) shape: ObjectTypeDescriptorShape,
+}
+
+impl ObjectTypeDescriptor {
+	pub fn display_name(&self) -> &str {
+		&self.display_name
+	}
+
+	pub fn id(&self) -> ObjectTypeId {
+		self.id
+	}
+
+	pub fn shape(&self) -> &ObjectTypeDescriptorShape {
+		&self.shape
+	}
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ObjectTypeId(pub(crate) u32);
+
+impl ObjectTypeId {
+	pub(crate) const fn from_raw(value: u32) -> Self {
+		Self(value)
+	}
+
+	pub(crate) const fn raw(self) -> u32 {
+		self.0
+	}
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Program {
 	constants: ConstantPool,
 	debug: DebugInfo,
 	entry_point: EntryPoint,
 	functions: Vec<CompiledFunction>,
+	object_types: Vec<ObjectTypeDescriptor>,
 	queries: Vec<LoweredBackendQuery>,
 }
 
@@ -306,6 +430,7 @@ impl Program {
 			debug,
 			entry_point: EntryPoint::Function(entry_function_index),
 			functions,
+			object_types: Vec::new(),
 			queries,
 		}
 	}
@@ -343,6 +468,7 @@ impl Program {
 			debug,
 			entry_point: EntryPoint::Code(entry),
 			functions,
+			object_types: Vec::new(),
 			queries,
 		}
 	}
@@ -423,6 +549,14 @@ impl Program {
 		}
 	}
 
+	pub fn object_type_descriptor(&self, id: ObjectTypeId) -> Option<&ObjectTypeDescriptor> {
+		self.object_types.iter().find(|descriptor| descriptor.id() == id)
+	}
+
+	pub fn object_type_descriptors(&self) -> &[ObjectTypeDescriptor] {
+		&self.object_types
+	}
+
 	pub fn queries(&self) -> &[LoweredBackendQuery] {
 		&self.queries
 	}
@@ -432,6 +566,11 @@ impl Program {
 			.get(body_index)
 			.map(|code_body| code_body.visible_locals(instruction_index))
 			.unwrap_or_default()
+	}
+
+	pub(crate) fn with_object_type_descriptors(mut self, object_types: Vec<ObjectTypeDescriptor>) -> Self {
+		self.object_types = object_types;
+		self
 	}
 }
 

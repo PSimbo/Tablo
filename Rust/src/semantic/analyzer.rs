@@ -2,7 +2,7 @@ use std::collections::{ BTreeMap, BTreeSet };
 
 use crate::ast::*;
 use crate::builtins::{ BuiltInFunction, BuiltInParameterType };
-use crate::bytecode::Constant;
+use crate::bytecode::*;
 use crate::compiler::CompileError;
 use crate::format_string::*;
 use crate::query::*;
@@ -129,9 +129,6 @@ pub struct NewRecordLayout {
 	pub record_type: RecordPointerType,
 	pub schema_is_implicit: bool,
 }
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct ObjectTypeId(u32);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordPointerBindingInfo {
@@ -1533,6 +1530,78 @@ impl SemanticAnalyzer {
 			.collect::<Vec<_>>()
 			.join(", ");
 		format!("{name}({parameters})")
+	}
+
+	fn describe_object_default_value(&self, expression: &Expr) -> ObjectDefaultValue {
+		match expression {
+			Expr::Array(array) => ObjectDefaultValue::Array(
+				array.elements.iter()
+					.map(|element| self.describe_object_default_value(element))
+					.collect(),
+			),
+			Expr::Boolean(value) => ObjectDefaultValue::Boolean(value.value),
+			Expr::Date(value) => ObjectDefaultValue::Date(value.value.clone()),
+			Expr::Decimal(value) => ObjectDefaultValue::Decimal(value.value.clone()),
+			Expr::Integer(value) => ObjectDefaultValue::Integer(value.value),
+			Expr::Null(_) => ObjectDefaultValue::Null,
+			Expr::ObjectConstruction(object) => ObjectDefaultValue::Object {
+				fields: object.fields.iter()
+					.map(|field| (
+						field.name.clone(),
+						self.describe_object_default_value(&field.value),
+					))
+					.collect(),
+				object_type_id: self.semantic_program.object_construction_type_id(object.position)
+					.expect("Validated object default is missing its resolved type identity."),
+			},
+			Expr::Text(value) => ObjectDefaultValue::Text(value.value.clone()),
+			Expr::Time(value) => ObjectDefaultValue::Time(value.value.clone()),
+			Expr::TimeTz(value) => ObjectDefaultValue::TimeTz(value.value.clone()),
+			Expr::Timestamp(value) => ObjectDefaultValue::Timestamp(value.value.clone()),
+			Expr::TimestampTz(value) => ObjectDefaultValue::TimestampTz(value.value.clone()),
+			_ => unreachable!("Validated object defaults contain only literal expressions."),
+		}
+	}
+
+	fn describe_object_value_type(&self, data_type: &DataType) -> ObjectValueTypeDescriptor {
+		match data_type {
+			DataType::Any => ObjectValueTypeDescriptor::Any,
+			DataType::Array(element_type) => ObjectValueTypeDescriptor::Array(Box::new(
+				self.describe_object_value_type(element_type),
+			)),
+			DataType::Bool => ObjectValueTypeDescriptor::Bool,
+			DataType::Date => ObjectValueTypeDescriptor::Date,
+			DataType::Dec => ObjectValueTypeDescriptor::Dec,
+			DataType::Int => ObjectValueTypeDescriptor::Int,
+			DataType::Nullable(inner) => ObjectValueTypeDescriptor::Nullable(Box::new(
+				self.describe_object_value_type(inner),
+			)),
+			DataType::Object(name) => {
+				if let Some(object_type_id) = self.lookup_object_type_id(name) {
+					ObjectValueTypeDescriptor::Object(object_type_id)
+				}
+				else {
+					debug_assert!(self.lookup_enum(name).is_some());
+					ObjectValueTypeDescriptor::Enum(name.to_string())
+				}
+			}
+			DataType::Range(element_type) => ObjectValueTypeDescriptor::Range(Box::new(
+				self.describe_object_value_type(element_type),
+			)),
+			DataType::Text => ObjectValueTypeDescriptor::Text,
+			DataType::Time => ObjectValueTypeDescriptor::Time,
+			DataType::TimeTz => ObjectValueTypeDescriptor::TimeTz,
+			DataType::Timestamp => ObjectValueTypeDescriptor::Timestamp,
+			DataType::TimestampTz => ObjectValueTypeDescriptor::TimestampTz,
+			DataType::Union(members) => ObjectValueTypeDescriptor::Union(
+				members.iter()
+					.map(|member| self.describe_object_value_type(member))
+					.collect(),
+			),
+			DataType::EmptyArray | DataType::Null | DataType::RecordPointer(_) => {
+				unreachable!("Validated object declarations contain only declarable value types.")
+			}
+		}
 	}
 
 	fn effective_object_data_type(&self, data_type: &DataType) -> Option<DataType> {
@@ -5925,7 +5994,33 @@ impl SemanticAnalyzer {
 			self.validate_object_declaration(object)?;
 		}
 
-		self.validate_object_default_construction_cycles()
+		self.validate_object_default_construction_cycles()?;
+		self.semantic_program.object_type_descriptors = self.semantic_program.object_types.iter()
+			.map(|(id, object_type)| {
+				(*id, ObjectTypeDescriptor {
+					display_name: object_type.display_name().to_string(),
+					id: *id,
+					shape: match &object_type.declaration().shape {
+						ObjectDeclarationShape::Fields(fields) => ObjectTypeDescriptorShape::Fields(
+							fields.iter()
+								.map(|field| ObjectFieldDescriptor {
+									data_type: self.describe_object_value_type(&field.data_type),
+									explicit_default: field.default_value.as_ref()
+										.map(|value| self.describe_object_default_value(value)),
+									is_quoted: field.is_quoted,
+									name: field.name.clone(),
+									visibility: field.visibility,
+								})
+								.collect(),
+						),
+						ObjectDeclarationShape::Array(element_type) => ObjectTypeDescriptorShape::RootArray(
+							self.describe_object_value_type(element_type),
+						),
+					},
+				})
+			})
+			.collect();
+		Ok(())
 	}
 
 	fn validate_public_object_type_reference(
@@ -6568,6 +6663,7 @@ pub struct SemanticProgram {
 	lowered_for_record_queries: BTreeMap<usize, QueryForPlan>,
 	new_record_layouts: BTreeMap<usize, NewRecordLayout>,
 	object_construction_type_ids: BTreeMap<usize, ObjectTypeId>,
+	object_type_descriptors: BTreeMap<ObjectTypeId, ObjectTypeDescriptor>,
 	object_type_ids_by_name: BTreeMap<String, ObjectTypeId>,
 	object_type_references: BTreeMap<usize, Vec<ResolvedObjectTypeReference>>,
 	object_types: BTreeMap<ObjectTypeId, ResolvedObjectType>,
@@ -6706,6 +6802,18 @@ impl SemanticProgram {
 		self.object_type(self.object_type_id(name)?)
 	}
 
+	pub fn object_type_default(&self, id: ObjectTypeId) -> Option<ObjectDefaultValue> {
+		self.complete_object_default(id, &[])
+	}
+
+	pub fn object_type_descriptor(&self, id: ObjectTypeId) -> Option<&ObjectTypeDescriptor> {
+		self.object_type_descriptors.get(&id)
+	}
+
+	pub fn object_type_descriptors(&self) -> impl Iterator<Item = &ObjectTypeDescriptor> {
+		self.object_type_descriptors.values()
+	}
+
 	pub fn object_type_id(&self, name: &str) -> Option<ObjectTypeId> {
 		self.object_type_ids_by_name.get(name).copied()
 	}
@@ -6755,6 +6863,85 @@ impl SemanticProgram {
 
 	pub fn warnings(&self) -> &[SemanticWarning] {
 		&self.warnings
+	}
+
+	fn complete_explicit_object_default(&self, value: &ObjectDefaultValue) -> Option<ObjectDefaultValue> {
+		match value {
+			ObjectDefaultValue::Array(values) => Some(ObjectDefaultValue::Array(
+				values.iter()
+					.map(|value| self.complete_explicit_object_default(value))
+					.collect::<Option<Vec<_>>>()?,
+			)),
+			ObjectDefaultValue::Object { fields, object_type_id } => {
+				self.complete_object_default(*object_type_id, fields)
+			}
+			other => Some(other.clone()),
+		}
+	}
+
+	fn complete_object_default(
+		&self,
+		id: ObjectTypeId,
+		supplied_fields: &[(String, ObjectDefaultValue)],
+	) -> Option<ObjectDefaultValue> {
+		let descriptor = self.object_type_descriptor(id)?;
+
+		match descriptor.shape() {
+			ObjectTypeDescriptorShape::Fields(fields) => {
+				let fields = fields.iter()
+					.map(|field| {
+						let value = supplied_fields.iter()
+							.find(|(name, _)| name == field.name())
+							.map(|(_, value)| self.complete_explicit_object_default(value))
+							.or_else(|| field.explicit_default().map(|value| {
+								self.complete_explicit_object_default(value)
+							}))
+							.unwrap_or_else(|| self.default_for_object_value_type(field.data_type()));
+
+						Some((field.name().to_string(), value?))
+					})
+					.collect::<Option<Vec<_>>>()?;
+
+				Some(ObjectDefaultValue::Object {
+					fields,
+					object_type_id: id,
+				})
+			}
+			ObjectTypeDescriptorShape::RootArray(_) => Some(ObjectDefaultValue::Array(Vec::new())),
+		}
+	}
+
+	fn default_for_object_value_type(&self, data_type: &ObjectValueTypeDescriptor) -> Option<ObjectDefaultValue> {
+		match data_type {
+			ObjectValueTypeDescriptor::Any | ObjectValueTypeDescriptor::Nullable(_) => {
+				Some(ObjectDefaultValue::Null)
+			}
+			ObjectValueTypeDescriptor::Array(_) => Some(ObjectDefaultValue::Array(Vec::new())),
+			ObjectValueTypeDescriptor::Bool => Some(ObjectDefaultValue::Boolean(false)),
+			ObjectValueTypeDescriptor::Date => Some(ObjectDefaultValue::CurrentDate),
+			ObjectValueTypeDescriptor::Dec => Some(ObjectDefaultValue::Decimal(
+				crate::value::Decimal::from_integer(0),
+			)),
+			ObjectValueTypeDescriptor::Enum(name) => {
+				let declaration = self.enum_declaration(name)?;
+				let variant = declaration.variants.first()?;
+				let EnumValue::Constant(backing_value) = self.enum_variant(name, &variant.name)?.clone();
+
+				Some(ObjectDefaultValue::Enum {
+					backing_value,
+					enum_name: name.clone(),
+					variant_name: variant.name.clone(),
+				})
+			}
+			ObjectValueTypeDescriptor::Int => Some(ObjectDefaultValue::Integer(0)),
+			ObjectValueTypeDescriptor::Object(id) => self.complete_object_default(*id, &[]),
+			ObjectValueTypeDescriptor::Text => Some(ObjectDefaultValue::Text(String::new())),
+			ObjectValueTypeDescriptor::Time => Some(ObjectDefaultValue::CurrentTime),
+			ObjectValueTypeDescriptor::TimeTz => Some(ObjectDefaultValue::CurrentTimeTz),
+			ObjectValueTypeDescriptor::Timestamp => Some(ObjectDefaultValue::CurrentTimestamp),
+			ObjectValueTypeDescriptor::TimestampTz => Some(ObjectDefaultValue::CurrentTimestampTz),
+			ObjectValueTypeDescriptor::Range(_) | ObjectValueTypeDescriptor::Union(_) => None,
+		}
 	}
 }
 
@@ -7666,6 +7853,26 @@ mod tests {
 		assert_eq!(
 			error.message,
 			"Identifier `Read` is not callable because it refers to a variable in the nearest scope.",
+		);
+	}
+
+	#[test]
+	fn looks_up_runtime_object_descriptor_by_resolved_identity() {
+		let program = parse_program(
+			"obj Model { value: int, };\n\
+			fn Main(args: [text]): int { return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program(&program).unwrap();
+		let model_id = semantic_program.object_type_id("Model").unwrap();
+		let descriptor = semantic_program.object_type_descriptor(model_id).unwrap();
+
+		assert_eq!(descriptor.id(), model_id);
+		assert_eq!(descriptor.display_name(), "Model");
+		assert_eq!(
+			semantic_program.object_type_descriptor(ObjectTypeId(u32::MAX)),
+			None,
 		);
 	}
 
@@ -9991,6 +10198,232 @@ mod tests {
 		let binding = semantic_program.record_pointer_binding(declaration_position).unwrap();
 
 		assert_eq!(binding.read_fields, BTreeSet::from([String::from("Id"), String::from("Name")]));
+	}
+
+	#[test]
+	fn runtime_object_descriptors_construct_complete_defaults_recursively() {
+		let program = parse_program(
+			"enum Mode { Ready }\n\
+			obj Leaf { quantity: int = 7, label: text, };\n\
+			obj Config {\n\
+				leaf: Leaf,\n\
+				partial: Leaf = Leaf { quantity: 9 },\n\
+				optional: Leaf?,\n\
+				items: [Leaf],\n\
+				active: bool,\n\
+				amount: dec,\n\
+				mode: Mode,\n\
+				created: date,\n\
+			};\n\
+			obj Configs [Config];\n\
+			fn Main(args: [text]): int { return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program(&program).unwrap();
+		let leaf_id = semantic_program.object_type_id("Leaf").unwrap();
+		let config_id = semantic_program.object_type_id("Config").unwrap();
+		let ObjectDefaultValue::Object { fields, object_type_id } = semantic_program
+			.object_type_default(config_id)
+			.unwrap()
+		else {
+			panic!("Expected a field-shaped object default.");
+		};
+		let fields = fields.into_iter().collect::<BTreeMap<_, _>>();
+
+		assert_eq!(object_type_id, config_id);
+		assert_eq!(
+			fields["leaf"],
+			ObjectDefaultValue::Object {
+				fields: vec![
+					(String::from("quantity"), ObjectDefaultValue::Integer(7)),
+					(String::from("label"), ObjectDefaultValue::Text(String::new())),
+				],
+				object_type_id: leaf_id,
+			},
+		);
+		assert_eq!(
+			fields["partial"],
+			ObjectDefaultValue::Object {
+				fields: vec![
+					(String::from("quantity"), ObjectDefaultValue::Integer(9)),
+					(String::from("label"), ObjectDefaultValue::Text(String::new())),
+				],
+				object_type_id: leaf_id,
+			},
+		);
+		assert_eq!(fields["optional"], ObjectDefaultValue::Null);
+		assert_eq!(fields["items"], ObjectDefaultValue::Array(Vec::new()));
+		assert_eq!(fields["active"], ObjectDefaultValue::Boolean(false));
+		assert_eq!(
+			fields["amount"],
+			ObjectDefaultValue::Decimal(crate::value::Decimal::from_integer(0)),
+		);
+		assert_eq!(
+			fields["mode"],
+			ObjectDefaultValue::Enum {
+				backing_value: Constant::Integer(1),
+				enum_name: String::from("Mode"),
+				variant_name: String::from("Ready"),
+			},
+		);
+		assert_eq!(fields["created"], ObjectDefaultValue::CurrentDate);
+
+		let configs_id = semantic_program.object_type_id("Configs").unwrap();
+		assert_eq!(
+			semantic_program.object_type_default(configs_id),
+			Some(ObjectDefaultValue::Array(Vec::new())),
+		);
+	}
+
+	#[test]
+	fn runtime_object_descriptors_distinguish_field_and_root_array_shapes() {
+		let program = parse_program(
+			"obj Model { value: int, };\n\
+			obj Models [Model];\n\
+			fn Main(args: [text]): int { return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program(&program).unwrap();
+		let model = semantic_program.object_type_descriptor(
+			semantic_program.object_type_id("Model").unwrap(),
+		).unwrap();
+		let models = semantic_program.object_type_descriptor(
+			semantic_program.object_type_id("Models").unwrap(),
+		).unwrap();
+
+		assert!(matches!(model.shape(), ObjectTypeDescriptorShape::Fields(_)));
+		assert!(matches!(models.shape(), ObjectTypeDescriptorShape::RootArray(_)));
+	}
+
+	#[test]
+	fn runtime_object_descriptors_keep_identical_nominal_types_distinct() {
+		let program = parse_program(
+			"obj Left { value: int, };\n\
+			obj Right { value: int, };\n\
+			fn Main(args: [text]): int { return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program(&program).unwrap();
+		let left_id = semantic_program.object_type_id("Left").unwrap();
+		let right_id = semantic_program.object_type_id("Right").unwrap();
+		let left = semantic_program.object_type_descriptor(left_id).unwrap();
+		let right = semantic_program.object_type_descriptor(right_id).unwrap();
+
+		assert_ne!(left_id, right_id);
+		assert_eq!(left.shape(), right.shape());
+		assert_ne!(left, right);
+		assert_eq!(
+			semantic_program.object_type_default(left_id),
+			Some(ObjectDefaultValue::Object {
+				fields: vec![(String::from("value"), ObjectDefaultValue::Integer(0))],
+				object_type_id: left_id,
+			}),
+		);
+		assert_eq!(
+			semantic_program.object_type_default(right_id),
+			Some(ObjectDefaultValue::Object {
+				fields: vec![(String::from("value"), ObjectDefaultValue::Integer(0))],
+				object_type_id: right_id,
+			}),
+		);
+	}
+
+	#[test]
+	fn runtime_object_descriptors_retain_field_types_defaults_and_nested_identities() {
+		let program = parse_program(
+			"obj Child { value: int = 1, };\n\
+			obj Config {\n\
+				name: text = 'default',\n\
+				child: Child? = Child { value: 2 },\n\
+				choices: [text | Child],\n\
+			};\n\
+			obj Children [Child];\n\
+			fn Main(args: [text]): int { return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program(&program).unwrap();
+		let child_id = semantic_program.object_type_id("Child").unwrap();
+		let config = semantic_program.object_type_descriptor(
+			semantic_program.object_type_id("Config").unwrap(),
+		).unwrap();
+		let ObjectTypeDescriptorShape::Fields(fields) = config.shape() else {
+			panic!("Expected field-shaped object descriptor.");
+		};
+
+		assert_eq!(fields.iter().map(ObjectFieldDescriptor::name).collect::<Vec<_>>(), vec![
+			"name",
+			"child",
+			"choices",
+		]);
+		assert_eq!(fields[0].data_type(), &ObjectValueTypeDescriptor::Text);
+		assert_eq!(
+			fields[0].explicit_default(),
+			Some(&ObjectDefaultValue::Text(String::from("default"))),
+		);
+		assert_eq!(
+			fields[1].data_type(),
+			&ObjectValueTypeDescriptor::Nullable(Box::new(
+				ObjectValueTypeDescriptor::Object(child_id),
+			)),
+		);
+		assert_eq!(
+			fields[1].explicit_default(),
+			Some(&ObjectDefaultValue::Object {
+				fields: vec![
+					(String::from("value"), ObjectDefaultValue::Integer(2)),
+				],
+				object_type_id: child_id,
+			}),
+		);
+		assert_eq!(
+			fields[2].data_type(),
+			&ObjectValueTypeDescriptor::Array(Box::new(
+				ObjectValueTypeDescriptor::Union(vec![
+					ObjectValueTypeDescriptor::Text,
+					ObjectValueTypeDescriptor::Object(child_id),
+				]),
+			)),
+		);
+
+		let children = semantic_program.object_type_descriptor(
+			semantic_program.object_type_id("Children").unwrap(),
+		).unwrap();
+		assert_eq!(
+			children.shape(),
+			&ObjectTypeDescriptorShape::RootArray(
+				ObjectValueTypeDescriptor::Object(child_id),
+			),
+		);
+	}
+
+	#[test]
+	fn runtime_object_descriptors_retain_public_and_private_fields() {
+		let program = parse_program(
+			"pub obj Model {\n\
+				privateValue: int,\n\
+				pub publicValue: int,\n\
+			};\n\
+			fn Main(args: [text]): int { return 0; }",
+		);
+		let mut analyzer = SemanticAnalyzer::new();
+
+		let semantic_program = analyzer.analyze_standalone_program(&program).unwrap();
+		let model = semantic_program.object_type_descriptor(
+			semantic_program.object_type_id("Model").unwrap(),
+		).unwrap();
+		let ObjectTypeDescriptorShape::Fields(fields) = model.shape() else {
+			panic!("Expected field-shaped object descriptor.");
+		};
+
+		assert_eq!(fields.len(), 2);
+		assert_eq!(fields[0].name(), "privateValue");
+		assert_eq!(fields[0].visibility(), Visibility::Private);
+		assert_eq!(fields[1].name(), "publicValue");
+		assert_eq!(fields[1].visibility(), Visibility::Public);
 	}
 
 	#[test]

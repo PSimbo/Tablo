@@ -662,7 +662,10 @@ impl Compiler {
 
 				self.emit(
 					emission,
-					Instruction::MakeObject(object_fields.iter().map(|field| field.name.clone()).collect()),
+					Instruction::MakeObject {
+						field_names: object_fields.iter().map(|field| field.name.clone()).collect(),
+						object_type_id,
+					},
 					expression_position,
 				);
 			}
@@ -772,6 +775,8 @@ impl Compiler {
 				functions,
 				self.compiled_queries.clone(),
 				DebugInfo::new(code_body_debug, vec![]),
+			).with_object_type_descriptors(
+				semantic_program.object_type_descriptors().cloned().collect(),
 			));
 		}
 
@@ -788,6 +793,8 @@ impl Compiler {
 			functions,
 			self.compiled_queries.clone(),
 			DebugInfo::new(code_body_debug, vec![]),
+		).with_object_type_descriptors(
+			semantic_program.object_type_descriptors().cloned().collect(),
 		))
 	}
 
@@ -1339,7 +1346,10 @@ impl Compiler {
 
 						self.emit(
 							emission,
-							Instruction::MakeObject(object_fields.iter().map(|field| field.name.clone()).collect()),
+							Instruction::MakeObject {
+								field_names: object_fields.iter().map(|field| field.name.clone()).collect(),
+								object_type_id,
+							},
 							debug_position,
 						);
 					}
@@ -2189,7 +2199,10 @@ mod tests {
 
 		assert_eq!(bytecode.entry_code().unwrap().instructions, vec![
 			Instruction::PushInteger(0),
-			Instruction::MakeObject(vec![String::from("value")]),
+			Instruction::MakeObject {
+				field_names: vec![String::from("value")],
+				object_type_id: semantic_program.object_type_id("First").unwrap(),
+			},
 			Instruction::StoreLocal(0),
 		]);
 	}
@@ -2307,7 +2320,10 @@ mod tests {
 
 		assert_eq!(bytecode.entry_code().unwrap().instructions, vec![
 			Instruction::PushInteger(0),
-			Instruction::MakeObject(vec![String::from("value")]),
+			Instruction::MakeObject {
+				field_names: vec![String::from("value")],
+				object_type_id: semantic_program.object_type_id("First").unwrap(),
+			},
 			Instruction::StoreLocal(0),
 		]);
 	}
@@ -2838,5 +2854,26 @@ mod tests {
 		let error = Compiler::new().compile_program(&program).unwrap_err();
 
 		assert_eq!(error.message, "Cannot assign a value of type `bool` to a variable of type `int`.");
+	}
+
+	#[test]
+	fn retains_semantic_object_type_descriptors_in_compiled_program() {
+		let program = parse_program(
+			"obj Child { value: int = 3, };\n\
+			obj Model { child: Child, };\n\
+			var model: Model = Model {};",
+		);
+		let semantic_program = SemanticAnalyzer::new().analyze_program(&program).unwrap();
+		let model_id = semantic_program.object_type_id("Model").unwrap();
+
+		let bytecode = Compiler::new()
+			.compile_program_with_existing_semantics(&program, &semantic_program)
+			.unwrap();
+
+		assert_eq!(bytecode.object_type_descriptors().len(), 2);
+		assert_eq!(
+			bytecode.object_type_descriptor(model_id),
+			semantic_program.object_type_descriptor(model_id),
+		);
 	}
 }

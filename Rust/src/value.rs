@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::Display;
 
 use crate::ast::{ DataType, RecordPointerType };
+use crate::bytecode::ObjectTypeId;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DatabaseValue {
@@ -61,7 +62,7 @@ pub enum Value {
 	IntegerRange(IntegerRange),
 	Iterator(IteratorState),
 	Null,
-	Object(BTreeMap<String, Value>),
+	Object(ObjectValue),
 	RecordPointer(RecordPointerValue),
 	Reference(LocalReference),
 	Text(String),
@@ -96,10 +97,10 @@ impl Display for Value {
 			Value::IntegerRange(range) => write!(f, "{range}"),
 			Value::Iterator(_) => write!(f, "<iterator>"),
 			Value::Null => write!(f, "null"),
-			Value::Object(fields) => {
+			Value::Object(object) => {
 				write!(f, "{{")?;
 
-				for (index, (name, value)) in fields.iter().enumerate() {
+				for (index, (name, value)) in object.fields.iter().enumerate() {
 					if index > 0 {
 						write!(f, ", ")?;
 					}
@@ -537,6 +538,21 @@ pub struct IntegerRangeIterator {
 pub struct LocalReference {
 	pub frame_index: usize,
 	pub slot: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObjectValue {
+	pub fields: BTreeMap<String, Value>,
+	pub object_type_id: ObjectTypeId,
+}
+
+impl ObjectValue {
+	pub fn new(object_type_id: ObjectTypeId, fields: BTreeMap<String, Value>) -> Self {
+		Self {
+			fields,
+			object_type_id,
+		}
+	}
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
