@@ -371,6 +371,14 @@ fn choose(right: int): int { return right; }";
 	}
 
 	#[test]
+	fn highlights_object_type_that_closes_default_construction_cycle() {
+		let source = "obj Node { next: Node, }; fn Main(args: [text]): int { return 0; }";
+		let diagnostic = diagnostic_for_tablo_error(source, check(source).unwrap_err());
+
+		assert_single_line_span(source, &diagnostic, "Node", 1);
+	}
+
+	#[test]
 	fn highlights_partially_qualified_object_type_name() {
 		let source = "obj Envelope { payload: obj Payload { value: int, }, previous: Payload, }; fn Main(args: [text]): int { return 0; }";
 		let diagnostic = diagnostic_for_tablo_error(source, check(source).unwrap_err());
@@ -395,6 +403,14 @@ fn choose(right: int): int { return right; }";
 		assert_eq!(diagnostics[0].range.start.character, 0);
 		assert_eq!(diagnostics[0].range.end.character, 6);
 		assert_eq!(diagnostics[0].severity, 2);
+	}
+
+	#[test]
+	fn highlights_private_object_type_exposed_by_public_field() {
+		let source = "obj PrivateModel { value: int, }; pub obj PublicModel { pub value: PrivateModel, }; fn Main(args: [text]): int { return 0; }";
+		let diagnostic = diagnostic_for_tablo_error(source, check(source).unwrap_err());
+
+		assert_single_line_span(source, &diagnostic, "PrivateModel", 1);
 	}
 
 	#[test]

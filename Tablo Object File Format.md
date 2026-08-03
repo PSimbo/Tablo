@@ -13,6 +13,7 @@ At present, a Tablo object file stores:
 * compiled functions and their return metadata
 * the program entry point
 * backend-specific database queries
+* runtime object-type descriptors
 * source-level debugging information
 
 The current format does not yet include a constant data section. The compiler must emit constants directly in bytecode instructions.
@@ -51,19 +52,21 @@ Current Format
 
 The current object file format is laid out as follows:
 
-| Field               | Encoding                                |
-| ------------------- | --------------------------------------- |
-| Magic               | four bytes containing `TBO0`            |
-| Format version      | `u16`                                   |
-| Function count      | `u32`                                   |
-| Functions           | one function record per function        |
-| Entry-point kind    | `u8`                                    |
-| Entry-point payload | depends on the entry-point kind         |
-| Query count         | `u32`                                   |
-| Queries             | one query record per query              |
-| Debug information   | source-file and code-body debug records |
+| Field                  | Encoding                                  |
+| ---------------------- | ----------------------------------------- |
+| Magic                  | four bytes containing `TBO0`              |
+| Format version         | `u16`                                     |
+| Function count         | `u32`                                     |
+| Functions              | one function record per function          |
+| Entry-point kind       | `u8`                                      |
+| Entry-point payload    | depends on the entry-point kind           |
+| Query count            | `u32`                                     |
+| Queries                | one query record per query                |
+| Object-type count      | `u32`                                     |
+| Object-type descriptors| one descriptor per runtime object type    |
+| Debug information      | source-file and code-body debug records   |
 
-Trailing bytes after the debug information are invalid. The reader also accepts the end of the file immediately after the query records, in which case the program has no debug information.
+Trailing bytes after the debug information are invalid. The reader also accepts the end of the file immediately after the object-type descriptors, in which case the program has no debug information.
 
 Function Records
 ----------------
@@ -210,7 +213,7 @@ The following payload abbreviations are used:
 | `32`   | `LoadSequenceCurrent`    | `sequence`                                                                        |
 | `33`   | `Locked`                 | none                                                                              |
 | `34`   | `MakeArray`              | element count `u32`                                                               |
-| `35`   | `MakeObject`             | field names as `text[]`                                                           |
+| `35`   | `MakeObject`             | object type ID `u32`, field names as `text[]`                                     |
 | `36`   | `MakeRange`              | none                                                                              |
 | `37`   | `MakeRecordPointer`      | field names `text[]`, field types `type[]`, `record type`, schema-implicit `bool` |
 | `38`   | `MakeSteppedRange`       | none                                                                              |
@@ -316,6 +319,72 @@ Column selection tags:
 | `2` | Selected indices             | `u32[]` |
 | `3` | Runtime-determined selection | none    |
 
+Object-Type Descriptors
+-----------------------
+
+Each runtime object type has a stable object type ID. A descriptor contains:
+
+| Field        | Encoding                          |
+| ------------ | --------------------------------- |
+| Object ID    | `u32`                             |
+| Display name | `text`                            |
+| Shape        | shape tag and shape-specific data |
+
+The display name is the source-facing declaration name for an object from the root module and is module-qualified for an object originating in an imported module. It is intended for diagnostics and debugger views; object identity is always determined by the object ID.
+
+Shape tags are:
+
+| Tag | Shape       | Payload                                      |
+| --- | ----------- | -------------------------------------------- |
+| `1` | Fields      | `u32` field count followed by field records  |
+| `2` | Root array  | one object value type                        |
+
+Each field record contains its name as `text`, quoted-identifier status as `bool`, public visibility as `bool`, object value type, and an optional explicit default encoded as a present `object default`. Private fields remain in the descriptor because visibility controls source access rather than runtime shape.
+
+Object value types are encoded recursively:
+
+| Tag  | Type          | Payload                                  |
+| ---- | ------------- | ---------------------------------------- |
+| `1`  | `any`         | none                                     |
+| `2`  | array         | element object value type                |
+| `3`  | `bool`        | none                                     |
+| `4`  | `date`        | none                                     |
+| `5`  | `dec`         | none                                     |
+| `6`  | enum          | enum display name as `text`              |
+| `7`  | `int`         | none                                     |
+| `8`  | nullable      | inner object value type                  |
+| `9`  | object        | referenced object type ID as `u32`       |
+| `10` | range         | element object value type                |
+| `11` | `text`        | none                                     |
+| `12` | `time`        | none                                     |
+| `13` | `timetz`      | none                                     |
+| `14` | `timestamp`   | none                                     |
+| `15` | `timestamptz` | none                                     |
+| `16` | union         | `u32` member count followed by members   |
+
+Explicit object defaults use the following recursive encoding:
+
+| Tag  | Value                       | Payload                                               |
+| ---- | --------------------------- | ----------------------------------------------------- |
+| `1`  | array                       | `u32` value count followed by object defaults         |
+| `2`  | Boolean                     | `bool`                                                |
+| `3`  | current date                | none                                                  |
+| `4`  | current time                | none                                                  |
+| `5`  | current time with zone      | none                                                  |
+| `6`  | current timestamp           | none                                                  |
+| `7`  | current timestamp with zone | none                                                  |
+| `8`  | date                        | date value                                            |
+| `9`  | decimal                     | decimal value                                         |
+| `10` | enum                        | inline constant, enum name `text`, variant `text`     |
+| `11` | integer                     | `i64`                                                 |
+| `12` | null                        | none                                                  |
+| `13` | object                      | object ID `u32`, field count `u32`, field/value pairs |
+| `14` | text                        | `text`                                                |
+| `15` | time                        | canonical `text`                                      |
+| `16` | time with zone              | canonical `text`                                      |
+| `17` | timestamp                   | canonical `text`                                      |
+| `18` | timestamp with zone         | canonical `text`                                      |
+
 Debug Information
 -----------------
 
@@ -361,6 +430,8 @@ An object file is invalid if:
 * a string is not valid UTF-8
 * a tag, discriminant, opcode, or built-in identifier is unknown
 * it contains more than one entry point or no entry point
+* object-type descriptor IDs are duplicated
+* an object-type descriptor references an object type ID that is not present
 * trailing data remains after all records have been read
 
-The current format does not include checksums, signatures, a section directory, or validation of every cross-reference during decoding.
+The current format does not include checksums, signatures, a section directory, or validation of every non-object cross-reference during decoding.

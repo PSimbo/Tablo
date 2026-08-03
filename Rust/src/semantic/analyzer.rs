@@ -1,4 +1,5 @@
 use std::collections::{ BTreeMap, BTreeSet };
+use std::path::Path;
 
 use crate::ast::*;
 use crate::builtins::{ BuiltInFunction, BuiltInParameterType };
@@ -210,6 +211,14 @@ impl ResolvedObjectType {
 pub struct ResolvedObjectTypeReference {
 	pub object_type_id: ObjectTypeId,
 	pub path: Vec<ObjectTypeReferencePathComponent>,
+	pub position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedObjectTypeReferenceOccurrence {
+	pub object_type_id: ObjectTypeId,
+	pub position: usize,
+	pub source_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1191,7 +1200,7 @@ impl SemanticAnalyzer {
 
 	fn collect_referenced_object_names(data_type: &DataType, names: &mut BTreeSet<String>) {
 		match data_type {
-			DataType::Array(element_type) | DataType::Nullable(element_type) => {
+			DataType::Array(element_type) | DataType::Nullable(element_type) | DataType::Range(element_type) => {
 				Self::collect_referenced_object_names(element_type, names);
 			}
 			DataType::Object(name) => {
@@ -1200,6 +1209,24 @@ impl SemanticAnalyzer {
 			DataType::Union(member_types) => {
 				for member_type in member_types {
 					Self::collect_referenced_object_names(member_type, names);
+				}
+			}
+			_ => {}
+		}
+	}
+
+	fn collect_referenced_object_type_names<'a>(
+		data_type: &'a DataType,
+		names: &mut Vec<&'a ObjectTypeName>,
+	) {
+		match data_type {
+			DataType::Array(element_type) | DataType::Nullable(element_type) | DataType::Range(element_type) => {
+				Self::collect_referenced_object_type_names(element_type, names);
+			}
+			DataType::Object(name) => names.push(name),
+			DataType::Union(member_types) => {
+				for member_type in member_types {
+					Self::collect_referenced_object_type_names(member_type, names);
 				}
 			}
 			_ => {}
@@ -1422,7 +1449,6 @@ impl SemanticAnalyzer {
 				&& let FunctionParameterType::Value(data_type) = &parameter.data_type {
 				self.validate_public_object_type_reference(
 					data_type,
-					parameter.position,
 					format!("Public function `{}` parameter `{}`", function.name, parameter.name),
 				)?;
 			}
@@ -1451,7 +1477,6 @@ impl SemanticAnalyzer {
 			if function.visibility == Visibility::Public {
 				self.validate_public_object_type_reference(
 					return_type,
-					function.position,
 					format!("Public function `{}` return type", function.name),
 				)?;
 			}
@@ -1657,6 +1682,32 @@ impl SemanticAnalyzer {
 				self.data_type_display_name(target),
 			),
 		))
+	}
+
+	fn ensure_object_field_accessible(
+		&self,
+		object_name: &str,
+		field: &crate::ast::ObjectFieldDeclaration,
+		position: usize,
+		action: &str,
+	) -> Result<(), CompileError> {
+		let object_type = self.lookup_object_type(object_name)
+			.expect("Resolved object field is missing its containing object type.");
+
+		if field.visibility == Visibility::Private
+			&& object_type.source_name() != self.current_source_name.as_deref()
+		{
+			return Err(self.compile_error(
+				position,
+				format!(
+					"Field `{}` on object `{}` is private and cannot be {action} from this module.",
+					field.name,
+					object_type.display_name(),
+				),
+			));
+		}
+
+		Ok(())
 	}
 
 	fn ensure_object_field_default_assignable(
@@ -2453,13 +2504,13 @@ impl SemanticAnalyzer {
 						for field in &target.fields {
 							match current_type {
 								DataType::Object(ref object_name) => {
-									current_type = self.lookup_object_field(object_name, &field.name)
+									let object_field = self.lookup_object_field(object_name, &field.name)
 										.ok_or(self.compile_error(
 											field.position,
 											format!("Object `{object_name}` does not contain a field named `{}`.", field.name),
-										))?
-										.data_type
-										.clone();
+										))?;
+									self.ensure_object_field_accessible(object_name, object_field, field.position, "accessed")?;
+									current_type = object_field.data_type.clone();
 								}
 								DataType::RecordPointer(ref record_pointer) => {
 									current_type = self.infer_record_pointer_field_access_type(
@@ -2560,14 +2611,13 @@ impl SemanticAnalyzer {
 							));
 						}
 
-						let field_type = self.lookup_object_field(&name, &field.name)
+						let object_field = self.lookup_object_field(&name, &field.name)
 							.ok_or(self.compile_error(
 								field.position,
 								format!("Object `{name}` does not contain a field named `{}`.", field.name),
-							))?
-							.data_type
-							.clone();
-						Ok(field_type)
+							))?;
+						self.ensure_object_field_accessible(&name, object_field, field.position, "accessed")?;
+						Ok(object_field.data_type.clone())
 					}
 					DataType::RecordPointer(record_pointer) => self.infer_record_pointer_field_access_type(
 						&record_pointer,
@@ -2683,6 +2733,7 @@ impl SemanticAnalyzer {
 							format!("Object `{object_type_name}` does not contain a field named `{}`.", field.name),
 						));
 					};
+					self.ensure_object_field_accessible(object_type_name, object_field, field.position, "initialized")?;
 
 					if provided_fields.insert(field.name.clone(), ()).is_some() {
 						return Err(self.compile_error(
@@ -4666,6 +4717,7 @@ impl SemanticAnalyzer {
 					references.push(ResolvedObjectTypeReference {
 						object_type_id,
 						path: path.clone(),
+						position: name.position,
 					});
 				}
 				else if self.lookup_enum(name).is_none() {
@@ -4998,6 +5050,19 @@ impl SemanticAnalyzer {
 		});
 
 		Ok(resolved)
+	}
+
+	fn runtime_object_display_name(&self, object_type: &ResolvedObjectType) -> String {
+		if object_type.source_name() == self.root_source_name.as_deref() {
+			return object_type.display_name().to_string();
+		}
+
+		let module_name = object_type.source_name()
+			.and_then(|source_name| Path::new(source_name).file_stem())
+			.and_then(|module_name| module_name.to_str());
+		module_name
+			.map(|module_name| format!("{module_name}.{}", object_type.display_name()))
+			.unwrap_or_else(|| object_type.display_name().to_string())
 	}
 
 	fn schema_error_to_compile_error(&self, position: usize, error: SchemaError) -> CompileError {
@@ -5356,6 +5421,13 @@ impl SemanticAnalyzer {
 			&mut references,
 		)?;
 		if !references.is_empty() {
+			self.semantic_program.object_type_reference_occurrences.extend(
+				references.iter().map(|reference| ResolvedObjectTypeReferenceOccurrence {
+					object_type_id: reference.object_type_id,
+					position: reference.position,
+					source_name: self.current_source_name.clone(),
+				}),
+			);
 			self.semantic_program.object_type_references.insert(position, references);
 		}
 		Ok(())
@@ -5432,7 +5504,11 @@ impl SemanticAnalyzer {
 		let default_value = value.or(field.default_value.as_ref());
 		path.push(ObjectDefaultPathStep {
 			label: format!("{}.{}", object_type.display_name(), field.name),
-			position: default_value.map(Expr::position).unwrap_or(field.position),
+			position: default_value.map(Expr::position).unwrap_or_else(|| {
+				let mut referenced_types = Vec::new();
+				Self::collect_referenced_object_type_names(&field.data_type, &mut referenced_types);
+				referenced_types.first().map(|name| name.position).unwrap_or(field.position)
+			}),
 		});
 
 		let result = if let Some(default_value) = default_value {
@@ -5920,7 +5996,6 @@ impl SemanticAnalyzer {
 				if object_visibility == Visibility::Public {
 					self.validate_public_object_type_reference(
 						element_type,
-						object.position,
 						format!("Public root-array object `{}`", object.name),
 					)?;
 				}
@@ -5955,7 +6030,6 @@ impl SemanticAnalyzer {
 					if field.visibility == Visibility::Public {
 						self.validate_public_object_type_reference(
 							&field.data_type,
-							field.position,
 							format!("Public field `{}` on object `{}`", field.name, object.name),
 						)?;
 					}
@@ -5998,7 +6072,7 @@ impl SemanticAnalyzer {
 		self.semantic_program.object_type_descriptors = self.semantic_program.object_types.iter()
 			.map(|(id, object_type)| {
 				(*id, ObjectTypeDescriptor {
-					display_name: object_type.display_name().to_string(),
+					display_name: self.runtime_object_display_name(object_type),
 					id: *id,
 					shape: match &object_type.declaration().shape {
 						ObjectDeclarationShape::Fields(fields) => ObjectTypeDescriptorShape::Fields(
@@ -6026,18 +6100,17 @@ impl SemanticAnalyzer {
 	fn validate_public_object_type_reference(
 		&self,
 		data_type: &DataType,
-		position: usize,
 		declaration_description: String,
 	) -> Result<(), CompileError> {
-		let mut referenced_names = BTreeSet::new();
-		Self::collect_referenced_object_names(data_type, &mut referenced_names);
+		let mut referenced_names = Vec::new();
+		Self::collect_referenced_object_type_names(data_type, &mut referenced_names);
 		for referenced_name in referenced_names {
-			let Some(object_type) = self.lookup_object_type(&referenced_name) else {
+			let Some(object_type) = self.lookup_object_type(referenced_name) else {
 				continue;
 			};
 			if object_type.visibility() == Visibility::Private {
 				return Err(self.compile_error(
-					position,
+					referenced_name.position,
 					format!("{declaration_description} cannot expose private object type `{referenced_name}`."),
 				));
 			}
@@ -6665,6 +6738,7 @@ pub struct SemanticProgram {
 	object_construction_type_ids: BTreeMap<usize, ObjectTypeId>,
 	object_type_descriptors: BTreeMap<ObjectTypeId, ObjectTypeDescriptor>,
 	object_type_ids_by_name: BTreeMap<String, ObjectTypeId>,
+	object_type_reference_occurrences: Vec<ResolvedObjectTypeReferenceOccurrence>,
 	object_type_references: BTreeMap<usize, Vec<ResolvedObjectTypeReference>>,
 	object_types: BTreeMap<ObjectTypeId, ResolvedObjectType>,
 	query_plan: ProgramQueryPlan,
@@ -6734,6 +6808,23 @@ impl SemanticProgram {
 		self.declaration_types.get(&position)
 	}
 
+	pub fn display_data_type_name(&self, data_type: &DataType) -> String {
+		match data_type {
+			DataType::Array(element_type) => format!("[{}]", self.display_data_type_name(element_type)),
+			DataType::Nullable(inner) => format!("{}?", self.display_data_type_name(inner)),
+			DataType::Object(name) => self.object_type_id(&name.name)
+				.and_then(|id| self.object_type_descriptor(id))
+				.map(|descriptor| descriptor.display_name().to_string())
+				.unwrap_or_else(|| name.name.clone()),
+			DataType::Range(element_type) => format!("range<{}>", self.display_data_type_name(element_type)),
+			DataType::Union(members) => members.iter()
+				.map(|member| self.display_data_type_name(member))
+				.collect::<Vec<_>>()
+				.join(" | "),
+			other => other.name(),
+		}
+	}
+
 	pub fn entry_point_function_index(&self) -> Option<u32> {
 		self.entry_point_function_index
 	}
@@ -6794,6 +6885,18 @@ impl SemanticProgram {
 		self.object_construction_type_ids.get(&position).copied()
 	}
 
+	pub fn object_field_default(&self, id: ObjectTypeId, field_name: &str) -> Option<ObjectDefaultValue> {
+		let descriptor = self.object_type_descriptor(id)?;
+		let ObjectTypeDescriptorShape::Fields(fields) = descriptor.shape() else {
+			return None;
+		};
+		let field = fields.iter().find(|field| field.name() == field_name)?;
+
+		field.explicit_default()
+			.map(|value| self.complete_explicit_object_default(value))
+			.unwrap_or_else(|| self.default_for_object_value_type(field.data_type()))
+	}
+
 	pub fn object_type(&self, id: ObjectTypeId) -> Option<&ResolvedObjectType> {
 		self.object_types.get(&id)
 	}
@@ -6829,8 +6932,16 @@ impl SemanticProgram {
 			.map(|reference| reference.object_type_id)
 	}
 
+	pub fn object_type_reference_occurrences(&self) -> &[ResolvedObjectTypeReferenceOccurrence] {
+		&self.object_type_reference_occurrences
+	}
+
 	pub fn object_type_references(&self, position: usize) -> Option<&[ResolvedObjectTypeReference]> {
 		self.object_type_references.get(&position).map(Vec::as_slice)
+	}
+
+	pub fn object_types(&self) -> impl Iterator<Item = &ResolvedObjectType> {
+		self.object_types.values()
 	}
 
 	pub fn query_for_shape(&self, position: usize) -> Option<&QueryForShape> {
@@ -6893,10 +7004,7 @@ impl SemanticProgram {
 						let value = supplied_fields.iter()
 							.find(|(name, _)| name == field.name())
 							.map(|(_, value)| self.complete_explicit_object_default(value))
-							.or_else(|| field.explicit_default().map(|value| {
-								self.complete_explicit_object_default(value)
-							}))
-							.unwrap_or_else(|| self.default_for_object_value_type(field.data_type()));
+							.unwrap_or_else(|| self.object_field_default(id, field.name()));
 
 						Some((field.name().to_string(), value?))
 					})
@@ -9127,7 +9235,7 @@ mod tests {
 				message: String::from(
 					"Object default construction cycle through `InvalidNode.next` would never terminate.",
 				),
-				position: source.find("next:").unwrap(),
+				position: source.find("next: InvalidNode").unwrap() + "next: ".len(),
 			},
 		);
 	}
@@ -9274,7 +9382,7 @@ mod tests {
 				message: String::from(
 					"Object default construction cycle through `First.other` -> `Second.origin` would never terminate.",
 				),
-				position: source.find("origin: First").unwrap(),
+				position: source.find("origin: First").unwrap() + "origin: ".len(),
 			},
 		);
 	}
@@ -9565,7 +9673,7 @@ mod tests {
 				message: String::from(
 					"Public function `Read` parameter `value` cannot expose private object type `PrivateOuter.Child`.",
 				),
-				position: source.find("value: PrivateOuter.Child").unwrap(),
+				position: source.find("PrivateOuter.Child").unwrap(),
 			},
 		);
 	}
@@ -9586,7 +9694,7 @@ mod tests {
 				message: String::from(
 					"Public function `Read` parameter `value` cannot expose private object type `PrivateModel`.",
 				),
-				position: source.find("value: [PrivateModel?]").unwrap(),
+				position: source.find("[PrivateModel?]").unwrap() + 1,
 			},
 		);
 	}
@@ -9607,7 +9715,7 @@ mod tests {
 				message: String::from(
 					"Public function `Read` return type cannot expose private object type `PrivateModel`.",
 				),
-				position: source.find("fn Read").unwrap(),
+				position: source.find("text | PrivateModel").unwrap() + "text | ".len(),
 			},
 		);
 	}
@@ -10048,6 +10156,7 @@ mod tests {
 			Some([ResolvedObjectTypeReference {
 				object_type_id: payload_id,
 				path: vec![],
+				position: source.find("Envelope.Payload,\n").unwrap(),
 			}].as_slice()),
 		);
 		assert_eq!(
@@ -10103,26 +10212,31 @@ mod tests {
 
 		let semantic_program = analyzer.analyze_standalone_program(&program).unwrap();
 		let model_id = semantic_program.object_type_id("Model").unwrap();
-		let expected = |path| vec![ResolvedObjectTypeReference {
+		let expected = |path, position| vec![ResolvedObjectTypeReference {
 			object_type_id: model_id,
 			path,
+			position,
 		}];
 
+		let direct_position = source.find("Model,\n").unwrap();
 		assert_eq!(
 			semantic_program.object_type_references(source.find("direct:").unwrap()),
-			Some(expected(vec![]).as_slice()),
+			Some(expected(vec![], direct_position).as_slice()),
 		);
+		let optional_position = source.find("Model?,").unwrap();
 		assert_eq!(
 			semantic_program.object_type_references(source.find("optional:").unwrap()),
-			Some(expected(vec![ObjectTypeReferencePathComponent::NullableValue]).as_slice()),
+			Some(expected(vec![ObjectTypeReferencePathComponent::NullableValue], optional_position).as_slice()),
 		);
+		let items_position = source.find("[Model]").unwrap() + 1;
 		assert_eq!(
 			semantic_program.object_type_references(source.find("items:").unwrap()),
-			Some(expected(vec![ObjectTypeReferencePathComponent::ArrayElement]).as_slice()),
+			Some(expected(vec![ObjectTypeReferencePathComponent::ArrayElement], items_position).as_slice()),
 		);
+		let choice_position = source.find("text | Model").unwrap() + "text | ".len();
 		assert_eq!(
 			semantic_program.object_type_references(source.find("choice:").unwrap()),
-			Some(expected(vec![ObjectTypeReferencePathComponent::UnionMember(1)]).as_slice()),
+			Some(expected(vec![ObjectTypeReferencePathComponent::UnionMember(1)], choice_position).as_slice()),
 		);
 
 		let payload_id = semantic_program.object_type_id("Envelope.Payload").unwrap();
@@ -10135,6 +10249,7 @@ mod tests {
 					ObjectTypeReferencePathComponent::ArrayElement,
 					ObjectTypeReferencePathComponent::UnionMember(1),
 				],
+				position: source.find("Envelope.Payload]").unwrap(),
 			}].as_slice()),
 		);
 
@@ -10146,19 +10261,26 @@ mod tests {
 
 		assert_eq!(
 			semantic_program.object_type_references(value_parameter_position),
-			Some(expected(vec![]).as_slice()),
+			Some(expected(vec![], value_parameter_position + "value: ".len()).as_slice()),
 		);
 		assert_eq!(
 			semantic_program.object_type_references(values_parameter_position),
-			Some(expected(vec![ObjectTypeReferencePathComponent::ArrayElement]).as_slice()),
+			Some(expected(
+				vec![ObjectTypeReferencePathComponent::ArrayElement],
+				values_parameter_position + "values: [".len(),
+			).as_slice()),
 		);
+		let local_position = source.find("var local: Model").unwrap();
 		assert_eq!(
-			semantic_program.object_type_references(source.find("var local: Model").unwrap()),
-			Some(expected(vec![]).as_slice()),
+			semantic_program.object_type_references(local_position),
+			Some(expected(vec![], local_position + "var local: ".len()).as_slice()),
 		);
 		assert_eq!(
 			semantic_program.object_type_references(transform_position),
-			Some(expected(vec![]).as_slice()),
+			Some(expected(
+				vec![],
+				transform_position + source[transform_position..].find("): Model").unwrap() + "): ".len(),
+			).as_slice()),
 		);
 	}
 

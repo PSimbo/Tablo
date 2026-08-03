@@ -46,7 +46,7 @@ enum DebugCommand {
 #[derive(Clone)]
 enum VariableContainer {
 	Locals(usize),
-	Value(Value),
+	Value(Value, Option<ObjectValueTypeDescriptor>),
 }
 
 #[derive(Deserialize)]
@@ -353,14 +353,14 @@ impl DapServer {
 		let frame = stack_frames.get(frame_index).ok_or_else(|| format!("Unknown frame id {}.", frame_index + 1))?;
 		let value = VirtualMachine::evaluate_watch_expression(expression, frame)
 			.map_err(|error| error.message)?;
-		let variables_reference = self.variables_reference_for_value(value.clone());
+		let variables_reference = self.variables_reference_for_value(value.clone(), None);
 
 		Ok(vec![dap_response(
 			request_seq,
 			"evaluate",
 			json!({
 				"result": value.to_string(),
-				"type": variable_type_name(&value),
+				"type": self.variable_type_name(&value, None),
 				"variablesReference": variables_reference,
 			}),
 		)])
@@ -501,18 +501,26 @@ impl DapServer {
 				let mut variables = Vec::new();
 
 				for (name, declared_type, value) in locals {
-					let child_reference = self.variables_reference_for_value(value.clone());
+					let child_reference = self.variables_reference_for_value(value.clone(), None);
+					let displayed_type = if matches!(value, Value::Object(_)) {
+						self.variable_type_name(&value, None)
+					}
+					else {
+						declared_type
+					};
 					variables.push(json!({
 						"name": name,
 						"value": value.to_string(),
-						"type": declared_type,
+						"type": displayed_type,
 						"variablesReference": child_reference,
 					}));
 				}
 
 				variables
 			}
-			VariableContainer::Value(value) => self.child_variables_for_value(&value)?,
+			VariableContainer::Value(value, declared_type) => {
+				self.child_variables_for_value(&value, declared_type.as_ref())?
+			}
 		};
 
 		Ok(vec![dap_response(
@@ -569,27 +577,55 @@ impl DapServer {
 			.collect()
 	}
 
-	fn child_variables_for_value(&mut self, value: &Value) -> Result<Vec<JsonValue>, String> {
+	fn child_variables_for_value(
+		&mut self,
+		value: &Value,
+		declared_type: Option<&ObjectValueTypeDescriptor>,
+	) -> Result<Vec<JsonValue>, String> {
 		match value {
 			Value::Array(values) => Ok(values.iter().enumerate().map(|(index, value)| {
-				let child_reference = self.variables_reference_for_value(value.clone());
+				let element_type = array_element_type(declared_type).cloned();
+				let child_reference = self.variables_reference_for_value(value.clone(), element_type.clone());
 				json!({
 					"name": format!("[{}]", index + 1),
 					"value": value.to_string(),
-					"type": variable_type_name(value),
+					"type": self.variable_type_name(value, element_type.as_ref()),
 					"variablesReference": child_reference,
 				})
 			}).collect()),
 			Value::Null => Ok(Vec::new()),
-			Value::Object(object) => Ok(object.fields.iter().map(|(name, value)| {
-				let child_reference = self.variables_reference_for_value(value.clone());
-				json!({
-					"name": name,
-					"value": value.to_string(),
-					"type": variable_type_name(value),
-					"variablesReference": child_reference,
-				})
-			}).collect()),
+			Value::Object(object) => {
+				let descriptor_fields = self.program
+					.and_then(|program| program.object_type_descriptor(object.object_type_id))
+					.and_then(|descriptor| match descriptor.shape() {
+						ObjectTypeDescriptorShape::Fields(fields) => Some(fields.clone()),
+						ObjectTypeDescriptorShape::RootArray(_) => None,
+					});
+				let fields = descriptor_fields.map(|fields| {
+					fields.into_iter().filter_map(|field| {
+						object.fields.get(field.name()).cloned().map(|value| (
+							field.name().to_string(),
+							Some(field.data_type().clone()),
+							value,
+						))
+					}).collect::<Vec<_>>()
+				}).unwrap_or_else(|| {
+					object.fields.iter()
+						.map(|(name, value)| (name.clone(), None, value.clone()))
+						.collect()
+				});
+				let mut variables = Vec::with_capacity(fields.len());
+				for (name, data_type, value) in fields {
+					let child_reference = self.variables_reference_for_value(value.clone(), data_type.clone());
+					variables.push(json!({
+						"name": name,
+						"value": value.to_string(),
+						"type": self.variable_type_name(&value, data_type.as_ref()),
+						"variablesReference": child_reference,
+					}));
+				}
+				Ok(variables)
+			}
 			Value::RecordPointer(record) => {
 				if !record.exists || record.locked {
 					return Ok(Vec::new());
@@ -599,11 +635,11 @@ impl DapServer {
 
 				for (name, field) in &record.fields {
 					let value = debugger_value_for_record_field(field)?;
-					let child_reference = self.variables_reference_for_value(value.clone());
+					let child_reference = self.variables_reference_for_value(value.clone(), None);
 					variables.push(json!({
 						"name": name,
 						"value": value.to_string(),
-						"type": variable_type_name(&value),
+						"type": self.variable_type_name(&value, None),
 						"variablesReference": child_reference,
 					}));
 				}
@@ -626,14 +662,75 @@ impl DapServer {
 		self.variable_containers.clear();
 	}
 
-	fn variables_reference_for_value(&mut self, value: Value) -> i64 {
+	fn variable_type_name(
+		&self,
+		value: &Value,
+		declared_type: Option<&ObjectValueTypeDescriptor>,
+	) -> String {
+		if let Value::Object(object) = value
+			&& let Some(display_name) = self.program
+				.and_then(|program| program.object_type_descriptor(object.object_type_id))
+				.map(ObjectTypeDescriptor::display_name) {
+			return display_name.to_string();
+		}
+
+		if let Some(declared_type) = declared_type {
+			return object_value_type_name(declared_type, self.program);
+		}
+
+		runtime_variable_type_name(value).to_string()
+	}
+
+	fn variables_reference_for_value(
+		&mut self,
+		value: Value,
+		declared_type: Option<ObjectValueTypeDescriptor>,
+	) -> i64 {
 		match value {
 			Value::Array(_) | Value::Object(_) | Value::RecordPointer(_) => {
-				self.register_container(VariableContainer::Value(value))
+				self.register_container(VariableContainer::Value(value, declared_type))
 			}
 			_ => 0,
 		}
 	}
+}
+
+fn array_element_type(
+	data_type: Option<&ObjectValueTypeDescriptor>,
+) -> Option<&ObjectValueTypeDescriptor> {
+	match data_type? {
+		ObjectValueTypeDescriptor::Array(element_type) => Some(element_type),
+		ObjectValueTypeDescriptor::Nullable(inner) => array_element_type(Some(inner)),
+		_ => None,
+	}
+}
+
+fn dap_error_response(request: &DapRequest, message: impl Into<String>) -> JsonValue {
+	json!({
+		"type": "response",
+		"request_seq": request.seq,
+		"success": false,
+		"command": request.command,
+		"message": message.into(),
+	})
+}
+
+fn dap_event(event: &str, body: JsonValue) -> JsonValue {
+	json!({
+		"type": "event",
+		"event": event,
+		"body": body,
+	})
+}
+
+fn dap_response(request_seq: i64, command: &str, body: JsonValue) -> JsonValue {
+	json!({
+		"type": "response",
+		"request_seq": request_seq,
+		"success": true,
+		"command": command,
+		"body": body,
+	})
 }
 
 fn debugger_value_for_record_field(field: &RecordFieldValue) -> Result<Value, String> {
@@ -647,26 +744,40 @@ fn debugger_value_for_record_field(field: &RecordFieldValue) -> Result<Value, St
 	}
 }
 
-fn variable_type_name(value: &Value) -> &'static str {
-	match value {
-		Value::Array(_) => "array",
-		Value::Boolean(_) => "bool",
-		Value::Date(_) => "date",
-		Value::Decimal(_) => "dec",
-		Value::DecimalRange(_) => "range",
-		Value::Enum(_) => "enum",
-		Value::Integer(_) => "int",
-		Value::IntegerRange(_) => "range",
-		Value::Iterator(_) => "iterator",
-		Value::Null => "null",
-		Value::Object(_) => "object",
-		Value::RecordPointer(_) => "record pointer",
-		Value::Reference(_) => "reference",
-		Value::Text(_) => "text",
-		Value::Time(_) => "time",
-		Value::TimeTz(_) => "timetz",
-		Value::Timestamp(_) => "timestamp",
-		Value::TimestampTz(_) => "timestamptz",
+fn emit_dap_message(writer: &mut impl Write, message: &JsonValue) -> Result<(), String> {
+	let payload = serde_json::to_vec(message).map_err(|error| format!("Failed to encode DAP message: {error}"))?;
+	write!(writer, "Content-Length: {}\r\n\r\n", payload.len())
+		.map_err(|error| format!("Failed to write DAP header: {error}"))?;
+	writer.write_all(&payload).map_err(|error| format!("Failed to write DAP payload: {error}"))?;
+	writer.flush().map_err(|error| format!("Failed to flush DAP output: {error}"))?;
+	Ok(())
+}
+
+fn emit_dap_messages(writer: &mut impl Write, messages: &[JsonValue]) -> Result<(), String> {
+	for message in messages {
+		emit_dap_message(writer, message)?;
+	}
+
+	Ok(())
+}
+
+fn frame_id_from_arguments(arguments: Option<JsonValue>) -> Result<i64, String> {
+	arguments
+		.unwrap_or(JsonValue::Null)
+		.get("frameId")
+		.and_then(JsonValue::as_i64)
+		.ok_or(String::from("Request must include `frameId`."))
+}
+
+fn format_location(location: &SourceLocation) -> String {
+	let position = match location.display_name() {
+		Some(display_name) => format!("{display_name}:{}:{}", location.line(), location.column()),
+		None => format!("line {}, column {}", location.line(), location.column()),
+	};
+
+	match location.body_name() {
+		Some(body_name) => format!("{body_name} ({position})"),
+		None => position,
 	}
 }
 
@@ -720,68 +831,39 @@ fn main() {
 	run_debug_loop(&program, &mut session, initial_stop);
 }
 
-fn dap_error_response(request: &DapRequest, message: impl Into<String>) -> JsonValue {
-	json!({
-		"type": "response",
-		"request_seq": request.seq,
-		"success": false,
-		"command": request.command,
-		"message": message.into(),
-	})
-}
-
-fn dap_event(event: &str, body: JsonValue) -> JsonValue {
-	json!({
-		"type": "event",
-		"event": event,
-		"body": body,
-	})
-}
-
-fn dap_response(request_seq: i64, command: &str, body: JsonValue) -> JsonValue {
-	json!({
-		"type": "response",
-		"request_seq": request_seq,
-		"success": true,
-		"command": command,
-		"body": body,
-	})
-}
-
-fn emit_dap_message(writer: &mut impl Write, message: &JsonValue) -> Result<(), String> {
-	let payload = serde_json::to_vec(message).map_err(|error| format!("Failed to encode DAP message: {error}"))?;
-	write!(writer, "Content-Length: {}\r\n\r\n", payload.len())
-		.map_err(|error| format!("Failed to write DAP header: {error}"))?;
-	writer.write_all(&payload).map_err(|error| format!("Failed to write DAP payload: {error}"))?;
-	writer.flush().map_err(|error| format!("Failed to flush DAP output: {error}"))?;
-	Ok(())
-}
-
-fn emit_dap_messages(writer: &mut impl Write, messages: &[JsonValue]) -> Result<(), String> {
-	for message in messages {
-		emit_dap_message(writer, message)?;
-	}
-
-	Ok(())
-}
-
-fn frame_id_from_arguments(arguments: Option<JsonValue>) -> Result<i64, String> {
-	arguments
-		.unwrap_or(JsonValue::Null)
-		.get("frameId")
-		.and_then(JsonValue::as_i64)
-		.ok_or(String::from("Request must include `frameId`."))
-}
-
-fn format_location(location: &SourceLocation) -> String {
-	let position = match location.display_name() {
-		Some(display_name) => format!("{display_name}:{}:{}", location.line(), location.column()),
-		None => format!("line {}, column {}", location.line(), location.column()),
-	};
-
-	match location.body_name() {
-		Some(body_name) => format!("{body_name} ({position})"),
-		None => position,
+fn object_value_type_name(
+	data_type: &ObjectValueTypeDescriptor,
+	program: Option<&Program>,
+) -> String {
+	match data_type {
+		ObjectValueTypeDescriptor::Any => String::from("any"),
+		ObjectValueTypeDescriptor::Array(element_type) => {
+			format!("[{}]", object_value_type_name(element_type, program))
+		}
+		ObjectValueTypeDescriptor::Bool => String::from("bool"),
+		ObjectValueTypeDescriptor::Date => String::from("date"),
+		ObjectValueTypeDescriptor::Dec => String::from("dec"),
+		ObjectValueTypeDescriptor::Enum(name) => name.clone(),
+		ObjectValueTypeDescriptor::Int => String::from("int"),
+		ObjectValueTypeDescriptor::Nullable(inner) => {
+			format!("{}?", object_value_type_name(inner, program))
+		}
+		ObjectValueTypeDescriptor::Object(object_type_id) => program
+			.and_then(|program| program.object_type_descriptor(*object_type_id))
+			.map(|descriptor| descriptor.display_name().to_string())
+			.unwrap_or_else(|| String::from("object")),
+		ObjectValueTypeDescriptor::Range(element_type) => {
+			format!("range<{}>", object_value_type_name(element_type, program))
+		}
+		ObjectValueTypeDescriptor::Text => String::from("text"),
+		ObjectValueTypeDescriptor::Time => String::from("time"),
+		ObjectValueTypeDescriptor::TimeTz => String::from("timetz"),
+		ObjectValueTypeDescriptor::Timestamp => String::from("timestamp"),
+		ObjectValueTypeDescriptor::TimestampTz => String::from("timestamptz"),
+		ObjectValueTypeDescriptor::Union(members) => members.iter()
+			.map(|member| object_value_type_name(member, program))
+			.collect::<Vec<_>>()
+			.join(" | "),
 	}
 }
 
@@ -1136,11 +1218,58 @@ fn run_debug_loop(program: &Program, session: &mut DebuggerSession<'_>, mut stop
 	}
 }
 
+fn runtime_variable_type_name(value: &Value) -> &'static str {
+	match value {
+		Value::Array(_) => "array",
+		Value::Boolean(_) => "bool",
+		Value::Date(_) => "date",
+		Value::Decimal(_) => "dec",
+		Value::DecimalRange(_) => "range",
+		Value::Enum(_) => "enum",
+		Value::Integer(_) => "int",
+		Value::IntegerRange(_) => "range",
+		Value::Iterator(_) => "iterator",
+		Value::Null => "null",
+		Value::Object(_) => "object",
+		Value::RecordPointer(_) => "record pointer",
+		Value::Reference(_) => "reference",
+		Value::Text(_) => "text",
+		Value::Time(_) => "time",
+		Value::TimeTz(_) => "timetz",
+		Value::Timestamp(_) => "timestamp",
+		Value::TimestampTz(_) => "timestamptz",
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
 
 	use tablo::ast::*;
+	use tablo::utils::{ unique_temp_directory, unique_temp_path };
+
+	#[test]
+	fn debugger_descriptors_qualify_imported_object_types() {
+		let temp_dir = unique_temp_directory("tablodbg_imported_object_types");
+		let source_path = temp_dir.join("main.tablo");
+		let types_path = temp_dir.join("Types.tablo");
+		let object_path = temp_dir.join("main.tbo");
+		std::fs::create_dir_all(&temp_dir).unwrap();
+		std::fs::write(&types_path, "pub obj Shared { pub value: int, };").unwrap();
+		let source = "use Shared from './Types';\nfn Main(args: [text]): int { var value: Shared = Shared {}; return value.value; }";
+
+		tablo::compile_with_source_name(source, source_path.display().to_string(), &object_path).unwrap();
+		let program = read_program_from_path(&object_path).unwrap();
+		let shared = program.object_type_descriptors().iter()
+			.find(|descriptor| descriptor.display_name().ends_with("Shared"))
+			.unwrap();
+
+		assert_eq!(shared.display_name(), "Types.Shared");
+
+		let _ = std::fs::remove_file(object_path);
+		let _ = std::fs::remove_file(types_path);
+		let _ = std::fs::remove_dir(temp_dir);
+	}
 
 	#[test]
 	fn evaluates_watch_expression_in_dap_server() {
@@ -1250,6 +1379,65 @@ mod tests {
 	}
 
 	#[test]
+	fn expands_objects_with_nominal_and_declared_field_types() {
+		let object_path = unique_temp_path("tablodbg_object_variables", "tbo");
+		tablo::compile(
+			"pub obj Child { privateValue: int = 2, };\n\
+			pub obj Config {\n\
+			\tpub child: Child,\n\
+			\tnote: text?,\n\
+			};\n\
+			fn Main(args: [text]): int { return 0; }",
+			&object_path,
+		).unwrap();
+		let program = read_program_from_path(&object_path).unwrap();
+		let child_type_id = program.object_type_descriptors().iter()
+			.find(|descriptor| descriptor.display_name() == "Child")
+			.unwrap()
+			.id();
+		let config_type_id = program.object_type_descriptors().iter()
+			.find(|descriptor| descriptor.display_name() == "Config")
+			.unwrap()
+			.id();
+		let child = Value::Object(ObjectValue::new(
+			child_type_id,
+			BTreeMap::from([(String::from("privateValue"), Value::Integer(2))]),
+		));
+		let config = Value::Object(ObjectValue::new(
+			config_type_id,
+			BTreeMap::from([
+				(String::from("child"), child),
+				(String::from("note"), Value::Null),
+			]),
+		));
+		let program = Box::leak(Box::new(program));
+		let mut server = DapServer::new();
+		server.program = Some(program);
+
+		assert_eq!(server.variable_type_name(&config, None), "Config");
+		let variables = server.child_variables_for_value(&config, None).unwrap();
+
+		assert_eq!(variables.len(), 2);
+		assert_eq!(variables[0].get("name"), Some(&JsonValue::String(String::from("child"))));
+		assert_eq!(variables[0].get("type"), Some(&JsonValue::String(String::from("Child"))));
+		assert_ne!(variables[0].get("variablesReference"), Some(&JsonValue::Number(0.into())));
+		assert_eq!(variables[1].get("name"), Some(&JsonValue::String(String::from("note"))));
+		assert_eq!(variables[1].get("type"), Some(&JsonValue::String(String::from("text?"))));
+
+		let child_variables = server.child_variables_for_value(
+			match &config {
+				Value::Object(object) => object.fields.get("child").unwrap(),
+				_ => unreachable!(),
+			},
+			Some(&ObjectValueTypeDescriptor::Object(child_type_id)),
+		).unwrap();
+		assert_eq!(child_variables.len(), 1);
+		assert_eq!(child_variables[0].get("name"), Some(&JsonValue::String(String::from("privateValue"))));
+
+		let _ = std::fs::remove_file(object_path);
+	}
+
+	#[test]
 	fn expands_only_available_record_pointer_fields_in_variables_view() {
 		let mut fields = BTreeMap::new();
 		fields.insert(
@@ -1287,7 +1475,7 @@ mod tests {
 			schema_is_implicit: true,
 		});
 		let mut server = DapServer::new();
-		let variables = server.child_variables_for_value(&value).unwrap();
+		let variables = server.child_variables_for_value(&value, None).unwrap();
 
 		assert_eq!(variables.len(), 2);
 		assert_eq!(variables[0].get("name"), Some(&JsonValue::String(String::from("address1"))));

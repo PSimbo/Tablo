@@ -246,7 +246,7 @@ impl Compiler {
 				&mut emission,
 				parameter.name.clone(),
 				slot,
-				data_type.name(),
+				semantic_program.display_data_type_name(data_type),
 				false,
 				0,
 			);
@@ -636,34 +636,30 @@ impl Compiler {
 						"Missing resolved identity for object construction `{object_type_name}` at position {}.",
 						expression.position(),
 					));
-				let object_declaration = semantic_program.object_type(object_type_id)
-					.map(ResolvedObjectType::declaration)
-					.unwrap_or_else(|| panic!("Missing declaration for resolved object construction `{object_type_name}`."));
-				let object_fields = object_declaration.fields()
-					.unwrap_or_else(|| panic!("Object `{object_type_name}` does not support field-based construction."));
+				let descriptor = semantic_program.object_type_descriptor(object_type_id)
+					.unwrap_or_else(|| panic!("Missing descriptor for resolved object construction `{object_type_name}`."));
+				let ObjectTypeDescriptorShape::Fields(object_fields) = descriptor.shape() else {
+					panic!("Object `{object_type_name}` does not support field-based construction.");
+				};
 
 				for field in object_fields {
-					if let Some(provided_field) = fields.iter().find(|provided_field| provided_field.name == field.name) {
+					if let Some(provided_field) = fields.iter().find(|provided_field| provided_field.name == field.name()) {
 						self.compile_into_with_debug_position(&provided_field.value, semantic_program, emission, debug_position);
 					}
-					else if let Some(default_value) = &field.default_value {
-						self.compile_into_with_debug_position(default_value, semantic_program, emission, debug_position);
-					}
 					else {
-						self.emit_default_value(
-							&field.data_type,
-							semantic_program,
-							emission,
-							expression_position,
-							field.position,
-						);
+						let default = semantic_program.object_field_default(object_type_id, field.name())
+							.unwrap_or_else(|| panic!(
+								"Field `{}` on object `{object_type_name}` has no defined default value.",
+								field.name(),
+							));
+						self.emit_object_default_value(&default, emission, expression_position);
 					}
 				}
 
 				self.emit(
 					emission,
 					Instruction::MakeObject {
-						field_names: object_fields.iter().map(|field| field.name.clone()).collect(),
+						field_names: object_fields.iter().map(|field| field.name().to_string()).collect(),
 						object_type_id,
 					},
 					expression_position,
@@ -931,7 +927,7 @@ impl Compiler {
 					emission,
 					variable.name.clone(),
 					variable_slot,
-					variable_type.name(),
+					semantic_program.display_data_type_name(variable_type),
 					false,
 					emission.instructions.len() as u32,
 				);
@@ -1028,7 +1024,7 @@ impl Compiler {
 					emission,
 					variable.name.clone(),
 					variable_slot,
-					variable_type.name(),
+					semantic_program.display_data_type_name(variable_type),
 					!*is_mut,
 					emission.instructions.len() as u32,
 				);
@@ -1099,7 +1095,7 @@ impl Compiler {
 							emission,
 							name.clone(),
 							slot,
-							data_type.name(),
+							semantic_program.display_data_type_name(data_type),
 							true,
 							emission.instructions.len() as u32,
 						);
@@ -1146,7 +1142,7 @@ impl Compiler {
 					emission,
 					name.clone(),
 					slot,
-					data_type.name(),
+					semantic_program.display_data_type_name(data_type),
 					!*is_mut,
 					emission.instructions.len() as u32,
 				);
@@ -1222,7 +1218,7 @@ impl Compiler {
 					emission,
 					name.clone(),
 					slot,
-					data_type.name(),
+					semantic_program.display_data_type_name(data_type),
 					*is_const,
 					emission.instructions.len() as u32,
 				);
@@ -1319,40 +1315,9 @@ impl Compiler {
 			}
 			crate::ast::DataType::Object(name) => {
 				if let Some(object_type_id) = semantic_program.object_type_id_for_reference(type_position, &[]) {
-					let object_declaration = semantic_program.object_type(object_type_id)
-						.map(ResolvedObjectType::declaration)
-						.expect("Resolved object type reference is missing its declaration.");
-					if object_declaration.array_element_type().is_some() {
-						self.emit(emission, Instruction::MakeArray(0), debug_position);
-					}
-					else {
-						let object_fields = object_declaration.fields()
-							.unwrap_or_else(|| panic!("Missing fields for object `{name}`."));
-
-						for field in object_fields {
-							if let Some(default_value) = &field.default_value {
-								self.compile_into(default_value, semantic_program, emission);
-							}
-							else {
-								self.emit_default_value(
-									&field.data_type,
-									semantic_program,
-									emission,
-									debug_position,
-									field.position,
-								);
-							}
-						}
-
-						self.emit(
-							emission,
-							Instruction::MakeObject {
-								field_names: object_fields.iter().map(|field| field.name.clone()).collect(),
-								object_type_id,
-							},
-							debug_position,
-						);
-					}
+					let default = semantic_program.object_type_default(object_type_id)
+						.unwrap_or_else(|| panic!("Object `{name}` has no defined default value."));
+					self.emit_object_default_value(&default, emission, debug_position);
 				}
 				else if let Some(enum_declaration) = semantic_program.enum_declaration(name) {
 					let variant = enum_declaration.variants.first()
@@ -1394,6 +1359,61 @@ impl Compiler {
 			| crate::ast::DataType::Union(_) => {
 				panic!("Cannot emit an implicit default value for `{}`.", data_type.name());
 			}
+		}
+	}
+
+	fn emit_object_default_value(
+		&self,
+		default: &ObjectDefaultValue,
+		emission: &mut EmissionState,
+		debug_position: usize,
+	) {
+		match default {
+			ObjectDefaultValue::Array(values) => {
+				for value in values {
+					self.emit_object_default_value(value, emission, debug_position);
+				}
+				self.emit(emission, Instruction::MakeArray(values.len() as u32), debug_position);
+			}
+			ObjectDefaultValue::Boolean(value) => {
+				self.emit(emission, Instruction::PushBoolean(*value), debug_position);
+			}
+			ObjectDefaultValue::CurrentDate => self.emit(emission, Instruction::PushCurrentDate, debug_position),
+			ObjectDefaultValue::CurrentTime => self.emit(emission, Instruction::PushCurrentTime, debug_position),
+			ObjectDefaultValue::CurrentTimeTz => self.emit(emission, Instruction::PushCurrentTimeTz, debug_position),
+			ObjectDefaultValue::CurrentTimestamp => self.emit(emission, Instruction::PushCurrentTimestamp, debug_position),
+			ObjectDefaultValue::CurrentTimestampTz => self.emit(emission, Instruction::PushCurrentTimestampTz, debug_position),
+			ObjectDefaultValue::Date(value) => self.emit(emission, Instruction::PushDate(*value), debug_position),
+			ObjectDefaultValue::Decimal(value) => {
+				self.emit(emission, Instruction::PushDecimal(value.clone()), debug_position);
+			}
+			ObjectDefaultValue::Enum { backing_value, enum_name, variant_name } => {
+				self.emit(emission, Instruction::PushEnumValue {
+					backing_value: backing_value.clone(),
+					enum_name: enum_name.clone(),
+					variant_name: variant_name.clone(),
+				}, debug_position);
+			}
+			ObjectDefaultValue::Integer(value) => {
+				self.emit(emission, Instruction::PushInteger(*value), debug_position);
+			}
+			ObjectDefaultValue::Null => self.emit(emission, Instruction::PushNull, debug_position),
+			ObjectDefaultValue::Object { fields, object_type_id } => {
+				for (_, value) in fields {
+					self.emit_object_default_value(value, emission, debug_position);
+				}
+				self.emit(emission, Instruction::MakeObject {
+					field_names: fields.iter().map(|(name, _)| name.clone()).collect(),
+					object_type_id: *object_type_id,
+				}, debug_position);
+			}
+			ObjectDefaultValue::Text(value) => {
+				self.emit(emission, Instruction::PushText(value.clone()), debug_position);
+			}
+			ObjectDefaultValue::Time(value) => self.emit(emission, Instruction::PushTime(*value), debug_position),
+			ObjectDefaultValue::TimeTz(value) => self.emit(emission, Instruction::PushTimeTz(*value), debug_position),
+			ObjectDefaultValue::Timestamp(value) => self.emit(emission, Instruction::PushTimestamp(*value), debug_position),
+			ObjectDefaultValue::TimestampTz(value) => self.emit(emission, Instruction::PushTimestampTz(*value), debug_position),
 		}
 	}
 
@@ -2323,6 +2343,42 @@ mod tests {
 			Instruction::MakeObject {
 				field_names: vec![String::from("value")],
 				object_type_id: semantic_program.object_type_id("First").unwrap(),
+			},
+			Instruction::StoreLocal(0),
+		]);
+	}
+
+	#[test]
+	fn compiles_omitted_object_fields_from_complete_descriptor_defaults() {
+		let program = parse_program(
+			"obj Child { value: int = 4, label: text, };\n\
+			obj Model {\n\
+				child: Child = Child { value: 7 },\n\
+				values: [int] = [1, 2],\n\
+			};\n\
+			var model: Model = Model {};",
+		);
+		let semantic_program = SemanticAnalyzer::new().analyze_program(&program).unwrap();
+		let child_id = semantic_program.object_type_id("Child").unwrap();
+		let model_id = semantic_program.object_type_id("Model").unwrap();
+
+		let bytecode = Compiler::new()
+			.compile_program_with_existing_semantics(&program, &semantic_program)
+			.unwrap();
+
+		assert_eq!(bytecode.entry_code().unwrap().instructions, vec![
+			Instruction::PushInteger(7),
+			Instruction::PushText(String::new()),
+			Instruction::MakeObject {
+				field_names: vec![String::from("value"), String::from("label")],
+				object_type_id: child_id,
+			},
+			Instruction::PushInteger(1),
+			Instruction::PushInteger(2),
+			Instruction::MakeArray(2),
+			Instruction::MakeObject {
+				field_names: vec![String::from("child"), String::from("values")],
+				object_type_id: model_id,
 			},
 			Instruction::StoreLocal(0),
 		]);

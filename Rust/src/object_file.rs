@@ -3,9 +3,10 @@
 // point once the object file grows support for multiple sections and debug
 // metadata.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
-use crate::ast::DataType;
+use crate::ast::{DataType, Visibility};
 use crate::builtins::BuiltInFunction;
 use crate::bytecode::*;
 use crate::query::*;
@@ -13,7 +14,7 @@ use crate::value::Decimal;
 
 const MAGIC_BYTES: [u8; 4] = *b"TBO0";
 
-const FORMAT_VERSION: u16 = 1; // Leave at 1 until intial development is complete.
+const FORMAT_VERSION: u16 = 1; // Leave at 1 until initial development is complete.
 
 const OPCODE_ADD: u8 = 1;
 const OPCODE_ADVANCE_SEQUENCE: u8 = OPCODE_ADD + 1;
@@ -106,6 +107,45 @@ const DATA_TYPE_TAG_TIMESTAMP_TZ: u8 = DATA_TYPE_TAG_TIMESTAMP + 1;
 const DATA_TYPE_TAG_TIME_TZ: u8 = DATA_TYPE_TAG_TIMESTAMP_TZ + 1;
 const DATA_TYPE_TAG_UNION: u8 = DATA_TYPE_TAG_TIME_TZ + 1;
 
+const OBJECT_DEFAULT_ARRAY: u8 = 1;
+const OBJECT_DEFAULT_BOOLEAN: u8 = OBJECT_DEFAULT_ARRAY + 1;
+const OBJECT_DEFAULT_CURRENT_DATE: u8 = OBJECT_DEFAULT_BOOLEAN + 1;
+const OBJECT_DEFAULT_CURRENT_TIME: u8 = OBJECT_DEFAULT_CURRENT_DATE + 1;
+const OBJECT_DEFAULT_CURRENT_TIME_TZ: u8 = OBJECT_DEFAULT_CURRENT_TIME + 1;
+const OBJECT_DEFAULT_CURRENT_TIMESTAMP: u8 = OBJECT_DEFAULT_CURRENT_TIME_TZ + 1;
+const OBJECT_DEFAULT_CURRENT_TIMESTAMP_TZ: u8 = OBJECT_DEFAULT_CURRENT_TIMESTAMP + 1;
+const OBJECT_DEFAULT_DATE: u8 = OBJECT_DEFAULT_CURRENT_TIMESTAMP_TZ + 1;
+const OBJECT_DEFAULT_DECIMAL: u8 = OBJECT_DEFAULT_DATE + 1;
+const OBJECT_DEFAULT_ENUM: u8 = OBJECT_DEFAULT_DECIMAL + 1;
+const OBJECT_DEFAULT_INTEGER: u8 = OBJECT_DEFAULT_ENUM + 1;
+const OBJECT_DEFAULT_NULL: u8 = OBJECT_DEFAULT_INTEGER + 1;
+const OBJECT_DEFAULT_OBJECT: u8 = OBJECT_DEFAULT_NULL + 1;
+const OBJECT_DEFAULT_TEXT: u8 = OBJECT_DEFAULT_OBJECT + 1;
+const OBJECT_DEFAULT_TIME: u8 = OBJECT_DEFAULT_TEXT + 1;
+const OBJECT_DEFAULT_TIME_TZ: u8 = OBJECT_DEFAULT_TIME + 1;
+const OBJECT_DEFAULT_TIMESTAMP: u8 = OBJECT_DEFAULT_TIME_TZ + 1;
+const OBJECT_DEFAULT_TIMESTAMP_TZ: u8 = OBJECT_DEFAULT_TIMESTAMP + 1;
+
+const OBJECT_SHAPE_FIELDS: u8 = 1;
+const OBJECT_SHAPE_ROOT_ARRAY: u8 = OBJECT_SHAPE_FIELDS + 1;
+
+const OBJECT_VALUE_TYPE_ANY: u8 = 1;
+const OBJECT_VALUE_TYPE_ARRAY: u8 = OBJECT_VALUE_TYPE_ANY + 1;
+const OBJECT_VALUE_TYPE_BOOL: u8 = OBJECT_VALUE_TYPE_ARRAY + 1;
+const OBJECT_VALUE_TYPE_DATE: u8 = OBJECT_VALUE_TYPE_BOOL + 1;
+const OBJECT_VALUE_TYPE_DEC: u8 = OBJECT_VALUE_TYPE_DATE + 1;
+const OBJECT_VALUE_TYPE_ENUM: u8 = OBJECT_VALUE_TYPE_DEC + 1;
+const OBJECT_VALUE_TYPE_INT: u8 = OBJECT_VALUE_TYPE_ENUM + 1;
+const OBJECT_VALUE_TYPE_NULLABLE: u8 = OBJECT_VALUE_TYPE_INT + 1;
+const OBJECT_VALUE_TYPE_OBJECT: u8 = OBJECT_VALUE_TYPE_NULLABLE + 1;
+const OBJECT_VALUE_TYPE_RANGE: u8 = OBJECT_VALUE_TYPE_OBJECT + 1;
+const OBJECT_VALUE_TYPE_TEXT: u8 = OBJECT_VALUE_TYPE_RANGE + 1;
+const OBJECT_VALUE_TYPE_TIME: u8 = OBJECT_VALUE_TYPE_TEXT + 1;
+const OBJECT_VALUE_TYPE_TIME_TZ: u8 = OBJECT_VALUE_TYPE_TIME + 1;
+const OBJECT_VALUE_TYPE_TIMESTAMP: u8 = OBJECT_VALUE_TYPE_TIME_TZ + 1;
+const OBJECT_VALUE_TYPE_TIMESTAMP_TZ: u8 = OBJECT_VALUE_TYPE_TIMESTAMP + 1;
+const OBJECT_VALUE_TYPE_UNION: u8 = OBJECT_VALUE_TYPE_TIMESTAMP_TZ + 1;
+
 const QUERY_KIND_SQL: u8 = 1;
 
 const SQL_DIALECT_SQLITE: u8 = 1;
@@ -189,8 +229,189 @@ enum ObjectFileSection {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ObjectFileLayout {
 	debug: DebugInfo,
+	object_types: Vec<ObjectTypeDescriptor>,
 	queries: Vec<LoweredBackendQuery>,
 	sections: Vec<ObjectFileSection>,
+}
+
+impl ObjectFileLayout {
+	fn from_program(program: &Program) -> Self {
+		debug_assert!(
+			program.constant_pool().is_empty(),
+			"The current object file format does not yet serialize constant-pool entries."
+		);
+
+		let mut sections = Vec::with_capacity(program.functions().len() + 1);
+
+		for function in program.functions() {
+			sections.push(ObjectFileSection::Function(function.clone()));
+		}
+
+		match program.entry_point() {
+			EntryPoint::Code(code_body) => sections.push(ObjectFileSection::EntryCode(code_body.clone())),
+			EntryPoint::Function(function_index) => sections.push(ObjectFileSection::EntryFunction(*function_index)),
+		}
+
+		Self {
+			debug: program.debug_info().clone(),
+			object_types: program.object_type_descriptors().to_vec(),
+			queries: program.queries().to_vec(),
+			sections,
+		}
+	}
+
+	fn into_program(self) -> Result<Program, ObjectFileError> {
+		let ObjectFileLayout { debug, object_types, queries, sections } = self;
+		validate_object_type_descriptors(&object_types)?;
+		let mut entry_code = None;
+		let mut entry_function = None;
+		let mut functions = Vec::new();
+
+		for section in sections {
+			match section {
+				ObjectFileSection::EntryFunction(function_index) => {
+					if entry_code.is_some() || entry_function.is_some() {
+						return Err(ObjectFileError {
+							offset: 0,
+							message: String::from("Object file contains more than one entry point section."),
+						});
+					}
+
+					entry_function = Some(function_index);
+				}
+				ObjectFileSection::Function(function) => {
+					functions.push(function);
+				}
+				ObjectFileSection::EntryCode(code_body) => {
+					if entry_code.is_some() || entry_function.is_some() {
+						return Err(ObjectFileError {
+							offset: 0,
+							message: String::from("Object file contains more than one entry point section."),
+						});
+					}
+
+					entry_code = Some(code_body);
+				}
+			}
+		}
+
+		if let Some(function_index) = entry_function {
+			return Ok(Program::from_entry_function_with_queries(
+				ConstantPool::default(),
+				function_index,
+				functions,
+				queries,
+				debug,
+			).with_object_type_descriptors(object_types));
+		}
+
+		let entry_code = entry_code.ok_or(ObjectFileError {
+			offset: 0,
+			message: String::from("Object file does not contain an entry point section."),
+		})?;
+
+		Ok(Program::from_parts_with_functions_queries_and_debug(
+			ConstantPool::default(),
+			entry_code,
+			functions,
+			queries,
+			debug,
+		).with_object_type_descriptors(object_types))
+	}
+
+	fn write_to(&self, bytes: &mut Vec<u8>) {
+		let function_count = self.sections.iter()
+			.filter(|section| matches!(section, ObjectFileSection::Function(_)))
+			.count() as u32;
+		bytes.extend_from_slice(&function_count.to_le_bytes());
+
+		for section in &self.sections {
+			match section {
+				ObjectFileSection::EntryFunction(_) => {}
+				ObjectFileSection::Function(function) => {
+					bytes.push(u8::from(function.name().is_some()));
+					if let Some(name) = function.name() {
+						bytes.extend_from_slice(&(name.len() as u32).to_le_bytes());
+						bytes.extend_from_slice(name.as_bytes());
+					}
+
+					bytes.push(u8::from(function.return_type().is_some()));
+					if let Some(return_type) = function.return_type() {
+						write_data_type(bytes, return_type);
+					}
+
+					write_code_body(bytes, function.body());
+				}
+				ObjectFileSection::EntryCode(_) => {}
+			}
+		}
+
+		match self.sections.iter().find(|section| !matches!(section, ObjectFileSection::Function(_))) {
+			Some(ObjectFileSection::EntryCode(code_body)) => {
+				bytes.push(0);
+				write_code_body(bytes, code_body);
+			}
+			Some(ObjectFileSection::EntryFunction(function_index)) => {
+				bytes.push(1);
+				bytes.extend_from_slice(&function_index.to_le_bytes());
+			}
+			Some(ObjectFileSection::Function(_)) | None => unreachable!("Object file layout must include a non-function entry point section."),
+		}
+
+		bytes.extend_from_slice(&(self.queries.len() as u32).to_le_bytes());
+		for query in &self.queries {
+			write_lowered_query(bytes, query);
+		}
+
+		bytes.extend_from_slice(&(self.object_types.len() as u32).to_le_bytes());
+		for object_type in &self.object_types {
+			write_object_type_descriptor(bytes, object_type);
+		}
+
+		bytes.extend_from_slice(&(self.debug.source_files().len() as u32).to_le_bytes());
+
+		for source_file in self.debug.source_files() {
+			bytes.extend_from_slice(&(source_file.display_name().len() as u32).to_le_bytes());
+			bytes.extend_from_slice(source_file.display_name().as_bytes());
+			bytes.extend_from_slice(&(source_file.line_starts().len() as u32).to_le_bytes());
+
+			for line_start in source_file.line_starts() {
+				bytes.extend_from_slice(&line_start.to_le_bytes());
+			}
+		}
+
+		bytes.extend_from_slice(&(self.debug.code_bodies().len() as u32).to_le_bytes());
+
+		for code_body in self.debug.code_bodies() {
+			bytes.push(u8::from(code_body.body_name().is_some()));
+			if let Some(body_name) = code_body.body_name() {
+				bytes.extend_from_slice(&(body_name.len() as u32).to_le_bytes());
+				bytes.extend_from_slice(body_name.as_bytes());
+			}
+
+			bytes.push(u8::from(code_body.source_file_index().is_some()));
+			if let Some(source_file_index) = code_body.source_file_index() {
+				bytes.extend_from_slice(&source_file_index.to_le_bytes());
+			}
+
+			bytes.extend_from_slice(&(code_body.instruction_positions().len() as u32).to_le_bytes());
+			for position in code_body.instruction_positions() {
+				bytes.extend_from_slice(&position.to_le_bytes());
+			}
+
+			bytes.extend_from_slice(&(code_body.locals().len() as u32).to_le_bytes());
+			for local in code_body.locals() {
+				bytes.extend_from_slice(&(local.name().len() as u32).to_le_bytes());
+				bytes.extend_from_slice(local.name().as_bytes());
+				bytes.extend_from_slice(&local.slot().to_le_bytes());
+				bytes.extend_from_slice(&(local.declared_type().len() as u32).to_le_bytes());
+				bytes.extend_from_slice(local.declared_type().as_bytes());
+				bytes.push(u8::from(local.is_const()));
+				bytes.extend_from_slice(&local.scope_start().to_le_bytes());
+				bytes.extend_from_slice(&local.scope_end().to_le_bytes());
+			}
+		}
+	}
 }
 
 struct ObjectFileReader<'a> {
@@ -634,6 +855,13 @@ impl<'a> ObjectFileReader<'a> {
 			queries.push(self.read_lowered_query()?);
 		}
 
+		let object_type_count = self.read_u32()? as usize;
+		let mut object_types = Vec::with_capacity(object_type_count);
+
+		for _ in 0..object_type_count {
+			object_types.push(self.read_object_type_descriptor()?);
+		}
+
 		let debug = if self.is_at_end() {
 			DebugInfo::default()
 		}
@@ -643,6 +871,7 @@ impl<'a> ObjectFileReader<'a> {
 
 		Ok(ObjectFileLayout {
 			debug,
+			object_types,
 			queries,
 			sections,
 		})
@@ -655,6 +884,175 @@ impl<'a> ObjectFileReader<'a> {
 			kind => Err(ObjectFileError {
 				offset: kind_offset,
 				message: format!("Unknown query kind {kind}."),
+			}),
+		}
+	}
+
+	fn read_object_default_value(&mut self) -> Result<ObjectDefaultValue, ObjectFileError> {
+		let tag_offset = self.offset;
+		match self.read_u8()? {
+			OBJECT_DEFAULT_ARRAY => {
+				let value_count = self.read_u32()? as usize;
+				let mut values = Vec::with_capacity(value_count);
+
+				for _ in 0..value_count {
+					values.push(self.read_object_default_value()?);
+				}
+
+				Ok(ObjectDefaultValue::Array(values))
+			}
+			OBJECT_DEFAULT_BOOLEAN => Ok(ObjectDefaultValue::Boolean(self.read_bool()?)),
+			OBJECT_DEFAULT_CURRENT_DATE => Ok(ObjectDefaultValue::CurrentDate),
+			OBJECT_DEFAULT_CURRENT_TIME => Ok(ObjectDefaultValue::CurrentTime),
+			OBJECT_DEFAULT_CURRENT_TIME_TZ => Ok(ObjectDefaultValue::CurrentTimeTz),
+			OBJECT_DEFAULT_CURRENT_TIMESTAMP => Ok(ObjectDefaultValue::CurrentTimestamp),
+			OBJECT_DEFAULT_CURRENT_TIMESTAMP_TZ => Ok(ObjectDefaultValue::CurrentTimestampTz),
+			OBJECT_DEFAULT_DATE => Ok(ObjectDefaultValue::Date(crate::value::Date::from_parts(
+				self.read_i32()?,
+				self.read_u8()?,
+				self.read_u8()?,
+			).map_err(|message| ObjectFileError {
+				offset: self.offset.saturating_sub(6),
+				message,
+			})?)),
+			OBJECT_DEFAULT_DECIMAL => Ok(ObjectDefaultValue::Decimal(self.read_decimal()?)),
+			OBJECT_DEFAULT_ENUM => Ok(ObjectDefaultValue::Enum {
+				backing_value: self.read_constant_value()?,
+				enum_name: self.read_string()?,
+				variant_name: self.read_string()?,
+			}),
+			OBJECT_DEFAULT_INTEGER => Ok(ObjectDefaultValue::Integer(self.read_i64()?)),
+			OBJECT_DEFAULT_NULL => Ok(ObjectDefaultValue::Null),
+			OBJECT_DEFAULT_OBJECT => {
+				let object_type_id = ObjectTypeId::from_raw(self.read_u32()?);
+				let field_count = self.read_u32()? as usize;
+				let mut fields = Vec::with_capacity(field_count);
+
+				for _ in 0..field_count {
+					fields.push((self.read_string()?, self.read_object_default_value()?));
+				}
+
+				Ok(ObjectDefaultValue::Object { fields, object_type_id })
+			}
+			OBJECT_DEFAULT_TEXT => Ok(ObjectDefaultValue::Text(self.read_string()?)),
+			OBJECT_DEFAULT_TIME => Ok(ObjectDefaultValue::Time(
+				crate::value::Time::from_iso_text(&self.read_string()?).map_err(|message| ObjectFileError {
+					offset: self.offset,
+					message,
+				})?,
+			)),
+			OBJECT_DEFAULT_TIME_TZ => Ok(ObjectDefaultValue::TimeTz(
+				crate::value::TimeTz::from_iso_text(&self.read_string()?).map_err(|message| ObjectFileError {
+					offset: self.offset,
+					message,
+				})?,
+			)),
+			OBJECT_DEFAULT_TIMESTAMP => Ok(ObjectDefaultValue::Timestamp(
+				crate::value::Timestamp::from_iso_text(&self.read_string()?).map_err(|message| ObjectFileError {
+					offset: self.offset,
+					message,
+				})?,
+			)),
+			OBJECT_DEFAULT_TIMESTAMP_TZ => Ok(ObjectDefaultValue::TimestampTz(
+				crate::value::TimestampTz::from_iso_text(&self.read_string()?).map_err(|message| ObjectFileError {
+					offset: self.offset,
+					message,
+				})?,
+			)),
+			tag => Err(ObjectFileError {
+				offset: tag_offset,
+				message: format!("Unknown object default value tag {tag}."),
+			}),
+		}
+	}
+
+	fn read_object_type_descriptor(&mut self) -> Result<ObjectTypeDescriptor, ObjectFileError> {
+		let id = ObjectTypeId::from_raw(self.read_u32()?);
+		let display_name = self.read_string()?;
+		let shape_offset = self.offset;
+		let shape = match self.read_u8()? {
+			OBJECT_SHAPE_FIELDS => {
+				let field_count = self.read_u32()? as usize;
+				let mut fields = Vec::with_capacity(field_count);
+
+				for _ in 0..field_count {
+					let name = self.read_string()?;
+					let is_quoted = self.read_bool()?;
+					let visibility = if self.read_bool()? {
+						Visibility::Public
+					}
+					else {
+						Visibility::Private
+					};
+					let data_type = self.read_object_value_type_descriptor()?;
+					let explicit_default = if self.read_bool()? {
+						Some(self.read_object_default_value()?)
+					}
+					else {
+						None
+					};
+					fields.push(ObjectFieldDescriptor {
+						data_type,
+						explicit_default,
+						is_quoted,
+						name,
+						visibility,
+					});
+				}
+
+				ObjectTypeDescriptorShape::Fields(fields)
+			}
+			OBJECT_SHAPE_ROOT_ARRAY => {
+				ObjectTypeDescriptorShape::RootArray(self.read_object_value_type_descriptor()?)
+			}
+			shape => {
+				return Err(ObjectFileError {
+					offset: shape_offset,
+					message: format!("Unknown object descriptor shape {shape}."),
+				});
+			}
+		};
+
+		Ok(ObjectTypeDescriptor { display_name, id, shape })
+	}
+
+	fn read_object_value_type_descriptor(&mut self) -> Result<ObjectValueTypeDescriptor, ObjectFileError> {
+		let tag_offset = self.offset;
+		match self.read_u8()? {
+			OBJECT_VALUE_TYPE_ANY => Ok(ObjectValueTypeDescriptor::Any),
+			OBJECT_VALUE_TYPE_ARRAY => Ok(ObjectValueTypeDescriptor::Array(Box::new(
+				self.read_object_value_type_descriptor()?,
+			))),
+			OBJECT_VALUE_TYPE_BOOL => Ok(ObjectValueTypeDescriptor::Bool),
+			OBJECT_VALUE_TYPE_DATE => Ok(ObjectValueTypeDescriptor::Date),
+			OBJECT_VALUE_TYPE_DEC => Ok(ObjectValueTypeDescriptor::Dec),
+			OBJECT_VALUE_TYPE_ENUM => Ok(ObjectValueTypeDescriptor::Enum(self.read_string()?)),
+			OBJECT_VALUE_TYPE_INT => Ok(ObjectValueTypeDescriptor::Int),
+			OBJECT_VALUE_TYPE_NULLABLE => Ok(ObjectValueTypeDescriptor::Nullable(Box::new(
+				self.read_object_value_type_descriptor()?,
+			))),
+			OBJECT_VALUE_TYPE_OBJECT => Ok(ObjectValueTypeDescriptor::Object(ObjectTypeId::from_raw(self.read_u32()?))),
+			OBJECT_VALUE_TYPE_RANGE => Ok(ObjectValueTypeDescriptor::Range(Box::new(
+				self.read_object_value_type_descriptor()?,
+			))),
+			OBJECT_VALUE_TYPE_TEXT => Ok(ObjectValueTypeDescriptor::Text),
+			OBJECT_VALUE_TYPE_TIME => Ok(ObjectValueTypeDescriptor::Time),
+			OBJECT_VALUE_TYPE_TIME_TZ => Ok(ObjectValueTypeDescriptor::TimeTz),
+			OBJECT_VALUE_TYPE_TIMESTAMP => Ok(ObjectValueTypeDescriptor::Timestamp),
+			OBJECT_VALUE_TYPE_TIMESTAMP_TZ => Ok(ObjectValueTypeDescriptor::TimestampTz),
+			OBJECT_VALUE_TYPE_UNION => {
+				let member_count = self.read_u32()? as usize;
+				let mut members = Vec::with_capacity(member_count);
+
+				for _ in 0..member_count {
+					members.push(self.read_object_value_type_descriptor()?);
+				}
+
+				Ok(ObjectValueTypeDescriptor::Union(members))
+			}
+			tag => Err(ObjectFileError {
+				offset: tag_offset,
+				message: format!("Unknown object value type tag {tag}."),
 			}),
 		}
 	}
@@ -825,6 +1223,123 @@ impl<'a> ObjectFileReader<'a> {
 		bytes.copy_from_slice(self.read_exact(4)?);
 		Ok(u32::from_le_bytes(bytes))
 	}
+}
+
+fn validate_object_default_references(
+	value: &ObjectDefaultValue,
+	object_type_ids: &BTreeSet<ObjectTypeId>,
+) -> Result<(), ObjectFileError> {
+	match value {
+		ObjectDefaultValue::Array(values) => {
+			for value in values {
+				validate_object_default_references(value, object_type_ids)?;
+			}
+		}
+		ObjectDefaultValue::Object { fields, object_type_id } => {
+			validate_object_type_reference(*object_type_id, object_type_ids)?;
+			for (_, value) in fields {
+				validate_object_default_references(value, object_type_ids)?;
+			}
+		}
+		ObjectDefaultValue::Boolean(_)
+		| ObjectDefaultValue::CurrentDate
+		| ObjectDefaultValue::CurrentTime
+		| ObjectDefaultValue::CurrentTimeTz
+		| ObjectDefaultValue::CurrentTimestamp
+		| ObjectDefaultValue::CurrentTimestampTz
+		| ObjectDefaultValue::Date(_)
+		| ObjectDefaultValue::Decimal(_)
+		| ObjectDefaultValue::Enum { .. }
+		| ObjectDefaultValue::Integer(_)
+		| ObjectDefaultValue::Null
+		| ObjectDefaultValue::Text(_)
+		| ObjectDefaultValue::Time(_)
+		| ObjectDefaultValue::TimeTz(_)
+		| ObjectDefaultValue::Timestamp(_)
+		| ObjectDefaultValue::TimestampTz(_) => {}
+	}
+
+	Ok(())
+}
+
+fn validate_object_type_descriptors(object_types: &[ObjectTypeDescriptor]) -> Result<(), ObjectFileError> {
+	let mut object_type_ids = BTreeSet::new();
+
+	for object_type in object_types {
+		if !object_type_ids.insert(object_type.id()) {
+			return Err(ObjectFileError {
+				offset: 0,
+				message: format!("Object file contains duplicate object type ID {}.", object_type.id().raw()),
+			});
+		}
+	}
+
+	for object_type in object_types {
+		match object_type.shape() {
+			ObjectTypeDescriptorShape::Fields(fields) => {
+				for field in fields {
+					validate_object_value_type_references(field.data_type(), &object_type_ids)?;
+					if let Some(default) = field.explicit_default() {
+						validate_object_default_references(default, &object_type_ids)?;
+					}
+				}
+			}
+			ObjectTypeDescriptorShape::RootArray(element_type) => {
+				validate_object_value_type_references(element_type, &object_type_ids)?;
+			}
+		}
+	}
+
+	Ok(())
+}
+
+fn validate_object_type_reference(
+	object_type_id: ObjectTypeId,
+	object_type_ids: &BTreeSet<ObjectTypeId>,
+) -> Result<(), ObjectFileError> {
+	if object_type_ids.contains(&object_type_id) {
+		Ok(())
+	}
+	else {
+		Err(ObjectFileError {
+			offset: 0,
+			message: format!("Object descriptor references missing object type ID {}.", object_type_id.raw()),
+		})
+	}
+}
+
+fn validate_object_value_type_references(
+	data_type: &ObjectValueTypeDescriptor,
+	object_type_ids: &BTreeSet<ObjectTypeId>,
+) -> Result<(), ObjectFileError> {
+	match data_type {
+		ObjectValueTypeDescriptor::Array(element_type)
+		| ObjectValueTypeDescriptor::Nullable(element_type)
+		| ObjectValueTypeDescriptor::Range(element_type) => {
+			validate_object_value_type_references(element_type, object_type_ids)?;
+		}
+		ObjectValueTypeDescriptor::Object(object_type_id) => {
+			validate_object_type_reference(*object_type_id, object_type_ids)?;
+		}
+		ObjectValueTypeDescriptor::Union(members) => {
+			for member in members {
+				validate_object_value_type_references(member, object_type_ids)?;
+			}
+		}
+		ObjectValueTypeDescriptor::Any
+		| ObjectValueTypeDescriptor::Bool
+		| ObjectValueTypeDescriptor::Date
+		| ObjectValueTypeDescriptor::Dec
+		| ObjectValueTypeDescriptor::Enum(_)
+		| ObjectValueTypeDescriptor::Int
+		| ObjectValueTypeDescriptor::Text
+		| ObjectValueTypeDescriptor::Time
+		| ObjectValueTypeDescriptor::TimeTz
+		| ObjectValueTypeDescriptor::Timestamp
+		| ObjectValueTypeDescriptor::TimestampTz => {}
+	}
+
+	Ok(())
 }
 
 fn write_code_body(bytes: &mut Vec<u8>, code_body: &CodeBody) {
@@ -1180,6 +1695,179 @@ fn write_lowered_query(bytes: &mut Vec<u8>, query: &LoweredBackendQuery) {
 	}
 }
 
+fn write_object_default_value(bytes: &mut Vec<u8>, value: &ObjectDefaultValue) {
+	match value {
+		ObjectDefaultValue::Array(values) => {
+			bytes.push(OBJECT_DEFAULT_ARRAY);
+			bytes.extend_from_slice(&(values.len() as u32).to_le_bytes());
+			for value in values {
+				write_object_default_value(bytes, value);
+			}
+		}
+		ObjectDefaultValue::Boolean(value) => {
+			bytes.push(OBJECT_DEFAULT_BOOLEAN);
+			bytes.push(u8::from(*value));
+		}
+		ObjectDefaultValue::CurrentDate => bytes.push(OBJECT_DEFAULT_CURRENT_DATE),
+		ObjectDefaultValue::CurrentTime => bytes.push(OBJECT_DEFAULT_CURRENT_TIME),
+		ObjectDefaultValue::CurrentTimeTz => bytes.push(OBJECT_DEFAULT_CURRENT_TIME_TZ),
+		ObjectDefaultValue::CurrentTimestamp => bytes.push(OBJECT_DEFAULT_CURRENT_TIMESTAMP),
+		ObjectDefaultValue::CurrentTimestampTz => bytes.push(OBJECT_DEFAULT_CURRENT_TIMESTAMP_TZ),
+		ObjectDefaultValue::Date(value) => {
+			bytes.push(OBJECT_DEFAULT_DATE);
+			bytes.extend_from_slice(&value.year.to_le_bytes());
+			bytes.push(value.month);
+			bytes.push(value.day);
+		}
+		ObjectDefaultValue::Decimal(value) => {
+			bytes.push(OBJECT_DEFAULT_DECIMAL);
+			bytes.extend_from_slice(&value.coefficient.to_le_bytes());
+			bytes.push(value.precision);
+			bytes.push(value.scale);
+		}
+		ObjectDefaultValue::Enum { backing_value, enum_name, variant_name } => {
+			bytes.push(OBJECT_DEFAULT_ENUM);
+			write_inline_constant(bytes, backing_value);
+			write_string(bytes, enum_name);
+			write_string(bytes, variant_name);
+		}
+		ObjectDefaultValue::Integer(value) => {
+			bytes.push(OBJECT_DEFAULT_INTEGER);
+			bytes.extend_from_slice(&value.to_le_bytes());
+		}
+		ObjectDefaultValue::Null => bytes.push(OBJECT_DEFAULT_NULL),
+		ObjectDefaultValue::Object { fields, object_type_id } => {
+			bytes.push(OBJECT_DEFAULT_OBJECT);
+			bytes.extend_from_slice(&object_type_id.raw().to_le_bytes());
+			bytes.extend_from_slice(&(fields.len() as u32).to_le_bytes());
+			for (name, value) in fields {
+				write_string(bytes, name);
+				write_object_default_value(bytes, value);
+			}
+		}
+		ObjectDefaultValue::Text(value) => {
+			bytes.push(OBJECT_DEFAULT_TEXT);
+			write_string(bytes, value);
+		}
+		ObjectDefaultValue::Time(value) => {
+			bytes.push(OBJECT_DEFAULT_TIME);
+			write_string(bytes, &value.to_string());
+		}
+		ObjectDefaultValue::TimeTz(value) => {
+			bytes.push(OBJECT_DEFAULT_TIME_TZ);
+			write_string(bytes, &value.to_string());
+		}
+		ObjectDefaultValue::Timestamp(value) => {
+			bytes.push(OBJECT_DEFAULT_TIMESTAMP);
+			write_string(bytes, &value.to_string());
+		}
+		ObjectDefaultValue::TimestampTz(value) => {
+			bytes.push(OBJECT_DEFAULT_TIMESTAMP_TZ);
+			write_string(bytes, &value.to_string());
+		}
+	}
+}
+
+fn write_object_type_descriptor(bytes: &mut Vec<u8>, descriptor: &ObjectTypeDescriptor) {
+	bytes.extend_from_slice(&descriptor.id().raw().to_le_bytes());
+	write_string(bytes, descriptor.display_name());
+
+	match descriptor.shape() {
+		ObjectTypeDescriptorShape::Fields(fields) => {
+			bytes.push(OBJECT_SHAPE_FIELDS);
+			bytes.extend_from_slice(&(fields.len() as u32).to_le_bytes());
+
+			for field in fields {
+				write_string(bytes, field.name());
+				bytes.push(u8::from(field.is_quoted()));
+				bytes.push(u8::from(field.visibility() == Visibility::Public));
+				write_object_value_type_descriptor(bytes, field.data_type());
+				bytes.push(u8::from(field.explicit_default().is_some()));
+				if let Some(default) = field.explicit_default() {
+					write_object_default_value(bytes, default);
+				}
+			}
+		}
+		ObjectTypeDescriptorShape::RootArray(element_type) => {
+			bytes.push(OBJECT_SHAPE_ROOT_ARRAY);
+			write_object_value_type_descriptor(bytes, element_type);
+		}
+	}
+}
+
+fn write_object_value_type_descriptor(bytes: &mut Vec<u8>, data_type: &ObjectValueTypeDescriptor) {
+	match data_type {
+		ObjectValueTypeDescriptor::Any => bytes.push(OBJECT_VALUE_TYPE_ANY),
+		ObjectValueTypeDescriptor::Array(element_type) => {
+			bytes.push(OBJECT_VALUE_TYPE_ARRAY);
+			write_object_value_type_descriptor(bytes, element_type);
+		}
+		ObjectValueTypeDescriptor::Bool => bytes.push(OBJECT_VALUE_TYPE_BOOL),
+		ObjectValueTypeDescriptor::Date => bytes.push(OBJECT_VALUE_TYPE_DATE),
+		ObjectValueTypeDescriptor::Dec => bytes.push(OBJECT_VALUE_TYPE_DEC),
+		ObjectValueTypeDescriptor::Enum(name) => {
+			bytes.push(OBJECT_VALUE_TYPE_ENUM);
+			write_string(bytes, name);
+		}
+		ObjectValueTypeDescriptor::Int => bytes.push(OBJECT_VALUE_TYPE_INT),
+		ObjectValueTypeDescriptor::Nullable(inner_type) => {
+			bytes.push(OBJECT_VALUE_TYPE_NULLABLE);
+			write_object_value_type_descriptor(bytes, inner_type);
+		}
+		ObjectValueTypeDescriptor::Object(object_type_id) => {
+			bytes.push(OBJECT_VALUE_TYPE_OBJECT);
+			bytes.extend_from_slice(&object_type_id.raw().to_le_bytes());
+		}
+		ObjectValueTypeDescriptor::Range(element_type) => {
+			bytes.push(OBJECT_VALUE_TYPE_RANGE);
+			write_object_value_type_descriptor(bytes, element_type);
+		}
+		ObjectValueTypeDescriptor::Text => bytes.push(OBJECT_VALUE_TYPE_TEXT),
+		ObjectValueTypeDescriptor::Time => bytes.push(OBJECT_VALUE_TYPE_TIME),
+		ObjectValueTypeDescriptor::TimeTz => bytes.push(OBJECT_VALUE_TYPE_TIME_TZ),
+		ObjectValueTypeDescriptor::Timestamp => bytes.push(OBJECT_VALUE_TYPE_TIMESTAMP),
+		ObjectValueTypeDescriptor::TimestampTz => bytes.push(OBJECT_VALUE_TYPE_TIMESTAMP_TZ),
+		ObjectValueTypeDescriptor::Union(members) => {
+			bytes.push(OBJECT_VALUE_TYPE_UNION);
+			bytes.extend_from_slice(&(members.len() as u32).to_le_bytes());
+			for member in members {
+				write_object_value_type_descriptor(bytes, member);
+			}
+		}
+	}
+}
+
+fn write_query_record_layout(bytes: &mut Vec<u8>, layout: &QueryRecordLayout) {
+	match &layout.schema {
+		QueryRecordSchema::Known(columns) => {
+			bytes.push(SQL_RECORD_SCHEMA_KNOWN);
+			bytes.extend_from_slice(&(columns.len() as u32).to_le_bytes());
+
+			for column in columns {
+				bytes.extend_from_slice(&(column.column_name.len() as u32).to_le_bytes());
+				bytes.extend_from_slice(column.column_name.as_bytes());
+				write_data_type(bytes, &column.data_type);
+				bytes.push(if column.is_nullable { 1 } else { 0 });
+				bytes.push(if column.is_primary_key { 1 } else { 0 });
+			}
+		}
+		QueryRecordSchema::RuntimeDetermined => bytes.push(SQL_RECORD_SCHEMA_RUNTIME),
+	}
+
+	match &layout.selection {
+		QueryColumnSelection::All => bytes.push(SQL_COLUMN_SELECTION_ALL),
+		QueryColumnSelection::Indices(indices) => {
+			bytes.push(SQL_COLUMN_SELECTION_INDICES);
+			bytes.extend_from_slice(&(indices.len() as u32).to_le_bytes());
+
+			for index in indices {
+				bytes.extend_from_slice(&index.to_le_bytes());
+			}
+		}
+		QueryColumnSelection::RuntimeDetermined => bytes.push(SQL_COLUMN_SELECTION_RUNTIME),
+	}
+}
+
 fn write_sql_query(bytes: &mut Vec<u8>, query: &SqlQuery) {
 	bytes.push(match query.dialect {
 		SqlDialect::MySql => SQL_DIALECT_MYSQL,
@@ -1242,207 +1930,9 @@ fn write_sql_query(bytes: &mut Vec<u8>, query: &SqlQuery) {
 	bytes.extend_from_slice(query.table_name.as_bytes());
 }
 
-impl ObjectFileLayout {
-	fn from_program(program: &Program) -> Self {
-		debug_assert!(
-			program.constant_pool().is_empty(),
-			"The current object file format does not yet serialize constant-pool entries."
-		);
-
-		let mut sections = Vec::with_capacity(program.functions().len() + 1);
-
-		for function in program.functions() {
-			sections.push(ObjectFileSection::Function(function.clone()));
-		}
-
-		match program.entry_point() {
-			EntryPoint::Code(code_body) => sections.push(ObjectFileSection::EntryCode(code_body.clone())),
-			EntryPoint::Function(function_index) => sections.push(ObjectFileSection::EntryFunction(*function_index)),
-		}
-
-		Self {
-			debug: program.debug_info().clone(),
-			queries: program.queries().to_vec(),
-			sections,
-		}
-	}
-
-	fn into_program(self) -> Result<Program, ObjectFileError> {
-		let mut entry_code = None;
-		let mut entry_function = None;
-		let mut functions = Vec::new();
-
-		for section in self.sections {
-			match section {
-				ObjectFileSection::EntryFunction(function_index) => {
-					if entry_code.is_some() || entry_function.is_some() {
-						return Err(ObjectFileError {
-							offset: 0,
-							message: String::from("Object file contains more than one entry point section."),
-						});
-					}
-
-					entry_function = Some(function_index);
-				}
-				ObjectFileSection::Function(function) => {
-					functions.push(function);
-				}
-				ObjectFileSection::EntryCode(code_body) => {
-					if entry_code.is_some() || entry_function.is_some() {
-						return Err(ObjectFileError {
-							offset: 0,
-							message: String::from("Object file contains more than one entry point section."),
-						});
-					}
-
-					entry_code = Some(code_body);
-				}
-			}
-		}
-
-		if let Some(function_index) = entry_function {
-			return Ok(Program::from_entry_function_with_queries(
-				ConstantPool::default(),
-				function_index,
-				functions,
-				self.queries,
-				self.debug,
-			));
-		}
-
-		let entry_code = entry_code.ok_or(ObjectFileError {
-			offset: 0,
-			message: String::from("Object file does not contain an entry point section."),
-		})?;
-
-		Ok(Program::from_parts_with_functions_queries_and_debug(
-			ConstantPool::default(),
-			entry_code,
-			functions,
-			self.queries,
-			self.debug,
-		))
-	}
-
-	fn write_to(&self, bytes: &mut Vec<u8>) {
-		let function_count = self.sections.iter()
-			.filter(|section| matches!(section, ObjectFileSection::Function(_)))
-			.count() as u32;
-		bytes.extend_from_slice(&function_count.to_le_bytes());
-
-		for section in &self.sections {
-			match section {
-				ObjectFileSection::EntryFunction(_) => {}
-				ObjectFileSection::Function(function) => {
-					bytes.push(u8::from(function.name().is_some()));
-					if let Some(name) = function.name() {
-						bytes.extend_from_slice(&(name.len() as u32).to_le_bytes());
-						bytes.extend_from_slice(name.as_bytes());
-					}
-
-					bytes.push(u8::from(function.return_type().is_some()));
-					if let Some(return_type) = function.return_type() {
-						write_data_type(bytes, return_type);
-					}
-
-					write_code_body(bytes, function.body());
-				}
-				ObjectFileSection::EntryCode(_) => {}
-			}
-		}
-
-		match self.sections.iter().find(|section| !matches!(section, ObjectFileSection::Function(_))) {
-			Some(ObjectFileSection::EntryCode(code_body)) => {
-				bytes.push(0);
-				write_code_body(bytes, code_body);
-			}
-			Some(ObjectFileSection::EntryFunction(function_index)) => {
-				bytes.push(1);
-				bytes.extend_from_slice(&function_index.to_le_bytes());
-			}
-			Some(ObjectFileSection::Function(_)) | None => unreachable!("Object file layout must include a non-function entry point section."),
-		}
-
-		bytes.extend_from_slice(&(self.queries.len() as u32).to_le_bytes());
-		for query in &self.queries {
-			write_lowered_query(bytes, query);
-		}
-
-		bytes.extend_from_slice(&(self.debug.source_files().len() as u32).to_le_bytes());
-
-		for source_file in self.debug.source_files() {
-			bytes.extend_from_slice(&(source_file.display_name().len() as u32).to_le_bytes());
-			bytes.extend_from_slice(source_file.display_name().as_bytes());
-			bytes.extend_from_slice(&(source_file.line_starts().len() as u32).to_le_bytes());
-
-			for line_start in source_file.line_starts() {
-				bytes.extend_from_slice(&line_start.to_le_bytes());
-			}
-		}
-
-		bytes.extend_from_slice(&(self.debug.code_bodies().len() as u32).to_le_bytes());
-
-		for code_body in self.debug.code_bodies() {
-			bytes.push(u8::from(code_body.body_name().is_some()));
-			if let Some(body_name) = code_body.body_name() {
-				bytes.extend_from_slice(&(body_name.len() as u32).to_le_bytes());
-				bytes.extend_from_slice(body_name.as_bytes());
-			}
-
-			bytes.push(u8::from(code_body.source_file_index().is_some()));
-			if let Some(source_file_index) = code_body.source_file_index() {
-				bytes.extend_from_slice(&source_file_index.to_le_bytes());
-			}
-
-			bytes.extend_from_slice(&(code_body.instruction_positions().len() as u32).to_le_bytes());
-			for position in code_body.instruction_positions() {
-				bytes.extend_from_slice(&position.to_le_bytes());
-			}
-
-			bytes.extend_from_slice(&(code_body.locals().len() as u32).to_le_bytes());
-			for local in code_body.locals() {
-				bytes.extend_from_slice(&(local.name().len() as u32).to_le_bytes());
-				bytes.extend_from_slice(local.name().as_bytes());
-				bytes.extend_from_slice(&local.slot().to_le_bytes());
-				bytes.extend_from_slice(&(local.declared_type().len() as u32).to_le_bytes());
-				bytes.extend_from_slice(local.declared_type().as_bytes());
-				bytes.push(u8::from(local.is_const()));
-				bytes.extend_from_slice(&local.scope_start().to_le_bytes());
-				bytes.extend_from_slice(&local.scope_end().to_le_bytes());
-			}
-		}
-	}
-}
-
-fn write_query_record_layout(bytes: &mut Vec<u8>, layout: &QueryRecordLayout) {
-	match &layout.schema {
-		QueryRecordSchema::Known(columns) => {
-			bytes.push(SQL_RECORD_SCHEMA_KNOWN);
-			bytes.extend_from_slice(&(columns.len() as u32).to_le_bytes());
-
-			for column in columns {
-				bytes.extend_from_slice(&(column.column_name.len() as u32).to_le_bytes());
-				bytes.extend_from_slice(column.column_name.as_bytes());
-				write_data_type(bytes, &column.data_type);
-				bytes.push(if column.is_nullable { 1 } else { 0 });
-				bytes.push(if column.is_primary_key { 1 } else { 0 });
-			}
-		}
-		QueryRecordSchema::RuntimeDetermined => bytes.push(SQL_RECORD_SCHEMA_RUNTIME),
-	}
-
-	match &layout.selection {
-		QueryColumnSelection::All => bytes.push(SQL_COLUMN_SELECTION_ALL),
-		QueryColumnSelection::Indices(indices) => {
-			bytes.push(SQL_COLUMN_SELECTION_INDICES);
-			bytes.extend_from_slice(&(indices.len() as u32).to_le_bytes());
-
-			for index in indices {
-				bytes.extend_from_slice(&index.to_le_bytes());
-			}
-		}
-		QueryColumnSelection::RuntimeDetermined => bytes.push(SQL_COLUMN_SELECTION_RUNTIME),
-	}
+fn write_string(bytes: &mut Vec<u8>, value: &str) {
+	bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+	bytes.extend_from_slice(value.as_bytes());
 }
 
 #[cfg(test)]
@@ -1452,12 +1942,54 @@ mod tests {
 	use crate::ast::*;
 
 	#[test]
+	fn rejects_duplicate_object_type_descriptor_ids() {
+		let descriptor = ObjectTypeDescriptor {
+			display_name: String::from("Example"),
+			id: ObjectTypeId::from_raw(0),
+			shape: ObjectTypeDescriptorShape::Fields(vec![]),
+		};
+		let program = Program::new(vec![]).with_object_type_descriptors(vec![
+			descriptor.clone(),
+			descriptor,
+		]);
+
+		let error = read_program(&write_program(&program)).unwrap_err();
+
+		assert_eq!(error, ObjectFileError {
+			offset: 0,
+			message: String::from("Object file contains duplicate object type ID 0."),
+		});
+	}
+
+	#[test]
 	fn rejects_invalid_magic_bytes() {
 		let error = read_program(b"NOPE").unwrap_err();
 
 		assert_eq!(error, ObjectFileError {
 			offset: 0,
 			message: String::from("Invalid object file magic bytes."),
+		});
+	}
+
+	#[test]
+	fn rejects_missing_object_type_descriptor_references() {
+		let program = Program::new(vec![]).with_object_type_descriptors(vec![ObjectTypeDescriptor {
+			display_name: String::from("Example"),
+			id: ObjectTypeId::from_raw(0),
+			shape: ObjectTypeDescriptorShape::Fields(vec![ObjectFieldDescriptor {
+				data_type: ObjectValueTypeDescriptor::Object(ObjectTypeId::from_raw(7)),
+				explicit_default: None,
+				is_quoted: false,
+				name: String::from("missing"),
+				visibility: Visibility::Private,
+			}]),
+		}]);
+
+		let error = read_program(&write_program(&program)).unwrap_err();
+
+		assert_eq!(error, ObjectFileError {
+			offset: 0,
+			message: String::from("Object descriptor references missing object type ID 7."),
 		});
 	}
 
@@ -1570,6 +2102,102 @@ mod tests {
 	}
 
 	#[test]
+	fn round_trips_every_object_descriptor_default_value() {
+		let defaults = vec![
+			ObjectDefaultValue::Array(vec![ObjectDefaultValue::Integer(1)]),
+			ObjectDefaultValue::Boolean(true),
+			ObjectDefaultValue::CurrentDate,
+			ObjectDefaultValue::CurrentTime,
+			ObjectDefaultValue::CurrentTimeTz,
+			ObjectDefaultValue::CurrentTimestamp,
+			ObjectDefaultValue::CurrentTimestampTz,
+			ObjectDefaultValue::Date(crate::value::Date::from_parts(2026, 8, 1).unwrap()),
+			ObjectDefaultValue::Decimal(Decimal::from_literal("12.34").unwrap()),
+			ObjectDefaultValue::Enum {
+				backing_value: Constant::Text(String::from("ready")),
+				enum_name: String::from("Status"),
+				variant_name: String::from("Ready"),
+			},
+			ObjectDefaultValue::Integer(17),
+			ObjectDefaultValue::Null,
+			ObjectDefaultValue::Object {
+				fields: vec![(String::from("value"), ObjectDefaultValue::Integer(3))],
+				object_type_id: ObjectTypeId::from_raw(0),
+			},
+			ObjectDefaultValue::Text(String::from("example")),
+			ObjectDefaultValue::Time(crate::value::Time::from_iso_text("11:22:33").unwrap()),
+			ObjectDefaultValue::TimeTz(crate::value::TimeTz::from_iso_text("11:22:33+04:30").unwrap()),
+			ObjectDefaultValue::Timestamp(
+				crate::value::Timestamp::from_iso_text("2026-08-01T11:22:33").unwrap(),
+			),
+			ObjectDefaultValue::TimestampTz(
+				crate::value::TimestampTz::from_iso_text("2026-08-01T11:22:33Z").unwrap(),
+			),
+		];
+		let fields = defaults.into_iter().enumerate()
+			.map(|(index, explicit_default)| ObjectFieldDescriptor {
+				data_type: ObjectValueTypeDescriptor::Any,
+				explicit_default: Some(explicit_default),
+				is_quoted: false,
+				name: format!("field{index}"),
+				visibility: Visibility::Private,
+			})
+			.collect();
+		let program = Program::new(vec![]).with_object_type_descriptors(vec![ObjectTypeDescriptor {
+			display_name: String::from("Defaults"),
+			id: ObjectTypeId::from_raw(0),
+			shape: ObjectTypeDescriptorShape::Fields(fields),
+		}]);
+
+		let decoded = read_program(&write_program(&program)).unwrap();
+
+		assert_eq!(decoded, program);
+	}
+
+	#[test]
+	fn round_trips_every_object_value_type_descriptor() {
+		let data_types = vec![
+			ObjectValueTypeDescriptor::Any,
+			ObjectValueTypeDescriptor::Array(Box::new(ObjectValueTypeDescriptor::Int)),
+			ObjectValueTypeDescriptor::Bool,
+			ObjectValueTypeDescriptor::Date,
+			ObjectValueTypeDescriptor::Dec,
+			ObjectValueTypeDescriptor::Enum(String::from("Status")),
+			ObjectValueTypeDescriptor::Int,
+			ObjectValueTypeDescriptor::Nullable(Box::new(ObjectValueTypeDescriptor::Text)),
+			ObjectValueTypeDescriptor::Object(ObjectTypeId::from_raw(0)),
+			ObjectValueTypeDescriptor::Range(Box::new(ObjectValueTypeDescriptor::Dec)),
+			ObjectValueTypeDescriptor::Text,
+			ObjectValueTypeDescriptor::Time,
+			ObjectValueTypeDescriptor::TimeTz,
+			ObjectValueTypeDescriptor::Timestamp,
+			ObjectValueTypeDescriptor::TimestampTz,
+			ObjectValueTypeDescriptor::Union(vec![
+				ObjectValueTypeDescriptor::Int,
+				ObjectValueTypeDescriptor::Text,
+			]),
+		];
+		let fields = data_types.into_iter().enumerate()
+			.map(|(index, data_type)| ObjectFieldDescriptor {
+				data_type,
+				explicit_default: None,
+				is_quoted: false,
+				name: format!("field{index}"),
+				visibility: Visibility::Private,
+			})
+			.collect();
+		let program = Program::new(vec![]).with_object_type_descriptors(vec![ObjectTypeDescriptor {
+			display_name: String::from("Types"),
+			id: ObjectTypeId::from_raw(0),
+			shape: ObjectTypeDescriptorShape::Fields(fields),
+		}]);
+
+		let decoded = read_program(&write_program(&program)).unwrap();
+
+		assert_eq!(decoded, program);
+	}
+
+	#[test]
 	fn round_trips_new_record_field_types() {
 		let program = Program::new(vec![
 			Instruction::PushInteger(0),
@@ -1588,6 +2216,68 @@ mod tests {
 
 		let bytes = write_program(&program);
 		let decoded = read_program(&bytes).unwrap();
+
+		assert_eq!(decoded, program);
+	}
+
+	#[test]
+	fn round_trips_object_type_descriptors() {
+		let program = Program::new(vec![
+			Instruction::PushInteger(1),
+			Instruction::MakeObject {
+				field_names: vec![String::from("child")],
+				object_type_id: ObjectTypeId::from_raw(0),
+			},
+		]).with_object_type_descriptors(vec![
+			ObjectTypeDescriptor {
+				display_name: String::from("Outer"),
+				id: ObjectTypeId::from_raw(0),
+				shape: ObjectTypeDescriptorShape::Fields(vec![
+					ObjectFieldDescriptor {
+						data_type: ObjectValueTypeDescriptor::Object(ObjectTypeId::from_raw(1)),
+						explicit_default: Some(ObjectDefaultValue::Object {
+							fields: vec![(String::from("value"), ObjectDefaultValue::Integer(7))],
+							object_type_id: ObjectTypeId::from_raw(1),
+						}),
+						is_quoted: false,
+						name: String::from("child"),
+						visibility: Visibility::Private,
+					},
+					ObjectFieldDescriptor {
+						data_type: ObjectValueTypeDescriptor::Union(vec![
+							ObjectValueTypeDescriptor::Int,
+							ObjectValueTypeDescriptor::Text,
+						]),
+						explicit_default: Some(ObjectDefaultValue::Text(String::from("default"))),
+						is_quoted: true,
+						name: String::from("Choice"),
+						visibility: Visibility::Public,
+					},
+				]),
+			},
+			ObjectTypeDescriptor {
+				display_name: String::from("Outer.Child"),
+				id: ObjectTypeId::from_raw(1),
+				shape: ObjectTypeDescriptorShape::Fields(vec![ObjectFieldDescriptor {
+					data_type: ObjectValueTypeDescriptor::Int,
+					explicit_default: Some(ObjectDefaultValue::Integer(7)),
+					is_quoted: false,
+					name: String::from("value"),
+					visibility: Visibility::Public,
+				}]),
+			},
+			ObjectTypeDescriptor {
+				display_name: String::from("Items"),
+				id: ObjectTypeId::from_raw(2),
+				shape: ObjectTypeDescriptorShape::RootArray(ObjectValueTypeDescriptor::Array(Box::new(
+					ObjectValueTypeDescriptor::Nullable(Box::new(ObjectValueTypeDescriptor::Object(
+						ObjectTypeId::from_raw(1),
+					))),
+				))),
+			},
+		]);
+
+		let decoded = read_program(&write_program(&program)).unwrap();
 
 		assert_eq!(decoded, program);
 	}

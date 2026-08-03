@@ -1,11 +1,13 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::io::{ BufRead, BufReader, Write };
+use std::path::Path;
 
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use serde_json::json;
 
+use tablo::ast::ObjectDeclaration;
 use tablo::completion::*;
 use tablo::diagnostics::*;
 use tablo::runtime_config::read_schema_catalog_from_runtime_config_path;
@@ -93,6 +95,23 @@ struct VersionedTextDocumentItem {
 }
 
 impl LspServer {
+	fn completion_analysis(&self, uri: &str, cursor_offset: usize) -> Option<(SourceAnalysis, String)> {
+		let document = self.open_documents.get(uri)?;
+		let file_path = file_path_from_document_uri(uri)?;
+		let source_name = file_path.display().to_string();
+		let schema_catalog = discover_project_config_path(&file_path)
+			.and_then(|config_path| read_schema_catalog_from_runtime_config_path(&config_path).ok());
+		let analyze = |source: &str| match schema_catalog.as_ref() {
+			Some(schema_catalog) => analyze_with_source_name_and_schema(source, &source_name, schema_catalog),
+			None => analyze_with_source_name(source, &source_name),
+		};
+		let analysis = analyze(&document.text).or_else(|_| {
+			let prepared_source = source_for_completion_analysis(&document.text, cursor_offset);
+			analyze(&prepared_source)
+		}).ok()?;
+		Some((analysis, source_name))
+	}
+
 	fn completion_items(&self, uri: &str, position: Position) -> Vec<JsonValue> {
 		let prefix = self.completion_prefix(uri, position);
 		let mut items = self.member_completion_items(uri, position).unwrap_or_else(|| {
@@ -140,6 +159,11 @@ impl LspServer {
 		let visible_text = &document.text[..cursor_offset];
 		let mut items = collect_document_completion_items(visible_text);
 		items.extend(function_completion_items(&document.text));
+
+		if let Some((analysis, source_name)) = self.completion_analysis(uri, cursor_offset) {
+			items.extend(object_type_completion_items(&analysis, &source_name));
+		}
+
 		items
 	}
 
@@ -239,6 +263,7 @@ impl LspServer {
 							},
 							"capabilities": {
 								"positionEncoding": "utf-16",
+								"definitionProvider": true,
 								"completionProvider": {
 									"resolveProvider": false,
 									"triggerCharacters": [".", "_"]
@@ -260,6 +285,21 @@ impl LspServer {
 				Ok(false)
 			}
 			Some("initialized") => Ok(false),
+			Some("textDocument/definition") => {
+				let params: CompletionParams = serde_json::from_value(params)
+					.map_err(|error| format!("Invalid definition params: {error}"))?;
+				let definition = self.object_type_definition(&params.text_document.uri, params.position);
+
+				if let Some(id) = id {
+					write_lsp_message(writer, &json!({
+						"jsonrpc": "2.0",
+						"id": id,
+						"result": definition
+					}))?;
+				}
+
+				Ok(false)
+			}
 			Some("textDocument/completion") => {
 				let params: CompletionParams = serde_json::from_value(params)
 					.map_err(|error| format!("Invalid completion params: {error}"))?;
@@ -345,9 +385,17 @@ impl LspServer {
 		let document = self.open_documents.get(uri)?;
 		let cursor_offset = source_offset_for_position(&document.text, position.line, position.character)?;
 		let file_path = file_path_from_document_uri(uri)?;
-		let config_path = discover_project_config_path(&file_path)?;
-		let schema_catalog = read_schema_catalog_from_runtime_config_path(&config_path).ok()?;
-		member_completion_items(&document.text, cursor_offset, Some(&schema_catalog))
+		let schema_catalog = discover_project_config_path(&file_path)
+			.and_then(|config_path| read_schema_catalog_from_runtime_config_path(&config_path).ok());
+		let analysis = self.completion_analysis(uri, cursor_offset);
+
+		member_completion_items_with_analysis(
+			&document.text,
+			cursor_offset,
+			schema_catalog.as_ref(),
+			analysis.as_ref().map(|(analysis, _)| analysis),
+			analysis.as_ref().map(|(_, source_name)| source_name.as_str()),
+		)
 	}
 
 	fn new() -> Self {
@@ -355,6 +403,33 @@ impl LspServer {
 			open_documents: BTreeMap::new(),
 			shutdown_requested: false,
 		}
+	}
+
+	fn object_type_definition(&self, uri: &str, position: Position) -> Option<JsonValue> {
+		let document = self.open_documents.get(uri)?;
+		let cursor_offset = source_offset_for_position(&document.text, position.line, position.character)?;
+		let (analysis, source_name) = self.completion_analysis(uri, cursor_offset)?;
+		let source = SourceText::new(&document.text);
+		let reference = analysis.semantic_program.object_type_reference_occurrences()
+			.iter()
+			.filter(|reference| reference.source_name.as_deref() == Some(source_name.as_str()))
+			.find(|reference| {
+				token_span_at_position(&source, reference.position)
+					.is_some_and(|(start, end)| start <= cursor_offset && cursor_offset <= end)
+			})?;
+		let object_type = analysis.semantic_program.object_type(reference.object_type_id)?;
+		let target_source_name = object_type.source_name()?;
+		let target_uri = document_uri_from_source_name(target_source_name)?;
+		let target_text = self.open_documents.get(&target_uri)
+			.map(|document| document.text.clone())
+			.or_else(|| std::fs::read_to_string(target_source_name).ok())?;
+		let target_source = SourceText::new(target_text);
+		let (start, end) = object_declaration_name_span(&target_source, object_type.declaration())?;
+
+		Some(json!({
+			"uri": target_uri,
+			"range": lsp_range_for_byte_span(&target_source, start, end),
+		}))
 	}
 
 	fn publish_diagnostics<W: Write>(&self, writer: &mut W, uri: &str) -> Result<(), String> {
@@ -404,7 +479,12 @@ impl LspServer {
 	fn signature_help(&self, uri: &str, position: Position) -> Option<JsonValue> {
 		let document = self.open_documents.get(uri)?;
 		let cursor_offset = source_offset_for_position(&document.text, position.line, position.character)?;
-		let help = signature_help(&document.text, cursor_offset)?;
+		let analysis = self.completion_analysis(uri, cursor_offset);
+		let help = signature_help_with_analysis(
+			&document.text,
+			cursor_offset,
+			analysis.as_ref().map(|(analysis, _)| analysis),
+		)?;
 		Some(json!({
 			"activeSignature": 0,
 			"activeParameter": help.active_parameter,
@@ -460,6 +540,49 @@ fn diagnostic_to_json(diagnostic: Diagnostic) -> JsonValue {
 			}
 		}
 	})
+}
+
+fn document_uri_from_source_name(source_name: &str) -> Option<String> {
+	if source_name.starts_with('<') && source_name.ends_with('>') {
+		return None;
+	}
+
+	let path = Path::new(source_name);
+	let prefix = if cfg!(windows) { "file:///" } else { "file://" };
+	Some(format!("{prefix}{}", path.display()))
+}
+
+fn lsp_range_for_byte_span(source: &SourceText, start: usize, end: usize) -> JsonValue {
+	let (start_line, start_column) = source.line_and_column(start);
+	let (end_line, end_column) = source.line_and_column(end);
+
+	json!({
+		"start": {
+			"line": start_line.saturating_sub(1),
+			"character": start_column.saturating_sub(1),
+		},
+		"end": {
+			"line": end_line.saturating_sub(1),
+			"character": end_column.saturating_sub(1),
+		},
+	})
+}
+
+fn object_declaration_name_span(
+	source: &SourceText,
+	declaration: &ObjectDeclaration,
+) -> Option<(usize, usize)> {
+	if !declaration.has_explicit_name {
+		return token_span_at_position(source, declaration.position);
+	}
+
+	let (_, object_keyword_end) = token_span_at_position(source, declaration.position)?;
+	let name_start = source.as_str()[object_keyword_end..]
+		.char_indices()
+		.find(|(_, ch)| !ch.is_whitespace())
+		.map(|(offset, _)| object_keyword_end + offset)?;
+	let identifier = read_identifier(source.as_str(), name_start)?;
+	Some((name_start, identifier.end))
 }
 
 fn parse_content_length(header_line: &str) -> Result<Option<usize>, String> {
@@ -535,6 +658,14 @@ mod tests {
 	use tablo::utils::unique_temp_directory;
 
 	use super::*;
+
+	fn position_at_offset(source: &str, offset: usize) -> Position {
+		let source = &source[..offset];
+		Position {
+			line: source.lines().count().saturating_sub(1) as u32,
+			character: source.lines().last().map_or(0, |line| line.chars().count()) as u32,
+		}
+	}
 
 	#[test]
 	fn accepts_migrated_function_syntax_and_keywords_in_document_diagnostics() {
@@ -640,6 +771,36 @@ fn Read(config: Config): int {
 	}
 
 	#[test]
+	fn completion_items_include_imported_object_types() {
+		let temp_dir = unique_temp_directory("tablolsp_imported_object_type_completion");
+		let source_path = temp_dir.join("main.tablo");
+		let types_path = temp_dir.join("Types.tablo");
+		std::fs::create_dir_all(&temp_dir).unwrap();
+		std::fs::write(
+			&types_path,
+			"pub obj Shared { pub visible: int, hidden: int, };",
+		).unwrap();
+		let source = "use Shared from './Types';\nfn Main(args: [text]): int {\n\tvar value: Sha;\n\treturn 0;\n}";
+		let cursor_offset = source.find("Sha;").unwrap() + 3;
+		let uri = format!("file://{}", source_path.display());
+		let mut server = LspServer::new();
+		server.open_documents.insert(uri.clone(), OpenDocument {
+			text: source.to_string(),
+			version: 1,
+		});
+
+		let items = server.completion_items(&uri, position_at_offset(source, cursor_offset));
+		let labels = items.into_iter()
+			.filter_map(|item| item.get("label").and_then(JsonValue::as_str).map(str::to_string))
+			.collect::<Vec<_>>();
+
+		assert!(labels.contains(&String::from("Shared")));
+
+		let _ = std::fs::remove_file(types_path);
+		let _ = std::fs::remove_dir(temp_dir);
+	}
+
+	#[test]
 	fn discovers_project_config_in_parent_directory() {
 		let temp_dir = unique_temp_directory("tablolsp_project_config");
 		let source_dir = temp_dir.join("src");
@@ -709,6 +870,134 @@ fn Read(config: Config): int {
 
 		assert!(diagnostic.contains("Field `MissingField` does not exist on table `Customers`."));
 		assert!(diagnostic.contains("\"character\":50"));
+	}
+
+	#[test]
+	fn member_completion_includes_private_fields_from_the_current_module() {
+		let source = "obj Local { visible: int, hidden: int, };\nfn Main(args: [text]): int {\n\tvar value: Local = Local {};\n\tvalue.;\n\treturn 0;\n}";
+		let cursor_offset = source.find("value.;").unwrap() + "value.".len();
+		let uri = String::from("file:///tmp/local-object-completion.tablo");
+		let mut server = LspServer::new();
+		server.open_documents.insert(uri.clone(), OpenDocument {
+			text: source.to_string(),
+			version: 1,
+		});
+
+		let items = server.completion_items(&uri, position_at_offset(source, cursor_offset));
+		let labels = items.into_iter()
+			.filter_map(|item| item.get("label").and_then(JsonValue::as_str).map(str::to_string))
+			.collect::<Vec<_>>();
+
+		assert!(labels.contains(&String::from("visible")));
+		assert!(labels.contains(&String::from("hidden")));
+	}
+
+	#[test]
+	fn member_completion_uses_imported_object_identities_and_hides_private_fields() {
+		let temp_dir = unique_temp_directory("tablolsp_imported_object_member_completion");
+		let source_path = temp_dir.join("main.tablo");
+		let types_path = temp_dir.join("Types.tablo");
+		std::fs::create_dir_all(&temp_dir).unwrap();
+		std::fs::write(
+			&types_path,
+			"pub obj Shared {\n\
+			\tpub details: { pub visible: int, hidden: int, },\n\
+			};",
+		).unwrap();
+		let source = "use Shared from './Types';\nfn Main(args: [text]): int {\n\tvar value: Shared = Shared {};\n\tvalue.details.;\n\treturn 0;\n}";
+		let cursor_offset = source.find("details.").unwrap() + "details.".len();
+		let uri = format!("file://{}", source_path.display());
+		let mut server = LspServer::new();
+		server.open_documents.insert(uri.clone(), OpenDocument {
+			text: source.to_string(),
+			version: 1,
+		});
+
+		let items = server.completion_items(&uri, position_at_offset(source, cursor_offset));
+		let labels = items.into_iter()
+			.filter_map(|item| item.get("label").and_then(JsonValue::as_str).map(str::to_string))
+			.collect::<Vec<_>>();
+
+		assert!(labels.contains(&String::from("visible")));
+		assert!(!labels.contains(&String::from("hidden")));
+
+		let _ = std::fs::remove_file(types_path);
+		let _ = std::fs::remove_dir(temp_dir);
+	}
+
+	#[test]
+	fn object_type_definition_resolves_imported_object_identity_to_its_source() {
+		let temp_dir = unique_temp_directory("tablolsp_imported_object_definition");
+		let source_path = temp_dir.join("main.tablo");
+		let types_path = temp_dir.join("Types.tablo");
+		let imported_source = "pub obj Shared { pub value: int, };";
+		std::fs::create_dir_all(&temp_dir).unwrap();
+		std::fs::write(&types_path, imported_source).unwrap();
+		let source = "use Shared from './Types';\n\
+			fn Main(args: [text]): int {\n\
+			\tvar value: Shared;\n\
+			\treturn 0;\n\
+			}";
+		let reference_offset = source.find("value: Shared").unwrap() + "value: ".len();
+		let uri = format!("file://{}", source_path.display());
+		let expected_uri = format!("file://{}", types_path.display());
+		let mut server = LspServer::new();
+		server.open_documents.insert(uri.clone(), OpenDocument {
+			text: source.to_string(),
+			version: 1,
+		});
+
+		let definition = server.object_type_definition(
+			&uri,
+			position_at_offset(source, reference_offset),
+		).unwrap();
+
+		assert_eq!(definition.get("uri").and_then(JsonValue::as_str), Some(expected_uri.as_str()));
+		assert_eq!(definition.pointer("/range/start/line").and_then(JsonValue::as_u64), Some(0));
+		assert_eq!(definition.pointer("/range/start/character").and_then(JsonValue::as_u64), Some(8));
+		assert_eq!(definition.pointer("/range/end/character").and_then(JsonValue::as_u64), Some(14));
+
+		let _ = std::fs::remove_file(types_path);
+		let _ = std::fs::remove_dir(temp_dir);
+	}
+
+	#[test]
+	fn object_type_definition_resolves_named_inline_object_identity() {
+		let source = "obj Envelope {\n\
+		\tpayload: obj Payload { value: int, },\n\
+		};\n\
+		fn Main(args: [text]): int {\n\
+		\tvar value: Envelope.Payload;\n\
+		\treturn 0;\n\
+		}";
+		let uri = String::from("file:///tmp/nested-object-definition.tablo");
+		let reference_offset = source.rfind("Envelope.Payload").unwrap() + "Envelope.".len();
+		let declaration_offset = source.find("Payload {").unwrap();
+		let expected_position = position_at_offset(source, declaration_offset);
+		let mut server = LspServer::new();
+		server.open_documents.insert(uri.clone(), OpenDocument {
+			text: source.to_string(),
+			version: 1,
+		});
+
+		let definition = server.object_type_definition(
+			&uri,
+			position_at_offset(source, reference_offset),
+		).unwrap();
+
+		assert_eq!(definition.get("uri").and_then(JsonValue::as_str), Some(uri.as_str()));
+		assert_eq!(
+			definition.pointer("/range/start/line").and_then(JsonValue::as_u64),
+			Some(expected_position.line as u64),
+		);
+		assert_eq!(
+			definition.pointer("/range/start/character").and_then(JsonValue::as_u64),
+			Some(expected_position.character as u64),
+		);
+		assert_eq!(
+			definition.pointer("/range/end/character").and_then(JsonValue::as_u64),
+			Some((expected_position.character + "Payload".len() as u32) as u64),
+		);
 	}
 
 	#[test]
@@ -791,5 +1080,47 @@ fn Read(config: Config): int {
 				.and_then(JsonValue::as_str),
 			Some("right: int = 0"),
 		);
+	}
+
+	#[test]
+	fn signature_help_qualifies_object_types_from_imported_functions() {
+		let temp_dir = unique_temp_directory("tablolsp_imported_signature_help");
+		let source_path = temp_dir.join("main.tablo");
+		let types_path = temp_dir.join("Types.tablo");
+		std::fs::create_dir_all(&temp_dir).unwrap();
+		std::fs::write(
+			&types_path,
+			"pub obj Shared { pub value: int, };\n\
+			pub fn Convert(value: Shared, fallback: Shared? = null): [Shared] { return [value]; }\n\
+			fn Convert(value: text): text { return value; }",
+		).unwrap();
+		let source = "use Convert from './Types';\nfn Main(args: [text]): int {\n\tConvert(Shared {}, null);\n\treturn 0;\n}";
+		let cursor_offset = source.find(", null").unwrap() + 2;
+		let uri = format!("file://{}", source_path.display());
+		let mut server = LspServer::new();
+		server.open_documents.insert(uri.clone(), OpenDocument {
+			text: source.to_string(),
+			version: 1,
+		});
+
+		let help = server.signature_help(&uri, position_at_offset(source, cursor_offset)).unwrap();
+		let signatures = help.get("signatures").and_then(JsonValue::as_array).unwrap();
+
+		assert_eq!(signatures.len(), 1);
+		assert_eq!(
+			signatures[0].get("label").and_then(JsonValue::as_str),
+			Some("Convert(value: Types.Shared, fallback: Types.Shared? = null): [Types.Shared]"),
+		);
+		assert_eq!(
+			signatures[0].get("parameters")
+				.and_then(JsonValue::as_array)
+				.and_then(|parameters| parameters.get(1))
+				.and_then(|parameter| parameter.get("label"))
+				.and_then(JsonValue::as_str),
+			Some("fallback: Types.Shared? = null"),
+		);
+
+		let _ = std::fs::remove_file(types_path);
+		let _ = std::fs::remove_dir(temp_dir);
 	}
 }

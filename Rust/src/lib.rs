@@ -30,7 +30,7 @@ use compiler::{ CompileError , Compiler };
 use database::RuntimeDatabaseConfig;
 use object_file::*;
 use schema::SchemaCatalog;
-use semantic::analyzer::{ FunctionOverloadAlias, SemanticAnalyzer, SemanticWarning };
+use semantic::analyzer::{ FunctionOverloadAlias, SemanticAnalyzer, SemanticProgram, SemanticWarning };
 use semantic::ssa::*;
 use source::SourceText;
 use syntax::lexer::{ LexError, Lexer };
@@ -138,7 +138,11 @@ pub struct CompilationReport {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SourceAnalysis {
+	pub imported_function_sources: BTreeMap<String, Vec<String>>,
 	pub local_usage: ProgramLocalUsage,
+	pub object_import_bindings: BTreeMap<String, ObjectTypeId>,
+	pub semantic_program: SemanticProgram,
+	pub source_name: String,
 	pub warnings: Vec<SemanticWarning>,
 }
 
@@ -166,6 +170,7 @@ struct LinkedProgram {
 	function_overload_aliases: Vec<FunctionOverloadAlias>,
 	function_source_files: Vec<SourceFileDebugInfo>,
 	function_source_indices: Vec<u32>,
+	object_import_bindings: BTreeMap<String, String>,
 	program: ast::AstProgram,
 	root_source_file: SourceFileDebugInfo,
 	top_level_function_source_names: Vec<String>,
@@ -1137,9 +1142,34 @@ fn analyze_source_local_usage_with_name_and_schema(
 		.filter(|warning| warning.source_name.as_deref().is_none_or(|name| name == root_source_name))
 		.cloned()
 		.collect();
+	let object_import_bindings = linked_program.object_import_bindings.iter()
+		.filter_map(|(name, target_name)| {
+			semantic_program.object_type_id(target_name).map(|id| (name.clone(), id))
+		})
+		.collect();
+	let function_sources_by_target = linked_program.program.functions.iter()
+		.zip(&linked_program.top_level_function_source_names)
+		.map(|(function, source_name)| (function.name.as_str(), source_name.as_str()))
+		.collect::<BTreeMap<_, _>>();
+	let imported_function_sources = linked_program.function_overload_aliases.iter()
+		.filter_map(|alias| {
+			let mut source_names = alias.target_names.iter()
+				.filter_map(|target_name| function_sources_by_target.get(target_name.as_str()).copied())
+				.filter(|source_name| *source_name != root_source_name)
+				.map(String::from)
+				.collect::<Vec<_>>();
+			source_names.sort();
+			source_names.dedup();
+			(!source_names.is_empty()).then(|| (alias.display_name.clone(), source_names))
+		})
+		.collect();
 
 	Ok(SourceAnalysis {
+		imported_function_sources,
 		local_usage: filter_root_source_local_usage(local_usage, &linked_program),
+		object_import_bindings,
+		semantic_program,
+		source_name: root_source_name.to_string(),
 		warnings,
 	})
 }
@@ -1656,6 +1686,7 @@ fn link_program_modules(
 			function_overload_aliases: Vec::new(),
 			function_source_files: Vec::new(),
 			function_source_indices: collect_function_source_indices(program, 0),
+			object_import_bindings: BTreeMap::new(),
 			program: program.clone(),
 			root_source_file,
 			top_level_function_source_names: program.functions.iter()
@@ -1675,6 +1706,7 @@ fn link_program_modules(
 			function_overload_aliases: Vec::new(),
 			function_source_files: Vec::new(),
 			function_source_indices: collect_function_source_indices(program, 0),
+			object_import_bindings: BTreeMap::new(),
 			program: program.clone(),
 			root_source_file,
 			top_level_function_source_names: program.functions.iter()
@@ -1811,6 +1843,7 @@ fn link_program_modules(
 		function_overload_aliases: linker.function_overload_aliases,
 		function_source_files: imported_source_files,
 		function_source_indices,
+		object_import_bindings: import_bindings.objects,
 		program: linked_program,
 		root_source_file,
 		top_level_function_source_names,
@@ -4924,6 +4957,38 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_assigning_private_field_from_importing_module() {
+		let root_path = write_test_source_file(
+			"rejects_assigning_private_field_from_importing_module_root",
+			"main.tablo",
+			"use Shared from './Types';\n\
+			fn Main(args: [text]): int { var value: Shared = Shared {}; value.hidden = 3; return 0; }",
+		);
+		let types_path = root_path.parent().unwrap().join("Types.tablo");
+		fs::write(
+			&types_path,
+			"pub obj Shared { pub visible: int = 1, hidden: int = 2, };",
+		).unwrap();
+
+		let error = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap_err();
+
+		assert!(matches!(
+			error,
+			TabloError::Compile(crate::compiler::CompileError { message, .. })
+				if message == "Field `hidden` on object `Shared` is private and cannot be accessed from this module."
+		));
+
+		let _ = fs::remove_file(types_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
+	}
+
+	#[test]
 	fn rejects_assignment_from_any_to_specific_type() {
 		let error = run("fn Main(args: [text]): int { var value: any = 1; var total: int = value; return total; }").unwrap_err();
 
@@ -5349,6 +5414,38 @@ mod tests {
 			),
 			position: 7,
 		}));
+	}
+
+	#[test]
+	fn rejects_initializing_private_field_from_importing_module() {
+		let root_path = write_test_source_file(
+			"rejects_initializing_private_field_from_importing_module_root",
+			"main.tablo",
+			"use Shared from './Types';\n\
+			fn Main(args: [text]): int { var value: Shared = Shared { hidden: 3 }; return 0; }",
+		);
+		let types_path = root_path.parent().unwrap().join("Types.tablo");
+		fs::write(
+			&types_path,
+			"pub obj Shared { pub visible: int = 1, hidden: int = 2, };",
+		).unwrap();
+
+		let error = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap_err();
+
+		assert!(matches!(
+			error,
+			TabloError::Compile(crate::compiler::CompileError { message, .. })
+				if message == "Field `hidden` on object `Shared` is private and cannot be initialized from this module."
+		));
+
+		let _ = fs::remove_file(types_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
 	}
 
 	#[test]
@@ -5839,6 +5936,38 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_reading_private_field_from_importing_module() {
+		let root_path = write_test_source_file(
+			"rejects_reading_private_field_from_importing_module_root",
+			"main.tablo",
+			"use Shared from './Types';\n\
+			fn Main(args: [text]): int { var value: Shared = Shared {}; return value.hidden; }",
+		);
+		let types_path = root_path.parent().unwrap().join("Types.tablo");
+		fs::write(
+			&types_path,
+			"pub obj Shared { pub visible: int = 1, hidden: int = 2, };",
+		).unwrap();
+
+		let error = compile_source_to_program_with_name_and_schema(
+			fs::read_to_string(&root_path).unwrap(),
+			Some(root_path.to_str().unwrap()),
+			CompilationTarget::Standalone,
+			None,
+		).unwrap_err();
+
+		assert!(matches!(
+			error,
+			TabloError::Compile(crate::compiler::CompileError { message, .. })
+				if message == "Field `hidden` on object `Shared` is private and cannot be accessed from this module."
+		));
+
+		let _ = fs::remove_file(types_path);
+		let _ = fs::remove_file(&root_path);
+		let _ = fs::remove_dir(root_path.parent().unwrap());
+	}
+
+	#[test]
 	fn rejects_scalar_named_group_boundary_variadic_argument() {
 		let error = compile_standalone_with_schema_fixture_and_backends(
 			"with exampledb;\nfn Main(args: [text]): int {\n    for rec cust in Customers group by Country as country, City {\n        if firstof(v1: country, v2: City) { return 1; }\n    }\n    return 0;\n}",
@@ -6098,6 +6227,7 @@ mod tests {
 			CompilationTarget::Standalone,
 			None,
 		).unwrap_err();
+		let diagnostic = crate::diagnostics::diagnostic_for_tablo_error(&root_source, error.clone());
 		let formatted = error.format_with_source_name(&root_source, Some(root_path.to_str().unwrap()));
 
 		assert!(
@@ -6106,6 +6236,10 @@ mod tests {
 			),
 			"{formatted}",
 		);
+		assert_eq!(diagnostic.range.start.line, 1);
+		assert_eq!(diagnostic.range.start.character, 4);
+		assert_eq!(diagnostic.range.end.line, 1);
+		assert_eq!(diagnostic.range.end.character, 10);
 
 		let _ = fs::remove_file(left_path);
 		let _ = fs::remove_file(right_path);
@@ -8381,7 +8515,29 @@ mod tests {
 	}
 
 	#[test]
-	fn runs_root_array_shaped_object_declaration_with_imported_element_type() {
+	fn runs_root_array_shaped_object_declaration_with_named_element_object_file() {
+		let output_path = unique_test_output_path("runs_root_array_shaped_object_declaration_with_named_element_object_file");
+		compile(
+			"obj CustomerCollection [obj Customer { name: text, }];\nfn Main(args: [text]): int { var customers: CustomerCollection = [CustomerCollection.Customer { name: 'Alice' }]; if customers[1].name == 'Alice' { return 1; } return 0; }",
+			&output_path,
+		).unwrap();
+		let result = run_file(&output_path).unwrap();
+		let _ = std::fs::remove_file(&output_path);
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn runs_root_array_shaped_object_declaration_with_named_element_source_text() {
+		let result = run(
+			"obj CustomerCollection [obj Customer { name: text, }];\nfn Main(args: [text]): int { var customers: CustomerCollection = [CustomerCollection.Customer { name: 'Alice' }]; if customers[1].name == 'Alice' { return 1; } return 0; }"
+		).unwrap();
+
+		assert_eq!(result, Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn runs_root_array_shaped_object_with_imported_element_type_after_object_round_trip() {
 		let root_path = write_test_source_file(
 			"runs_root_array_shaped_object_declaration_with_imported_element_type_root",
 			"main.tablo",
@@ -8403,6 +8559,7 @@ mod tests {
 			CompilationTarget::Standalone,
 			None,
 		).unwrap();
+		let program = read_program(&write_program(&program)).unwrap();
 		let result = run_program(&program).unwrap();
 
 		assert_eq!(result, Some(Value::Integer(1)));
@@ -8410,28 +8567,6 @@ mod tests {
 		let _ = fs::remove_file(types_path);
 		let _ = fs::remove_file(&root_path);
 		let _ = fs::remove_dir(root_path.parent().unwrap());
-	}
-
-	#[test]
-	fn runs_root_array_shaped_object_declaration_with_named_element_object_file() {
-		let output_path = unique_test_output_path("runs_root_array_shaped_object_declaration_with_named_element_object_file");
-		compile(
-			"obj CustomerCollection [obj Customer { name: text, }];\nfn Main(args: [text]): int { var customers: CustomerCollection = [CustomerCollection.Customer { name: 'Alice' }]; if customers[1].name == 'Alice' { return 1; } return 0; }",
-			&output_path,
-		).unwrap();
-		let result = run_file(&output_path).unwrap();
-		let _ = std::fs::remove_file(&output_path);
-
-		assert_eq!(result, Some(Value::Integer(1)));
-	}
-
-	#[test]
-	fn runs_root_array_shaped_object_declaration_with_named_element_source_text() {
-		let result = run(
-			"obj CustomerCollection [obj Customer { name: text, }];\nfn Main(args: [text]): int { var customers: CustomerCollection = [CustomerCollection.Customer { name: 'Alice' }]; if customers[1].name == 'Alice' { return 1; } return 0; }"
-		).unwrap();
-
-		assert_eq!(result, Some(Value::Integer(1)));
 	}
 
 	#[test]

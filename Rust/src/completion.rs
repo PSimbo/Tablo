@@ -1,6 +1,9 @@
 use crate::builtins::BuiltInFunction;
+use crate::ast::Visibility;
+use crate::bytecode::{ ObjectTypeDescriptorShape, ObjectTypeId, ObjectValueTypeDescriptor };
 use crate::schema::*;
 use crate::source::*;
+use crate::SourceAnalysis;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompletionItemKind {
@@ -44,6 +47,38 @@ pub fn callable_signatures(source: &str, name: &str) -> Vec<CallableSignature> {
 		collect_document_callable_signatures(source).into_iter()
 			.filter_map(|(function_name, signature)| (function_name == name).then_some(signature))
 	);
+	signatures
+}
+
+pub fn callable_signatures_with_analysis(
+	source: &str,
+	name: &str,
+	analysis: Option<&SourceAnalysis>,
+) -> Vec<CallableSignature> {
+	let mut signatures = callable_signatures(source, name);
+
+	if let Some(analysis) = analysis {
+		if let Some(source_names) = analysis.imported_function_sources.get(name) {
+			for source_name in source_names {
+				let Ok(imported_source) = std::fs::read_to_string(source_name) else {
+					continue;
+				};
+				signatures.extend(
+					collect_document_callable_signatures_with_visibility(&imported_source).into_iter()
+						.filter_map(|(function_name, signature, is_public)| {
+							(is_public && function_name == name).then_some(signature)
+						}),
+				);
+			}
+		}
+
+		for signature in &mut signatures {
+			*signature = qualify_callable_signature(signature, analysis);
+		}
+	}
+
+	let mut seen = std::collections::BTreeSet::new();
+	signatures.retain(|signature| seen.insert(signature.label.clone()));
 	signatures
 }
 
@@ -243,6 +278,16 @@ pub fn member_completion_items(
 	cursor_offset: usize,
 	schema_catalog: Option<&SchemaCatalog>,
 ) -> Option<Vec<CompletionItem>> {
+	member_completion_items_with_analysis(source, cursor_offset, schema_catalog, None, None)
+}
+
+pub fn member_completion_items_with_analysis(
+	source: &str,
+	cursor_offset: usize,
+	schema_catalog: Option<&SchemaCatalog>,
+	analysis: Option<&SourceAnalysis>,
+	current_source_name: Option<&str>,
+) -> Option<Vec<CompletionItem>> {
 	let visible_text = &source[..cursor_offset.min(source.len())];
 	let receiver_chain = extract_member_receiver_chain(visible_text)?;
 	let active_databases = collect_active_databases(visible_text);
@@ -260,9 +305,12 @@ pub fn member_completion_items(
 		&object_declarations,
 		schema_catalog,
 		&active_databases,
+		analysis,
+		current_source_name,
 	)?;
 
-	if let Some(variants) = enum_declarations.get(&member_type) {
+	if let CompletionMemberType::Named(member_type_name) = &member_type
+		&& let Some(variants) = enum_declarations.get(member_type_name) {
 		return Some(variants.iter()
 			.map(|variant| CompletionItem {
 				label: variant.clone(),
@@ -271,6 +319,31 @@ pub fn member_completion_items(
 			})
 			.collect());
 	}
+
+	if let CompletionMemberType::Object(object_type_id) = member_type {
+		let analysis = analysis?;
+		let object_type = analysis.semantic_program.object_type(object_type_id)?;
+		let descriptor = analysis.semantic_program.object_type_descriptor(object_type_id)?;
+		let ObjectTypeDescriptorShape::Fields(fields) = descriptor.shape() else {
+			return Some(Vec::new());
+		};
+		let can_access_private_fields = current_source_name.is_some_and(|source_name| {
+			object_type.source_name() == Some(source_name)
+		});
+
+		return Some(fields.iter()
+			.filter(|field| field.visibility() == Visibility::Public || can_access_private_fields)
+			.map(|field| CompletionItem {
+				label: field.name().to_string(),
+				kind: CompletionItemKind::Field,
+				detail: format!("Object field of {}", object_type.display_name()),
+			})
+			.collect());
+	}
+
+	let CompletionMemberType::Named(member_type) = member_type else {
+		return None;
+	};
 
 	if let Some(fields) = object_declarations.get(&member_type) {
 		return Some(fields.iter()
@@ -293,13 +366,97 @@ pub fn member_completion_items(
 		.collect())
 }
 
+pub fn object_type_completion_items(
+	analysis: &SourceAnalysis,
+	current_source_name: &str,
+) -> Vec<CompletionItem> {
+	let mut items = analysis.semantic_program.object_types()
+		.filter(|object_type| {
+			object_type.source_name() == Some(current_source_name)
+				&& object_type.declaration().has_explicit_name
+		})
+		.map(|object_type| CompletionItem {
+			label: object_type.display_name().to_string(),
+			kind: CompletionItemKind::Object,
+			detail: String::from("Object type"),
+		})
+		.collect::<Vec<_>>();
+
+	items.extend(analysis.object_import_bindings.iter().filter_map(|(name, object_type_id)| {
+		let object_type = analysis.semantic_program.object_type(*object_type_id)?;
+		(object_type.visibility() == Visibility::Public).then(|| CompletionItem {
+			label: name.clone(),
+			kind: CompletionItemKind::Object,
+			detail: format!("Object type {}", object_type.display_name()),
+		})
+	}));
+	items
+}
+
 pub fn signature_help(source: &str, cursor_offset: usize) -> Option<SignatureHelp> {
+	signature_help_with_analysis(source, cursor_offset, None)
+}
+
+pub fn signature_help_with_analysis(
+	source: &str,
+	cursor_offset: usize,
+	analysis: Option<&SourceAnalysis>,
+) -> Option<SignatureHelp> {
 	let (name, active_parameter) = active_call(source, cursor_offset)?;
-	let signatures = callable_signatures(source, &name);
+	let signatures = callable_signatures_with_analysis(source, &name, analysis);
 	(!signatures.is_empty()).then_some(SignatureHelp {
 		active_parameter,
 		signatures,
 	})
+}
+
+pub fn source_for_completion_analysis(source: &str, cursor_offset: usize) -> String {
+	let cursor_offset = cursor_offset.min(source.len());
+	let visible_text = &source[..cursor_offset];
+	let trimmed_end = visible_text.trim_end().len();
+	if trimmed_end > 0 && visible_text[..trimmed_end].ends_with('.') {
+		let before_dot = &visible_text[..trimmed_end - 1];
+		let receiver_start = before_dot.char_indices()
+			.rev()
+			.find(|(_, ch)| !is_identifier_char(*ch) && *ch != '.' && !ch.is_whitespace())
+			.map_or(0, |(index, ch)| index + ch.len_utf8());
+		let receiver_start = receiver_start + before_dot[receiver_start..].len()
+			- before_dot[receiver_start..].trim_start().len();
+		let next_character = source[cursor_offset..].trim_start().chars().next();
+		let replacement = if matches!(next_character, Some(')') | Some(']') | Some(',') | Some(';')) {
+			"0"
+		}
+		else {
+			"0;"
+		};
+		let mut prepared = source.to_string();
+		prepared.replace_range(receiver_start..trimmed_end, replacement);
+		return prepared;
+	}
+
+	let token_start = visible_text.char_indices()
+		.rev()
+		.find(|(_, ch)| !is_identifier_char(*ch))
+		.map_or(0, |(index, ch)| index + ch.len_utf8());
+	let token_end = source[cursor_offset..].char_indices()
+		.find(|(_, ch)| !is_identifier_char(*ch))
+		.map_or(source.len(), |(index, _)| cursor_offset + index);
+
+	if token_start == token_end {
+		return source.to_string();
+	}
+
+	let previous_character = source[..token_start].trim_end().chars().next_back();
+	let replacement = if previous_character == Some(':') { "int" } else { "0" };
+	let mut prepared = source.to_string();
+	prepared.replace_range(token_start..token_end, replacement);
+	prepared
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CompletionMemberType {
+	Named(String),
+	Object(ObjectTypeId),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -467,6 +624,14 @@ fn collect_active_databases(source: &str) -> Vec<String> {
 }
 
 fn collect_document_callable_signatures(source: &str) -> Vec<(String, CallableSignature)> {
+	collect_document_callable_signatures_with_visibility(source).into_iter()
+		.map(|(name, signature, _)| (name, signature))
+		.collect()
+}
+
+fn collect_document_callable_signatures_with_visibility(
+	source: &str,
+) -> Vec<(String, CallableSignature, bool)> {
 	let mut signatures = Vec::new();
 	let mut index = 0;
 
@@ -487,7 +652,9 @@ fn collect_document_callable_signatures(source: &str) -> Vec<(String, CallableSi
 		if !identifier.quoted
 			&& identifier.value == "fn"
 			&& let Some((name, signature, next_index)) = parse_function_signature(source, identifier.end) {
-			signatures.push((name, signature));
+			let is_public = identifier_before(source, index)
+				.is_some_and(|(previous, _)| previous == "pub");
+			signatures.push((name, signature, is_public));
 			index = next_index;
 			continue;
 		}
@@ -744,6 +911,29 @@ fn collect_visible_bindings(
 	merge_string_bindings(&scopes)
 }
 
+fn completion_member_type_from_descriptor(
+	data_type: &ObjectValueTypeDescriptor,
+) -> Option<CompletionMemberType> {
+	match data_type {
+		ObjectValueTypeDescriptor::Object(object_type_id) => Some(CompletionMemberType::Object(*object_type_id)),
+		ObjectValueTypeDescriptor::Nullable(value_type) => completion_member_type_from_descriptor(value_type),
+		ObjectValueTypeDescriptor::Any => Some(CompletionMemberType::Named(String::from("any"))),
+		ObjectValueTypeDescriptor::Bool => Some(CompletionMemberType::Named(String::from("bool"))),
+		ObjectValueTypeDescriptor::Date => Some(CompletionMemberType::Named(String::from("date"))),
+		ObjectValueTypeDescriptor::Dec => Some(CompletionMemberType::Named(String::from("dec"))),
+		ObjectValueTypeDescriptor::Enum(name) => Some(CompletionMemberType::Named(name.clone())),
+		ObjectValueTypeDescriptor::Int => Some(CompletionMemberType::Named(String::from("int"))),
+		ObjectValueTypeDescriptor::Text => Some(CompletionMemberType::Named(String::from("text"))),
+		ObjectValueTypeDescriptor::Time => Some(CompletionMemberType::Named(String::from("time"))),
+		ObjectValueTypeDescriptor::TimeTz => Some(CompletionMemberType::Named(String::from("timetz"))),
+		ObjectValueTypeDescriptor::Timestamp => Some(CompletionMemberType::Named(String::from("timestamp"))),
+		ObjectValueTypeDescriptor::TimestampTz => Some(CompletionMemberType::Named(String::from("timestamptz"))),
+		ObjectValueTypeDescriptor::Array(_)
+		| ObjectValueTypeDescriptor::Range(_)
+		| ObjectValueTypeDescriptor::Union(_) => None,
+	}
+}
+
 fn dedupe_object_fields(fields: &mut Vec<ObjectFieldInfo>) {
 	let mut seen = std::collections::BTreeSet::new();
 	fields.retain(|field| seen.insert(field.name.clone()));
@@ -992,7 +1182,19 @@ fn infer_expression_type(
 	}
 
 	let chain = split_qualified_chain(source)?;
-	resolve_member_type(&chain, visible_bindings, object_declarations, schema_catalog, active_databases)
+
+	match resolve_member_type(
+		&chain,
+		visible_bindings,
+		object_declarations,
+		schema_catalog,
+		active_databases,
+		None,
+		None,
+	)? {
+		CompletionMemberType::Named(type_name) => Some(type_name),
+		CompletionMemberType::Object(_) => None,
+	}
 }
 
 fn merge_string_bindings(
@@ -1226,6 +1428,70 @@ fn parse_variable_completion_item(source: &str, start: usize) -> Option<(String,
 	Some((name.value, name.end))
 }
 
+fn qualify_callable_signature(
+	signature: &CallableSignature,
+	analysis: &SourceAnalysis,
+) -> CallableSignature {
+	let parameters = signature.parameters.iter()
+		.map(|parameter| qualify_parameter_label(parameter, analysis))
+		.collect::<Vec<_>>();
+	let function_name = signature.label.split_once('(')
+		.map(|(name, _)| name)
+		.unwrap_or(signature.label.as_str());
+	let return_suffix = signature.label.rsplit_once(')')
+		.map(|(_, suffix)| suffix)
+		.unwrap_or("");
+	let return_suffix = return_suffix.strip_prefix(": ")
+		.map(|return_type| format!(": {}", qualify_type_spelling(return_type, analysis)))
+		.unwrap_or_default();
+
+	CallableSignature {
+		label: format!("{function_name}({}){return_suffix}", parameters.join(", ")),
+		parameters,
+	}
+}
+
+fn qualify_parameter_label(parameter: &str, analysis: &SourceAnalysis) -> String {
+	let Some((prefix, type_and_default)) = parameter.split_once(':') else {
+		return parameter.to_string();
+	};
+	let (data_type, default) = type_and_default.split_once(" = ")
+		.map(|(data_type, default)| (data_type, Some(default)))
+		.unwrap_or((type_and_default, None));
+	let reference_prefix_length = data_type.len() - data_type.trim_start().len();
+	let (spacing, data_type) = data_type.split_at(reference_prefix_length);
+	let reference = data_type.strip_prefix('&').map_or("", |_| "&");
+	let data_type = data_type.strip_prefix('&').unwrap_or(data_type);
+	let default = default.map(|default| format!(" = {default}")).unwrap_or_default();
+	format!("{prefix}:{spacing}{reference}{}{default}", qualify_type_spelling(data_type, analysis))
+}
+
+fn qualify_type_spelling(data_type: &str, analysis: &SourceAnalysis) -> String {
+	let mut qualified = String::new();
+	let mut index = 0;
+
+	while index < data_type.len() {
+		if let Some(identifier) = read_identifier(data_type, index) {
+			let object_type_id = analysis.object_import_bindings.get(&identifier.value).copied()
+				.or_else(|| analysis.semantic_program.object_type_id(&identifier.value));
+			if let Some(object_type) = object_type_id.and_then(|id| analysis.semantic_program.object_type(id)) {
+				qualified.push_str(&source_facing_object_type_name(object_type, analysis));
+			}
+			else {
+				qualified.push_str(&data_type[index..identifier.end]);
+			}
+			index = identifier.end;
+			continue;
+		}
+
+		let ch = data_type[index..].chars().next().unwrap();
+		qualified.push(ch);
+		index += ch.len_utf8();
+	}
+
+	qualified
+}
+
 fn read_object_field_type(
 	body: &str,
 	start: usize,
@@ -1294,25 +1560,53 @@ fn resolve_member_type(
 	object_declarations: &std::collections::BTreeMap<String, Vec<ObjectFieldInfo>>,
 	schema_catalog: Option<&SchemaCatalog>,
 	active_databases: &[String],
-) -> Option<String> {
-	let mut current_type = visible_bindings.get(chain.first()?).cloned()
-		.or_else(|| Some(chain.first()?.clone()))?;
+	analysis: Option<&SourceAnalysis>,
+	current_source_name: Option<&str>,
+) -> Option<CompletionMemberType> {
+	let mut current_type = CompletionMemberType::Named(
+		visible_bindings.get(chain.first()?).cloned()
+			.unwrap_or_else(|| chain.first().unwrap().clone()),
+	);
 
 	for field_name in chain.iter().skip(1) {
-		if let Some(fields) = object_declarations.get(&current_type) {
+		current_type = resolve_semantic_object_type(current_type, analysis);
+
+		if let CompletionMemberType::Object(object_type_id) = &current_type {
+			let object_type_id = *object_type_id;
+			let analysis = analysis?;
+			let object_type = analysis.semantic_program.object_type(object_type_id)?;
+			let descriptor = analysis.semantic_program.object_type_descriptor(object_type_id)?;
+			let ObjectTypeDescriptorShape::Fields(fields) = descriptor.shape() else {
+				return None;
+			};
+			let field = fields.iter().find(|candidate| candidate.name().eq_ignore_ascii_case(field_name))?;
+			let can_access_private_field = field.visibility() == Visibility::Public
+				|| current_source_name.is_some_and(|source_name| object_type.source_name() == Some(source_name));
+			if !can_access_private_field {
+				return None;
+			}
+			current_type = completion_member_type_from_descriptor(field.data_type())?;
+			continue;
+		}
+
+		let CompletionMemberType::Named(current_type_name) = &current_type else {
+			return None;
+		};
+
+		if let Some(fields) = object_declarations.get(current_type_name) {
 			let field = fields.iter().find(|candidate| candidate.name.eq_ignore_ascii_case(field_name))?;
-			current_type = field.type_name.clone()?;
+			current_type = CompletionMemberType::Named(field.type_name.clone()?);
 			continue;
 		}
 
 		let schema_catalog = schema_catalog?;
-		let resolved = resolve_type_name_to_table(&current_type, schema_catalog, active_databases)?;
+		let resolved = resolve_type_name_to_table(current_type_name, schema_catalog, active_databases)?;
 		let column = resolved.table().columns()
 			.find(|candidate| candidate.name().eq_ignore_ascii_case(field_name))?;
-		current_type = schema_data_type_name(column.data_type())?;
+		current_type = CompletionMemberType::Named(schema_data_type_name(column.data_type())?);
 	}
 
-	Some(current_type)
+	Some(resolve_semantic_object_type(current_type, analysis))
 }
 
 fn resolve_record_pointer_expression<'a>(
@@ -1374,6 +1668,24 @@ fn resolve_table_reference<'a>(
 		}
 		_ => None,
 	}
+}
+
+fn resolve_semantic_object_type(
+	member_type: CompletionMemberType,
+	analysis: Option<&SourceAnalysis>,
+) -> CompletionMemberType {
+	let CompletionMemberType::Named(type_name) = member_type else {
+		return member_type;
+	};
+	let Some(analysis) = analysis else {
+		return CompletionMemberType::Named(type_name);
+	};
+	let object_type_id = analysis.object_import_bindings.get(&type_name).copied()
+		.or_else(|| analysis.semantic_program.object_type_id(&type_name));
+
+	object_type_id
+		.map(CompletionMemberType::Object)
+		.unwrap_or(CompletionMemberType::Named(type_name))
 }
 
 fn resolve_type_name_to_table<'a>(
@@ -1503,6 +1815,22 @@ fn skip_object_field_tail(body: &str, start: usize) -> usize {
 	}
 
 	index
+}
+
+fn source_facing_object_type_name(
+	object_type: &crate::semantic::analyzer::ResolvedObjectType,
+	analysis: &SourceAnalysis,
+) -> String {
+	if object_type.source_name() == Some(analysis.source_name.as_str()) {
+		return object_type.display_name().to_string();
+	}
+
+	let module_name = object_type.source_name()
+		.and_then(|source_name| std::path::Path::new(source_name).file_stem())
+		.and_then(|module_name| module_name.to_str());
+	module_name
+		.map(|module_name| format!("{module_name}.{}", object_type.display_name()))
+		.unwrap_or_else(|| object_type.display_name().to_string())
 }
 
 fn split_parameter_labels(parameters: &str) -> Vec<String> {
