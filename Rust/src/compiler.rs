@@ -1596,7 +1596,7 @@ impl Compiler {
 	}
 }
 
-fn collect_all_function_declarations(program: &AstProgram) -> Vec<&FunctionDeclaration> {
+pub(crate) fn collect_all_function_declarations(program: &AstProgram) -> Vec<&FunctionDeclaration> {
 	let mut functions = Vec::new();
 
 	for function in &program.functions {

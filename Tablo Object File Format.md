@@ -18,6 +18,13 @@ At present, a Tablo object file stores:
 
 The current format does not yet include a constant data section. The compiler must emit constants directly in bytecode instructions.
 
+Tablo library container
+-----------------------
+
+`tabloc --emit library` writes a separate `.tlib` container. Its layout is four magic bytes `TLB1`, a little-endian `u32` JSON manifest byte length, the UTF-8 JSON manifest, and one object payload using the unchanged encoding below. The manifest has three fields: `compiler` (the exact compiler package version), `interface` (public function declarations in Tablo syntax with empty bodies), and `exports` (function indices in declaration order). The object payload contains the compiled implementations and their dependencies, with an empty code entry point. Libraries do not require `Main`.
+
+The compiler validates the declarations and export references before importing a library. At static link time, exported declarations receive their compiled bodies, internal functions are appended, and function calls, query indices, and debug source indices are relocated. Consumers retain no runtime dependency on the container. The current implementation supports function libraries without object types; see `Rust/README.md` for interface restrictions. The `TLB1` header identifies the library container independently of the object format version.
+
 Conventions
 -----------
 

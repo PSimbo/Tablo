@@ -144,6 +144,22 @@ pub fn compile_object(
 	Ok(report)
 }
 
+pub fn compile_library(
+	source: &str,
+	source_path: &Path,
+	output_path: &Path,
+	schema_catalog: Option<&SchemaCatalog>,
+	debug_info: DebugInfoLevel,
+) -> Result<CompilationReport, ExecutableBuildError> {
+	let (mut library, warnings) = crate::frontend::compile_library_source(source, &source_path.to_string_lossy(), schema_catalog)
+		.map_err(ExecutableBuildError::Compile)?;
+	let output_path = checked_output_path(&library.program, output_path)?;
+	library.program.debug_info_mut().retain_level(debug_info);
+	let bytes = library.write().map_err(ExecutableBuildError::Build)?;
+	publish_output(&mut bytes.as_slice(), &output_path, false)?;
+	Ok(CompilationReport { warnings })
+}
+
 fn compile_for_output(
 	source: &str,
 	source_path: &Path,
@@ -155,15 +171,20 @@ fn compile_for_output(
 	let (mut program, warnings) = crate::compile_source_to_program_with_name_and_schema_and_warnings(
 		source, Some(&source_name), CompilationTarget::Standalone, schema_catalog,
 	).map_err(ExecutableBuildError::Compile)?;
+	let output_path = checked_output_path(&program, output_path)?;
+	// Check all source paths before removing optional debug records.
+	program.debug_info_mut().retain_level(debug_info);
+	Ok((program, CompilationReport { warnings }, output_path))
+}
+
+fn checked_output_path(program: &Program, output_path: &Path) -> Result<PathBuf, ExecutableBuildError> {
 	let output_path = resolved_output_path(output_path)?;
 	for source_file in program.debug_info().source_files() {
 		if fs::canonicalize(source_file.display_name()).ok().as_ref() == Some(&output_path) {
 			return Err(ExecutableBuildError::Build(format!("Output `{}` would overwrite a source file.", output_path.display())));
 		}
 	}
-	// Check all source paths before removing optional debug records.
-	program.debug_info_mut().retain_level(debug_info);
-	Ok((program, CompilationReport { warnings }, output_path))
+	Ok(output_path)
 }
 
 fn resolve_runtime_lock(project: &Path, host: &str, offline: bool) -> Result<(), ExecutableBuildError> {

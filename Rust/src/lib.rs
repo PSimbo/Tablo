@@ -12,6 +12,8 @@ pub mod debugger;
 pub mod diagnostics;
 #[cfg(feature = "compiler")]
 pub mod executable;
+#[cfg(feature = "compiler")]
+mod library;
 pub mod format_string;
 pub mod object_file;
 pub mod query;

@@ -8,6 +8,32 @@ use tablo::executable::{ExecutableBuildOptions, compile_executable};
 
 #[test]
 #[ignore = "builds native executables with Cargo; run explicitly with --ignored"]
+fn links_a_tablo_library_into_an_executable() {
+	let directory = tempfile::tempdir().unwrap();
+	let root = directory.path();
+	let library_source = "pub fn Answer(): int { return 42; }";
+	let library_path = root.join("Answer.tablo");
+	fs::write(&library_path, library_source).unwrap();
+	tablo::executable::compile_library(library_source, &library_path, &root.join("Answer.tlib"), None, tablo::bytecode::DebugInfoLevel::None).unwrap();
+	fs::remove_file(&library_path).unwrap();
+	let source = "use './Answer'; fn Main(args: [text]): int { return Answer(); }";
+	let source_path = root.join("main.tablo");
+	fs::write(&source_path, source).unwrap();
+	let runtime_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+	let options = ExecutableBuildOptions {
+		cache_dir: runtime_dir.join("target/embedded-test-cache"), runtime_dir, offline: true,
+		debug_info: tablo::bytecode::DebugInfoLevel::None, runtime: tablo::executable::RuntimeMode::Embedded,
+	};
+	let output = root.join("application");
+	compile_executable(source, &source_path, &output, None, &options).unwrap();
+	fs::remove_file(root.join("Answer.tlib")).unwrap();
+	fs::remove_file(source_path).unwrap();
+	let result = Command::new(output).current_dir(root).env_remove("TABLO_CONFIG").output().unwrap();
+	assert_eq!(result.status.code(), Some(42), "{}", String::from_utf8_lossy(&result.stderr));
+}
+
+#[test]
+#[ignore = "builds native executables with Cargo; run explicitly with --ignored"]
 fn builds_relocates_and_rebuilds_an_embedded_application() {
 	let directory = tempfile::tempdir().unwrap();
 	let source_path = directory.path().join("main.tablo");

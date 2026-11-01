@@ -4,7 +4,7 @@ use clap::{Parser, ValueEnum};
 use serde::Deserialize;
 
 use tablo::bytecode::DebugInfoLevel;
-use tablo::executable::{ExecutableBuildOptions, ExecutableBuildError, RuntimeMode, compile_executable, compile_object};
+use tablo::executable::{ExecutableBuildOptions, ExecutableBuildError, RuntimeMode, compile_executable, compile_object, compile_library};
 use tablo::runtime_config::read_schema_catalog_from_runtime_config_path;
 use tablo::utils::existing_child_path;
 
@@ -17,7 +17,7 @@ enum Emit {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "tabloc", version, about = "Compile Tablo source to an executable or standalone bytecode object.")]
+#[command(name = "tabloc", version, about = "Compile Tablo source to an executable, standalone bytecode object, or Tablo library.")]
 #[command(after_help = "Executable output supports embedded and shared runtimes on Linux.\nUse --emit object --debug-info full for tablodbg; objects are not yet independently linkable.\nDatabase backends and schemas are selected through tablo.toml or --config, not --schema.")]
 struct Args {
 	#[arg(value_name = "INPUT")]
@@ -76,10 +76,7 @@ fn main() {
 }
 
 fn compile(args: Args) -> Result<(), CliError> {
-	if args.emit == Emit::Library {
-		return Err(CliError::usage("Tablo library output is not implemented yet."));
-	}
-	if args.emit == Emit::Object && (args.runtime.is_some() || args.runtime_dir.is_some() || args.cache_dir.is_some() || args.offline) {
+	if args.emit != Emit::Executable && (args.runtime.is_some() || args.runtime_dir.is_some() || args.cache_dir.is_some() || args.offline) {
 		return Err(CliError::usage("--runtime, --runtime-dir, --cache-dir, and --offline apply to executable output only."));
 	}
 	let current_dir = std::env::current_dir().map_err(|error| CliError::build(error.to_string()))?;
@@ -113,7 +110,7 @@ fn compile(args: Args) -> Result<(), CliError> {
 			compile_executable(&source, &args.input_path, &output, schema.as_ref(), &options)
 		}
 		Emit::Object => compile_object(&source, &args.input_path, &output, schema.as_ref(), debug_info),
-		Emit::Library => unreachable!(),
+		Emit::Library => compile_library(&source, &args.input_path, &output, schema.as_ref(), debug_info),
 	}.map_err(|error| CliError::build(match error {
 		ExecutableBuildError::Compile(error) => error.format_with_source_name(&source, Some(&args.input_path.to_string_lossy())),
 		ExecutableBuildError::Build(message) => message,

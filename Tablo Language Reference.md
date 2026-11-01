@@ -91,6 +91,8 @@ Top-level executable statements are not permitted. All executable code must appe
 
 The `args` parameter receives the program's command-line arguments. If no arguments are provided then `args` is the empty array. The integer returned from `Main` is the program's exit status.
 
+A reusable Tablo library does not require `Main`. Its public declarations are imported using `use`, with the same visibility and type rules as source modules. The Rust implementation packages compiled libraries as `.tlib` files and links their bytecode into consuming programs at build time. Deployed programs do not require the library files. See `Rust/README.md` for the currently supported subset of library declarations.
+
 Examples elsewhere in this document may show partial snippets rather than complete standalone programs. Such snippets are intended only to illustrate a feature in isolation and therefore do not necessarily include a full `Main` definition.
 
 Comments

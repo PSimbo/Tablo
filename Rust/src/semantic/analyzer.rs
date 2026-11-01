@@ -242,6 +242,7 @@ pub struct ResolvedTableReference {
 // generation can remain simple.
 #[derive(Default)]
 pub struct SemanticAnalyzer {
+	external_functions: BTreeSet<String>,
 	current_non_null_assumptions: Vec<Expr>,
 	current_return_type: Option<DataType>,
 	current_schema_catalog: Option<SchemaCatalog>,
@@ -255,7 +256,7 @@ pub struct SemanticAnalyzer {
 	group_boundary_contexts: Vec<GroupBoundaryContext>,
 	locals: ScopeStack<LocalBinding>,
 	loop_depth: usize,
-	next_function_index: u32,
+	function_indices: BTreeMap<usize, u32>,
 	next_local_slot: u32,
 	null_comparison_operands: BTreeSet<usize>,
 	object_type_bindings: ScopeStack<ObjectTypeId>,
@@ -289,7 +290,12 @@ impl SemanticAnalyzer {
 		self.sequence_aliases = ScopeStack::default();
 		self.function_depth = 0;
 		self.loop_depth = 0;
-		self.next_function_index = 0;
+		// Signature collection visits scopes in a different order from bytecode
+		// emission. Assign indices in emission order up front. Node addresses are
+		// used only as identities during this analysis, never dereferenced; source
+		// offsets alone can collide between imported modules.
+		self.function_indices = crate::compiler::collect_all_function_declarations(program).iter().enumerate()
+			.map(|(index, function)| (*function as *const FunctionDeclaration as usize, index as u32)).collect();
 		self.next_local_slot = 0;
 		self.null_comparison_operands.clear();
 		self.object_type_bindings = ScopeStack::default();
@@ -428,6 +434,7 @@ impl SemanticAnalyzer {
 
 	pub fn new() -> Self {
 		let analyzer = Self {
+			external_functions: BTreeSet::new(),
 			current_non_null_assumptions: Vec::new(),
 			current_return_type: None,
 			current_schema_catalog: None,
@@ -441,7 +448,7 @@ impl SemanticAnalyzer {
 			group_boundary_contexts: Vec::new(),
 			locals: ScopeStack::default(),
 			loop_depth: 0,
-			next_function_index: 0,
+			function_indices: BTreeMap::new(),
 			next_local_slot: 0,
 			null_comparison_operands: BTreeSet::new(),
 			object_type_bindings: ScopeStack::default(),
@@ -459,6 +466,10 @@ impl SemanticAnalyzer {
 
 	pub fn set_query_optimizations_enabled(&mut self, enabled: bool) {
 		self.query_optimizations_disabled = !enabled;
+	}
+
+	pub(crate) fn set_external_functions(&mut self, functions: BTreeSet<String>) {
+		self.external_functions = functions;
 	}
 
 	pub fn set_root_source_name(&mut self, source_name: Option<String>) {
@@ -1482,7 +1493,8 @@ impl SemanticAnalyzer {
 			}
 		}
 
-		let function_index = self.next_function_index;
+		let function_index = *self.function_indices.get(&(function as *const FunctionDeclaration as usize))
+			.ok_or_else(|| self.compile_error(function.position, "Missing function declaration index."))?;
 		let signature = FunctionSignature {
 			function_index,
 			parameter_defaults: function.parameters.iter()
@@ -1511,7 +1523,6 @@ impl SemanticAnalyzer {
 		}
 
 		self.semantic_program.function_declaration_targets.insert(function.position, function_index);
-		self.next_function_index += 1;
 		Ok(())
 	}
 
@@ -5683,9 +5694,12 @@ impl SemanticAnalyzer {
 			self.validate_function_parameter(parameter)?;
 		}
 
-		self.validate_block(function.body.statements.as_slice())?;
+		if !self.external_functions.contains(&function.name) {
+			self.validate_block(function.body.statements.as_slice())?;
+		}
 
 		if let Some(return_type) = &function.return_type
+			&& !self.external_functions.contains(&function.name)
 			&& !self.block_guarantees_return(&function.body) {
 			return Err(self.compile_error(
 				function.position,

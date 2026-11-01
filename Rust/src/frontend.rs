@@ -72,6 +72,7 @@ struct LinkedModule {
 }
 
 struct LinkedProgram {
+	libraries: Vec<crate::library::LibraryImport>,
 	function_overload_aliases: Vec<FunctionOverloadAlias>,
 	function_source_files: Vec<SourceFileDebugInfo>,
 	function_source_indices: Vec<u32>,
@@ -101,6 +102,7 @@ struct ModuleImportBindings {
 
 #[derive(Default)]
 struct ModuleLinker {
+	libraries: Vec<crate::library::LibraryImport>,
 	declared_modules: BTreeMap<PathBuf, ModuleExports>,
 	function_overload_aliases: Vec<FunctionOverloadAlias>,
 	loaded_modules: BTreeMap<PathBuf, LinkedModule>,
@@ -522,7 +524,15 @@ impl ModuleLinker {
 			return Ok(exports.clone());
 		}
 
-		let source = std::fs::read_to_string(module_path).map_err(|error| CompileError {
+		let library = if module_path.extension().is_some_and(|extension| extension == "tlib") {
+			Some(crate::library::Library::read(module_path).map_err(|message| CompileError {
+				message: format!("Invalid library `{}`: {message}", module_path.display()),
+				position: use_declaration.position,
+			})?)
+		}
+		else { None };
+		let source = library.as_ref().map(|library| Ok(library.interface.clone()))
+			.unwrap_or_else(|| std::fs::read_to_string(module_path)).map_err(|error| CompileError {
 			message: format!(
 				"Failed to read imported module `{}` from `{}`: {}",
 				use_declaration.module_path,
@@ -622,6 +632,12 @@ impl ModuleLinker {
 				&import_bindings.functions,
 				&object_reference_renames,
 			);
+		}
+
+		if let Some(library) = library {
+			let bindings = program.functions.iter().zip(&library.exports)
+				.map(|(function, index)| (function.name.clone(), function.position, *index)).collect();
+			self.libraries.push(crate::library::LibraryImport { library, bindings });
 		}
 
 		let exported_functions = program.functions.iter()
@@ -978,6 +994,7 @@ fn analyze_source_local_usage_with_name_and_schema(
 	let mut analyzer = SemanticAnalyzer::new();
 
 	analyzer.set_function_overload_aliases(linked_program.function_overload_aliases.clone());
+	analyzer.set_external_functions(external_function_names(&linked_program));
 	analyzer.set_root_source_name(Some(linked_program.root_source_file.display_name().to_string()));
 	analyzer.set_top_level_function_source_names(linked_program.top_level_function_source_names.clone());
 	analyzer.set_top_level_object_display_names(linked_program.top_level_object_display_names.clone());
@@ -1294,7 +1311,20 @@ pub(crate) fn compile_source_to_program_with_name_and_schema_and_warnings(
 	let program = parse_source_text(&source)?;
 	validate_module_graph(&program, source_name).map_err(TabloError::Compile)?;
 	let linked_program = link_program_modules(&program, &source, source_name).map_err(TabloError::Compile)?;
+	compile_linked_program(&linked_program, target, schema_catalog)
+}
+
+fn external_function_names(program: &LinkedProgram) -> BTreeSet<String> {
+	program.libraries.iter().flat_map(|import| import.bindings.iter().map(|(name, _, _)| name.clone())).collect()
+}
+
+fn compile_linked_program(
+	linked_program: &LinkedProgram,
+	target: CompilationTarget,
+	schema_catalog: Option<&SchemaCatalog>,
+) -> Result<(Program, Vec<SemanticWarning>), TabloError> {
 	let mut analyzer = SemanticAnalyzer::new();
+	analyzer.set_external_functions(external_function_names(linked_program));
 	analyzer.set_function_overload_aliases(linked_program.function_overload_aliases.clone());
 	analyzer.set_root_source_name(Some(linked_program.root_source_file.display_name().to_string()));
 	analyzer.set_top_level_function_source_names(linked_program.top_level_function_source_names.clone());
@@ -1306,8 +1336,40 @@ pub(crate) fn compile_source_to_program_with_name_and_schema_and_warnings(
 		schema_catalog,
 		analyzer,
 	)?;
-	attach_source_debug_info(&mut program, &linked_program);
+	attach_source_debug_info(&mut program, linked_program);
+	let program = crate::library::link(program, &linked_program.program, &linked_program.libraries).map_err(TabloError::Compile)?;
 	Ok((program, warnings))
+}
+
+pub(crate) fn compile_library_source(
+	source: &str,
+	source_name: &str,
+	schema: Option<&SchemaCatalog>,
+) -> Result<(crate::library::Library, Vec<SemanticWarning>), TabloError> {
+	let source_text = SourceText::new(source);
+	let ast = parse_source_text(&source_text)?;
+	let fail = |message: String| TabloError::Compile(CompileError { message, position: 0 });
+	if ast.result.is_some() || ast.statements.iter().any(|statement| !matches!(statement, ast::Statement::Use(_) | ast::Statement::EnumDeclaration(_))) {
+		return Err(fail(String::from("Top-level executable statements are not permitted in libraries.")));
+	}
+	validate_module_graph(&ast, Some(source_name)).map_err(TabloError::Compile)?;
+	let linked = link_program_modules(&ast, &source_text, Some(source_name)).map_err(TabloError::Compile)?;
+	let root_functions = compiler::collect_all_function_declarations(&ast);
+	let root_offset = compiler::collect_all_function_declarations(&linked.program).len() - root_functions.len();
+	let mut interface = String::new();
+	let mut exports = Vec::new();
+	for function in ast.functions.iter().filter(|function| function.visibility == ast::Visibility::Public) {
+		interface.push_str("pub ");
+		interface.push_str(&source[function.position..function.body.position]);
+		interface.push_str("{}\n");
+		let index = root_functions.iter().position(|candidate| std::ptr::eq(*candidate, function)).unwrap();
+		exports.push(u32::try_from(root_offset + index).map_err(|_| fail(String::from("Too many library functions.")))?);
+	}
+	let interface_ast = parse_source_text(&SourceText::new(interface.clone()))?;
+	crate::library::validate_interface(&interface_ast).map_err(fail)?;
+	let (program, warnings) = compile_linked_program(&linked, CompilationTarget::Snippet, schema)?;
+	let library = crate::library::Library { interface, exports, program };
+	Ok((library, warnings))
 }
 
 pub(crate) fn decode_external_source_diagnostic(message: &str) -> Option<(&str, String, usize, String)> {
@@ -1509,6 +1571,7 @@ fn link_program_modules(
 
 	let Some(source_name) = source_name else {
 		return Ok(LinkedProgram {
+			libraries: Vec::new(),
 			function_overload_aliases: Vec::new(),
 			function_source_files: Vec::new(),
 			function_source_indices: collect_function_source_indices(program, 0),
@@ -1529,6 +1592,7 @@ fn link_program_modules(
 
 	if first_use_statement(program).is_none() {
 		return Ok(LinkedProgram {
+			libraries: Vec::new(),
 			function_overload_aliases: Vec::new(),
 			function_source_files: Vec::new(),
 			function_source_indices: collect_function_source_indices(program, 0),
@@ -1666,6 +1730,7 @@ fn link_program_modules(
 	}
 
 	Ok(LinkedProgram {
+		libraries: linker.libraries,
 		function_overload_aliases: linker.function_overload_aliases,
 		function_source_files: imported_source_files,
 		function_source_indices,
@@ -1706,7 +1771,7 @@ fn merge_with_declarations(
 	merged
 }
 
-fn parse_source_text(source: &SourceText) -> Result<ast::AstProgram, TabloError> {
+pub(crate) fn parse_source_text(source: &SourceText) -> Result<ast::AstProgram, TabloError> {
 	let mut lexer = Lexer::new(source.clone());
 	let tokens = lexer.tokenize().map_err(TabloError::Lex)?;
 	let mut parser = Parser::new(tokens);
@@ -1718,6 +1783,9 @@ fn resolve_module_path(base_directory: &Path, module_path: &str) -> PathBuf {
 
 	if resolved.extension().is_none() {
 		resolved.set_extension("tablo");
+		if !resolved.exists() && resolved.with_extension("tlib").exists() {
+			resolved.set_extension("tlib");
+		}
 	}
 
 	resolved
@@ -2064,7 +2132,10 @@ fn validate_module_imports_in_program(
 			continue;
 		}
 
-		let source = std::fs::read_to_string(&module_path).map_err(|error| CompileError {
+		let source = if module_path.extension().is_some_and(|extension| extension == "tlib") {
+			crate::library::Library::read(&module_path).map(|library| library.interface)
+		}
+		else { std::fs::read_to_string(&module_path).map_err(|error| error.to_string()) }.map_err(|error| CompileError {
 			message: format!(
 				"Failed to read imported module `{}` from `{}`: {}",
 				use_declaration.module_path,

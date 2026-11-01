@@ -43,8 +43,33 @@ cargo run --manifest-path Rust/Cargo.toml --bin tabloc -- \
 cargo run --manifest-path Rust/Cargo.toml --bin tablodbg -- dist/hello.tobj
 ```
 
-Object output does not require a native build toolchain and defaults to `.tobj`. Existing `.tbo` files remain readable. These objects still contain complete programs requiring `Main`; independently linkable objects and Tablo libraries are not implemented yet. The bytecode format version is unchanged.
+Object output does not require a native build toolchain and defaults to `.tobj`. Existing `.tbo` files remain readable. These objects still contain complete programs requiring `Main`; independently linkable `.tobj` modules are not implemented yet. The bytecode format version is unchanged.
 
-`--debug-info lines` is the default and keeps source locations without debugger local-variable records. `full` retains those records; `none` removes optional debug records. VS Code requests full debug information automatically. The former positional output argument and `--schema` option are no longer accepted; use `-o` and TOML configuration. Tablo library output is not implemented yet.
+To build a reusable Tablo function library, export functions with `pub` and use `--emit library`. A library does not require `Main`:
+
+```tablo
+// Math.tablo
+fn Twice(value: int): int { return value * 2; }
+pub fn Answer(value: int = 20): int { return Twice(value) + 2; }
+```
+
+```sh
+cargo run --manifest-path Rust/Cargo.toml --bin tabloc -- --emit library Math.tablo
+```
+
+This writes `Math.tlib`; `-o PATH` selects another filename. Consumers use the existing import syntax:
+
+```tablo
+use Answer from './Math.tlib';
+fn Main(args: [text]): int { return Answer(); }
+```
+
+An extensionless import such as `use './Math';` selects `Math.tablo` when it exists, otherwise `Math.tlib`. Specify `.tlib` explicitly to select the compiled library when both exist. Compile the consumer normally to an executable, or use `--emit object` for a `.tobj` program. Library code is statically linked into either output; execution requires neither the `.tlib` file nor its sources. Libraries also include their imported implementation dependencies, so a library can be distributed as one file and used to build further libraries.
+
+The first library implementation supports public functions with built-in value types, including arrays, nullable types, overloads, reference parameters, variadic parameters, and defaults. Private functions remain internal. Defaults must be expressible using the public interface and built-ins; they cannot reference private helpers. Database operations inside function bodies are compiled with the build's schema configuration. Consumers must supply compatible runtime database configuration; native driver selection may also require the compilation schema configuration.
+
+Object types in libraries, and object, record, or sequence types in public signatures, are not supported yet. Top-level executable statements and empty public interfaces are rejected. Libraries currently require the same compiler package version. The separate `.tlib` container holds declarations and bytecode; it does not change the `.tobj` encoding. `--debug-info` applies to libraries as well, and consumers cannot restore debug information stripped when a library was built.
+
+`--debug-info lines` is the default and keeps source locations without debugger local-variable records. `full` retains those records; `none` removes optional debug records. VS Code requests full debug information automatically. The former positional output argument and `--schema` option are no longer accepted; use `-o` and TOML configuration.
 
 Run the native integration tests explicitly with `cargo test --manifest-path Rust/Cargo.toml --test embedded_executable --test shared_executable -- --ignored`. They use offline Cargo builds and reuse `Rust/target/embedded-test-cache`. The shared-runtime test also requires `readelf` (from binutils).
