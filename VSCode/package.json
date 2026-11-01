@@ -51,7 +51,7 @@
             "properties": {
               "program": {
                 "type": "string",
-                "description": "Path to the compiled Tablo object file (.tbo) to debug."
+                "description": "Path to the compiled Tablo object file (.tobj or legacy .tbo) to debug."
               },
               "sourceFile": {
                 "type": "string",
@@ -112,7 +112,7 @@
         "tablo.debug.outputDirectory": {
           "type": "string",
           "default": ".tablo/debug",
-          "description": "Workspace-relative directory used for generated debug-time `.tbo` files."
+          "description": "Workspace-relative directory used for generated debug-time `.tobj` files."
         },
         "tablo.language.enableLsp": {
           "type": "boolean",

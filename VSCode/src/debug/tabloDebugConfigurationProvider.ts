@@ -67,9 +67,9 @@ export class TabloDebugConfigurationProvider implements vscode.DebugConfiguratio
 		}
 
 		if (!resolved.program || typeof resolved.program !== "string") {
-			logError("Debug launch aborted because neither a .tablo source file nor a .tbo object file was available.");
+			logError("Debug launch aborted because neither a .tablo source file nor a .tobj/.tbo object file was available.");
 			revealLogs();
-			void vscode.window.showErrorMessage("Tablo debugging requires either a `.tablo` source file or a `.tbo` object file.");
+			void vscode.window.showErrorMessage("Tablo debugging requires either a `.tablo` source file or a `.tobj` or legacy `.tbo` object file.");
 			return undefined;
 		}
 

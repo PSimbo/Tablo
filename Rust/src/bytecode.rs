@@ -210,6 +210,27 @@ pub struct DebugInfo {
 	source_files: Vec<SourceFileDebugInfo>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DebugInfoLevel {
+	None,
+	#[default]
+	Lines,
+	Full,
+}
+
+impl std::str::FromStr for DebugInfoLevel {
+	type Err = String;
+
+	fn from_str(value: &str) -> Result<Self, Self::Err> {
+		match value {
+			"none" => Ok(Self::None),
+			"lines" => Ok(Self::Lines),
+			"full" => Ok(Self::Full),
+			_ => Err(format!("Unknown debug-info level `{value}`; expected none, lines, or full.")),
+		}
+	}
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EntryPoint {
 	Code(CodeBody),
@@ -369,6 +390,18 @@ impl ConstantPool {
 }
 
 impl DebugInfo {
+	pub fn retain_level(&mut self, level: DebugInfoLevel) {
+		match level {
+			DebugInfoLevel::None => *self = Self::default(),
+			DebugInfoLevel::Lines => {
+				for body in &mut self.code_bodies {
+					body.locals.clear();
+				}
+			}
+			DebugInfoLevel::Full => {},
+		}
+	}
+
 	pub fn add_source_file(&mut self, source_file: SourceFileDebugInfo) -> u32 {
 		let source_file_index = self.source_files.len() as u32;
 		self.source_files.push(source_file);

@@ -16,9 +16,11 @@ export async function compileSourceForDebugging(
 
 	const tablocPath = explicitTablocPath || defaultTablocPath();
 	const projectConfigPath = explicitProjectConfigPath || defaultProjectConfigPath();
-	const args = projectConfigPath
-		? ["--config", projectConfigPath, sourceFile, outputPath]
-		: [sourceFile, outputPath];
+	const args = ["--emit", "object", "--debug-info", "full", "-o", outputPath];
+	if (projectConfigPath) {
+		args.push("--config", projectConfigPath);
+	}
+	args.push(sourceFile);
 	logInfo(
 		`Compiling ${sourceFile} to ${outputPath} using ${tablocPath}` +
 		`${projectConfigPath ? ` with config ${projectConfigPath}` : ""}.`

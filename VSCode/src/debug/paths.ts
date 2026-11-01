@@ -23,7 +23,7 @@ export function isTabloSourceFile(filePath: string): boolean {
 }
 
 export function isTabloObjectFile(filePath: string): boolean {
-	return filePath.toLowerCase().endsWith(".tbo");
+	return /\.(tobj|tbo)$/i.test(filePath);
 }
 
 export function resolveDebugOutputPath(sourceFile: string, workspaceFolder: vscode.WorkspaceFolder | undefined): string {
@@ -37,6 +37,6 @@ export function resolveDebugOutputPath(sourceFile: string, workspaceFolder: vsco
 
 	return path.join(
 		outputRoot,
-		relativeSourcePath.replace(/\.tablo$/i, ".tbo")
+		relativeSourcePath.replace(/\.tablo$/i, ".tobj")
 	);
 }

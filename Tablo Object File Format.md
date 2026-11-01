@@ -4,7 +4,7 @@ Tablo Object File Format
 Purpose
 -------
 
-This document describes the structure of compiled Tablo object files.
+This document describes the structure of compiled Tablo object files. `tabloc --emit object` writes this encoding with a `.tobj` extension by default; existing `.tbo` files use the same encoding and remain readable. The extension change does not change the format version. These files currently contain complete programs, not independently linkable modules.
 
 At present, a Tablo object file stores:
 

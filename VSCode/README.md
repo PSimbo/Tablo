@@ -1,44 +1,45 @@
 # Tablo VS Code Extension
 
-This folder contains the Visual Studio Code extension for Tablo.
+The extension provides syntax highlighting, code completion, and debugging for Tablo. You can run it directly from this checkout without packaging or installing it.
 
-The current implementation focuses on debugger integration via `tablodbg --dap`.
-When launched from a `.tablo` file, the extension attempts to compile the
-source to a hidden `.tbo` file before starting the debugger.
+1. Install VS Code and Node.js with npm. Make sure the `code` command is available in your terminal.
 
-The extension also includes:
+2. From the repository root, install the extension's dependencies and build it:
 
-- an initial native VS Code completion provider for `.tablo` files
-- optional experimental LSP-backed diagnostics via `tablolsp`
+   ```sh
+   npm --prefix VSCode ci
+   npm --prefix VSCode run build
+   ```
 
-The native completion provider currently offers:
+3. Launch a development window with the extension enabled (Linux/macOS shell):
 
-- keyword, primitive-type, and built-in-function completions
-- document-symbol completions for functions, objects, enums, and local names
-- member completions for `Enum.Variant` and simple `obj`-typed variables where
-  the type can be inferred directly from the current document
+   ```sh
+   code --new-window --extensionDevelopmentPath="$PWD/VSCode" .
+   ```
 
-Current structure:
+   In PowerShell, use:
 
-- `src/extension.ts`
-  - extension activation entry point
-- `src/debug/`
-  - DAP-related registration and launch
-- `src/language/`
-  - native language features and the lightweight `tablolsp` client wiring
+   ```powershell
+   code --new-window --extensionDevelopmentPath="$($PWD.Path)/VSCode" .
+   ```
 
-The extension currently assumes:
+4. Open a `.tablo` file in the new window. Syntax highlighting and completion should be available. Press **Ctrl+Space** to request completions.
 
-- compiled Tablo programs are debugged from `.tbo` object files
-- `.tablo` source files can be compiled automatically into `.tablo/debug/`
-- `tablodbg` is either on `PATH` or configured explicitly
-- `tablolsp` is either on `PATH` or configured explicitly when LSP is enabled
-- an optional `tablo.toml` path can be supplied through `tablo.debug.projectConfigPath`
+To debug programs, first build the compiler and debugger from the repository root using a Rust toolchain:
 
-Settings of interest:
+```sh
+cargo build --manifest-path Rust/Cargo.toml --bin tabloc --bin tablodbg
+```
 
-- `tablo.debug.tablocPath`
-- `tablo.debug.tablodbgPath`
-- `tablo.debug.projectConfigPath`
-- `tablo.language.enableLsp`
-- `tablo.language.tablolspPath`
+In the development window's Settings, set these values to the **absolute paths** of the built executables:
+
+- `tablo.debug.tablocPath`: `<repository>/Rust/target/debug/tabloc`
+- `tablo.debug.tablodbgPath`: `<repository>/Rust/target/debug/tablodbg`
+
+On Windows, include the `.exe` suffix. Alternatively, put both executables on `PATH` before launching VS Code.
+
+Open and save a Tablo program containing `fn Main(args: [text]): int`, set a breakpoint, and press **F5**. Choose **Tablo** if prompted. The extension compiles the program into `.tablo/debug/` and starts the debugger. If something fails, open **View → Output** and select **Tablo** for details.
+
+After changing extension code, run `npm --prefix VSCode run build` again, then run **Developer: Reload Window** from the development window's Command Palette.
+
+Experimental language-server support is optional; see [language features](src/language/README.md) for details.

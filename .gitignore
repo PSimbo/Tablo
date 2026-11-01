@@ -1,8 +1,11 @@
+/dist
 /Rust/target
+/Temp
 /VSCode/dist
 /VSCode/node_modules
 
 Cargo.lock
+!/Rust/Cargo.lock
 tablo.toml
 .tablo/
 .vscode/

@@ -19,7 +19,7 @@ use tablo::vm::*;
 #[derive(ClapParser, Debug)]
 #[command(name = "tablodbg")]
 #[command(about = "Prototype debugger for compiled Tablo object files.")]
-#[command(after_help = "Interactive mode:\n  tablodbg program.tbo\n\nDAP mode:\n  tablodbg --dap\n\nInteractive commands:\n  continue | c               Resume execution\n  step-in | s | si           Step into the next instruction\n  step-over | n              Step over the current call or instruction\n  step-out | finish | fin | o Run until the current frame returns\n  break <SOURCE:LINE> | b    Add a breakpoint after launch\n  breakpoints | bl           List the current breakpoints\n  clear-breakpoints | bc     Remove all breakpoints\n  stack | bt | where         Show the current stack trace\n  locals | l                 Show locals in the current frame\n  help | h | ?               Show debugger command help\n  quit | q | exit            Exit the debugger")]
+#[command(after_help = "Interactive mode:\n  tablodbg program.tobj\n\nDAP mode:\n  tablodbg --dap\n\nInteractive commands:\n  continue | c               Resume execution\n  step-in | s | si           Step into the next instruction\n  step-over | n              Step over the current call or instruction\n  step-out | finish | fin | o Run until the current frame returns\n  break <SOURCE:LINE> | b    Add a breakpoint after launch\n  breakpoints | bl           List the current breakpoints\n  clear-breakpoints | bc     Remove all breakpoints\n  stack | bt | where         Show the current stack trace\n  locals | l                 Show locals in the current frame\n  help | h | ?               Show debugger command help\n  quit | q | exit            Exit the debugger")]
 struct Args {
 	#[arg(value_name = "INPUT")]
 	input_path: Option<PathBuf>,
