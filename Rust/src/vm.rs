@@ -1,13 +1,19 @@
 use std::collections::BTreeMap;
 
+#[cfg(feature = "compiler")]
 use crate::ast::*;
-use crate::builtins::{ BuiltInFunction, BuiltInSignature };
+use crate::builtins::BuiltInFunction;
+#[cfg(feature = "compiler")]
+use crate::builtins::BuiltInSignature;
 use crate::bytecode::*;
 use crate::database::{ DatabaseRuntime, RuntimeDatabaseConfig };
 use crate::format_string::*;
 use crate::query::LoweredBackendQuery;
+#[cfg(feature = "compiler")]
 use crate::source::SourceText;
+#[cfg(feature = "compiler")]
 use crate::syntax::lexer::Lexer;
+#[cfg(feature = "compiler")]
 use crate::syntax::parser::Parser;
 use crate::value::*;
 
@@ -125,6 +131,7 @@ impl VmVisibleLocal {
 }
 
 impl VirtualMachine {
+	#[cfg(feature = "compiler")]
 	pub fn evaluate_watch_expression(
 		expression: &str,
 		frame: &VmStackFrame,
@@ -188,6 +195,7 @@ impl VirtualMachine {
 		}
 	}
 
+	#[cfg(feature = "compiler")]
 	pub(crate) fn begin_execution(&mut self, program: &Program) {
 		self.begin_execution_with_arguments(program, &[]);
 	}
@@ -223,11 +231,12 @@ impl VirtualMachine {
 		Some((self.frame_debug_body_index(program, frame), frame.instruction_index))
 	}
 
+	#[cfg(feature = "compiler")]
 	pub(crate) fn current_stack_depth(&self) -> usize {
 		self.frames.len()
 	}
 
-	#[cfg(test)]
+	#[cfg(all(test, feature = "compiler"))]
 	pub(crate) fn database_query_execution_count(&self) -> usize {
 		self.database_runtime.query_execution_count()
 	}
@@ -1702,6 +1711,7 @@ fn align_comparable_numeric_values(lhs: &Decimal, rhs: &Decimal, instruction_ind
 	Ok((lhs, rhs))
 }
 
+#[cfg(feature = "compiler")]
 fn boolean_operand_value(value: Value, instruction_index: usize) -> Result<bool, VmError> {
 	match value {
 		Value::Boolean(value) => Ok(value),
@@ -1858,6 +1868,7 @@ fn compare_values(lhs: Value, rhs: Value, instruction_index: usize, kind: Compar
 	Ok(Value::Boolean(value))
 }
 
+#[cfg(feature = "compiler")]
 fn condition_value(value: Value, instruction_index: usize) -> Result<bool, VmError> {
 	match value {
 		Value::Boolean(value) => Ok(value),
@@ -1889,6 +1900,7 @@ fn count_non_overlapping_substrings(value: &str, substring: &str) -> usize {
 	count
 }
 
+#[cfg(feature = "compiler")]
 fn debug_argument_order_for_signature(
 	signature: &BuiltInSignature,
 	arguments: &[CallArgument],
@@ -1943,6 +1955,7 @@ fn debug_argument_order_for_signature(
 	Some(bindings.into_iter().flatten().collect())
 }
 
+#[cfg(feature = "compiler")]
 fn debug_built_in_argument_order(
 	built_in: BuiltInFunction,
 	call: &crate::ast::CallExpr,
@@ -1988,6 +2001,7 @@ fn equals_value(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Valu
 	Ok(Value::Boolean(value))
 }
 
+#[cfg(feature = "compiler")]
 fn evaluate_boolean_binary(
 	lhs: Value,
 	rhs: Value,
@@ -1999,6 +2013,7 @@ fn evaluate_boolean_binary(
 	Ok(Value::Boolean(op(lhs, rhs)))
 }
 
+#[cfg(feature = "compiler")]
 fn evaluate_debug_call(call: &crate::ast::CallExpr, frame: &VmStackFrame) -> Result<Value, VmError> {
 	let Some(built_in) = BuiltInFunction::from_name(&call.callee.name) else {
 		return Err(vm_error(
@@ -2045,6 +2060,7 @@ fn evaluate_debug_call(call: &crate::ast::CallExpr, frame: &VmStackFrame) -> Res
 		))
 }
 
+#[cfg(feature = "compiler")]
 fn evaluate_debug_expression(expression: &Expr, frame: &VmStackFrame) -> Result<Value, VmError> {
 	match expression {
 		Expr::Array(array) => {
@@ -3093,7 +3109,7 @@ fn vm_error(instruction_index: usize, message: String) -> VmError {
 	}
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "compiler"))]
 mod tests {
 	use super::*;
 

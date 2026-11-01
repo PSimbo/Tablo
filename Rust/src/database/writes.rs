@@ -6,6 +6,8 @@ use crate::value::{ RecordPointerValue, Value };
 
 use super::records::normalize_name;
 
+// SQL rendering tests cover all dialects independently of enabled drivers.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum WriteDialect {
 	MySql,

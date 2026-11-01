@@ -3,12 +3,18 @@ use crate::builtins::BuiltInFunction;
 use crate::schema::DatabaseBackend;
 use crate::value::*;
 
+#[cfg(feature = "compiler")]
 mod mysql;
+#[cfg(feature = "compiler")]
 mod planner;
+#[cfg(feature = "compiler")]
 mod postgresql;
+#[cfg(feature = "compiler")]
 mod sql_renderer;
+#[cfg(feature = "compiler")]
 mod sqlite;
 
+#[cfg(feature = "compiler")]
 pub use planner::*;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -190,6 +196,7 @@ impl QueryCountPlan {
 		parameters
 	}
 
+	#[cfg(feature = "compiler")]
 	pub(crate) fn expressions_are_infallible(&self) -> bool {
 		self.filter.as_ref().is_none_or(query_expression_is_infallible)
 	}
@@ -224,6 +231,7 @@ impl QueryFindPlan {
 		parameters
 	}
 
+	#[cfg(feature = "compiler")]
 	pub(crate) fn expressions_are_infallible(&self) -> bool {
 		self.filter.as_ref().is_none_or(query_expression_is_infallible)
 			&& self.order_by.iter().all(|item| query_expression_is_infallible(&item.expression))
@@ -268,6 +276,7 @@ impl QueryForPlan {
 		parameters
 	}
 
+	#[cfg(feature = "compiler")]
 	pub(crate) fn expressions_are_infallible(&self) -> bool {
 		self.filter.as_ref().is_none_or(query_expression_is_infallible)
 			&& self.group_by.iter().all(|item| query_expression_is_infallible(&item.expression))
@@ -401,6 +410,7 @@ pub struct SqlScalarProjection {
 	pub value_id: QueryProjectedValueId,
 }
 
+#[cfg(feature = "compiler")]
 pub fn lower_count_query(plan: &QueryCountPlan) -> Result<LoweredBackendQuery, QueryLoweringError> {
 	match plan.backend {
 		DatabaseBackend::MySql => sql_renderer::lower_count(&mysql::MySqlRenderer, plan).map(LoweredBackendQuery::Sql),
@@ -409,6 +419,7 @@ pub fn lower_count_query(plan: &QueryCountPlan) -> Result<LoweredBackendQuery, Q
 	}
 }
 
+#[cfg(feature = "compiler")]
 pub fn lower_find_query(plan: &QueryFindPlan) -> Result<LoweredBackendQuery, QueryLoweringError> {
 	match plan.backend {
 		DatabaseBackend::MySql => sql_renderer::lower_find(&mysql::MySqlRenderer, plan).map(LoweredBackendQuery::Sql),
@@ -417,6 +428,7 @@ pub fn lower_find_query(plan: &QueryFindPlan) -> Result<LoweredBackendQuery, Que
 	}
 }
 
+#[cfg(feature = "compiler")]
 pub fn lower_for_query(plan: &QueryForPlan) -> Result<LoweredBackendQuery, QueryLoweringError> {
 	match plan.backend {
 		DatabaseBackend::MySql => sql_renderer::lower_for(&mysql::MySqlRenderer, plan).map(LoweredBackendQuery::Sql),
@@ -425,6 +437,7 @@ pub fn lower_for_query(plan: &QueryForPlan) -> Result<LoweredBackendQuery, Query
 	}
 }
 
+#[cfg(feature = "compiler")]
 pub fn lower_for_shape(shape: &QueryForShape) -> Result<LoweredBackendQuery, QueryLoweringError> {
 	match shape.query.backend {
 		DatabaseBackend::MySql => sql_renderer::lower_for_shape(&mysql::MySqlRenderer, shape).map(LoweredBackendQuery::Sql),
@@ -433,6 +446,7 @@ pub fn lower_for_shape(shape: &QueryForShape) -> Result<LoweredBackendQuery, Que
 	}
 }
 
+#[cfg(feature = "compiler")]
 pub(super) fn effective_find_order_direction(kind: FindKind, direction: OrderByDirection) -> OrderByDirection {
 	match kind {
 		FindKind::Any | FindKind::First => direction,
@@ -443,6 +457,7 @@ pub(super) fn effective_find_order_direction(kind: FindKind, direction: OrderByD
 	}
 }
 
+#[cfg(feature = "compiler")]
 pub(crate) fn query_planning_capabilities(backend: DatabaseBackend) -> PlannedQueryBackendCapabilities {
 	use sql_renderer::SqlRenderer;
 
@@ -481,6 +496,7 @@ fn push_query_parameter(parameter: &QueryParameter, parameters: &mut Vec<QueryPa
 	}
 }
 
+#[cfg(feature = "compiler")]
 fn query_expression_is_infallible(expression: &QueryExpr) -> bool {
 	match expression {
 		QueryExpr::ArrayLiteral(elements) => elements.iter().all(query_expression_is_infallible),
@@ -514,7 +530,7 @@ fn query_expression_is_infallible(expression: &QueryExpr) -> bool {
 	}
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "compiler"))]
 mod tests {
 	use super::*;
 

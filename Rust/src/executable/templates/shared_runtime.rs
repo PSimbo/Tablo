@@ -6,6 +6,11 @@ pub extern "C" fn tablo_runtime_version() -> TabloVersion {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn tablo_runtime_drivers() -> u32 {
+	tablo::runtime_drivers::DriverSet::available().bits()
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn tablo_runtime_run(
 	bytes: *const u8,
 	length: usize,

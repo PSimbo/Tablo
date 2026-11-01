@@ -4,6 +4,7 @@ use abi::{RuntimeArgument, TabloVersion};
 
 #[link(name = "__TABLO_LIBRARY__")]
 unsafe extern "C" {
+	fn tablo_runtime_drivers() -> u32;
 	fn tablo_runtime_version() -> TabloVersion;
 	fn tablo_runtime_run(bytes: *const u8, length: usize, version: TabloVersion, arguments: *const RuntimeArgument, argument_count: usize, exit_status: *mut i32) -> i32;
 }
@@ -13,6 +14,11 @@ fn main() {
 	let actual = unsafe { tablo_runtime_version() };
 	if !actual.accepts(required) {
 		eprintln!("Tablo artifact version {required} cannot run on runtime {actual}; matching major/minor and an equal or newer runtime patch are required.");
+		std::process::exit(1);
+	}
+	let required_drivers = __TABLO_DRIVERS__u32;
+	if unsafe { tablo_runtime_drivers() } & required_drivers != required_drivers {
+		eprintln!("The loaded Tablo runtime does not include all required database drivers.");
 		std::process::exit(1);
 	}
 	let arguments: Vec<String> = std::env::args().skip(1).collect();

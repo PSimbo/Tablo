@@ -5,7 +5,7 @@ use crate::schema::DatabaseBackend;
 use crate::value::{ RecordPointerValue, Value };
 
 use super::config::*;
-use super::{ mysql, postgresql, sqlite };
+
 
 pub(super) trait DatabaseDriver {
 	fn advance_sequence(&mut self, schema_is_implicit: bool, schema_name: &str, sequence_name: &str) -> Result<i64, String>;
@@ -130,7 +130,7 @@ impl DatabaseRuntime {
 		}
 	}
 
-	#[cfg(test)]
+	#[cfg(all(test, feature = "compiler"))]
 	pub(crate) fn query_execution_count(&self) -> usize {
 		self.query_execution_count
 	}
@@ -206,18 +206,27 @@ impl DatabaseRuntime {
 			let database = self.config.database(database_name).ok_or_else(|| {
 				format!("Database `{database_name}` is not configured at runtime.")
 			})?;
-			let session = match database.backend() {
+			let session: Result<Box<dyn DatabaseDriver>, String> = match database.backend() {
 				DatabaseBackend::MySql => {
-					Box::new(mysql::MySqlSession::open(database_name, database.connection_string())?) as Box<dyn DatabaseDriver>
+					#[cfg(feature = "driver-mysql")]
+					{ Ok(Box::new(super::mysql::MySqlSession::open(database_name, database.connection_string())?) as Box<dyn DatabaseDriver>) }
+					#[cfg(not(feature = "driver-mysql"))]
+					{ Err(String::from("This runtime was built without the mysql driver.")) }
 				}
 				DatabaseBackend::PostgreSql => {
-					Box::new(postgresql::PostgreSqlSession::open(database_name, database.connection_string())?) as Box<dyn DatabaseDriver>
+					#[cfg(feature = "driver-postgresql")]
+					{ Ok(Box::new(super::postgresql::PostgreSqlSession::open(database_name, database.connection_string())?) as Box<dyn DatabaseDriver>) }
+					#[cfg(not(feature = "driver-postgresql"))]
+					{ Err(String::from("This runtime was built without the postgresql driver.")) }
 				}
 				DatabaseBackend::Sqlite => {
-					Box::new(sqlite::SqliteSession::open(database_name, database.connection_string())?) as Box<dyn DatabaseDriver>
+					#[cfg(feature = "driver-sqlite")]
+					{ Ok(Box::new(super::sqlite::SqliteSession::open(database_name, database.connection_string())?) as Box<dyn DatabaseDriver>) }
+					#[cfg(not(feature = "driver-sqlite"))]
+					{ Err(String::from("This runtime was built without the sqlite driver.")) }
 				}
 			};
-			self.sessions.insert(normalized_name.clone(), session);
+			self.sessions.insert(normalized_name.clone(), session?);
 		}
 		self.claim_transaction_database(database_name);
 
@@ -257,7 +266,7 @@ struct TransactionScope {
 	savepoint_name: String,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "driver-sqlite", feature = "driver-mysql"))]
 mod tests {
 	use super::*;
 

@@ -33,6 +33,7 @@ pub(super) fn known_record_schema(layout: &QueryRecordLayout) -> Result<&[QueryR
 	})
 }
 
+#[cfg(any(test, feature = "driver-mysql", feature = "driver-postgresql"))]
 pub(super) fn locked_record_pointer(query: &SqlQuery, columns: &[QueryResultColumn]) -> RecordPointerValue {
 	RecordPointerValue {
 		column_names: columns.iter().map(|column| column.column_name.clone()).collect(),

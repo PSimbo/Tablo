@@ -1,10 +1,14 @@
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "compiler")]
+use std::path::PathBuf;
 
 use serde::Deserialize;
 
 use crate::database::RuntimeDatabaseConfig;
+#[cfg(feature = "compiler")]
 use crate::schema::SchemaCatalog;
+#[cfg(feature = "compiler")]
 use crate::schema_fixture::read_schema_catalog_from_path as read_schema_fixture_catalog_from_path;
 
 #[derive(Debug, Eq, PartialEq)]
@@ -15,6 +19,7 @@ pub struct RuntimeConfigError {
 #[derive(Deserialize)]
 struct RuntimeConfigFile {
 	databases: Option<BTreeMap<String, String>>,
+	#[cfg(feature = "compiler")]
 	schemas: Option<BTreeMap<String, String>>,
 }
 
@@ -30,6 +35,7 @@ impl RuntimeConfigFile {
 		Ok(config)
 	}
 
+	#[cfg(feature = "compiler")]
 	fn into_schema_catalog(self, base_directory: &Path) -> Result<SchemaCatalog, RuntimeConfigError> {
 		let databases = self.databases.unwrap_or_default();
 		let mut merged_catalog = SchemaCatalog::new();
@@ -88,6 +94,7 @@ pub fn read_runtime_database_config_from_str(contents: &str) -> Result<RuntimeDa
 	config_file.into_runtime_database_config()
 }
 
+#[cfg(feature = "compiler")]
 pub fn read_schema_catalog_from_runtime_config_path(path: impl AsRef<Path>) -> Result<SchemaCatalog, RuntimeConfigError> {
 	let path = path.as_ref();
 	let contents = std::fs::read_to_string(path).map_err(|error| RuntimeConfigError {
@@ -101,6 +108,7 @@ pub fn read_schema_catalog_from_runtime_config_path(path: impl AsRef<Path>) -> R
 	config_file.into_schema_catalog(base_directory)
 }
 
+#[cfg(feature = "compiler")]
 fn resolve_config_path(base_directory: &Path, configured_path: &str) -> PathBuf {
 	let path = Path::new(configured_path);
 
@@ -112,6 +120,7 @@ fn resolve_config_path(base_directory: &Path, configured_path: &str) -> PathBuf 
 	}
 }
 
+#[cfg(feature = "compiler")]
 fn schema_error_message(error: crate::schema::SchemaError) -> String {
 	match error {
 		crate::schema::SchemaError::AmbiguousDatabaseQualifiedSequenceName { database_name, sequence_name } => {
@@ -191,7 +200,7 @@ fn schema_error_message(error: crate::schema::SchemaError) -> String {
 	}
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "compiler"))]
 mod tests {
 	use crate::utils::*;
 

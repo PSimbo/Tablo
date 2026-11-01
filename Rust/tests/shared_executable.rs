@@ -42,6 +42,7 @@ fn shares_relocates_and_validates_a_runtime_without_embedding_it() {
 	let library = fs::read_dir(deployment.join("lib")).unwrap().map(|entry| entry.unwrap().path())
 		.find(|path| path.extension().is_some_and(|extension| extension == "so")).unwrap();
 	let library_name = library.file_name().unwrap().to_owned();
+	assert!(library_name.to_str().unwrap().ends_with("_none.so"));
 	let original_library = fs::read(&library).unwrap();
 	let modified = fs::metadata(&library).unwrap().modified().unwrap();
 	let second = deployment.join("second");
@@ -97,6 +98,7 @@ fn shares_relocates_and_validates_a_runtime_without_embedding_it() {
 #[repr(C)] pub struct Version { major: u64, minor: u64, patch: u64 }
 #[repr(C)] pub struct Argument { data: *const u8, len: usize }
 #[unsafe(no_mangle)] pub extern "C" fn tablo_runtime_version() -> Version { Version { major: 99, minor: 0, patch: 0 } }
+#[unsafe(no_mangle)] pub extern "C" fn tablo_runtime_drivers() -> u32 { 7 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn tablo_runtime_run(_: *const u8, _: usize, _: Version, _: *const Argument, _: usize, _: *mut i32) -> i32 { std::process::abort() }
 "#).unwrap();
 	fs::rename(&library, &hidden).unwrap();
@@ -106,4 +108,40 @@ fn shares_relocates_and_validates_a_runtime_without_embedding_it() {
 	let incompatible = run(&shared, &["--help"]);
 	assert_eq!(incompatible.status.code(), Some(1));
 	assert!(String::from_utf8_lossy(&incompatible.stderr).contains("cannot run on runtime 99.0.0"));
+}
+
+#[test]
+#[ignore = "builds native executables with the SQLite-only runtime; run explicitly with --ignored"]
+fn selects_sqlite_for_imported_queries_and_rejects_a_library_without_its_driver() {
+	let directory = tempfile::tempdir().unwrap();
+	let source = directory.path().join("main.tablo");
+	fs::write(&source, "use CountCustomers from './Queries'; fn Main(args: [text]): int { return CountCustomers(); }").unwrap();
+	fs::write(directory.path().join("Queries.tablo"), "with ExampleDb; pub fn CountCustomers(): int { return count Customers; }").unwrap();
+	fs::write(directory.path().join("schema.sql"), "database ExampleDb; schema Main implicit; create table Customers (Id int not null);").unwrap();
+	fs::write(directory.path().join("tablo.toml"), "[databases]\nExampleDb = 'sqlite:data.sqlite'\nUnused = 'mysql://unused:unused@localhost/unused'\n[schemas]\nExampleDb = 'schema.sql'\n").unwrap();
+	let database = rusqlite::Connection::open(directory.path().join("data.sqlite")).unwrap();
+	database.execute_batch("CREATE TABLE Customers (Id INTEGER NOT NULL); INSERT INTO Customers VALUES (1), (2);").unwrap();
+	drop(database);
+	for mode in ["embedded", "shared"] {
+		let output = directory.path().join(mode);
+		assert_success(&build(&source, &output, Some(mode)));
+		let result = run(&output, &[]);
+		assert_eq!(result.status.code(), Some(2), "{}", String::from_utf8_lossy(&result.stderr));
+	}
+	let library = fs::read_dir(directory.path().join("lib")).unwrap().map(|entry| entry.unwrap().path())
+		.find(|path| path.extension().is_some_and(|extension| extension == "so")).unwrap();
+	assert!(library.file_name().unwrap().to_str().unwrap().ends_with("_sqlite.so"));
+	let stub = directory.path().join("missing_driver.rs");
+	fs::write(&stub, r#"
+#[repr(C)] pub struct Version { major: u64, minor: u64, patch: u64 }
+#[repr(C)] pub struct Argument { data: *const u8, len: usize }
+#[unsafe(no_mangle)] pub extern "C" fn tablo_runtime_version() -> Version { Version { major: 0, minor: 1, patch: 0 } }
+#[unsafe(no_mangle)] pub extern "C" fn tablo_runtime_drivers() -> u32 { 0 }
+#[unsafe(no_mangle)] pub unsafe extern "C" fn tablo_runtime_run(_: *const u8, _: usize, _: Version, _: *const Argument, _: usize, _: *mut i32) -> i32 { std::process::abort() }
+"#).unwrap();
+	let result = Command::new("rustc").args(["--edition", "2024", "--crate-type", "cdylib"]).arg(&stub).arg("-o").arg(&library).output().unwrap();
+	assert_success(&result);
+	let rejected = run(&directory.path().join("shared"), &[]);
+	assert_eq!(rejected.status.code(), Some(1));
+	assert!(String::from_utf8_lossy(&rejected.stderr).contains("does not include all required database drivers"));
 }

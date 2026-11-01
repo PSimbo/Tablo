@@ -30,6 +30,12 @@ pub fn run_package(bytes: &[u8], artifact_version: TabloVersion, arguments: &[St
 			.map_err(|error| format!("Failed to load runtime config `{}`: {}", path.display(), error.message))?,
 		None => RuntimeDatabaseConfig::new(),
 	};
+	for query in program.queries() {
+		let crate::query::LoweredBackendQuery::Sql(query) = query;
+		if !crate::runtime_drivers::DriverSet::available().contains(query.dialect.backend()) {
+			return Err(format!("This runtime was built without the {} driver required by database `{}`.", query.dialect.backend().name(), query.database_name));
+		}
+	}
 	let result = crate::run_program_with_database_config_and_arguments(&program, config, arguments)
 		.map_err(|error| error.to_string())?;
 	main_exit_status(result)
@@ -140,6 +146,7 @@ mod tests {
 		assert_eq!(status, 42);
 	}
 
+	#[cfg(feature = "compiler")]
 	#[test]
 	fn shared_boundary_separates_application_failure_status_from_runtime_failure() {
 		let program = crate::compile_to_program_with_name("fn Main(args: [text]): int { return 7; }", None).unwrap();

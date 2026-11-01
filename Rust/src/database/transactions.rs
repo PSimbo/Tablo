@@ -37,6 +37,7 @@ impl TransactionState {
 		Ok(())
 	}
 
+	#[cfg(any(test, feature = "driver-mysql", feature = "driver-postgresql"))]
 	pub fn is_active(&self) -> bool {
 		self.depth > 0
 	}

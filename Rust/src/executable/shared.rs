@@ -4,8 +4,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{ExecutableBuildError, TabloVersion, build_cargo, publish_executable, publish_output};
+use super::{ExecutableBuildError, TabloVersion, build_cargo, publish_executable, publish_output, resolve_runtime_lock};
 use crate::bytecode::Program;
+use crate::runtime_drivers::DriverSet;
 
 #[derive(Deserialize, Serialize)]
 struct LibraryManifest {
@@ -21,7 +22,7 @@ pub(super) fn build(
 	runtime_dir: &Path,
 	cache: &Path,
 	host: &str,
-	runtime_version: TabloVersion,
+	runtime_variant: (TabloVersion, DriverSet),
 	offline: bool,
 ) -> Result<(), ExecutableBuildError> {
 	// Cargo locks its build, but releases that lock before we copy the result.
@@ -29,22 +30,26 @@ pub(super) fn build(
 	// the cached shared library between linking and deployment.
 	eprintln!("Building shared Tablo runtime and launcher (Cargo reuses cached dependencies)...");
 	let _cache_lock = lock(&cache.join("shared-runtime.lock"))?;
-	let project = cache.join("shared-runtime");
+	let (runtime_version, drivers) = runtime_variant;
+	let variant = drivers.name();
+	let features = drivers.cargo_features();
+	let project = cache.join(format!("shared-runtime-{variant}"));
 	fs::create_dir_all(project.join("src"))?;
-	let library = format!("tablo_runtime_{}_{}_all", runtime_version.major, runtime_version.minor);
+	let library = format!("tablo_runtime_{}_{}_{variant}", runtime_version.major, runtime_version.minor);
 	let filename = format!("lib{library}.so");
 	let runtime_path = runtime_dir.to_str().ok_or_else(|| error("The runtime source path must be valid UTF-8 for Cargo."))?;
 	let path = toml::Value::String(runtime_path.to_string()).to_string();
 	write_if_changed(&project.join("Cargo.toml"), format!(
-		"[package]\nname = \"tablo-shared-runtime\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n\n[lib]\nname = \"{library}\"\ncrate-type = [\"cdylib\"]\n\n[dependencies]\ntablo = {{ package = \"tabloc\", path = {path} }}\n"
+		"[package]\nname = \"tablo-shared-runtime-{variant}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n\n[lib]\nname = \"{library}\"\ncrate-type = [\"cdylib\"]\n\n[dependencies]\ntablo = {{ package = \"tabloc\", path = {path}, default-features = false, features = {features} }}\n"
 	).as_bytes())?;
 	let mut lockfile = fs::read_to_string(runtime_dir.join("Cargo.lock"))?;
-	lockfile.push_str("\n[[package]]\nname = \"tablo-shared-runtime\"\nversion = \"0.0.0\"\ndependencies = [\"tabloc\"]\n");
+	lockfile.push_str(&format!("\n[[package]]\nname = \"tablo-shared-runtime-{variant}\"\nversion = \"0.0.0\"\ndependencies = [\"tabloc\"]\n"));
 	write_if_changed(&project.join("Cargo.lock"), lockfile.as_bytes())?;
 	write_if_changed(&project.join("src/lib.rs"), include_bytes!("templates/shared_runtime.rs"))?;
 	write_if_changed(&project.join("build.rs"), format!(
 		"fn main() {{ println!(\"cargo:rustc-link-arg=-Wl,-soname,{filename}\"); }}\n"
 	).as_bytes())?;
+	resolve_runtime_lock(&project, host, offline)?;
 	let target_dir = cache.join("target");
 	build_cargo(&project.join("Cargo.toml"), &target_dir, host, &["--lib"], offline)?;
 	let library_dir = target_dir.join(host).join("debug");
@@ -69,13 +74,14 @@ pub(super) fn build(
 	let version = TabloVersion::current();
 	let source = include_str!("templates/shared_launcher.rs")
 		.replace("__TABLO_LIBRARY__", &library)
+		.replace("__TABLO_DRIVERS__", &drivers.bits().to_string())
 		.replace("__TABLO_VERSION__", &format!("TabloVersion {{ major: {}, minor: {}, patch: {} }}", version.major, version.minor, version.patch));
 	fs::write(launcher.path().join("src/main.rs"), source)?;
 	fs::write(launcher.path().join("src/abi.rs"), include_bytes!("../runtime_abi.rs"))?;
 	fs::write(launcher.path().join("src/program.tbo"), crate::object_file::write_program(program))?;
 	build_cargo(&launcher.path().join("Cargo.toml"), &target_dir, host, &["--bin", name], offline)?;
 
-	deploy_library(&built_library, &output.parent().unwrap().join("lib"), host, runtime_version, version)?;
+	deploy_library(&built_library, &output.parent().unwrap().join("lib"), host, runtime_version, version, &variant)?;
 	publish_executable(&library_dir.join(name), output)?;
 	Ok(())
 }
@@ -99,6 +105,7 @@ fn deploy_library(
 	host: &str,
 	runtime: TabloVersion,
 	artifact: TabloVersion,
+	drivers: &str,
 ) -> Result<(), ExecutableBuildError> {
 	fs::create_dir_all(directory)?;
 	let _deployment_lock = lock(&directory.join(".tablo-runtime.lock"))?;
@@ -106,7 +113,7 @@ fn deploy_library(
 	let manifest_path = destination.with_extension("so.json");
 	let bytes = fs::read(built)?;
 	let hash = format!("{:x}", Sha256::digest(&bytes));
-	let metadata = LibraryManifest { version: runtime.to_string(), target: host.to_string(), drivers: String::from("all"), sha256: hash };
+	let metadata = LibraryManifest { version: runtime.to_string(), target: host.to_string(), drivers: drivers.to_string(), sha256: hash };
 	match fs::read(&destination) {
 		Ok(existing) if existing == bytes => {},
 		Ok(existing) => {
@@ -115,7 +122,7 @@ fn deploy_library(
 				let version = TabloVersion::parse(&manifest.version).ok();
 				if artifact != (TabloVersion { major: 0, minor: 0, patch: 0 })
 					&& version.is_some_and(|version| version.accepts(artifact))
-					&& manifest.target == host && manifest.drivers == "all"
+					&& manifest.target == host && manifest.drivers == drivers
 					&& manifest.sha256 == format!("{:x}", Sha256::digest(&existing))
 				{
 					return Ok(());
@@ -154,13 +161,13 @@ mod tests {
 		let older = TabloVersion::parse("0.1.2").unwrap();
 		let newer = TabloVersion::parse("0.1.5").unwrap();
 		fs::write(&built, "newer runtime").unwrap();
-		deploy_library(&built, &deployment, "host", newer, newer).unwrap();
+		deploy_library(&built, &deployment, "host", newer, newer, "all").unwrap();
 		fs::write(&built, "older runtime").unwrap();
-		deploy_library(&built, &deployment, "host", older, older).unwrap();
+		deploy_library(&built, &deployment, "host", older, older, "all").unwrap();
 		let installed = deployment.join(built.file_name().unwrap());
 		assert_eq!(fs::read_to_string(&installed).unwrap(), "newer runtime");
 		fs::write(&installed, "damaged runtime").unwrap();
-		assert!(deploy_library(&built, &deployment, "host", older, older).is_err());
+		assert!(deploy_library(&built, &deployment, "host", older, older, "all").is_err());
 		assert_eq!(fs::read_to_string(&installed).unwrap(), "damaged runtime");
 	}
 
@@ -171,10 +178,10 @@ mod tests {
 		let deployment = temp.path().join("lib");
 		let version = TabloVersion::parse("0.1.2").unwrap();
 		fs::write(&built, "original").unwrap();
-		deploy_library(&built, &deployment, "host", version, version).unwrap();
+		deploy_library(&built, &deployment, "host", version, version, "all").unwrap();
 		fs::write(&built, "replacement").unwrap();
-		assert!(deploy_library(&built, &deployment, "host", version, TabloVersion::parse("0.1.3").unwrap()).is_err());
-		assert!(deploy_library(&built, &deployment, "host", version, TabloVersion::parse("0.0.0").unwrap()).is_err());
-		assert!(deploy_library(&built, &deployment, "other-host", version, version).is_err());
+		assert!(deploy_library(&built, &deployment, "host", version, TabloVersion::parse("0.1.3").unwrap(), "all").is_err());
+		assert!(deploy_library(&built, &deployment, "host", version, TabloVersion::parse("0.0.0").unwrap(), "all").is_err());
+		assert!(deploy_library(&built, &deployment, "other-host", version, version, "all").is_err());
 	}
 }

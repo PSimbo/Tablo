@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 use crate::bytecode::{DebugInfoLevel, Program};
 use crate::runtime::check_version;
 use crate::runtime_abi::TabloVersion;
+use crate::runtime_drivers::required_drivers;
 use crate::schema::SchemaCatalog;
 use crate::{CompilationReport, CompilationTarget, TabloError};
 
@@ -73,6 +74,7 @@ pub fn compile_executable(
 		return Err(ExecutableBuildError::Build(String::from("Executable builds currently support Linux hosts only.")));
 	}
 	let (program, report, output_path) = compile_for_output(source, source_path, output_path, schema_catalog, options.debug_info)?;
+	let drivers = required_drivers(&program, schema_catalog).map_err(ExecutableBuildError::Build)?;
 	let runtime_dir = fs::canonicalize(&options.runtime_dir)?;
 	let manifest: toml::Value = toml::from_str(&fs::read_to_string(runtime_dir.join("Cargo.toml"))?)
 		.map_err(|error| ExecutableBuildError::Build(format!("Invalid runtime Cargo.toml: {error}")))?;
@@ -97,7 +99,7 @@ pub fn compile_executable(
 	fs::create_dir_all(&options.cache_dir)?;
 	let cache_dir = fs::canonicalize(&options.cache_dir)?;
 	if options.runtime == RuntimeMode::Shared {
-		shared::build(&program, &output_path, &runtime_dir, &cache_dir, host, runtime_version, options.offline)?;
+		shared::build(&program, &output_path, &runtime_dir, &cache_dir, host, (runtime_version, drivers), options.offline)?;
 		return Ok(report);
 	}
 	let project = tempfile::Builder::new().prefix("tablo-build-").tempdir_in(&cache_dir)?;
@@ -107,8 +109,9 @@ pub fn compile_executable(
 		ExecutableBuildError::Build(String::from("The runtime source path must be valid UTF-8 for Cargo."))
 	})?;
 	let quoted_path = toml::Value::String(runtime_path.to_string()).to_string();
+	let features = drivers.cargo_features();
 	let manifest = format!(
-		"[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n\n[dependencies]\ntablo = {{ package = \"tabloc\", path = {quoted_path} }}\n"
+		"[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n\n[dependencies]\ntablo = {{ package = \"tabloc\", path = {quoted_path}, default-features = false, features = {features} }}\n"
 	);
 	fs::write(project.path().join("Cargo.toml"), manifest)?;
 	// The launcher adds only one local package to the supplied dependency graph.
@@ -120,6 +123,7 @@ pub fn compile_executable(
 	fs::write(project.path().join("src/main.rs"), launcher_source(artifact_version))?;
 
 	eprintln!("Building embedded Tablo executable (Cargo reuses cached dependencies)...");
+	resolve_runtime_lock(project.path(), host, options.offline)?;
 	build_cargo(&project.path().join("Cargo.toml"), &cache_dir.join("target"), host, &["--bin", name], options.offline)?;
 	publish_executable(&cache_dir.join("target").join(host).join("debug").join(name), &output_path)?;
 	Ok(report)
@@ -160,6 +164,36 @@ fn compile_for_output(
 	// Check all source paths before removing optional debug records.
 	program.debug_info_mut().retain_level(debug_info);
 	Ok((program, CompilationReport { warnings }, output_path))
+}
+
+fn resolve_runtime_lock(project: &Path, host: &str, offline: bool) -> Result<(), ExecutableBuildError> {
+	let lock_path = project.join("Cargo.lock");
+	let supplied = fs::read_to_string(&lock_path)?;
+	// Optional dependencies can disappear from Cargo's resolved lockfile. Let
+	// Cargo prune it, but reject any package/version/checksum outside the supplied
+	// graph before allowing compilation or dependency build scripts to run.
+	let mut command = Command::new("cargo");
+	command.args(["metadata", "--format-version", "1", "--filter-platform", host, "--manifest-path"])
+		.arg(project.join("Cargo.toml")).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::inherit());
+	if offline { command.arg("--offline"); }
+	if !command.status()?.success() {
+		return Err(ExecutableBuildError::Build(String::from("Could not resolve the runtime dependency graph.")));
+	}
+	verify_locked_packages(&supplied, &fs::read_to_string(lock_path)?)
+}
+
+fn verify_locked_packages(supplied: &str, resolved: &str) -> Result<(), ExecutableBuildError> {
+	fn packages(contents: &str) -> Result<std::collections::BTreeSet<Vec<String>>, ExecutableBuildError> {
+		let lock: toml::Value = toml::from_str(contents).map_err(|error| ExecutableBuildError::Build(format!("Invalid dependency lockfile: {error}")))?;
+		let entries = lock.get("package").and_then(toml::Value::as_array)
+			.ok_or_else(|| ExecutableBuildError::Build(String::from("Dependency lockfile contains no packages.")))?;
+		Ok(entries.iter().map(|package| ["name", "version", "source", "checksum"].iter()
+			.map(|key| package.get(*key).and_then(toml::Value::as_str).unwrap_or("").to_string()).collect()).collect())
+	}
+	if !packages(resolved)?.is_subset(&packages(supplied)?) {
+		return Err(ExecutableBuildError::Build(String::from("Runtime dependency resolution changed a locked package version or checksum; update the supplied runtime bundle deliberately before building.")));
+	}
+	Ok(())
 }
 
 fn build_cargo(manifest: &Path, target_dir: &Path, host: &str, selection: &[&str], offline: bool) -> Result<(), ExecutableBuildError> {
@@ -256,4 +290,14 @@ mod tests {
 		let error = compile_executable(source, &input, &imported, None, &options).unwrap_err();
 		assert!(error.to_string().contains("would overwrite a source file"));
 	}
+	#[test]
+	fn permits_pruning_locked_packages_but_rejects_version_and_checksum_changes() {
+		let package = "[[package]]\nname = 'dependency'\nversion = '1.2.3'\nsource = 'registry+example'\nchecksum = 'original'\n";
+		let unused = "[[package]]\nname = 'unused'\nversion = '4.0.0'\n";
+		let supplied = format!("{package}{unused}");
+		verify_locked_packages(&supplied, package).unwrap();
+		assert!(verify_locked_packages(&supplied, &package.replace("1.2.3", "1.2.4")).is_err());
+		assert!(verify_locked_packages(&supplied, &package.replace("original", "changed")).is_err());
+	}
+
 }
