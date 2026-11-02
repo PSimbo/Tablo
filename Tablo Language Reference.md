@@ -177,7 +177,13 @@ The `any` type is distinct from `json`. The `json` type represents JSON-domain d
 
 Note that the `json` data type does not require that the database backend have explicit support for storing JSON data. Tablo provides functions for converting JSON data to and from strings.
 
-JSON objects are free to contain any number of named fields. The `exists` operator may be used to determine whether a certain field exists. This operator evaluates to `true` even if the field contains a value of `null`. See "Presence and Lock Operators" for its complete semantics.
+The language provides a single `json` type, without separate JSON-specific scalar types. Numbers stored within JSON retain their exact numeric values, including numbers beyond the range or precision of Tablo's numeric primitives. Parsing, retaining, copying, and serializing JSON must preserve those numeric values. This does not require preserving their original numeric spelling.
+
+Converting a JSON number to a Tablo numeric primitive may lose precision according to the conversion rules. Such a conversion does not modify the original JSON property or array element unless the converted primitive is subsequently assigned back to that property or element.
+
+The root of a `json` value must be an object or array. Its fields and elements may contain nested objects, arrays, strings, numbers, Boolean values, or null. Accessing a field or element does not by itself convert its contents to a Tablo primitive. Objects and arrays obtained through such access have type `json`; scalar contents are implicitly converted when a compatible Tablo target type is required, as described under "Automatic Type Conversions".
+
+JSON objects are free to contain any number of named fields. A nullable `json?` value of `null` represents the absence of a JSON object or array. The `exists` operator may be used to determine whether a certain field exists. This operator evaluates to `true` even if the field contains a value of `null`. See "Presence and Lock Operators" for its complete semantics.
 
 Beyond the primitive data types listed in this section, custom data types may be defined as objects (see the "Objects" section).
 
@@ -364,7 +370,7 @@ Decimal values may be compared with other decimal values. Decimal values may als
 
 Arrays may be compared for equality using `==` and `!=`. Two arrays are equal if and only if they have the same length and each element is equal to the corresponding element in the other array.
 
-The `null` literal may be compared for equality with a nullable or non-nullable value of any type for which equality is defined. A JSON value representing JSON `null` is equal to the `null` literal. Every other non-nullable value is unequal to `null`, so `value == null` always evaluates to `false` and `value != null` always evaluates to `true` when `value` has a non-nullable non-JSON type. Such comparisons are valid even when the compiler can determine their result statically.
+The `null` literal may be compared for equality with a nullable or non-nullable value of any type for which equality is defined. A JSON field or element containing null compares equal to the `null` literal. A non-nullable `json` value itself contains an object or array and is unequal to `null`. Every other non-nullable value is also unequal to `null`. Such comparisons are valid even when the compiler can determine their result statically.
 
 Objects may be compared for equality using `==` and `!=`. Ordinary statically typed object operands must have the same nominal object type, subject to the usual nullable and non-nullable compatibility. Two non-null object values are equal if and only if every field is equal, including private fields and fields within nested objects. Root-array-shaped objects are compared using array equality. Structurally identical values of different nominal object types are not equal.
 
@@ -372,7 +378,7 @@ Object comparison is recursive and terminates as soon as inequality is establish
 
 JSON values may be compared for equality using `==` and `!=`. JSON values of different kinds are not equal. JSON strings and Boolean values use their ordinary scalar equality, JSON `null` uses the ordinary `null` equality rules, and JSON numbers are equal when they represent the same numeric value; differences in numeric spelling such as `1`, `1.0`, and `1e0` do not affect equality. JSON arrays are equal when they have the same length and corresponding elements are equal in the same order. JSON objects are equal when they contain the same case-sensitive property names and the corresponding values are equal; property order does not affect equality.
 
-Except for `null`, a JSON value is not equal to a statically typed object or other non-JSON value merely because its structure or scalar representation matches. An explicit conversion is required before values from different runtime domains can compare as values of the same type.
+A JSON object or array is not equal to a statically typed object or ordinary Tablo array merely because its structure matches. An explicit conversion is required before these values can compare as values of the same type. JSON scalar contents follow the target-type conversion rules in "Automatic Type Conversions".
 
 Values of type `any` may be compared using `==` and `!=`, including comparison between an `any` operand and a concrete operand. Equality unwraps each `any` operand and compares its contained runtime value using the equality rules for that value. Compatible concrete values use their ordinary equality semantics, including numeric compatibility between `int` and `dec`. Incompatible runtime types are unequal rather than producing a runtime failure. The `any` wrapper does not itself create a distinct value, so an `any` value containing `42` is equal to the concrete integer `42`.
 
@@ -515,6 +521,8 @@ Tablo supports a fairly limited set of automatic type conversions. In general, a
 
 Numeric values may be implicitly converted between `int` and `dec` where necessary.
 
+A scalar obtained from a JSON field or array element is implicitly converted to a compatible Tablo target type when assigned to a typed destination or passed to a by-value function parameter. The target type determines the conversion; the value must be compatible with that type. For example, a JSON string may supply a `text` parameter, a JSON Boolean may supply a `bool` parameter, and a JSON number may supply a compatible numeric parameter. JSON null may supply a nullable target. The conversion does not modify the source JSON field or element. JSON objects and arrays obtained through field or element access can supply a `json` parameter without conversion to an ordinary Tablo object or array.
+
 No implicit conversions are defined to or from `any`, except that values of any type may be assigned to a variable, field, or array element whose declared type is `any`.
 
 Note that `float` and `dec` are not implicitly converted to one another. Any operation involving both `float` and `dec` requires an explicit conversion.
@@ -525,7 +533,7 @@ When the `+` operator is used and either operand is of type `text`, the other op
 
 In all of the above cases, if both operands are non-nullable then the result is also a non-nullable type. If either or both operands are nullable then the result is a nullable type.
 
-With one notable exception, no automatic conversions occur when passing arguments to functions. A function must receive exactly the types it expects or a compile error results. The aforementioned exception is the automatic conversion from a non-nullable type to the corresponding nullable type. In other words, a value of type `int` may be used where `int?` is expected, but a value of type `int?` may not be used where `int` is required without first proving or converting away the nullability.
+Automatic conversions when passing arguments to functions are limited to the JSON scalar conversions described above and conversion from a non-nullable type to the corresponding nullable type. Other arguments must match the parameter types or a compile error results. A value of type `int` may be used where `int?` is expected, but a value of type `int?` may not be used where `int` is required without first proving or converting away the nullability. Ordinary `int` and `dec` arguments are not automatically converted to one another at a function boundary.
 
 Variables
 ---------
@@ -1702,9 +1710,13 @@ The function overload resolution process is as follows:
   * A non-nullable by-value parameter without a default is left unbound.
 4. If exactly one candidate remains then that function is selected. Otherwise, if no candidates remain then no matching overload exists and if multiple candidates remain then the call is ambiguous. In either case, the call produces a compile error.
 
-The compiler does not rank compatible candidates for the purpose of overload resolution. In particular, it does not prefer exact parameter types over nullable parameter types, fewer omitted parameters over more omitted parameters, or fixed parameters over "varargs" parameters. The ordinary function-argument compatibility rules still apply: a non-nullable value may be passed to a parameter with the corresponding nullable type, while a nullable value may not be passed to the corresponding non-nullable type. General automatic conversions, including conversions between `int` and `dec`, are not performed when passing arguments to functions and do not participate in overload resolution.
+The compiler does not rank compatible candidates for the purpose of overload resolution. In particular, it does not prefer exact parameter types over nullable parameter types, fewer omitted parameters over more omitted parameters, or fixed parameters over "varargs" parameters. The ordinary function-argument compatibility rules still apply: a non-nullable value may be passed to a parameter with the corresponding nullable type, while a nullable value may not be passed to the corresponding non-nullable type. The JSON scalar conversions specified under "Automatic Type Conversions" are an exception to the ordinary argument-conversion restrictions. They do not introduce a preference ranking between compatible overloads. Other automatic conversions, including conversions between ordinary `int` and `dec` arguments, are not performed when passing arguments to functions and do not participate in overload resolution.
 
 Parameter names do participate in overload resolution through argument binding. Overloads with otherwise identical parameter types must therefore be distinguished by named arguments. A positional call that does not distinguish them is ambiguous and produces a compile error.
+
+Overload resolution must not inspect or rely on JSON contents, including property names, structural layout, or the kinds or values of fields and elements. This applies even when those contents could be determined during compilation. Passing a `json` value does not make an overload accepting a named object type eligible based on the JSON's shape. When a particular structured layout is required, the caller must first convert the JSON to a value of the corresponding defined `obj` type; overload resolution then uses that object's static type.
+
+For a JSON field or element argument, any permitted implicit conversion is determined by the parameter type of an overload selected without inspecting the JSON contents. If multiple candidates remain compatible under the argument-binding and conversion rules, the call is ambiguous; the compiler must not choose among them by inspecting the field or element. Conversion is performed for the selected parameter, and a conversion failure does not trigger selection of another overload. Functions may accept `json` parameters, but application interfaces are generally expected to use defined object types once the required structure is known.
 
 Every function in an overload set must have at least one syntactically valid argument list that selects it uniquely. The compiler rejects a declaration if adding it would leave any function in the resulting overload set with no uniquely identifying call. This rule is independent of the calls that currently exist in the program.
 
@@ -2117,6 +2129,10 @@ Returns the `int` obtained by casting `v`. If `v` cannot be converted then the f
 
 Returns the `int` obtained by parsing `v`. If `v` cannot be parsed as an `int` then the function fails.
 
+### `json(v: text): json`
+
+Parses `v` as a JSON object or array. Parsing fails if the input is malformed, its root is a scalar (including null), or any object contains duplicate property names. Duplicate names are compared exactly and case-sensitively, including names decoded from escape sequences.
+
 ### `max(a: int, b: int): int`
 
 Returns the greater of the two `int` values `a` and `b`.
@@ -2194,6 +2210,10 @@ Returns the string representation of `v`.
 ### `text(v: int): text`
 
 Returns the string representation of `v`.
+
+### `text(v: json): text`
+
+Serializes `v` as JSON text.
 
 ### `text(v: date): text`
 
