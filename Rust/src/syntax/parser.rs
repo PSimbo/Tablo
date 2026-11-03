@@ -250,7 +250,12 @@ impl Parser {
 		};
 		let operator_position = token.start;
 
+		let extended_path = assignment_path(&left).is_some_and(|(_, path)| {
+			path.iter().any(|part| matches!(part, AssignmentPathPart::Field(_, true)))
+				|| (path.len() > 1 && path.iter().any(|part| matches!(part, AssignmentPathPart::Index(_))))
+		});
 		let target = match left {
+			expression if extended_path => AssignmentTarget::Path(Box::new(expression)),
 			Expr::FieldAccess(field_access) => {
 				AssignmentTarget::Field(self.extract_field_assignment_target(field_access, operator_position)?)
 			}
@@ -666,6 +671,7 @@ impl Parser {
 		let field = self.expect_token(TokenKind::Identifier, "Expected field name after `.`.")?;
 
 		Ok(Expr::FieldAccess(FieldAccessExpr {
+			is_quoted: field.is_quoted_identifier,
 			field: IdentifierExpr {
 				name: field.lexeme,
 				position: field.start,
@@ -1608,6 +1614,7 @@ impl Parser {
 			| TokenKind::DecKeyword
 			| TokenKind::BoolKeyword
 			| TokenKind::IntKeyword
+			| TokenKind::JsonKeyword
 			| TokenKind::TextKeyword
 			| TokenKind::TimeKeyword
 			| TokenKind::TimeTzKeyword
@@ -1658,6 +1665,7 @@ impl Parser {
 				)))
 			}
 			TokenKind::IntKeyword => Ok(DataType::Int),
+			TokenKind::JsonKeyword => Ok(DataType::Json),
 			TokenKind::LeftBracket => {
 				let element_type = self.parse_data_type()?;
 				self.expect_token(TokenKind::RightBracket, "Expected `]` after array element type.")?;
@@ -2425,6 +2433,7 @@ mod tests {
 
 	fn normalize_assignment_target(target: AssignmentTarget) -> AssignmentTarget {
 		match target {
+			AssignmentTarget::Path(path) => AssignmentTarget::Path(Box::new(normalize_expr(*path))),
 			AssignmentTarget::Field(target) => AssignmentTarget::Field(ObjectFieldAssignmentTarget {
 				fields: target.fields.into_iter().map(normalize_identifier).collect(),
 				object: normalize_identifier(target.object),
@@ -2535,7 +2544,8 @@ mod tests {
 				position: 0,
 				value,
 			}),
-			Expr::FieldAccess(FieldAccessExpr { field, object, .. }) => Expr::FieldAccess(FieldAccessExpr {
+			Expr::FieldAccess(FieldAccessExpr { field, object, is_quoted, .. }) => Expr::FieldAccess(FieldAccessExpr {
+				is_quoted,
 				field: normalize_identifier(field),
 				object: Box::new(normalize_expr(*object)),
 				position: 0,
@@ -3738,11 +3748,13 @@ mod tests {
 			parse("exists payload.customer.name"),
 			Expr::Unary(UnaryExpr {
 				operand: Box::new(Expr::FieldAccess(FieldAccessExpr {
+					is_quoted: false,
 					field: IdentifierExpr {
 						name: String::from("name"),
 						position: 0,
 					},
 					object: Box::new(Expr::FieldAccess(FieldAccessExpr {
+						is_quoted: false,
 						field: IdentifierExpr {
 							name: String::from("customer"),
 							position: 0,
@@ -3952,6 +3964,7 @@ mod tests {
 							position: 0,
 							statements: vec![
 								Statement::Expression(Expr::FieldAccess(FieldAccessExpr {
+									is_quoted: false,
 									field: IdentifierExpr {
 										name: String::from("name"),
 										position: 0,
@@ -4024,6 +4037,7 @@ mod tests {
 							position: 0,
 							statements: vec![
 								Statement::Expression(Expr::FieldAccess(FieldAccessExpr {
+									is_quoted: false,
 									field: IdentifierExpr {
 										name: String::from("name"),
 										position: 0,
@@ -4124,6 +4138,7 @@ mod tests {
 							position: 0,
 							statements: vec![
 								Statement::Expression(Expr::FieldAccess(FieldAccessExpr {
+									is_quoted: false,
 									field: IdentifierExpr {
 										name: String::from("name"),
 										position: 0,
@@ -4502,6 +4517,7 @@ mod tests {
 								},
 								where_clause: Some(Box::new(Expr::Binary(BinaryExpr {
 									left: Box::new(Expr::FieldAccess(FieldAccessExpr {
+										is_quoted: false,
 										field: IdentifierExpr {
 											name: String::from("id"),
 											position: 0,
@@ -5232,6 +5248,7 @@ mod tests {
 					},
 				],
 				result: Some(Expr::FieldAccess(FieldAccessExpr {
+					is_quoted: false,
 					field: IdentifierExpr {
 						name: String::from("age"),
 						position: 0,

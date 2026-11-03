@@ -14,10 +14,17 @@ pub enum AssignmentOperator {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AssignmentPathPart {
+	Field(IdentifierExpr, bool),
+	Index(Expr),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AssignmentTarget {
 	Field(ObjectFieldAssignmentTarget),
 	Identifier(IdentifierExpr),
 	Index(ArrayIndexAssignmentTarget),
+	Path(Box<Expr>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,6 +60,9 @@ pub enum DataType {
 	Dec,
 	EmptyArray,
 	Int,
+	Json,
+	// Field and element contents remain in the JSON domain until a destination supplies a type.
+	JsonMember,
 	Null,
 	Nullable(Box<DataType>),
 	Object(ObjectTypeName),
@@ -91,6 +101,8 @@ impl DataType {
 			Self::Dec => String::from("dec"),
 			Self::EmptyArray => String::from("empty array"),
 			Self::Int => String::from("int"),
+			Self::Json => String::from("json"),
+			Self::JsonMember => String::from("JSON content"),
 			Self::Null => String::from("null"),
 			Self::Nullable(inner) => format!("{}?", inner.name()),
 			Self::Object(name) => name.name.clone(),
@@ -376,6 +388,7 @@ pub struct EnumVariantDeclaration {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FieldAccessExpr {
+	pub is_quoted: bool,
 	pub field: IdentifierExpr,
 	pub object: Box<Expr>,
 	pub position: usize,
@@ -741,18 +754,31 @@ impl Expr {
 	}
 }
 
-pub fn field_access_base_and_path(expression: &Expr) -> Option<(&Expr, Vec<String>)> {
-	let Expr::FieldAccess(field_access) = expression else {
-		return None;
-	};
-	let mut fields = vec![field_access.field.name.clone()];
-	let mut object = field_access.object.as_ref();
-
-	while let Expr::FieldAccess(field_access) = object {
-		fields.push(field_access.field.name.clone());
-		object = field_access.object.as_ref();
+pub fn assignment_path(expression: &Expr) -> Option<(&IdentifierExpr, Vec<AssignmentPathPart>)> {
+	match expression {
+		Expr::Identifier(identifier) => Some((identifier, Vec::new())),
+		Expr::FieldAccess(field) => {
+			let (root, mut path) = assignment_path(&field.object)?;
+			path.push(AssignmentPathPart::Field(field.field.clone(), field.is_quoted));
+			Some((root, path))
+		}
+		Expr::Index(index) => {
+			let (root, mut path) = assignment_path(&index.array)?;
+			path.push(AssignmentPathPart::Index((*index.index).clone()));
+			Some((root, path))
+		}
+		_ => None,
 	}
+}
 
+pub fn field_access_base_and_members(expression: &Expr) -> Option<(&Expr, Vec<(String, bool)>)> {
+	let Expr::FieldAccess(field) = expression else { return None; };
+	let mut fields = vec![(field.field.name.clone(), field.is_quoted)];
+	let mut object = field.object.as_ref();
+	while let Expr::FieldAccess(field) = object {
+		fields.push((field.field.name.clone(), field.is_quoted));
+		object = field.object.as_ref();
+	}
 	fields.reverse();
 	Some((object, fields))
 }

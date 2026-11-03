@@ -15,6 +15,7 @@ pub mod executable;
 #[cfg(feature = "compiler")]
 mod library;
 pub mod format_string;
+pub mod json;
 pub mod object_file;
 pub mod query;
 pub mod runtime;

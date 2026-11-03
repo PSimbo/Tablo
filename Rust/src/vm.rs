@@ -634,6 +634,21 @@ impl VirtualMachine {
 				self.stack.push(compare_values(lhs, rhs, instruction_index, ComparisonKind::LessThanOrEqual)?);
 				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::ConvertJson(target) => {
+				let value = self.pop_value(instruction_index)?;
+				self.stack.push(convert_json_content(value, target).map_err(|message| vm_error(instruction_index, message))?);
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::LoadQuotedField(name) => {
+				let object = self.pop_value(instruction_index)?;
+				self.stack.push(load_member_value(object, name, true, instruction_index)?);
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::MemberPathExists(path) => {
+				let object = self.pop_value(instruction_index)?;
+				self.stack.push(Value::Boolean(member_path_exists(object, path, instruction_index)?));
+				Ok(ExecutionOutcome::Continue(None))
+			}
 			Instruction::LoadField(field_name) => {
 				let object = self.pop_value(instruction_index)?;
 				self.stack.push(load_field_value(object, field_name, instruction_index)?);
@@ -932,6 +947,28 @@ impl VirtualMachine {
 				self.stack.push(subtract_values(lhs, rhs, instruction_index)?);
 				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::StoreJsonPath(path) => {
+				let value = crate::json::JsonValue::from_value(self.pop_value(instruction_index)?)
+					.map_err(|message| vm_error(instruction_index, message))?;
+				let index_count = path.iter().filter(|part| matches!(part, JsonMutationPart::Index)).count();
+				let indices = self.pop_call_arguments(index_count, instruction_index)?;
+				let mut indices = indices.into_iter();
+				let mut keys = Vec::new();
+				for part in path {
+					keys.push(match part {
+						JsonMutationPart::Field(name, quoted) => crate::json::JsonMutationKey::Field(name.clone(), *quoted),
+						JsonMutationPart::Index => {
+							let Some(Value::Integer(index)) = indices.next() else { return Err(vm_error(instruction_index, String::from("JSON mutation indices must be integers."))); };
+							crate::json::JsonMutationKey::Index(index)
+						}
+					});
+				}
+				let Value::Json(root) = self.pop_value(instruction_index)? else { return Err(vm_error(instruction_index, String::from("JSON mutation requires a non-null JSON document."))); };
+				let updated = root.assign(&keys, &value).map_err(|message| vm_error(instruction_index, message))?;
+				self.stack.push(Value::Json(value));
+				self.stack.push(Value::Json(updated));
+				Ok(ExecutionOutcome::Continue(None))
+			}
 			Instruction::StoreFieldPath(field_path) => {
 				let value = self.pop_value(instruction_index)?;
 				let object = self.pop_value(instruction_index)?;
@@ -1146,6 +1183,7 @@ impl VirtualMachine {
 			| Value::Enum(_)
 			| Value::IntegerRange(_)
 			| Value::Iterator(_)
+			| Value::Json(_)
 			| Value::Null
 			| Value::Object(_)
 			| Value::Reference(_)
@@ -1569,6 +1607,10 @@ impl VirtualMachine {
 					format!("Built-in function `date` expects 1 argument(s), found {}.", arguments.len()),
 				)),
 			},
+			BuiltInFunction::JsonCast => match arguments.as_slice() {
+				[Value::Text(text)] => crate::json::JsonValue::parse(text).map(|value| Some(Value::Json(value))).map_err(|message| vm_error(instruction_index, message)),
+				_ => Err(vm_error(instruction_index, String::from("Built-in function `json` expects one text argument."))),
+			},
 			BuiltInFunction::SeqNext => Err(vm_error(
 				instruction_index,
 				String::from("Built-in function `seqnext` must be compiled into a sequence instruction before runtime."),
@@ -1577,6 +1619,7 @@ impl VirtualMachine {
 			| BuiltInFunction::DecCast
 			| BuiltInFunction::BoolCast
 			=> match arguments.as_slice() {
+				[Value::Json(value)] if built_in == BuiltInFunction::TextCast => Ok(Some(Value::Text(value.to_text()))),
 				[Value::Enum(value)] => Ok(Some((*value.backing_value).clone())),
 				[value] => Err(vm_error(
 					instruction_index,
@@ -2111,7 +2154,7 @@ fn evaluate_debug_expression(expression: &Expr, frame: &VmStackFrame) -> Result<
 		Expr::Decimal(decimal) => Ok(Value::Decimal(decimal.value.clone())),
 		Expr::FieldAccess(field_access) => {
 			let object = evaluate_debug_expression(&field_access.object, frame)?;
-			load_field_value(object, &field_access.field.name, field_access.position)
+			load_member_value(object, &field_access.field.name, field_access.is_quoted, field_access.position)
 		}
 		Expr::Find(_) => Err(vm_error(
 			expression.position(),
@@ -2164,9 +2207,9 @@ fn evaluate_debug_expression(expression: &Expr, frame: &VmStackFrame) -> Result<
 		Expr::Unary(unary) => {
 			match unary.operator {
 				UnaryOperator::Exists => {
-					if let Some((base, field_path)) = field_access_base_and_path(&unary.operand) {
+					if let Some((base, field_path)) = field_access_base_and_members(&unary.operand) {
 						let value = evaluate_debug_expression(base, frame)?;
-						return Ok(Value::Boolean(field_path_exists(value, &field_path, unary.position)?));
+						return Ok(Value::Boolean(member_path_exists(value, &field_path, unary.position)?));
 					}
 
 					let value = evaluate_debug_expression(&unary.operand, frame)?;
@@ -2208,12 +2251,21 @@ fn evaluate_debug_expression(expression: &Expr, frame: &VmStackFrame) -> Result<
 	}
 }
 
-fn field_path_exists(mut value: Value, field_path: &[String], instruction_index: usize) -> Result<bool, VmError> {
-	for (index, field_name) in field_path.iter().enumerate() {
+fn field_path_exists(value: Value, field_path: &[String], instruction_index: usize) -> Result<bool, VmError> {
+	member_path_exists(value, &field_path.iter().map(|name| (name.clone(), false)).collect::<Vec<_>>(), instruction_index)
+}
+
+fn member_path_exists(mut value: Value, field_path: &[(String, bool)], instruction_index: usize) -> Result<bool, VmError> {
+	for (index, (field_name, quoted)) in field_path.iter().enumerate() {
 		let is_final_field = index + 1 == field_path.len();
 
 		value = match value {
 			Value::Null => return Ok(false),
+			Value::Json(json) => {
+				let Some(child) = json.field(field_name, *quoted).map_err(|message| vm_error(instruction_index, message))? else { return Ok(false); };
+				if is_final_field { return Ok(true); }
+				Value::Json(child)
+			}
 			Value::Object(object) => {
 				let Some(field_value) = object.fields.get(field_name) else {
 					return Ok(false);
@@ -2389,6 +2441,15 @@ fn load_array_index_value(values: Vec<Value>, index: Value, instruction_index: u
 	}
 }
 
+fn convert_json_content(value: Value, target: &crate::ast::DataType) -> Result<Value, String> {
+	match (value, target.without_nullability()) {
+		(Value::Json(value), _) => value.convert(target),
+		(Value::Array(values), crate::ast::DataType::Array(element)) => values.into_iter()
+			.map(|value| convert_json_content(value, element)).collect::<Result<Vec<_>, _>>().map(Value::Array),
+		(value, _) => Ok(value),
+	}
+}
+
 fn load_field_path_value(object: Value, field_path: &[String], instruction_index: usize) -> Result<Value, VmError> {
 	let mut value = object;
 
@@ -2400,7 +2461,14 @@ fn load_field_path_value(object: Value, field_path: &[String], instruction_index
 }
 
 fn load_field_value(object: Value, field_name: &str, instruction_index: usize) -> Result<Value, VmError> {
+	load_member_value(object, field_name, false, instruction_index)
+}
+
+fn load_member_value(object: Value, field_name: &str, quoted: bool, instruction_index: usize) -> Result<Value, VmError> {
 	match object {
+		Value::Json(json) => json.field(field_name, quoted)
+			.map_err(|message| vm_error(instruction_index, message))?
+			.map(Value::Json).ok_or_else(|| vm_error(instruction_index, format!("JSON field `{field_name}` is missing or its parent is not an object."))),
 		Value::Object(object) => object.fields.get(field_name).cloned().ok_or(vm_error(
 			instruction_index,
 			format!("Object does not contain a field named `{field_name}`."),
@@ -2436,6 +2504,10 @@ fn load_field_value(object: Value, field_name: &str, instruction_index: usize) -
 fn load_index_value(array: Value, index: Value, instruction_index: usize) -> Result<Value, VmError> {
 	match array {
 		Value::Array(values) => load_array_index_value(values, index, instruction_index),
+		Value::Json(value) => match index {
+			Value::Integer(index) => value.index(index).map(Value::Json).map_err(|message| vm_error(instruction_index, message)),
+			other => Err(vm_error(instruction_index, format!("JSON array index must be an `int`, found `{}`.", type_name(&other)))),
+		},
 		Value::Text(value) => load_text_index_value(value, index, instruction_index),
 		other => {
 			Err(vm_error(
@@ -2675,6 +2747,7 @@ fn negate_value(value: Value) -> Value {
 		Value::Integer(integer) => Value::Integer(integer.saturating_neg()),
 		Value::IntegerRange(_) => unreachable!("Range values are rejected before numeric negation."),
 		Value::Iterator(_) => unreachable!("Iterator values are rejected before numeric negation."),
+		Value::Json(_) => unreachable!("JSON values are rejected before numeric negation."),
 		Value::Null => unreachable!("Null values are rejected before numeric negation."),
 		Value::Object(_) => unreachable!("Object values are rejected before numeric negation."),
 		Value::RecordPointer(_) => unreachable!("Record pointer values are rejected before numeric negation."),
@@ -2960,6 +3033,7 @@ fn stringify_value(value: &Value) -> String {
 		Value::Integer(value) => value.to_string(),
 		Value::IntegerRange(value) => value.to_string(),
 		Value::Iterator(_) => String::from("<iterator>"),
+		Value::Json(value) => value.to_text(),
 		Value::Null => String::from("null"),
 		Value::Object(object) => {
 			let mut result = String::from("{");
@@ -3018,6 +3092,7 @@ fn type_name(value: &Value) -> &'static str {
 		Value::Integer(_) => "int",
 		Value::IntegerRange(_) => "range",
 		Value::Iterator(_) => "iterator",
+		Value::Json(_) => "json",
 		Value::Null => "null",
 		Value::Object(_) => "object",
 		Value::RecordPointer(_) => "record pointer",
@@ -3071,6 +3146,8 @@ fn values_equal(lhs: &Value, rhs: &Value, instruction_index: usize) -> Result<bo
 		(Value::DecimalRange(lhs), Value::DecimalRange(rhs)) => Ok(lhs == rhs),
 		(Value::IntegerRange(lhs), Value::IntegerRange(rhs)) => Ok(lhs == rhs),
 		(Value::Iterator(lhs), Value::Iterator(rhs)) => Ok(lhs == rhs),
+		(Value::Json(lhs), Value::Json(rhs)) => Ok(lhs == rhs),
+		(Value::Json(value), Value::Null) | (Value::Null, Value::Json(value)) => Ok(value.is_null()),
 		(Value::Null, Value::Null) => Ok(true),
 		(Value::Object(lhs), Value::Object(rhs)) => {
 			if lhs.object_type_id != rhs.object_type_id || lhs.fields.len() != rhs.fields.len() {

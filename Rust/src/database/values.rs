@@ -10,6 +10,7 @@ pub(super) fn runtime_type_name(value: &Value) -> &'static str {
 		Value::Enum(_) => "enum",
 		Value::Integer(_) => "int",
 		Value::Iterator(_) => "iterator",
+		Value::Json(_) => "json",
 		Value::Null => "null",
 		Value::Object(_) => "object",
 		Value::RecordPointer(_) => "record pointer",

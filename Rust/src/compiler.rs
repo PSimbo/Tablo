@@ -302,7 +302,19 @@ impl Compiler {
 		emission: &mut EmissionState,
 		debug_position: Option<usize>,
 	) {
-		let _ = self;
+		self.compile_expression_value(expression, semantic_program, emission, debug_position);
+		if let Some(target) = semantic_program.json_conversion(expression.position()) {
+			self.emit(emission, Instruction::ConvertJson(target.clone()), debug_position.unwrap_or(expression.position()));
+		}
+	}
+
+	fn compile_expression_value(
+		&mut self,
+		expression: &Expr,
+		semantic_program: &SemanticProgram,
+		emission: &mut EmissionState,
+		debug_position: Option<usize>,
+	) {
 		let expression_position = debug_position.unwrap_or(expression.position());
 
 		match expression {
@@ -314,7 +326,37 @@ impl Compiler {
 				self.emit(emission, Instruction::MakeArray(elements.len() as u32), expression_position);
 			}
 			Expr::Assignment(AssignmentExpr { operator, target, value, .. }) => {
+				if semantic_program.is_json_assignment(expression.position()) {
+					let (root, path) = match target {
+						AssignmentTarget::Path(path) => assignment_path(path).unwrap(),
+						AssignmentTarget::Field(target) => (&target.object, target.fields.iter().cloned().map(|field| AssignmentPathPart::Field(field, false)).collect()),
+						AssignmentTarget::Index(target) => (&target.array, vec![AssignmentPathPart::Index((*target.index).clone())]),
+						_ => unreachable!(),
+					};
+					let slot = semantic_program.identifier_slot(root.position).unwrap();
+					self.emit(emission, Instruction::LoadLocal(slot), expression_position);
+					let mut parts = Vec::new();
+					for part in path {
+						match part {
+							AssignmentPathPart::Field(field, quoted) => parts.push(JsonMutationPart::Field(field.name, quoted)),
+							AssignmentPathPart::Index(index) => {
+								self.compile_into(&index, semantic_program, emission);
+								parts.push(JsonMutationPart::Index);
+							}
+						}
+					}
+					self.compile_into(value, semantic_program, emission);
+					self.emit(emission, Instruction::StoreJsonPath(parts), expression_position);
+					self.emit(emission, Instruction::StoreLocal(slot), expression_position);
+					return;
+				}
 				match target {
+					AssignmentTarget::Path(path) => {
+						let (root, path) = assignment_path(path).unwrap();
+						let fields = path.into_iter().map(|part| match part { AssignmentPathPart::Field(field, _) => field, _ => unreachable!() }).collect::<Vec<_>>();
+						let slot = semantic_program.identifier_slot(root.position).unwrap();
+						self.compile_object_field_assignment(slot, &fields, *operator, value, semantic_program, emission);
+					}
 					AssignmentTarget::Field(target) => {
 						let slot = semantic_program.identifier_slot(target.object.position)
 							.unwrap_or_else(|| panic!("Missing slot for identifier `{}`.", target.object.name));
@@ -549,7 +591,7 @@ impl Compiler {
 			Expr::Decimal(DecimalLiteral { value, .. }) => {
 				self.emit(emission, Instruction::PushDecimal(value.clone()), expression_position);
 			}
-			Expr::FieldAccess(FieldAccessExpr { field, object, .. }) => {
+			Expr::FieldAccess(FieldAccessExpr { field, object, is_quoted, .. }) => {
 				if let Some(enum_value) = semantic_program.enum_variant_value(expression.position()) {
 					let EnumValue::Constant(backing_value) = enum_value;
 					let enum_name = match object.as_ref() {
@@ -572,7 +614,7 @@ impl Compiler {
 				}
 				else {
 					self.compile_into_with_debug_position(object, semantic_program, emission, debug_position);
-					self.emit(emission, Instruction::LoadField(field.name.clone()), expression_position);
+					self.emit(emission, if *is_quoted { Instruction::LoadQuotedField(field.name.clone()) } else { Instruction::LoadField(field.name.clone()) }, expression_position);
 				}
 			}
 			Expr::Find(_) => {
@@ -713,9 +755,12 @@ impl Compiler {
 			}
 			Expr::Unary(UnaryExpr { operand, operator, .. }) => {
 				if *operator == UnaryOperator::Exists
-					&& let Some((base, field_path)) = field_access_base_and_path(operand) {
+					&& let Some((base, field_path)) = field_access_base_and_members(operand) {
 					self.compile_into_with_debug_position(base, semantic_program, emission, debug_position);
-					self.emit(emission, Instruction::FieldPathExists(field_path), expression_position);
+					let instruction = if field_path.iter().any(|(_, quoted)| *quoted) {
+						Instruction::MemberPathExists(field_path)
+					} else { Instruction::FieldPathExists(field_path.into_iter().map(|(name, _)| name).collect()) };
+					self.emit(emission, instruction, expression_position);
 				}
 				else {
 					self.compile_into_with_debug_position(operand, semantic_program, emission, debug_position);
@@ -1310,6 +1355,9 @@ impl Compiler {
 					debug_position,
 				);
 			}
+			crate::ast::DataType::Json => {
+				self.emit_object_default_value(&ObjectDefaultValue::Json(crate::json::JsonValue::default()), emission, debug_position);
+			}
 			crate::ast::DataType::Int => {
 				self.emit(emission, Instruction::PushInteger(0), debug_position);
 			}
@@ -1352,7 +1400,8 @@ impl Compiler {
 			crate::ast::DataType::TimestampTz => {
 				self.emit(emission, Instruction::PushCurrentTimestampTz, debug_position);
 			}
-			crate::ast::DataType::EmptyArray
+			crate::ast::DataType::JsonMember
+			| crate::ast::DataType::EmptyArray
 			| crate::ast::DataType::Null
 			| crate::ast::DataType::Range(_)
 			| crate::ast::DataType::RecordPointer(_)
@@ -1396,6 +1445,10 @@ impl Compiler {
 			}
 			ObjectDefaultValue::Integer(value) => {
 				self.emit(emission, Instruction::PushInteger(*value), debug_position);
+			}
+			ObjectDefaultValue::Json(value) => {
+				self.emit(emission, Instruction::PushText(value.to_text()), debug_position);
+				self.emit(emission, Instruction::CallBuiltIn(crate::builtins::BuiltInFunction::JsonCast, 1), debug_position);
 			}
 			ObjectDefaultValue::Null => self.emit(emission, Instruction::PushNull, debug_position),
 			ObjectDefaultValue::Object { fields, object_type_id } => {
@@ -2203,9 +2256,9 @@ mod tests {
 	#[test]
 	fn compiles_implicit_object_default_using_resolved_declaration_type() {
 		let mut program = parse_program(
-			"obj First { value: int, };\n\
+			"obj Primary { value: int, };\n\
 			obj Second { value: text, };\n\
-			var result: First;",
+			var result: Primary;",
 		);
 		let semantic_program = SemanticAnalyzer::new().analyze_program(&program).unwrap();
 		let Statement::VariableDeclaration(variable) = &mut program.statements[0] else {
@@ -2221,7 +2274,7 @@ mod tests {
 			Instruction::PushInteger(0),
 			Instruction::MakeObject {
 				field_names: vec![String::from("value")],
-				object_type_id: semantic_program.object_type_id("First").unwrap(),
+				object_type_id: semantic_program.object_type_id("Primary").unwrap(),
 			},
 			Instruction::StoreLocal(0),
 		]);
@@ -2321,9 +2374,9 @@ mod tests {
 	#[test]
 	fn compiles_object_construction_using_resolved_identity() {
 		let mut program = parse_program(
-			"obj First { value: int, };\n\
+			"obj Primary { value: int, };\n\
 			obj Second { value: text, };\n\
-			var result: First = First {};",
+			var result: Primary = Primary {};",
 		);
 		let semantic_program = SemanticAnalyzer::new().analyze_program(&program).unwrap();
 		let Statement::VariableDeclaration(variable) = &mut program.statements[0] else {
@@ -2342,7 +2395,7 @@ mod tests {
 			Instruction::PushInteger(0),
 			Instruction::MakeObject {
 				field_names: vec![String::from("value")],
-				object_type_id: semantic_program.object_type_id("First").unwrap(),
+				object_type_id: semantic_program.object_type_id("Primary").unwrap(),
 			},
 			Instruction::StoreLocal(0),
 		]);

@@ -32,6 +32,7 @@ pub enum Instruction {
 	Call(u32, u32),
 	CallBuiltIn(BuiltInFunction, u32),
 	CommitTransaction,
+	ConvertJson(DataType),
 	CreateRecord,
 	CreateRecordIfPending,
 	DeleteRecord,
@@ -55,6 +56,7 @@ pub enum Instruction {
 	LoadIndex,
 	LoadLocal(u32),
 	LoadProjectedValue(u32),
+	LoadQuotedField(String),
 	LoadReference(u32),
 	LoadSequenceCurrent {
 		database_name: String,
@@ -76,6 +78,7 @@ pub enum Instruction {
 		schema_is_implicit: bool,
 	},
 	MakeSteppedRange,
+	MemberPathExists(Vec<(String, bool)>),
 	Modulo,
 	Multiply,
 	Negate,
@@ -108,6 +111,7 @@ pub enum Instruction {
 	ReturnNoValue,
 	StoreFieldPath(Vec<String>),
 	StoreIndex,
+	StoreJsonPath(Vec<JsonMutationPart>),
 	StoreLocal(u32),
 	StoreSequenceCurrent {
 		database_name: String,
@@ -119,6 +123,12 @@ pub enum Instruction {
 	UpdateRecord,
 	UpdateRecordIfChanged,
 	Xor,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum JsonMutationPart {
+	Field(String, bool),
+	Index,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -138,6 +148,7 @@ pub enum ObjectDefaultValue {
 		variant_name: String,
 	},
 	Integer(i64),
+	Json(crate::json::JsonValue),
 	Null,
 	Object {
 		fields: Vec<(String, ObjectDefaultValue)>,
@@ -165,6 +176,7 @@ pub enum ObjectValueTypeDescriptor {
 	Dec,
 	Enum(String),
 	Int,
+	Json,
 	Nullable(Box<ObjectValueTypeDescriptor>),
 	Object(ObjectTypeId),
 	Range(Box<ObjectValueTypeDescriptor>),

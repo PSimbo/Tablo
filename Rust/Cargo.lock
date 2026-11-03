@@ -1519,6 +1519,7 @@ dependencies = [
  "colored",
  "mysql",
  "native-tls",
+ "num-bigint",
  "postgres",
  "postgres-native-tls",
  "rusqlite",

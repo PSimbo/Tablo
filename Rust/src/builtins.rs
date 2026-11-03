@@ -13,7 +13,8 @@ const BUILTIN_FORMAT: u8 = BUILTIN_FIRST_OF + 1;
 const BUILTIN_HOUR: u8 = BUILTIN_FORMAT + 1;
 const BUILTIN_INDEX_OF: u8 = BUILTIN_HOUR + 1;
 const BUILTIN_INT_CAST: u8 = BUILTIN_INDEX_OF + 1;
-const BUILTIN_LAST_OF: u8 = BUILTIN_INT_CAST + 1;
+const BUILTIN_JSON_CAST: u8 = BUILTIN_INT_CAST + 1;
+const BUILTIN_LAST_OF: u8 = BUILTIN_JSON_CAST + 1;
 const BUILTIN_LEN: u8 = BUILTIN_LAST_OF + 1;
 const BUILTIN_MINUTE: u8 = BUILTIN_LEN + 1;
 const BUILTIN_MONTH: u8 = BUILTIN_MINUTE + 1;
@@ -39,6 +40,7 @@ pub enum BuiltInFunction {
 	Hour,
 	IndexOf,
 	IntCast,
+	JsonCast,
 	LastOf,
 	Len,
 	Minute,
@@ -67,6 +69,7 @@ impl BuiltInFunction {
 			Self::Hour,
 			Self::IndexOf,
 			Self::IntCast,
+			Self::JsonCast,
 			Self::LastOf,
 			Self::Len,
 			Self::Minute,
@@ -95,6 +98,7 @@ impl BuiltInFunction {
 			BUILTIN_HOUR => Some(Self::Hour),
 			BUILTIN_INDEX_OF => Some(Self::IndexOf),
 			BUILTIN_INT_CAST => Some(Self::IntCast),
+			BUILTIN_JSON_CAST => Some(Self::JsonCast),
 			BUILTIN_LAST_OF => Some(Self::LastOf),
 			BUILTIN_LEN => Some(Self::Len),
 			BUILTIN_MINUTE => Some(Self::Minute),
@@ -124,6 +128,7 @@ impl BuiltInFunction {
 			"hour" => Some(Self::Hour),
 			"indexof" => Some(Self::IndexOf),
 			"int" => Some(Self::IntCast),
+			"json" => Some(Self::JsonCast),
 			"lastof" => Some(Self::LastOf),
 			"len" => Some(Self::Len),
 			"minute" => Some(Self::Minute),
@@ -153,6 +158,7 @@ impl BuiltInFunction {
 			Self::Hour => BUILTIN_HOUR,
 			Self::IndexOf => BUILTIN_INDEX_OF,
 			Self::IntCast => BUILTIN_INT_CAST,
+			Self::JsonCast => BUILTIN_JSON_CAST,
 			Self::LastOf => BUILTIN_LAST_OF,
 			Self::Len => BUILTIN_LEN,
 			Self::Minute => BUILTIN_MINUTE,
@@ -181,6 +187,7 @@ impl BuiltInFunction {
 			Self::Hour => "hour",
 			Self::IndexOf => "indexof",
 			Self::IntCast => "int",
+			Self::JsonCast => "json",
 			Self::LastOf => "lastof",
 			Self::Len => "len",
 			Self::Minute => "minute",
@@ -207,6 +214,7 @@ impl BuiltInFunction {
 			| Self::Hour
 			| Self::IndexOf
 			| Self::IntCast
+			| Self::JsonCast
 			| Self::LastOf
 			| Self::Len
 			| Self::Minute
@@ -291,6 +299,7 @@ impl BuiltInFunction {
 				Self::signature(&[("str", Text), ("arr", ArrayText)], Some(DataType::Int.into_nullable())),
 				Self::signature(&[("sub", Text), ("str", Text)], Some(DataType::Int.into_nullable())),
 			],
+			Self::JsonCast => vec![Self::signature(&[("v", Text)], Some(DataType::Json))],
 			Self::IntCast => vec![
 				Self::signature(&[("v", Bool)], Some(DataType::Int)),
 				Self::signature(&[("v", Text)], Some(DataType::Int)),
@@ -330,6 +339,7 @@ impl BuiltInFunction {
 				),
 			],
 			Self::TextCast => vec![
+				Self::signature(&[("v", Json)], Some(DataType::Text)),
 				Self::signature(&[("v", EnumBacked(DataType::Text))], Some(DataType::Text)),
 			],
 			Self::Trim => vec![
@@ -360,6 +370,7 @@ impl BuiltInFunction {
 			| Self::Displn
 			| Self::Hour
 			| Self::IntCast
+			| Self::JsonCast
 			| Self::Len
 			| Self::Minute
 			| Self::Month
@@ -501,8 +512,16 @@ impl BuiltInFunction {
 				[arg] if matches!(arg.without_nullability(), DataType::Text) => Some(DataType::Int),
 				_ => None,
 			},
+			Self::JsonCast => match argument_types {
+				[DataType::Text] => Some(DataType::Json),
+				_ => None,
+			},
+			Self::TextCast => match argument_types {
+				[DataType::Json] => Some(DataType::Text),
+				_ => None,
+			},
 			Self::SeqNext => None,
-			Self::TextCast | Self::DecCast | Self::BoolCast => None,
+			Self::DecCast | Self::BoolCast => None,
 		}
 	}
 
@@ -541,6 +560,7 @@ pub enum BuiltInParameterType {
 	Dec,
 	EnumBacked(DataType),
 	Int,
+	Json,
 	Sequence,
 	Text,
 	Time,
@@ -560,6 +580,7 @@ impl BuiltInParameterType {
 			Self::Dec => String::from("dec"),
 			Self::EnumBacked(backing_type) => format!("<{}-backed enum>", backing_type.name()),
 			Self::Int => String::from("int"),
+			Self::Json => String::from("json"),
 			Self::Sequence => String::from("seq <sequence>"),
 			Self::Text => String::from("text"),
 			Self::Time => String::from("time"),

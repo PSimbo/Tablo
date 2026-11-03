@@ -221,7 +221,7 @@
       "patterns": [
         {
           "name": "storage.type.primitive.tablo",
-          "match": "\\b(?:int|dec|text|bool)\\b"
+          "match": "\\b(?:int|dec|text|bool|json)\\b"
         },
         {
           "name": "storage.type.object.tablo",

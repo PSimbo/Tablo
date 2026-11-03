@@ -4,12 +4,12 @@ Tablo Object File Format
 Purpose
 -------
 
-This document describes the structure of compiled Tablo object files. `tabloc --emit object` writes this encoding with a `.tobj` extension by default; existing `.tbo` files use the same encoding and remain readable. The extension change does not change the format version. These files currently contain complete programs, not independently linkable modules.
+This document describes the structure of compiled Tablo object files. `tabloc --emit object` writes this encoding with a `.tobj` extension by default; the file extension does not affect decoding. Legacy `TBO0` files must be recompiled. These files currently contain complete programs, not independently linkable modules.
 
 At present, a Tablo object file stores:
 
 * a file header
-* a format version number
+* the producing Tablo version
 * compiled functions and their return metadata
 * the program entry point
 * backend-specific database queries
@@ -21,7 +21,7 @@ The current format does not yet include a constant data section. The compiler mu
 Tablo library container
 -----------------------
 
-`tabloc --emit library` writes a separate `.tlib` container. Its layout is four magic bytes `TLB1`, a little-endian `u32` JSON manifest byte length, the UTF-8 JSON manifest, and one object payload using the unchanged encoding below. The manifest has three fields: `compiler` (the exact compiler package version), `interface` (public function declarations in Tablo syntax with empty bodies), and `exports` (function indices in declaration order). The object payload contains the compiled implementations and their dependencies, with an empty code entry point. Libraries do not require `Main`.
+`tabloc --emit library` writes a separate `.tlib` container. Its layout is four magic bytes `TLB1`, a little-endian `u32` JSON manifest byte length, the UTF-8 JSON manifest, and one object payload using the encoding below. The manifest has three fields: `compiler` (the exact compiler package version), `interface` (public function declarations in Tablo syntax with empty bodies), and `exports` (function indices in declaration order). The object payload contains the compiled implementations and their dependencies, with an empty code entry point. Libraries do not require `Main`.
 
 The compiler validates the declarations and export references before importing a library. At static link time, exported declarations receive their compiled bodies, internal functions are appended, and function calls, query indices, and debug source indices are relocated. Consumers retain no runtime dependency on the container. The current implementation supports function libraries without object types; see `Rust/README.md` for interface restrictions. The `TLB1` header identifies the library container independently of the object format version.
 
@@ -59,21 +59,40 @@ Current Format
 
 The current object file format is laid out as follows:
 
-| Field                  | Encoding                                  |
-| ---------------------- | ----------------------------------------- |
-| Magic                  | four bytes containing `TBO0`              |
-| Format version         | `u16`                                     |
-| Function count         | `u32`                                     |
-| Functions              | one function record per function          |
-| Entry-point kind       | `u8`                                      |
-| Entry-point payload    | depends on the entry-point kind           |
-| Query count            | `u32`                                     |
-| Queries                | one query record per query                |
-| Object-type count      | `u32`                                     |
-| Object-type descriptors| one descriptor per runtime object type    |
-| Debug information      | source-file and code-body debug records   |
+| Field                   | Encoding                                |
+| ----------------------- | --------------------------------------- |
+| Magic                   | four bytes containing `TBO1`            |
+| Producing Tablo version | packed `u32` (see below)                |
+| Function count          | `u32`                                   |
+| Functions               | one function record per function        |
+| Entry-point kind        | `u8`                                    |
+| Entry-point payload     | depends on the entry-point kind         |
+| Query count             | `u32`                                   |
+| Queries                 | one query record per query              |
+| Object-type count       | `u32`                                   |
+| Object-type descriptors | one descriptor per runtime object type  |
+| Debug information       | source-file and code-body debug records |
 
 Trailing bytes after the debug information are invalid. The reader also accepts the end of the file immediately after the object-type descriptors, in which case the program has no debug information.
+
+Version Encoding and Compatibility
+----------------------------------
+
+The header contains one shared Tablo `major.minor.patch` version, taken from the producing compiler's package version. There is no independently maintained object-format version. Pack it as `(major << 24) | (minor << 16) | patch` and write the resulting `u32` in little-endian order.
+
+| Bits  | Component | Range   |
+| ----- | --------- | ------- |
+| 31–24 | Major     | 0–255   |
+| 23–16 | Minor     | 0–255   |
+| 15–0  | Patch     | 0–65535 |
+
+For example, `18.52.22136` packs as `0x12345678` and is stored as bytes `78 56 34 12`. Components exceeding these ranges cannot be encoded and must not be truncated.
+
+A reader accepts an ordinary artifact only if its major and minor match exactly and the reader's patch is at least the artifact's patch. Equivalently, the packed values must match under mask `0xFFFF0000`, and the artifact's value under mask `0x0000FFFF` must be no greater than the reader's. Patch releases must preserve decoding and execution of earlier patches in the same major/minor series.
+
+Artifact version `0.0.0` bypasses the version comparison only. Structural validation and runtime requirements still apply. A reader at `0.0.0` does not bypass checks for ordinary versioned artifacts.
+
+`TBO1` distinguishes this header from the experimental `TBO0` layout with its two-byte marker `1`. Readers reject that old layout; recompile old objects and libraries containing old object payloads. The magic identifies the header layout, not a second compatibility version. The same packed header is used in standalone objects, library payloads, and embedded or shared executable payloads. Changing a filename extension does not migrate its contents.
 
 Function Records
 ----------------
@@ -171,6 +190,7 @@ Data types are encoded recursively:
 | `15` | `timestamptz`      | none                                               |
 | `16` | `timetz`           | none                                               |
 | `17` | union              | `u32` member count followed by member types        |
+| `18` | `json`             | none                                               |
 
 The internal null-literal type is not serializable. Nullability is represented by tag `8`; a runtime null value is produced by `PushNull`.
 
@@ -193,71 +213,83 @@ The following payload abbreviations are used:
 | `5`    | `Call`                   | function index `u32`, argument count `u32`                                        |
 | `6`    | `CallBuiltIn`            | built-in ID `u8`, argument count `u32`                                            |
 | `7`    | `CommitTransaction`      | none                                                                              |
-| `8`    | `CreateRecord`           | none                                                                              |
-| `9`    | `CreateRecordIfPending`  | none                                                                              |
-| `10`   | `DeleteRecord`           | none                                                                              |
-| `11`   | `Divide`                 | none                                                                              |
-| `12`   | `Dup2`                   | none                                                                              |
-| `13`   | `Equal`                  | none                                                                              |
-| `14`   | `ExecuteQuery`           | query index `u32`                                                                 |
-| `15`   | `Exists`                 | none                                                                              |
-| `16`   | `FieldPathExists`        | `text[]`                                                                          |
-| `17`   | `GreaterThan`            | none                                                                              |
-| `18`   | `GreaterThanOrEqual`     | none                                                                              |
-| `19`   | `IterHasNext`            | none                                                                              |
-| `20`   | `IterInit`               | none                                                                              |
-| `21`   | `IterNext`               | none                                                                              |
-| `22`   | `Jump`                   | target instruction index `u32`                                                    |
-| `23`   | `JumpIfFalse`            | target instruction index `u32`                                                    |
-| `24`   | `LessThan`               | none                                                                              |
-| `25`   | `LessThanOrEqual`        | none                                                                              |
-| `26`   | `LoadField`              | field name `text`                                                                 |
-| `27`   | `LoadFieldPath`          | `text[]`                                                                          |
-| `28`   | `LoadIndex`              | none                                                                              |
-| `29`   | `LoadLocal`              | slot `u32`                                                                        |
-| `30`   | `LoadProjectedValue`     | projected-value ID `u32`                                                          |
-| `31`   | `LoadReference`          | slot `u32`                                                                        |
-| `32`   | `LoadSequenceCurrent`    | `sequence`                                                                        |
-| `33`   | `Locked`                 | none                                                                              |
-| `34`   | `MakeArray`              | element count `u32`                                                               |
-| `35`   | `MakeObject`             | object type ID `u32`, field names as `text[]`                                     |
-| `36`   | `MakeRange`              | none                                                                              |
-| `37`   | `MakeRecordPointer`      | field names `text[]`, field types `type[]`, `record type`, schema-implicit `bool` |
-| `38`   | `MakeSteppedRange`       | none                                                                              |
-| `39`   | `Modulo`                 | none                                                                              |
-| `40`   | `Multiply`               | none                                                                              |
-| `41`   | `Negate`                 | none                                                                              |
-| `42`   | `Not`                    | none                                                                              |
-| `43`   | `NotEqual`               | none                                                                              |
-| `44`   | `Or`                     | none                                                                              |
-| `45`   | `Pop`                    | none                                                                              |
-| `46`   | `PushBoolean`            | `bool`                                                                            |
-| `47`   | `PushCurrentDate`        | none                                                                              |
-| `48`   | `PushCurrentTime`        | none                                                                              |
-| `49`   | `PushCurrentTimestamp`   | none                                                                              |
-| `50`   | `PushCurrentTimestampTz` | none                                                                              |
-| `51`   | `PushCurrentTimeTz`      | none                                                                              |
-| `52`   | `PushDate`               | date value                                                                        |
-| `53`   | `PushDecimal`            | decimal value                                                                     |
-| `54`   | `PushEnumValue`          | inline constant, enum name `text`, variant name `text`                            |
-| `55`   | `PushInteger`            | `i64`                                                                             |
-| `56`   | `PushNull`               | none                                                                              |
-| `57`   | `PushText`               | `text`                                                                            |
-| `58`   | `PushTime`               | canonical `text`                                                                  |
-| `59`   | `PushTimestamp`          | canonical `text`                                                                  |
-| `60`   | `PushTimestampTz`        | canonical `text`                                                                  |
-| `61`   | `PushTimeTz`             | canonical `text`                                                                  |
-| `62`   | `ReorderCallArguments`   | argument indices as `u32[]`                                                       |
-| `63`   | `Return`                 | none                                                                              |
-| `64`   | `ReturnNoValue`          | none                                                                              |
-| `65`   | `StoreFieldPath`         | `text[]`                                                                          |
-| `66`   | `StoreIndex`             | none                                                                              |
-| `67`   | `StoreLocal`             | slot `u32`                                                                        |
-| `68`   | `StoreSequenceCurrent`   | `sequence`                                                                        |
-| `69`   | `Subtract`               | none                                                                              |
-| `70`   | `UpdateRecord`           | none                                                                              |
-| `71`   | `UpdateRecordIfChanged`  | none                                                                              |
-| `72`   | `Xor`                    | none                                                                              |
+| `8`    | `ConvertJson`            | destination `type`                                                               |
+| `9`    | `CreateRecord`           | none                                                                              |
+| `10`   | `CreateRecordIfPending`  | none                                                                              |
+| `11`   | `DeleteRecord`           | none                                                                              |
+| `12`   | `Divide`                 | none                                                                              |
+| `13`   | `Dup2`                   | none                                                                              |
+| `14`   | `Equal`                  | none                                                                              |
+| `15`   | `ExecuteQuery`           | query index `u32`                                                                 |
+| `16`   | `Exists`                 | none                                                                              |
+| `17`   | `FieldPathExists`        | `text[]`                                                                          |
+| `18`   | `GreaterThan`            | none                                                                              |
+| `19`   | `GreaterThanOrEqual`     | none                                                                              |
+| `20`   | `IterHasNext`            | none                                                                              |
+| `21`   | `IterInit`               | none                                                                              |
+| `22`   | `IterNext`               | none                                                                              |
+| `23`   | `Jump`                   | target instruction index `u32`                                                    |
+| `24`   | `JumpIfFalse`            | target instruction index `u32`                                                    |
+| `25`   | `LessThan`               | none                                                                              |
+| `26`   | `LessThanOrEqual`        | none                                                                              |
+| `27`   | `LoadField`              | field name `text`                                                                 |
+| `28`   | `LoadFieldPath`          | `text[]`                                                                          |
+| `29`   | `LoadIndex`              | none                                                                              |
+| `30`   | `LoadLocal`              | slot `u32`                                                                        |
+| `31`   | `LoadProjectedValue`     | projected-value ID `u32`                                                          |
+| `32`   | `LoadQuotedField`        | field name `text`                                                                 |
+| `33`   | `LoadReference`          | slot `u32`                                                                        |
+| `34`   | `LoadSequenceCurrent`    | `sequence`                                                                        |
+| `35`   | `Locked`                 | none                                                                              |
+| `36`   | `MakeArray`              | element count `u32`                                                               |
+| `37`   | `MakeObject`             | object type ID `u32`, field names as `text[]`                                     |
+| `38`   | `MakeRange`              | none                                                                              |
+| `39`   | `MakeRecordPointer`      | field names `text[]`, field types `type[]`, `record type`, schema-implicit `bool` |
+| `40`   | `MakeSteppedRange`       | none                                                                              |
+| `41`   | `MemberPathExists`       | `u32` count, then field name `text` and quoted `bool` for each member             |
+| `42`   | `Modulo`                 | none                                                                              |
+| `43`   | `Multiply`               | none                                                                              |
+| `44`   | `Negate`                 | none                                                                              |
+| `45`   | `Not`                    | none                                                                              |
+| `46`   | `NotEqual`               | none                                                                              |
+| `47`   | `Or`                     | none                                                                              |
+| `48`   | `Pop`                    | none                                                                              |
+| `49`   | `PushBoolean`            | `bool`                                                                            |
+| `50`   | `PushCurrentDate`        | none                                                                              |
+| `51`   | `PushCurrentTime`        | none                                                                              |
+| `52`   | `PushCurrentTimestamp`   | none                                                                              |
+| `53`   | `PushCurrentTimestampTz` | none                                                                              |
+| `54`   | `PushCurrentTimeTz`      | none                                                                              |
+| `55`   | `PushDate`               | date value                                                                        |
+| `56`   | `PushDecimal`            | decimal value                                                                     |
+| `57`   | `PushEnumValue`          | inline constant, enum name `text`, variant name `text`                            |
+| `58`   | `PushInteger`            | `i64`                                                                             |
+| `59`   | `PushNull`               | none                                                                              |
+| `60`   | `PushText`               | `text`                                                                            |
+| `61`   | `PushTime`               | canonical `text`                                                                  |
+| `62`   | `PushTimestamp`          | canonical `text`                                                                  |
+| `63`   | `PushTimestampTz`        | canonical `text`                                                                  |
+| `64`   | `PushTimeTz`             | canonical `text`                                                                  |
+| `65`   | `ReorderCallArguments`   | argument indices as `u32[]`                                                       |
+| `66`   | `Return`                 | none                                                                              |
+| `67`   | `ReturnNoValue`          | none                                                                              |
+| `68`   | `StoreFieldPath`         | `text[]`                                                                          |
+| `69`   | `StoreIndex`             | none                                                                              |
+| `70`   | `StoreJsonPath`          | tagged mutation path (see below)                                                  |
+| `71`   | `StoreLocal`             | slot `u32`                                                                        |
+| `72`   | `StoreSequenceCurrent`   | `sequence`                                                                        |
+| `73`   | `Subtract`               | none                                                                              |
+| `74`   | `UpdateRecord`           | none                                                                              |
+| `75`   | `UpdateRecordIfChanged`  | none                                                                              |
+| `76`   | `Xor`                    | none                                                                              |
+
+`StoreJsonPath` encodes a `u32` component count, followed by components tagged `0` for a field (`text` name and quoted `bool`) or `1` for an index (no inline payload). Before execution the stack holds the JSON root, each integer index in path order, and the assigned value. The instruction returns the assigned JSON contents followed by the updated root; `StoreLocal` writes that root back. Indices are evaluated once in path order, followed by the assigned expression. Failed writes do not publish the updated root.
+
+`LoadIndex` also reads JSON arrays using one-based integer indices. It preserves JSON-domain contents for subsequent access or typed conversion, and rejects out-of-bounds indices and non-array JSON values. No additional opcode or version change is needed for JSON indexing.
+
+`LoadField` uses case-insensitive lookup for JSON properties, rejecting ambiguous matches. `LoadQuotedField` uses exact lookup. Both raise runtime errors for missing JSON fields or non-object parents. `FieldPathExists` treats JSON names as unquoted; `MemberPathExists` preserves each member's quotedness. Presence checks return false for missing or untraversable paths, but still reject ambiguous JSON names.
+
+`ConvertJson` converts JSON field contents to the destination type, enforcing JSON kind, nullability, and numeric representability. It also converts elements recursively when materializing an ordinary typed array of JSON field reads. The internal JSON field-content expression type is not a source-declarable or serialized type. Source JSON documents retain their original values after conversion.
 
 Call Argument Plans
 -------------------
@@ -368,6 +400,7 @@ Object value types are encoded recursively:
 | `14` | `timestamp`   | none                                     |
 | `15` | `timestamptz` | none                                     |
 | `16` | union         | `u32` member count followed by members   |
+| `17` | `json`        | none                                     |
 
 Explicit object defaults use the following recursive encoding:
 
@@ -391,6 +424,7 @@ Explicit object defaults use the following recursive encoding:
 | `16` | time with zone              | canonical `text`                                      |
 | `17` | timestamp                   | canonical `text`                                      |
 | `18` | timestamp with zone         | canonical `text`                                      |
+| `19` | JSON document               | JSON serialized as `text`                             |
 
 Debug Information
 -----------------
@@ -430,7 +464,7 @@ Validity Rules
 
 An object file is invalid if:
 
-* its magic bytes are not `TBO0`
+* its magic bytes are not `TBO1`
 * its version is unsupported
 * it ends before a required field, instruction, or operand is complete
 * a Boolean contains a value other than `0` or `1`

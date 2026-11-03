@@ -312,6 +312,13 @@ impl<'a> FunctionSsaBuilder<'a> {
 		self.lower_expression(block_id, &expression.value);
 
 		match &expression.target {
+			AssignmentTarget::Path(path) => {
+				self.lower_expression(block_id, path);
+				if let Some((root, _)) = crate::ast::assignment_path(path)
+					&& let Some(slot) = self.semantic_program.identifier_slot(root.position) {
+					self.push_write(block_id, slot, expression.position, SsaWriteKind::Mutation);
+				}
+			}
 			AssignmentTarget::Identifier(identifier) => {
 				if let Some(slot) = self.semantic_program.identifier_slot(identifier.position) {
 					if expression.operator != AssignmentOperator::Assign {

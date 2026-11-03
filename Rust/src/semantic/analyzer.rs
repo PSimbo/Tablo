@@ -580,16 +580,44 @@ impl SemanticAnalyzer {
 		}
 	}
 
+	fn infer_json_assignment(&mut self, root: &IdentifierExpr, path: &[AssignmentPathPart], operator: AssignmentOperator, value: &Expr, position: usize) -> Result<DataType, CompileError> {
+		let local = self.lookup_local(&root.name).ok_or_else(|| self.compile_error(root.position, format!("Variable `{}` is not declared in this scope.", root.name)))?;
+		if local.is_const { return Err(self.compile_error(position, format!("Constant `{}` cannot be mutated.", root.name))); }
+		if local.data_type.without_nullability() != &DataType::Json {
+			return Err(self.compile_error(position, String::from("Mixed or quoted mutation paths currently require a JSON variable.")));
+		}
+		if operator != AssignmentOperator::Assign {
+			return Err(self.compile_error(position, String::from("JSON content mutation currently supports `=` only; convert to a primitive before arithmetic.")));
+		}
+		for part in path {
+			if let AssignmentPathPart::Index(index) = part {
+				let index_type = self.infer_expression_type(index)?;
+				if index_type != DataType::Int { return Err(self.compile_error(index.position(), String::from("JSON mutation indices must have type `int`."))); }
+			}
+		}
+		let value_type = self.infer_expression_type(value)?;
+		if !matches!(value_type.without_nullability(), DataType::Json | DataType::JsonMember | DataType::Text | DataType::Bool | DataType::Int | DataType::Dec | DataType::Null) {
+			return Err(self.compile_error(value.position(), format!("Cannot store `{}` in JSON without explicit conversion.", value_type.name())));
+		}
+		self.semantic_program.identifier_slots.insert(root.position, local.slot);
+		self.semantic_program.json_assignments.insert(position);
+		Ok(DataType::JsonMember)
+	}
+
 	fn assignment_result_type(
-		&self,
+		&mut self,
 		operator: AssignmentOperator,
 		target: &DataType,
 		value: &DataType,
 		position: usize,
+		value_position: usize,
 	) -> Result<DataType, CompileError> {
 		match operator {
 			AssignmentOperator::Assign => {
-				self.ensure_assignable(target, value, position)?;
+				if !self.is_assignable(target, value) {
+					return self.ensure_assignable(target, value, position).map(|_| target.clone());
+				}
+				self.record_json_conversion(target, value, value_position);
 				Ok(target.clone())
 			}
 			AssignmentOperator::AddAssign => {
@@ -847,6 +875,7 @@ impl SemanticAnalyzer {
 				DataType::Object(format!("{BUILT_IN_ENUM_TYPE_PREFIX}{}_enum", backing_type.name()).into())
 			}
 			BuiltInParameterType::Int => DataType::Int,
+			BuiltInParameterType::Json => DataType::Json,
 			BuiltInParameterType::Sequence => return None,
 			BuiltInParameterType::Text => DataType::Text,
 			BuiltInParameterType::Time => DataType::Time,
@@ -1352,6 +1381,7 @@ impl SemanticAnalyzer {
 		match data_type {
 			DataType::Any
 			| DataType::Array(_)
+			| DataType::Json
 			| DataType::Bool
 			| DataType::Date
 			| DataType::Dec
@@ -1364,7 +1394,8 @@ impl SemanticAnalyzer {
 			| DataType::TimestampTz
 			| DataType::Union(_) => true,
 			DataType::Nullable(_) => true,
-			DataType::EmptyArray
+			DataType::JsonMember
+			| DataType::EmptyArray
 			| DataType::Null
 			| DataType::Range(_)
 			| DataType::RecordPointer(_) => false,
@@ -1609,6 +1640,7 @@ impl SemanticAnalyzer {
 			DataType::Date => ObjectValueTypeDescriptor::Date,
 			DataType::Dec => ObjectValueTypeDescriptor::Dec,
 			DataType::Int => ObjectValueTypeDescriptor::Int,
+			DataType::Json => ObjectValueTypeDescriptor::Json,
 			DataType::Nullable(inner) => ObjectValueTypeDescriptor::Nullable(Box::new(
 				self.describe_object_value_type(inner),
 			)),
@@ -1634,7 +1666,7 @@ impl SemanticAnalyzer {
 					.map(|member| self.describe_object_value_type(member))
 					.collect(),
 			),
-			DataType::EmptyArray | DataType::Null | DataType::RecordPointer(_) => {
+			DataType::JsonMember | DataType::EmptyArray | DataType::Null | DataType::RecordPointer(_) => {
 				unreachable!("Validated object declarations contain only declarable value types.")
 			}
 		}
@@ -1660,8 +1692,22 @@ impl SemanticAnalyzer {
 		}
 	}
 
-	fn ensure_assignable(&self, target: &DataType, value: &DataType, position: usize) -> Result<(), CompileError> {
+	fn record_json_conversion(&mut self, target: &DataType, value: &DataType, position: usize) {
+		fn contains_content(data_type: &DataType) -> bool {
+			match data_type {
+				DataType::JsonMember => true,
+				DataType::Array(inner) | DataType::Nullable(inner) => contains_content(inner),
+				_ => false,
+			}
+		}
+		if contains_content(value) && target != value && target != &DataType::Any {
+			self.semantic_program.json_conversions.insert(position, target.clone());
+		}
+	}
+
+	fn ensure_assignable(&mut self, target: &DataType, value: &DataType, position: usize) -> Result<(), CompileError> {
 		if self.is_assignable(target, value) {
+			self.record_json_conversion(target, value, position);
 			return Ok(());
 		}
 
@@ -1676,12 +1722,13 @@ impl SemanticAnalyzer {
 	}
 
 	fn ensure_function_argument_assignable(
-		&self,
+		&mut self,
 		target: &DataType,
 		value: &DataType,
 		position: usize,
 	) -> Result<(), CompileError> {
 		if self.is_function_argument_assignable(target, value) {
+			self.record_json_conversion(target, value, position);
 			return Ok(());
 		}
 
@@ -1803,7 +1850,7 @@ impl SemanticAnalyzer {
 		match (lhs, rhs) {
 			(Expr::Identifier(lhs), Expr::Identifier(rhs)) => lhs.name == rhs.name,
 			(Expr::FieldAccess(lhs), Expr::FieldAccess(rhs)) => {
-				lhs.field.name == rhs.field.name
+				lhs.field.name == rhs.field.name && lhs.is_quoted == rhs.is_quoted
 					&& self.expressions_match_for_non_null_refinement(lhs.object.as_ref(), rhs.object.as_ref())
 			}
 			_ => false,
@@ -1998,7 +2045,7 @@ impl SemanticAnalyzer {
 			}
 		}
 
-		let argument_types = arguments.iter()
+		let mut argument_types = arguments.iter()
 			.map(|argument| {
 				let expression = argument.expression().expect("Built-in arguments must be expressions after default-marker validation.");
 				self.infer_expression_type(expression)
@@ -2028,7 +2075,7 @@ impl SemanticAnalyzer {
 		}
 
 		let signatures = self.built_in_validation_signatures(built_in);
-		let (_, argument_bindings) = self.select_function_overload(
+		let (signature, argument_bindings) = self.select_function_overload(
 			"built-in function",
 			built_in.name(),
 			&signatures,
@@ -2036,6 +2083,23 @@ impl SemanticAnalyzer {
 			&argument_types.iter().cloned().map(Some).collect::<Vec<_>>(),
 			position,
 		)?;
+		for (parameter, binding) in signature.parameters.iter().zip(&argument_bindings) {
+			let (indices, target) = match binding {
+				CallArgumentBinding::Supplied(index) => (vec![*index], &parameter.data_type),
+				CallArgumentBinding::Variadic(indices) => {
+					let DataType::Array(element) = &parameter.data_type else { unreachable!() };
+					(indices.clone(), element.as_ref())
+				}
+				_ => continue,
+			};
+			for index in indices {
+				let index = index as usize;
+				if argument_types[index] == DataType::JsonMember {
+					self.ensure_function_argument_assignable(target, &argument_types[index], arguments[index].expression().unwrap().position())?;
+					argument_types[index] = target.clone();
+				}
+			}
+		}
 		let ordered_arguments = Self::call_arguments_in_binding_order(arguments, &argument_bindings);
 		let argument_types = Self::call_argument_types_in_binding_order(&argument_types, &argument_bindings);
 		self.semantic_program.call_argument_bindings.insert(position, argument_bindings);
@@ -2365,6 +2429,19 @@ impl SemanticAnalyzer {
 			Expr::Array(array) => self.infer_array_literal_type(array.elements.as_slice(), array.position),
 			Expr::Assignment(AssignmentExpr { operator, target, value, .. }) => {
 				match target {
+					AssignmentTarget::Path(path) => {
+						let (root, path) = assignment_path(path).expect("Parsed assignment path has a root");
+						if self.lookup_local(&root.name).is_some_and(|local| local.data_type.without_nullability() != &DataType::Json)
+							&& path.iter().all(|part| matches!(part, AssignmentPathPart::Field(_, _))) {
+							let fields = path.into_iter().map(|part| match part { AssignmentPathPart::Field(field, _) => field, _ => unreachable!() }).collect();
+							self.infer_expression_type(&Expr::Assignment(AssignmentExpr {
+								target: AssignmentTarget::Field(ObjectFieldAssignmentTarget { object: root.clone(), fields, position: expression.position() }),
+								operator: *operator, value: value.clone(), position: expression.position(),
+							}))
+						} else {
+							self.infer_json_assignment(root, &path, *operator, value, expression.position())
+						}
+					}
 					AssignmentTarget::Identifier(target) => {
 						if let Some(resolved_sequence) = self.lookup_sequence_alias(&target.name) {
 							if *operator != AssignmentOperator::Assign {
@@ -2385,7 +2462,7 @@ impl SemanticAnalyzer {
 
 							self.record_resolved_sequence(target.position, &resolved_sequence);
 							let value_type = self.infer_expression_type(value)?;
-							self.assignment_result_type(*operator, &DataType::Int, &value_type, expression.position())
+							self.assignment_result_type(*operator, &DataType::Int, &value_type, expression.position(), value.position())
 						}
 						else if let Some(local) = self.lookup_local(&target.name) {
 							self.semantic_program.identifier_slots.insert(target.position, local.slot);
@@ -2412,7 +2489,7 @@ impl SemanticAnalyzer {
 								self.record_record_pointer_escape(value);
 							}
 
-							self.assignment_result_type(*operator, &local.data_type, &value_type, expression.position())
+							self.assignment_result_type(*operator, &local.data_type, &value_type, expression.position(), value.position())
 						}
 						else if let Some(resolved_sequence) = self.try_resolve_unqualified_sequence(&target.name, target.position)? {
 							if *operator != AssignmentOperator::Assign {
@@ -2433,7 +2510,7 @@ impl SemanticAnalyzer {
 
 							self.record_resolved_sequence(target.position, &resolved_sequence);
 							let value_type = self.infer_expression_type(value)?;
-							self.assignment_result_type(*operator, &DataType::Int, &value_type, expression.position())
+							self.assignment_result_type(*operator, &DataType::Int, &value_type, expression.position(), value.position())
 						}
 						else {
 							Err(self.compile_error(
@@ -2443,6 +2520,9 @@ impl SemanticAnalyzer {
 						}
 					}
 					AssignmentTarget::Index(target) => {
+						if self.lookup_local(&target.array.name).is_some_and(|local| local.data_type.without_nullability() == &DataType::Json) {
+							return self.infer_json_assignment(&target.array, &vec![AssignmentPathPart::Index((*target.index).clone())], *operator, value, expression.position());
+						}
 						let local = self.lookup_local(&target.array.name).ok_or(self.compile_error(
 							target.array.position,
 							format!("Variable `{}` is not declared in this scope.", target.array.name),
@@ -2485,9 +2565,12 @@ impl SemanticAnalyzer {
 						};
 
 						let value_type = self.infer_expression_type(value)?;
-						self.assignment_result_type(*operator, element_type, &value_type, expression.position())
+						self.assignment_result_type(*operator, element_type, &value_type, expression.position(), value.position())
 					}
 					AssignmentTarget::Field(target) => {
+						if self.lookup_local(&target.object.name).is_some_and(|local| local.data_type.without_nullability() == &DataType::Json) {
+							return self.infer_json_assignment(&target.object, &target.fields.iter().cloned().map(|field| AssignmentPathPart::Field(field, false)).collect::<Vec<_>>(), *operator, value, expression.position());
+						}
 						let local = self.lookup_local(&target.object.name).ok_or(self.compile_error(
 							target.object.position,
 							format!("Variable `{}` is not declared in this scope.", target.object.name),
@@ -2552,7 +2635,7 @@ impl SemanticAnalyzer {
 						}
 
 						let value_type = self.infer_expression_type(value)?;
-						self.assignment_result_type(*operator, &current_type, &value_type, expression.position())
+						self.assignment_result_type(*operator, &current_type, &value_type, expression.position(), value.position())
 					}
 				}
 			}
@@ -2605,6 +2688,7 @@ impl SemanticAnalyzer {
 				let object_type = object_type.without_nullability().clone();
 
 				match object_type {
+					DataType::Json | DataType::JsonMember => Ok(DataType::JsonMember),
 					DataType::Object(name) => {
 						if self.lookup_enum(&name).is_some() {
 							return Err(self.compile_error(
@@ -2672,6 +2756,13 @@ impl SemanticAnalyzer {
 				let array_type = array_type.without_nullability().clone();
 
 				match array_type {
+					DataType::Json | DataType::JsonMember => match index_type {
+						DataType::Int => Ok(DataType::JsonMember),
+						other => Err(self.compile_error(
+							index.position(),
+							format!("JSON array index must be of type `int`, found `{}`.", other.name()),
+						)),
+					},
 					DataType::Array(element_type) => match index_type {
 						DataType::Int => Ok(*element_type),
 						DataType::Range(index_element_type) if index_element_type.without_nullability() == &DataType::Int => {
@@ -2825,7 +2916,10 @@ impl SemanticAnalyzer {
 
 				let true_type = self.infer_expression_type_with_branch_refinements(true_branch, condition, true)?;
 				let false_type = self.infer_expression_type_with_branch_refinements(false_branch, condition, false)?;
-				self.infer_ternary_result_type(&true_type, &false_type, *position)
+				let result = self.infer_ternary_result_type(&true_type, &false_type, *position)?;
+				self.record_json_conversion(&result, &true_type, true_branch.position());
+				self.record_json_conversion(&result, &false_type, false_branch.position());
+				Ok(result)
 			}
 			Expr::Text(_) => Ok(DataType::Text),
 			Expr::Time(_) => Ok(DataType::Time),
@@ -3475,6 +3569,10 @@ impl SemanticAnalyzer {
 
 		if target == &DataType::Any {
 			return true;
+		}
+
+		if value == &DataType::JsonMember {
+			return matches!(target.without_nullability(), DataType::JsonMember | DataType::Json | DataType::Bool | DataType::Text | DataType::Int | DataType::Dec);
 		}
 
 		match (target, value) {
@@ -4255,7 +4353,7 @@ impl SemanticAnalyzer {
 			_ => return,
 		};
 
-		if compared_type.is_nullable() {
+		if compared_type.is_nullable() || compared_type == &DataType::JsonMember {
 			self.null_comparison_operands.insert(compared_expression.position());
 		}
 		else {
@@ -4629,6 +4727,10 @@ impl SemanticAnalyzer {
 	fn require_equality_operands(&self, lhs: &DataType, rhs: &DataType, position: usize) -> Result<(), CompileError> {
 		let lhs = lhs.without_nullability();
 		let rhs = rhs.without_nullability();
+
+		if matches!(lhs, DataType::Json | DataType::JsonMember) && matches!(rhs, DataType::Json | DataType::JsonMember) {
+			return Ok(());
+		}
 
 		if lhs == &DataType::Any || rhs == &DataType::Any {
 			return Ok(());
@@ -6722,6 +6824,7 @@ impl SemanticAnalyzer {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SemanticProgram {
+	json_assignments: BTreeSet<usize>,
 	active_databases: Vec<String>,
 	built_in_call_targets: BTreeMap<usize, BuiltInFunction>,
 	call_argument_bindings: BTreeMap<usize, Vec<CallArgumentBinding>>,
@@ -6745,6 +6848,7 @@ pub struct SemanticProgram {
 	group_boundary_calls: BTreeMap<usize, GroupBoundaryCallInfo>,
 	identifier_slots: BTreeMap<usize, u32>,
 	iterator_slots: BTreeMap<usize, u32>,
+	json_conversions: BTreeMap<usize, DataType>,
 	lowered_count_queries: BTreeMap<usize, QueryCountPlan>,
 	lowered_find_queries: BTreeMap<usize, QueryFindPlan>,
 	lowered_for_record_queries: BTreeMap<usize, QueryForPlan>,
@@ -6766,6 +6870,10 @@ pub struct SemanticProgram {
 }
 
 impl SemanticProgram {
+	pub fn is_json_assignment(&self, position: usize) -> bool { self.json_assignments.contains(&position) }
+
+	pub fn json_conversion(&self, position: usize) -> Option<&DataType> { self.json_conversions.get(&position) }
+
 	pub fn active_databases(&self) -> &[String] {
 		&self.active_databases
 	}
@@ -7056,6 +7164,7 @@ impl SemanticProgram {
 				})
 			}
 			ObjectValueTypeDescriptor::Int => Some(ObjectDefaultValue::Integer(0)),
+			ObjectValueTypeDescriptor::Json => Some(ObjectDefaultValue::Json(crate::json::JsonValue::default())),
 			ObjectValueTypeDescriptor::Object(id) => self.complete_object_default(*id, &[]),
 			ObjectValueTypeDescriptor::Text => Some(ObjectDefaultValue::Text(String::new())),
 			ObjectValueTypeDescriptor::Time => Some(ObjectDefaultValue::CurrentTime),
@@ -7439,8 +7548,8 @@ mod tests {
 		let program = parse_program(
 			"obj LinkedNode { next: LinkedNode?, };\n\
 			obj TreeNode { children: [TreeNode], };\n\
-			obj First { other: Second?, };\n\
-			obj Second { origin: First, };\n\
+			obj Primary { other: Second?, };\n\
+			obj Second { origin: Primary, };\n\
 			fn Main(args: [text]): int { return 0; }",
 		);
 		let mut analyzer = SemanticAnalyzer::new();
@@ -7532,14 +7641,14 @@ mod tests {
 	#[test]
 	fn compares_object_types_using_resolved_identity_instead_of_source_spelling() {
 		let program = parse_program(
-			"obj First { value: int, };\n\
+			"obj Primary { value: int, };\n\
 			obj Second { value: int, };",
 		);
 		let mut analyzer = SemanticAnalyzer::new();
 		analyzer.declaration_kinds.enter_scope();
 		analyzer.object_type_bindings.enter_scope();
 		analyzer.collect_object_declarations(&program.objects).unwrap();
-		let first_id = analyzer.lookup_object_type_id("First").unwrap();
+		let first_id = analyzer.lookup_object_type_id("Primary").unwrap();
 		let second_id = analyzer.lookup_object_type_id("Second").unwrap();
 		analyzer.declaration_kinds.declare(
 			String::from("FirstAlias"),
@@ -7553,11 +7662,11 @@ mod tests {
 		analyzer.object_type_bindings.declare(String::from("SecondAlias"), second_id);
 
 		assert!(analyzer.is_assignable(
-			&DataType::Object(String::from("First").into()),
+			&DataType::Object(String::from("Primary").into()),
 			&DataType::Object(String::from("FirstAlias").into()),
 		));
 		assert!(!analyzer.is_assignable(
-			&DataType::Object(String::from("First").into()),
+			&DataType::Object(String::from("Primary").into()),
 			&DataType::Object(String::from("SecondAlias").into()),
 		));
 	}
@@ -9382,8 +9491,8 @@ mod tests {
 
 	#[test]
 	fn rejects_indirect_implicit_object_default_cycle() {
-		let source = "obj First { other: Second, };\n\
-			obj Second { origin: First, };\n\
+		let source = "obj Primary { other: Second, };\n\
+			obj Second { origin: Primary, };\n\
 			fn Main(args: [text]): int { return 0; }";
 		let program = parse_program(source);
 		let mut analyzer = SemanticAnalyzer::new();
@@ -9394,9 +9503,9 @@ mod tests {
 			error,
 			CompileError {
 				message: String::from(
-					"Object default construction cycle through `First.other` -> `Second.origin` would never terminate.",
+					"Object default construction cycle through `Primary.other` -> `Second.origin` would never terminate.",
 				),
-				position: source.find("origin: First").unwrap() + "origin: ".len(),
+				position: source.find("origin: Primary").unwrap() + "origin: ".len(),
 			},
 		);
 	}

@@ -80,6 +80,7 @@ const TYPE_ITEMS = [
 	typeItem("date"),
 	typeItem("dec"),
 	typeItem("int"),
+	typeItem("json"),
 	typeItem("text"),
 ];
 
@@ -91,8 +92,9 @@ const BUILT_IN_ITEMS = [
 	builtIn("displn", "Write text plus a trailing newline to stdout."),
 	builtIn("format", "Format an `int` or `dec` value as `text` according to a numeric format string."),
 	builtIn("int", "Cast an enum to its `int` backing value."),
+	builtIn("json", "Parse text as a JSON object or array."),
 	builtIn("len", "Return the length of an array."),
-	builtIn("text", "Cast an enum to its `text` backing value."),
+	builtIn("text", "Serialize JSON or cast an enum to its `text` backing value."),
 ];
 
 const SNIPPET_ITEMS = [

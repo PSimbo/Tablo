@@ -593,6 +593,10 @@ impl DapServer {
 					"variablesReference": child_reference,
 				})
 			}).collect()),
+			Value::Json(value) => Ok(value.debug_children().into_iter().map(|(name, text, nested)| {
+				let reference = nested.map(|value| self.variables_reference_for_value(Value::Json(value), None)).unwrap_or(0);
+				json!({ "name": name, "value": text, "variablesReference": reference })
+			}).collect()),
 			Value::Null => Ok(Vec::new()),
 			Value::Object(object) => {
 				let descriptor_fields = self.program
@@ -687,7 +691,7 @@ impl DapServer {
 		declared_type: Option<ObjectValueTypeDescriptor>,
 	) -> i64 {
 		match value {
-			Value::Array(_) | Value::Object(_) | Value::RecordPointer(_) => {
+			Value::Array(_) | Value::Object(_) | Value::Json(_) | Value::RecordPointer(_) => {
 				self.register_container(VariableContainer::Value(value, declared_type))
 			}
 			_ => 0,
@@ -856,6 +860,7 @@ fn object_value_type_name(
 			format!("range<{}>", object_value_type_name(element_type, program))
 		}
 		ObjectValueTypeDescriptor::Text => String::from("text"),
+		ObjectValueTypeDescriptor::Json => String::from("json"),
 		ObjectValueTypeDescriptor::Time => String::from("time"),
 		ObjectValueTypeDescriptor::TimeTz => String::from("timetz"),
 		ObjectValueTypeDescriptor::Timestamp => String::from("timestamp"),
@@ -1234,6 +1239,7 @@ fn runtime_variable_type_name(value: &Value) -> &'static str {
 		Value::RecordPointer(_) => "record pointer",
 		Value::Reference(_) => "reference",
 		Value::Text(_) => "text",
+		Value::Json(_) => "json",
 		Value::Time(_) => "time",
 		Value::TimeTz(_) => "timetz",
 		Value::Timestamp(_) => "timestamp",
@@ -1247,6 +1253,22 @@ mod tests {
 
 	use tablo::ast::*;
 	use tablo::utils::{ unique_temp_directory, unique_temp_path };
+
+	#[test]
+	fn expands_json_without_converting_scalar_numbers() {
+		let value = Value::Json(tablo::json::JsonValue::parse(r#"{"a":[1e999999999999999999999,null],"b":"hello"}"#).unwrap());
+		let mut server = DapServer::new();
+		assert_eq!(server.variable_type_name(&value, None), "json");
+		let children = server.child_variables_for_value(&value, None).unwrap();
+		assert_eq!(children[0]["name"], "a");
+		let reference = children[0]["variablesReference"].as_i64().unwrap();
+		assert!(reference > 0);
+		let VariableContainer::Value(nested, _) = server.variable_containers.get(&reference).unwrap().clone() else { panic!("Expected JSON children"); };
+		let elements = server.child_variables_for_value(&nested, None).unwrap();
+		assert_eq!(elements[0]["value"], "1e999999999999999999999");
+		assert_eq!(elements[1]["value"], "null");
+		assert_eq!(children[1]["value"], "\"hello\"");
+	}
 
 	#[test]
 	fn debugger_descriptors_qualify_imported_object_types() {

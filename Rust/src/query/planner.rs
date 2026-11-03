@@ -434,6 +434,7 @@ impl QueryPlanBuilder {
 				}
 			}
 			Expr::Assignment(assignment) => {
+				if let AssignmentTarget::Path(path) = &assignment.target { self.visit_expression(path, enclosing_query); }
 				if let AssignmentTarget::Index(target) = &assignment.target {
 					self.visit_expression(&target.index, enclosing_query);
 				}

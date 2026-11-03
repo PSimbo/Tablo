@@ -43,7 +43,7 @@ cargo run --manifest-path Rust/Cargo.toml --bin tabloc -- \
 cargo run --manifest-path Rust/Cargo.toml --bin tablodbg -- dist/hello.tobj
 ```
 
-Object output does not require a native build toolchain and defaults to `.tobj`. Existing `.tbo` files remain readable. These objects still contain complete programs requiring `Main`; independently linkable `.tobj` modules are not implemented yet. The bytecode format version is unchanged.
+Object output does not require a native build toolchain and defaults to `.tobj`. The `.tbo` extension is also accepted, but legacy `TBO0` contents require recompilation. These objects still contain complete programs requiring `Main`; independently linkable `.tobj` modules are not implemented yet. Objects record the producing Tablo version using the header described below.
 
 To build a reusable Tablo function library, export functions with `pub` and use `--emit library`. A library does not require `Main`:
 
@@ -73,3 +73,8 @@ Object types in libraries, and object, record, or sequence types in public signa
 `--debug-info lines` is the default and keeps source locations without debugger local-variable records. `full` retains those records; `none` removes optional debug records. VS Code requests full debug information automatically. The former positional output argument and `--schema` option are no longer accepted; use `-o` and TOML configuration.
 
 Run the native integration tests explicitly with `cargo test --manifest-path Rust/Cargo.toml --test embedded_executable --test shared_executable -- --ignored`. They use offline Cargo builds and reuse `Rust/target/embedded-test-cache`. The shared-runtime test also requires `readelf` (from binutils).
+
+Object version compatibility
+----------------------------
+
+Object payloads now use a `TBO1` header followed by the producing Tablo version packed into a little-endian `u32`: 8 bits for major, 8 for minor, and 16 for patch. The reader requires matching major/minor and a reader patch at least as new as the artifact's. Artifact `0.0.0` skips only the version check. Old `TBO0` objects and libraries containing them require recompilation. See [Tablo Object File Format](../Tablo%20Object%20File%20Format.md) for the encoding and compatibility rules. The library manifest's existing exact compiler-version check remains an additional restriction on library imports.

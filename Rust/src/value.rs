@@ -61,6 +61,7 @@ pub enum Value {
 	Integer(i64),
 	IntegerRange(IntegerRange),
 	Iterator(IteratorState),
+	Json(crate::json::JsonValue),
 	Null,
 	Object(ObjectValue),
 	RecordPointer(RecordPointerValue),
@@ -96,6 +97,7 @@ impl Display for Value {
 			Value::Integer(value) => write!(f, "{value}"),
 			Value::IntegerRange(range) => write!(f, "{range}"),
 			Value::Iterator(_) => write!(f, "<iterator>"),
+			Value::Json(value) => write!(f, "{value}"),
 			Value::Null => write!(f, "null"),
 			Value::Object(object) => {
 				write!(f, "{{")?;
@@ -961,6 +963,8 @@ fn data_type_name_for_database_runtime(data_type: &DataType) -> &'static str {
 		DataType::Dec => "dec",
 		DataType::EmptyArray => "empty array",
 		DataType::Int => "int",
+		DataType::Json => "json",
+		DataType::JsonMember => "JSON content",
 		DataType::Null => "null",
 		DataType::Nullable(inner) => data_type_name_for_database_runtime(inner),
 		DataType::Object(_) => "object",

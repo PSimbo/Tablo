@@ -362,7 +362,8 @@ impl Lexer {
 		}
 
 		let lexeme = self.source.as_str()[start..self.position].to_string();
-		let kind = match lexeme.as_str() {
+		let keyword = lexeme.to_ascii_lowercase();
+		let kind = match keyword.as_str() {
 			"and" => TokenKind::AndKeyword,
 			"any" => TokenKind::AnyKeyword,
 			"as" => TokenKind::AsKeyword,
@@ -392,6 +393,7 @@ impl Lexer {
 			"if" => TokenKind::IfKeyword,
 			"in" => TokenKind::InKeyword,
 			"int" => TokenKind::IntKeyword,
+			"json" => TokenKind::JsonKeyword,
 			"last" => TokenKind::LastKeyword,
 			"limit" => TokenKind::LimitKeyword,
 			"locked" => TokenKind::LockedKeyword,
@@ -423,7 +425,7 @@ impl Lexer {
 			_ => TokenKind::Identifier,
 		};
 
-		Ok((kind, lexeme))
+		Ok((kind, if kind == TokenKind::Identifier { lexeme } else { keyword }))
 	}
 
 	fn lex_numeric_literal(&mut self, starts_with_decimal_separator: bool) -> (TokenKind, String) {

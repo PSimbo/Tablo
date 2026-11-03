@@ -50,6 +50,7 @@ pub enum TokenKind {
 	InterpolatedStringEnd,
 	InterpolatedStringMiddle,
 	InterpolatedStringStart,
+	JsonKeyword,
 	LastKeyword,
 	LeftBrace,
 	LeftBracket,

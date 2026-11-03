@@ -185,6 +185,22 @@ The root of a `json` value must be an object or array. Its fields and elements m
 
 JSON objects are free to contain any number of named fields. A nullable `json?` value of `null` represents the absence of a JSON object or array. The `exists` operator may be used to determine whether a certain field exists. This operator evaluates to `true` even if the field contains a value of `null`. See "Presence and Lock Operators" for its complete semantics.
 
+JSON field access follows the ordinary identifier matching rules. An unquoted field name uses case-insensitive lookup. If multiple JSON properties match, access raises a runtime ambiguity error even if one property matches the reference's spelling exactly. A quoted field name uses exact, case-sensitive lookup. For example, if a JSON object contains both `"Name"` and `"name"`, `payload.name` is ambiguous, while `payload."name"` selects only `"name"`.
+
+An ordinary JSON field read raises a runtime error if the field is missing or an intermediate value is null, scalar, or an array rather than an object. Reading a present field containing null succeeds; that value may supply a nullable target. Nested reads do not implicitly create fields or convert scalar contents.
+
+JSON fields and array elements may be assigned with `=`. Assigning to a property that does not exists creates the property (using the spelling in the assignment). This cannot automatically created nested objects.
+
+~~~
+var data: json = json('{}');
+data.Name = 'Foo'; // Results in `{"Name":"Foo"}`.
+data.Customer.Name = 'Bar'; // INVALID. Cannot create nested object by assignment.
+~~~
+
+If an unquoted name matches an existing property, the write updates that property without changing its spelling; multiple matches are ambiguous, just as for reads. Quoted names match exactly and may create a distinct case-sensitive property. All intermediate objects and arrays must already exist and have the required kind; writes do not create intermediate containers or replace null or scalar parents automatically.
+
+JSON array writes may replace an existing element or append at exactly one past the current length. Other out-of-bounds writes fail; arrays cannot become sparse. Assigning null stores a present JSON null rather than deleting a property or element. JSON contents may be copied directly, preserving exact numeric values. Tablo `text`, `bool`, `int`, and `dec` values are stored as the corresponding JSON kinds; native objects and arrays require explicit conversion. Mutation of a JSON value does not modify separately assigned copies or the caller's value when passed by value.
+
 Beyond the primitive data types listed in this section, custom data types may be defined as objects (see the "Objects" section).
 
 Technically, Tablo supports two more primitive data types: record pointers and sequences. However, the semantics for these are quite different compared to other variables. A record pointer is declared using the `rec` keyword rather than the `var` keyword and is immutable unless the `mut` keyword is also specified. Record pointers are described further in the "Database Queries" section. Sequences cannot be defined in code; only referenced. They are described in the "Sequences" section.
@@ -418,7 +434,7 @@ The unary prefix `exists` operator tests the presence of its operand. It may be 
 
 When applied to a record pointer, `exists` evaluates to `true` if the corresponding database record exists, including when that record is locked. It evaluates to `false` if no matching record exists or if the record has been deleted through that record pointer.
 
-When applied to a field-access expression, `exists` evaluates to `true` if the complete field-access path can be resolved and the final field is present. A final field whose value is `null` is still present. It evaluates to `false` if a field in the path is missing or if an intermediate value is `null` and therefore cannot be traversed.
+When applied to a field-access expression, `exists` evaluates to `true` if the complete field-access path can be resolved and the final field is present. A final field whose value is `null` is still present. It evaluates to `false` if a field in the path is missing or an intermediate value cannot be traversed because it is null, scalar, or an array. JSON property-name ambiguity remains a runtime error under `exists`; it is not treated as an absent field.
 
 Fields declared by a statically typed object are always present because object construction produces a complete instance. Field presence is therefore principally useful when inspecting JSON data or traversing nullable intermediate values.
 
@@ -756,6 +772,8 @@ Array literals are written using `[` and `]` with comma-separated element expres
 Arrays are indexed using the syntax `arrayExpr[indexExpr]`. Indices must be of type `int`. Tablo uses one-based indexing, so an index of 1 refers to the first element in the array.
 
 If an array is read using an index that is outside its valid bounds, a runtime error is raised.
+
+JSON arrays use the same one-based integer indexing syntax and bounds rules. JSON slicing is not supported. The indexed JSON value must contain an array; indexing an object, scalar, or null raises a runtime error. Reads may be chained with field access and further indexing, for example `payload.customers[1].name` or `payload.matrix[2][1]`. Element reads retain JSON-domain contents and use the same target-type conversions as JSON field reads.
 
 Arrays may also be sliced by providing an integer range as the index. For example, `xs[2:4]` yields a new array containing the second through fourth elements of `xs`, while `xs[5:-1:1]` yields a reversed copy of the first five elements.
 

@@ -1830,6 +1830,7 @@ fn rewrite_expression_calls(
 		}
 		ast::Expr::Assignment(assignment) => {
 			match &mut assignment.target {
+				ast::AssignmentTarget::Path(path) => rewrite_expression_calls(path, top_level_renames, import_bindings, object_renames, shadowed_function_names),
 				ast::AssignmentTarget::Field(target) => {
 					let _ = target;
 				}

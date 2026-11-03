@@ -1,3 +1,4 @@
+use crate::runtime_abi::TabloVersion;
 // This module encodes and decodes the current `.tbo` object file format.
 // The format is still deliberately simple, but this is another likely split
 // point once the object file grows support for multiple sections and debug
@@ -12,9 +13,8 @@ use crate::bytecode::*;
 use crate::query::*;
 use crate::value::Decimal;
 
-const MAGIC_BYTES: [u8; 4] = *b"TBO0";
+const MAGIC_BYTES: [u8; 4] = *b"TBO1";
 
-const FORMAT_VERSION: u16 = 1; // Leave at 1 until initial development is complete.
 
 const OPCODE_ADD: u8 = 1;
 const OPCODE_ADVANCE_SEQUENCE: u8 = OPCODE_ADD + 1;
@@ -23,7 +23,8 @@ const OPCODE_BEGIN_TRANSACTION: u8 = OPCODE_AND + 1;
 const OPCODE_CALL: u8 = OPCODE_BEGIN_TRANSACTION + 1;
 const OPCODE_CALL_BUILT_IN: u8 = OPCODE_CALL + 1;
 const OPCODE_COMMIT_TRANSACTION: u8 = OPCODE_CALL_BUILT_IN + 1;
-const OPCODE_CREATE_RECORD: u8 = OPCODE_COMMIT_TRANSACTION + 1;
+const OPCODE_CONVERT_JSON: u8 = OPCODE_COMMIT_TRANSACTION + 1;
+const OPCODE_CREATE_RECORD: u8 = OPCODE_CONVERT_JSON + 1;
 const OPCODE_CREATE_RECORD_IF_PENDING: u8 = OPCODE_CREATE_RECORD + 1;
 const OPCODE_DELETE_RECORD: u8 = OPCODE_CREATE_RECORD_IF_PENDING + 1;
 const OPCODE_DIVIDE: u8 = OPCODE_DELETE_RECORD + 1;
@@ -46,7 +47,8 @@ const OPCODE_LOAD_FIELD_PATH: u8 = OPCODE_LOAD_FIELD + 1;
 const OPCODE_LOAD_INDEX: u8 = OPCODE_LOAD_FIELD_PATH + 1;
 const OPCODE_LOAD_LOCAL: u8 = OPCODE_LOAD_INDEX + 1;
 const OPCODE_LOAD_PROJECTED_VALUE: u8 = OPCODE_LOAD_LOCAL + 1;
-const OPCODE_LOAD_REFERENCE: u8 = OPCODE_LOAD_PROJECTED_VALUE + 1;
+const OPCODE_LOAD_QUOTED_FIELD: u8 = OPCODE_LOAD_PROJECTED_VALUE + 1;
+const OPCODE_LOAD_REFERENCE: u8 = OPCODE_LOAD_QUOTED_FIELD + 1;
 const OPCODE_LOAD_SEQUENCE_CURRENT: u8 = OPCODE_LOAD_REFERENCE + 1;
 const OPCODE_LOCKED: u8 = OPCODE_LOAD_SEQUENCE_CURRENT + 1;
 const OPCODE_MAKE_ARRAY: u8 = OPCODE_LOCKED + 1;
@@ -54,7 +56,8 @@ const OPCODE_MAKE_OBJECT: u8 = OPCODE_MAKE_ARRAY + 1;
 const OPCODE_MAKE_RANGE: u8 = OPCODE_MAKE_OBJECT + 1;
 const OPCODE_MAKE_RECORD_POINTER: u8 = OPCODE_MAKE_RANGE + 1;
 const OPCODE_MAKE_STEPPED_RANGE: u8 = OPCODE_MAKE_RECORD_POINTER + 1;
-const OPCODE_MODULO: u8 = OPCODE_MAKE_STEPPED_RANGE + 1;
+const OPCODE_MEMBER_PATH_EXISTS: u8 = OPCODE_MAKE_STEPPED_RANGE + 1;
+const OPCODE_MODULO: u8 = OPCODE_MEMBER_PATH_EXISTS + 1;
 const OPCODE_MULTIPLY: u8 = OPCODE_MODULO + 1;
 const OPCODE_NEGATE: u8 = OPCODE_MULTIPLY + 1;
 const OPCODE_NOT: u8 = OPCODE_NEGATE + 1;
@@ -82,7 +85,8 @@ const OPCODE_RETURN: u8 = OPCODE_REORDER_CALL_ARGUMENTS + 1;
 const OPCODE_RETURN_NO_VALUE: u8 = OPCODE_RETURN + 1;
 const OPCODE_STORE_FIELD_PATH: u8 = OPCODE_RETURN_NO_VALUE + 1;
 const OPCODE_STORE_INDEX: u8 = OPCODE_STORE_FIELD_PATH + 1;
-const OPCODE_STORE_LOCAL: u8 = OPCODE_STORE_INDEX + 1;
+const OPCODE_STORE_JSON_PATH: u8 = OPCODE_STORE_INDEX + 1;
+const OPCODE_STORE_LOCAL: u8 = OPCODE_STORE_JSON_PATH + 1;
 const OPCODE_STORE_SEQUENCE_CURRENT: u8 = OPCODE_STORE_LOCAL + 1;
 const OPCODE_SUBTRACT: u8 = OPCODE_STORE_SEQUENCE_CURRENT + 1;
 const OPCODE_UPDATE_RECORD: u8 = OPCODE_SUBTRACT + 1;
@@ -96,7 +100,8 @@ const DATA_TYPE_TAG_DATE: u8 = DATA_TYPE_TAG_BOOL + 1;
 const DATA_TYPE_TAG_DEC: u8 = DATA_TYPE_TAG_DATE + 1;
 const DATA_TYPE_TAG_EMPTY_ARRAY: u8 = DATA_TYPE_TAG_DEC + 1;
 const DATA_TYPE_TAG_INT: u8 = DATA_TYPE_TAG_EMPTY_ARRAY + 1;
-const DATA_TYPE_TAG_NULLABLE: u8 = DATA_TYPE_TAG_INT + 1;
+const DATA_TYPE_TAG_JSON: u8 = DATA_TYPE_TAG_INT + 1;
+const DATA_TYPE_TAG_NULLABLE: u8 = DATA_TYPE_TAG_JSON + 1;
 const DATA_TYPE_TAG_OBJECT: u8 = DATA_TYPE_TAG_NULLABLE + 1;
 const DATA_TYPE_TAG_RANGE: u8 = DATA_TYPE_TAG_OBJECT + 1;
 const DATA_TYPE_TAG_RECORD_POINTER: u8 = DATA_TYPE_TAG_RANGE + 1;
@@ -118,7 +123,8 @@ const OBJECT_DEFAULT_DATE: u8 = OBJECT_DEFAULT_CURRENT_TIMESTAMP_TZ + 1;
 const OBJECT_DEFAULT_DECIMAL: u8 = OBJECT_DEFAULT_DATE + 1;
 const OBJECT_DEFAULT_ENUM: u8 = OBJECT_DEFAULT_DECIMAL + 1;
 const OBJECT_DEFAULT_INTEGER: u8 = OBJECT_DEFAULT_ENUM + 1;
-const OBJECT_DEFAULT_NULL: u8 = OBJECT_DEFAULT_INTEGER + 1;
+const OBJECT_DEFAULT_JSON: u8 = OBJECT_DEFAULT_INTEGER + 1;
+const OBJECT_DEFAULT_NULL: u8 = OBJECT_DEFAULT_JSON + 1;
 const OBJECT_DEFAULT_OBJECT: u8 = OBJECT_DEFAULT_NULL + 1;
 const OBJECT_DEFAULT_TEXT: u8 = OBJECT_DEFAULT_OBJECT + 1;
 const OBJECT_DEFAULT_TIME: u8 = OBJECT_DEFAULT_TEXT + 1;
@@ -136,7 +142,8 @@ const OBJECT_VALUE_TYPE_DATE: u8 = OBJECT_VALUE_TYPE_BOOL + 1;
 const OBJECT_VALUE_TYPE_DEC: u8 = OBJECT_VALUE_TYPE_DATE + 1;
 const OBJECT_VALUE_TYPE_ENUM: u8 = OBJECT_VALUE_TYPE_DEC + 1;
 const OBJECT_VALUE_TYPE_INT: u8 = OBJECT_VALUE_TYPE_ENUM + 1;
-const OBJECT_VALUE_TYPE_NULLABLE: u8 = OBJECT_VALUE_TYPE_INT + 1;
+const OBJECT_VALUE_TYPE_JSON: u8 = OBJECT_VALUE_TYPE_INT + 1;
+const OBJECT_VALUE_TYPE_NULLABLE: u8 = OBJECT_VALUE_TYPE_JSON + 1;
 const OBJECT_VALUE_TYPE_OBJECT: u8 = OBJECT_VALUE_TYPE_NULLABLE + 1;
 const OBJECT_VALUE_TYPE_RANGE: u8 = OBJECT_VALUE_TYPE_OBJECT + 1;
 const OBJECT_VALUE_TYPE_TEXT: u8 = OBJECT_VALUE_TYPE_RANGE + 1;
@@ -177,7 +184,7 @@ pub fn read_program(bytes: &[u8]) -> Result<Program, ObjectFileError> {
 	let mut reader = ObjectFileReader::new(bytes);
 
 	reader.expect_magic_bytes()?;
-	reader.expect_format_version()?;
+	reader.expect_format_version(TabloVersion::current())?;
 	let layout = reader.read_layout()?;
 
 	if !reader.is_at_end() {
@@ -204,7 +211,7 @@ pub fn write_program(program: &Program) -> Vec<u8> {
 	let layout = ObjectFileLayout::from_program(program);
 
 	bytes.extend_from_slice(&MAGIC_BYTES);
-	bytes.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+	bytes.extend_from_slice(&TabloVersion::current().to_packed().expect("The Tablo package version must fit the object header").to_le_bytes());
 	layout.write_to(&mut bytes);
 
 	bytes
@@ -420,13 +427,13 @@ struct ObjectFileReader<'a> {
 }
 
 impl<'a> ObjectFileReader<'a> {
-	fn expect_format_version(&mut self) -> Result<(), ObjectFileError> {
-		let version = self.read_u16()?;
+	fn expect_format_version(&mut self, target: TabloVersion) -> Result<(), ObjectFileError> {
+		let version = TabloVersion::from_packed(self.read_u32()?);
 
-		if version != FORMAT_VERSION {
+		if !target.accepts(version) {
 			return Err(ObjectFileError {
 				offset: MAGIC_BYTES.len(),
-				message: format!("Unsupported object file version {version}; expected version {FORMAT_VERSION}."),
+				message: format!("Unsupported object file version {version}; reader is Tablo {target}. Matching major/minor and an equal or newer reader patch are required."),
 			});
 		}
 
@@ -510,6 +517,7 @@ impl<'a> ObjectFileReader<'a> {
 			DATA_TYPE_TAG_DEC => Ok(DataType::Dec),
 			DATA_TYPE_TAG_EMPTY_ARRAY => Ok(DataType::EmptyArray),
 			DATA_TYPE_TAG_INT => Ok(DataType::Int),
+			DATA_TYPE_TAG_JSON => Ok(DataType::Json),
 			DATA_TYPE_TAG_OBJECT => Ok(DataType::Object(self.read_string()?.into())),
 			DATA_TYPE_TAG_RANGE => Ok(DataType::Range(Box::new(self.read_data_type()?))),
 			DATA_TYPE_TAG_TEXT => Ok(DataType::Text),
@@ -793,6 +801,18 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_RETURN_NO_VALUE => Ok(Instruction::ReturnNoValue),
 			OPCODE_STORE_FIELD_PATH => Ok(Instruction::StoreFieldPath(self.read_string_vec()?)),
 			OPCODE_STORE_INDEX => Ok(Instruction::StoreIndex),
+			OPCODE_STORE_JSON_PATH => {
+				let count = self.read_u32()?;
+				let mut path = Vec::new();
+				for _ in 0..count {
+					path.push(match self.read_u8()? {
+						0 => JsonMutationPart::Field(self.read_string()?, self.read_bool()?),
+						1 => JsonMutationPart::Index,
+						_ => return Err(ObjectFileError { offset: self.offset - 1, message: String::from("Invalid JSON mutation path component.") }),
+					});
+				}
+				Ok(Instruction::StoreJsonPath(path))
+			}
 			OPCODE_STORE_LOCAL => Ok(Instruction::StoreLocal(self.read_u32()?)),
 			OPCODE_STORE_SEQUENCE_CURRENT => Ok(Instruction::StoreSequenceCurrent {
 				database_name: self.read_string()?,
@@ -804,6 +824,14 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_UPDATE_RECORD => Ok(Instruction::UpdateRecord),
 			OPCODE_UPDATE_RECORD_IF_CHANGED => Ok(Instruction::UpdateRecordIfChanged),
 			OPCODE_XOR => Ok(Instruction::Xor),
+			OPCODE_CONVERT_JSON => Ok(Instruction::ConvertJson(self.read_data_type()?)),
+			OPCODE_LOAD_QUOTED_FIELD => Ok(Instruction::LoadQuotedField(self.read_string()?)),
+			OPCODE_MEMBER_PATH_EXISTS => {
+				let count = self.read_u32()?;
+				let mut path = Vec::new();
+				for _ in 0..count { path.push((self.read_string()?, self.read_bool()?)); }
+				Ok(Instruction::MemberPathExists(path))
+			},
 			_ => Err(ObjectFileError {
 				offset: opcode_offset,
 				message: format!("Unknown opcode {opcode}."),
@@ -935,6 +963,10 @@ impl<'a> ObjectFileReader<'a> {
 				Ok(ObjectDefaultValue::Object { fields, object_type_id })
 			}
 			OBJECT_DEFAULT_TEXT => Ok(ObjectDefaultValue::Text(self.read_string()?)),
+			OBJECT_DEFAULT_JSON => {
+				let text = self.read_string()?;
+				crate::json::JsonValue::parse(&text).map(ObjectDefaultValue::Json).map_err(|message| ObjectFileError { offset: self.offset, message })
+			},
 			OBJECT_DEFAULT_TIME => Ok(ObjectDefaultValue::Time(
 				crate::value::Time::from_iso_text(&self.read_string()?).map_err(|message| ObjectFileError {
 					offset: self.offset,
@@ -1036,6 +1068,7 @@ impl<'a> ObjectFileReader<'a> {
 				self.read_object_value_type_descriptor()?,
 			))),
 			OBJECT_VALUE_TYPE_TEXT => Ok(ObjectValueTypeDescriptor::Text),
+			OBJECT_VALUE_TYPE_JSON => Ok(ObjectValueTypeDescriptor::Json),
 			OBJECT_VALUE_TYPE_TIME => Ok(ObjectValueTypeDescriptor::Time),
 			OBJECT_VALUE_TYPE_TIME_TZ => Ok(ObjectValueTypeDescriptor::TimeTz),
 			OBJECT_VALUE_TYPE_TIMESTAMP => Ok(ObjectValueTypeDescriptor::Timestamp),
@@ -1212,12 +1245,6 @@ impl<'a> ObjectFileReader<'a> {
 		Ok(self.read_exact(1)?[0])
 	}
 
-	fn read_u16(&mut self) -> Result<u16, ObjectFileError> {
-		let mut bytes = [0; 2];
-		bytes.copy_from_slice(self.read_exact(2)?);
-		Ok(u16::from_le_bytes(bytes))
-	}
-
 	fn read_u32(&mut self) -> Result<u32, ObjectFileError> {
 		let mut bytes = [0; 4];
 		bytes.copy_from_slice(self.read_exact(4)?);
@@ -1251,6 +1278,7 @@ fn validate_object_default_references(
 		| ObjectDefaultValue::Decimal(_)
 		| ObjectDefaultValue::Enum { .. }
 		| ObjectDefaultValue::Integer(_)
+		| ObjectDefaultValue::Json(_)
 		| ObjectDefaultValue::Null
 		| ObjectDefaultValue::Text(_)
 		| ObjectDefaultValue::Time(_)
@@ -1332,6 +1360,7 @@ fn validate_object_value_type_references(
 		| ObjectValueTypeDescriptor::Dec
 		| ObjectValueTypeDescriptor::Enum(_)
 		| ObjectValueTypeDescriptor::Int
+		| ObjectValueTypeDescriptor::Json
 		| ObjectValueTypeDescriptor::Text
 		| ObjectValueTypeDescriptor::Time
 		| ObjectValueTypeDescriptor::TimeTz
@@ -1377,6 +1406,8 @@ fn write_data_type(bytes: &mut Vec<u8>, data_type: &DataType) {
 			write_data_type(bytes, element_type);
 		}
 		DataType::Text => bytes.push(DATA_TYPE_TAG_TEXT),
+		DataType::Json => bytes.push(DATA_TYPE_TAG_JSON),
+		DataType::JsonMember => panic!("JSON field content is an expression type, not a declared type."),
 		DataType::Time => bytes.push(DATA_TYPE_TAG_TIME),
 		DataType::TimeTz => bytes.push(DATA_TYPE_TAG_TIME_TZ),
 		DataType::Timestamp => bytes.push(DATA_TYPE_TAG_TIMESTAMP),
@@ -1635,6 +1666,16 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			}
 		}
 		Instruction::StoreIndex => bytes.push(OPCODE_STORE_INDEX),
+		Instruction::StoreJsonPath(path) => {
+			bytes.push(OPCODE_STORE_JSON_PATH);
+			bytes.extend_from_slice(&(path.len() as u32).to_le_bytes());
+			for part in path {
+				match part {
+					JsonMutationPart::Field(name, quoted) => { bytes.push(0); write_string(bytes, name); bytes.push(u8::from(*quoted)); }
+					JsonMutationPart::Index => bytes.push(1),
+				}
+			}
+		}
 		Instruction::StoreLocal(slot) => {
 			bytes.push(OPCODE_STORE_LOCAL);
 			bytes.extend_from_slice(&slot.to_le_bytes());
@@ -1653,6 +1694,13 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 		Instruction::UpdateRecord => bytes.push(OPCODE_UPDATE_RECORD),
 		Instruction::UpdateRecordIfChanged => bytes.push(OPCODE_UPDATE_RECORD_IF_CHANGED),
 		Instruction::Xor => bytes.push(OPCODE_XOR),
+		Instruction::ConvertJson(target) => { bytes.push(OPCODE_CONVERT_JSON); write_data_type(bytes, target); }
+		Instruction::LoadQuotedField(name) => { bytes.push(OPCODE_LOAD_QUOTED_FIELD); write_string(bytes, name); }
+		Instruction::MemberPathExists(path) => {
+			bytes.push(OPCODE_MEMBER_PATH_EXISTS);
+			bytes.extend_from_slice(&(path.len() as u32).to_le_bytes());
+			for (name, quoted) in path { write_string(bytes, name); bytes.push(u8::from(*quoted)); }
+		}
 	}
 }
 
@@ -1745,6 +1793,10 @@ fn write_object_default_value(bytes: &mut Vec<u8>, value: &ObjectDefaultValue) {
 				write_object_default_value(bytes, value);
 			}
 		}
+		ObjectDefaultValue::Json(value) => {
+			bytes.push(OBJECT_DEFAULT_JSON);
+			write_string(bytes, &value.to_text());
+		}
 		ObjectDefaultValue::Text(value) => {
 			bytes.push(OBJECT_DEFAULT_TEXT);
 			write_string(bytes, value);
@@ -1823,6 +1875,7 @@ fn write_object_value_type_descriptor(bytes: &mut Vec<u8>, data_type: &ObjectVal
 			write_object_value_type_descriptor(bytes, element_type);
 		}
 		ObjectValueTypeDescriptor::Text => bytes.push(OBJECT_VALUE_TYPE_TEXT),
+		ObjectValueTypeDescriptor::Json => bytes.push(OBJECT_VALUE_TYPE_JSON),
 		ObjectValueTypeDescriptor::Time => bytes.push(OBJECT_VALUE_TYPE_TIME),
 		ObjectValueTypeDescriptor::TimeTz => bytes.push(OBJECT_VALUE_TYPE_TIME_TZ),
 		ObjectValueTypeDescriptor::Timestamp => bytes.push(OBJECT_VALUE_TYPE_TIMESTAMP),
@@ -1998,29 +2051,56 @@ mod tests {
 		let mut bytes = write_program(&Program::new(vec![
 			Instruction::PushInteger(1),
 		]));
-		bytes[15] = 255;
+		bytes[17] = 255;
 
 		let error = read_program(&bytes).unwrap_err();
 
 		assert_eq!(error, ObjectFileError {
-			offset: 15,
+			offset: 17,
 			message: String::from("Unknown opcode 255."),
 		});
 	}
 
 	#[test]
-	fn rejects_unsupported_object_file_version() {
-		let mut bytes = write_program(&Program::new(vec![
-			Instruction::PushInteger(1),
-		]));
-		bytes[MAGIC_BYTES.len()..MAGIC_BYTES.len() + 2].copy_from_slice(&2_u16.to_le_bytes());
+	fn writes_packed_producing_version_and_rejects_legacy_headers() {
+		let mut bytes = write_program(&Program::new(vec![]));
+		assert_eq!(&bytes[..4], b"TBO1");
+		assert_eq!(&bytes[4..8], &TabloVersion::current().to_packed().unwrap().to_le_bytes());
+		bytes[..4].copy_from_slice(b"TBO0");
+		assert_eq!(read_program(&bytes).unwrap_err().message, "Invalid object file magic bytes.");
+	}
 
-		let error = read_program(&bytes).unwrap_err();
+	#[test]
+	fn applies_object_version_compatibility_policy() {
+		for (artifact, target, accepted) in [
+			("0.3.2", "0.3.2", true), ("0.3.2", "0.3.5", true),
+			("0.3.2", "0.3.1", false), ("0.3.2", "0.4.0", false),
+			("0.3.2", "1.3.2", false), ("0.0.0", "1.3.2", true),
+			("0.3.2", "0.0.0", false),
+		] {
+			let version = TabloVersion::parse(artifact).unwrap().to_packed().unwrap().to_le_bytes();
+			let mut bytes = MAGIC_BYTES.to_vec();
+			bytes.extend_from_slice(&version);
+			let mut reader = ObjectFileReader::new(&bytes);
+			reader.expect_magic_bytes().unwrap();
+			let result = reader.expect_format_version(TabloVersion::parse(target).unwrap());
+			assert_eq!(result.is_ok(), accepted, "{artifact} on {target}");
+			if let Err(error) = result {
+				assert_eq!(error.offset, 4);
+				assert!(error.message.contains(artifact));
+				assert!(error.message.contains(target));
+			}
+		}
+	}
 
-		assert_eq!(error, ObjectFileError {
-			offset: MAGIC_BYTES.len(),
-			message: String::from("Unsupported object file version 2; expected version 1."),
-		});
+	#[test]
+	fn rejects_truncated_versions_and_validates_experimental_payloads() {
+		let mut bytes = write_program(&Program::new(vec![Instruction::PushInteger(1)]));
+		for length in 4..8 { assert!(read_program(&bytes[..length]).is_err()); }
+		bytes[4..8].copy_from_slice(&0_u32.to_le_bytes());
+		assert!(read_program(&bytes).is_ok());
+		bytes[17] = 255;
+		assert_eq!(read_program(&bytes).unwrap_err().message, "Unknown opcode 255.");
 	}
 
 	#[test]
