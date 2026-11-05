@@ -871,7 +871,7 @@ Anonymous scopes are supported and are created using a bare block:
 }
 ~~~
 
-Anonymous scopes are particularly useful for controlling the lifetime of mutable record pointers and, therefore, the point at which pending database changes are automatically committed.
+Anonymous scopes are particularly useful for controlling record pointer lifetimes. Pending changes receive automatic scope-exit handling when the last pointer to the shared record buffer is released; a derived immutable pointer can extend that lifetime beyond the scope of the original mutable pointer.
 
 If Statements
 -------------
@@ -897,7 +897,7 @@ else {
 
 The condition expression must evaluate to either a `bool` value or a record pointer. A record pointer condition evaluates to `true` if the record exists and is not locked. Otherwise it evaluates to `false`.
 
-As a special case, an `if` statement may begin with a record-pointer binding written using the `rec` keyword:
+As a special case, an `if` statement may begin with a record pointer binding written using the `rec` keyword:
 
 ~~~
 if rec foo = find first customers where customers.id == targetId {
@@ -908,7 +908,7 @@ else {
 }
 ~~~
 
-This form is valid only when the right-hand side is an expression of record-pointer type. The bound record pointer is in scope only within the associated `then` block. It is not in scope within the condition in which it is declared, it is not in scope after the `if` statement, and it is not in scope within any `else` or `else if` branch that belongs to a different condition.
+This form is valid only when the right-hand side is an expression of record pointer type. The bound record pointer is in scope only within the associated `then` block. It is not in scope within the condition in which it is declared, it is not in scope after the `if` statement, and it is not in scope within any `else` or `else if` branch that belongs to a different condition.
 
 The following is invalid:
 
@@ -928,9 +928,9 @@ if rec foo = find first customers where customers.country == 'CN' {
 }
 ~~~
 
-The `if rec ...` form is specific to record pointers. It is not a general-purpose assignment expression and it does not apply to ordinary variables.
+The `if rec ...` form is specific to record pointers. It is not a general-purpose assignment expression and it does not apply to ordinary variables. Its binding is immutable. When initialized from an existing record pointer, it shares that pointer's record buffer according to the rules under "Derived Pointers and Reassignment".
 
-An `else if` branch may also use its own record-pointer binding:
+An `else if` branch may also use its own record pointer binding:
 
 ~~~
 if rec cust = find first customers where customers.id == customerId {
@@ -1157,9 +1157,9 @@ If no `limit` clause is specified then Tablo does not impose a limit on the numb
 
 A record pointer is a variable that provides the user with the ability to get and set the field values for a database table record. Unlike other variables, a record pointer is declared with the `rec` keyword instead of `var`. They are also immutable unless the user opts into mutability by specifying the `mut` keyword.
 
-Record pointers may also appear in function parameter lists using `rec <table>` for pass-by-value parameters and `&rec <table>` for pass-by-reference parameters. In both cases, `<table>` identifies the single base table to which the record pointer must belong.
+Record pointers may only be passed to functions by reference. Parameters use `&rec <table>` for read-only access or `&rec mut <table>` for mutable access, and arguments must use `&identifier` at the call site. In both forms, `<table>` identifies the single base table to which the record pointer must belong. Passing a record pointer by value is not permitted.
 
-There are two valid ways to construct a record pointer. The first is with a database query of some kind. The second is as a mutable record pointer for the creation of a new record.
+A new record buffer is obtained through a database query or through `new` for the creation of a record. An immutable record pointer may also be derived from an existing mutable or immutable record pointer, sharing its buffered state as described below.
 
 ~~~
 rec loc = find tblLocations where id == 42;
@@ -1173,11 +1173,39 @@ create comp;
 
 The fields that may be accessed via a record pointer are entirely dependent upon the base database table for the query from which the record pointer was constructed.
 
-Note that the data provided by a record pointer represents a snapshot of the corresponding record. Tablo does not (and could not) guarantee that the underlying record data remains unmodified at the point in time at which the record pointer data is referenced.
+Note that the data provided by a record pointer represents a snapshot of the corresponding record. This is called the "record buffer". Tablo does not (and could not) guarantee that the underlying record data remains unmodified at the point in time at which the record buffer is referenced via a record pointer.
 
-When a record pointer's fields are modified, by default the changes are not committed to the database until the end of the enclosing scope. To force the changes to be committed at an earlier point in the code, the appropriate `create` or `update` keyword may be used.
+Any derived record pointers (i.e. record pointers created via assignment from another record pointer) share the same record buffer. Therefore, changes made through a mutable pointer are visible through its derived immutable pointers. Immutable access prevents modification through that pointer; it does not freeze the record buffer values.
 
-If a record is deleted via its record pointer, the deletion is committed to the database at the point at which the `delete` keyword appears. From that point on, the record pointer may not be used to access field data and `exists <record-pointer>` evaluates to `false`.
+Record buffer modifications are not immediately written to the database. When normal scope exit releases the last pointer to a record buffer, Tablo automatically writes its pending changes: an existing record is updated as though `update` had been used, while a new record that has not yet been created is inserted as though `create` had been used. Normal scope exit includes reaching the end of a scope or leaving it through `return` or `break`. No automatic update is needed for an existing record with no pending changes.
+
+The record buffer and its pending changes are shared by all pointers derived from it. Leaving a scope releases the pointers declared there, but automatic writing is postponed if another pointer still references the buffer. Reassignment also releases the pointer's old buffer and triggers the same automatic write if it was the last pointer to that buffer. The final pointer may be immutable: releasing it still writes changes previously made through mutable access. Pending changes must never be silently discarded by reassignment.
+
+Automatic writes are not performed during runtime-error unwinding, as described under "Create Statements" and "Update Statements". Explicit `create` or `update` through a mutable pointer may write changes earlier and updates the shared buffer so those changes are not written again solely because another pointer is released. These database writes remain subject to the enclosing transaction; they do not commit that transaction.
+
+If a record is deleted via its record pointer, the deletion is committed to the database at the point at which the `delete` keyword appears. From that point on, all pointers sharing that record buffer observe the deletion. They may not be used to access field data and `exists <record pointer>` evaluates to `false`.
+
+#### Derived Pointers and Reassignment
+
+An immutable record pointer may be initialized from either a mutable or an immutable pointer. This creates a read-only view of the same record buffer, including its pending changes and record status. It does not issue another query, duplicate pending changes, or acquire another database lock.
+
+~~~
+rec mut company = find first tblCompanies where id == 42;
+
+if company {
+  rec view = company;
+  company.name = 'Acme Ltd.';
+  // view.name now also reads 'Acme Ltd.'.
+}
+~~~
+
+A mutable pointer may not be initialized or reassigned from any existing record pointer, whether mutable or immutable. Mutable pointers must obtain a new record buffer through a query or `new`. Passing a mutable pointer to an `&rec mut` parameter shares the caller's existing variable and is not the creation of an independent mutable pointer.
+
+Mutability governs both field modification and reassignment. An immutable pointer cannot have its fields modified, cannot be used for explicit `create`, `update`, or `delete`, and cannot be reassigned. A mutable pointer may be reassigned to a query result or a new record of the same base table. A query used for such reassignment is a mutable acquisition and follows the same locking rules as a query initializing a `rec mut` declaration. The same rules apply to local variables and function parameters; reassignment through an `&rec mut` parameter changes the caller's variable.
+
+A derived immutable pointer retains its association with the record buffer from which it was created. If the original mutable variable is reassigned, the derived pointer continues to refer to the old buffer; it does not follow the variable to its new record. The old buffer remains alive until its last pointer is released. A by-reference function parameter instead aliases the caller's variable itself and therefore observes reassignment of that variable.
+
+These restrictions prevent assignment and function calls from creating independent writable copies of an existing record buffer. Separate queries may still acquire pointers to the same database row; those acquisitions remain subject to the normal transaction and locking rules.
 
 #### Record Pointers and Database Locks
 
@@ -1185,7 +1213,7 @@ Record pointer mutability (i.e. whether the `mut` keyword was used in acquiring 
 
 For database backends that support row-level locking, a mutable `find` query within a transaction attempts to acquire an update lock without waiting. If the selected record is already locked, the result is a locked record pointer as described under "Find Statements". A mutable query-based `for` loop instead waits for matching locked records to become available. It does not silently omit these records from the iteration. A deadlock, lock timeout, or other database failure produces a runtime error and causes the active transaction to be rolled back.
 
-Database locks are held according to the lifetime of the active transaction, not the lexical lifetime of an individual record pointer. Leaving the record pointer's scope does not release its lock while the transaction remains active. For backends without row-level locking, including SQLite, record pointers never enter the locked state and the `locked` operator always evaluates to `false`. Other database write contentions may still produce a runtime database error.
+Database locks are held according to the lifetime of the active transaction, not the lifetime of a pointer or its shared record buffer. Deriving an immutable pointer does not transfer or duplicate a lock. Reassignment, scope exit, and release of the last pointer do not release a lock while the transaction remains active. For backends without row-level locking, including SQLite, record pointers never enter the locked state and the `locked` operator always evaluates to `false`. Other database write contentions may still produce a runtime database error.
 
 ### For Loops
 
@@ -1274,7 +1302,7 @@ When assigning the result of a mutable `find` expression within a transaction to
 1. No matching record exists, or
 2. A matching record exists but is locked
 
-When no result can be assigned to the record pointer, it ends up in one of two "nullish" states. The `exists <record-pointer>` expression distinguishes a missing record from a locked record: it evaluates to `true` when the matching record exists, even if that record is locked. The `locked <record-pointer>` expression evaluates to `true` only when a matching record exists but is locked. Immutable `find` queries and queries executed outside a transaction do not request update locks, so their record pointers do not enter the locked state. For database backends that do not support record locking, the `locked` operator always evaluates to `false`. Applying `locked` to a read-only record pointer produces a compiler warning. If a record both exists and is not locked then it is not nullish and the record pointer may be used as the condition for an `if` statement, where it evaluates to `true`.
+When no result can be assigned to the record pointer, it ends up in one of two "nullish" states. The `exists <record pointer>` expression distinguishes a missing record from a locked record: it evaluates to `true` when the matching record exists, even if that record is locked. The `locked <record pointer>` expression evaluates to `true` only when a matching record exists but is locked. Immutable `find` queries and queries executed outside a transaction do not request update locks, so their record pointers do not enter the locked state. For database backends that do not support record locking, the `locked` operator always evaluates to `false`. Applying `locked` to a read-only record pointer produces a compiler warning. If a record both exists and is not locked then it is not nullish and the record pointer may be used as the condition for an `if` statement, where it evaluates to `true`.
 
 ~~~
 {
@@ -1310,7 +1338,7 @@ The following query syntax is valid for `count` statements:
 
 For the creation of new database records, a mutable record pointer must first be declared and assigned using a `new` expression. It is not valid to omit the assignment.
 
-With the new record pointer, field values may be assigned as required. Finally, the `create` keyword is used to commit the new record to the database. If the database table contains required fields that have not been assigned a value then a compiler warning is produced. Note that the record pointer is automatically committed when code execution leaves the enclosing scope. This includes the case where the end of the scope is reached and when a `return` or `break` statement is encountered. The only exception is when a runtime error is thrown, in which case no new record is committed to the database.
+With the new record pointer, field values may be assigned as required. Finally, the `create` keyword is used to commit the new record to the database. If the database table contains required fields that have not been assigned a value then a compiler warning is produced. A pending new record is automatically created when normal scope exit or reassignment releases the last pointer to its record buffer. Normal scope exit includes reaching the end of the scope or leaving it through `return` or `break`. Derived immutable pointers can postpone this cleanup by retaining the buffer. No automatic create is performed during runtime-error unwinding. An enclosing transaction still controls whether a database write is committed or rolled back.
 
 ~~~
 rec mut newComp = new tblCompanies;
@@ -1322,7 +1350,7 @@ Following a `create` statement, the record pointer remains valid and mutable and
 
 ### Update Statements
 
-The `update` keyword is used to manually commit database changes via a mutable record pointer. Note that any changes made to a mutable record pointer's fields are automatically committed when code execution leaves the enclosing scope. This includes the case where the end of the scope is reached and when a `return` or `break` statement is encountered. The only exception is when a runtime error is thrown, in which case no database changes are committed.
+The `update` keyword writes pending database changes through a mutable record pointer. Pending changes are also automatically written when normal scope exit or reassignment releases the last pointer to their shared record buffer. Normal scope exit includes reaching the end of the scope or leaving it through `return` or `break`. Derived immutable pointers can postpone this cleanup by retaining the buffer. No automatic update is performed during runtime-error unwinding. An enclosing transaction still controls whether a database write is committed or rolled back.
 
 ~~~
 rec mut loc = find first tblLocations where id == 101;
@@ -1451,7 +1479,7 @@ The parameter list is enclosed between `(` and `)` characters, which are require
 
 For ordinary values, each parameter is declared using the syntax `<name>: <type>`.
 
-Record-pointer parameters use the syntax `<name>: rec <table>` where `<table>` is the base table to which the record pointer must belong.
+Record pointer parameters use `<name>: &rec <table>` for read-only access or `<name>: &rec mut <table>` for mutable access, where `<table>` is the base table to which the pointer must belong. The `&` is required; record pointers cannot be passed by value.
 
 Ordinary parameters are passed by value. To declare that a parameter is passed by reference, prefix the parameter type with `&`:
 
@@ -1461,19 +1489,28 @@ fn Increment(value: &int) {
 }
 ~~~
 
-The same rule applies to record-pointer parameters:
+Record pointer parameters always use `&`. The optional `mut` additionally grants permission to modify the record and reassign the caller's pointer:
 
 ~~~
-fn TouchCustomer(cust: rec tblCustomers, refCust: &rec tblCustomers) {
-  if cust {
-    ...
-  }
+fn ReadCustomerName(cust: &rec tblCustomers): text {
+  return cust.name;
+}
 
-  if refCust {
-    ...
-  }
+fn RenameCustomer(cust: &rec mut tblCustomers, name: text) {
+  cust.name = name;
+}
+
+rec mut customer = find first tblCustomers where id == 42;
+
+if customer {
+  var name: text = ReadCustomerName(&customer);
+  RenameCustomer(&customer, 'Acme Ltd.');
 }
 ~~~
+
+An `&rec` parameter accepts a mutable or immutable record pointer, including an immutable `if rec` binding. It cannot modify fields, perform explicit database writes through the pointer, or reassign the caller's pointer. An `&rec mut` parameter requires a mutable record pointer argument and may perform those operations. Forwarding a read-only parameter to a mutable parameter is not permitted. The caller always writes `&identifier`; mutability is declared on the parameter and checked against the argument.
+
+Both forms share the caller's record pointer variable and record buffer. A call does not create an independent buffer or a second set of pending changes. Returning from a function releases its parameter reference, but does not trigger final-pointer cleanup while the caller's variable or a derived pointer still retains that buffer.
 
 The `&` marker is valid only in function parameter declarations. It does not define a general-purpose reference type and may not be used for local variable declarations, return types, array element types, or any other type position.
 
@@ -1485,13 +1522,13 @@ Increment(&counter);
 
 For the time being, only plain identifiers may be passed by reference. It is therefore invalid to pass literals, arbitrary expressions, indexed array elements, or query expressions by reference.
 
-Assigning to a by-reference parameter modifies the caller's variable behind the reference. This remains true even when the assigned value is read from another by-reference parameter.
+Assigning to a writable by-reference parameter modifies the caller's variable behind the reference. For ordinary value types, this remains true when the assigned value is read from another by-reference parameter. Record pointer reassignment requires `&rec mut` and follows the query/`new`, same-table, and lifetime rules under "Derived Pointers and Reassignment"; a reference does not permit copying an existing pointer into a mutable pointer.
 
 By-reference parameters may not declare default values and must be supplied with every call. This rule also applies when the referenced value has a nullable type: a nullable referenced value may contain `null`, but the reference itself must still alias a caller variable.
 
 Tablo references are not nullable and cannot be created independently of a function call. A by-reference parameter exists only for the duration of the corresponding call and must not outlive it.
 
-For the time being, record-pointer parameter types are limited to single-table record pointers. Joined query row-shapes do not yet have a parameter type syntax.
+For the time being, record pointer parameter types are limited to single-table record pointers. Joined query row-shapes do not yet have a parameter type syntax.
 
 When a function returns a value, its return type follows the parameter list and a `:` character. Any valid Tablo type may be used as the return type, including arrays, objects, and nullable or non-nullable types. Record pointers are not yet valid as function return types.
 
@@ -1525,7 +1562,7 @@ Functions may be defined both at module scope and nested within other scopes. On
 
 Nested functions use normal lexical scope rules for function visibility. A nested function may call functions that are visible from the enclosing scope at the point where the nested function is declared. If a name is declared again within the nested function body, that inner declaration shadows the outer one in the usual way.
 
-Variables and parameters from an enclosing scope are not captured implicitly, even for read-only access. If a nested function needs access to a variable from the enclosing scope, that variable must be passed explicitly as an argument. If the nested function must modify the variable, the corresponding parameter must be declared using `&` and the call site must pass the variable using `&name`.
+Variables and parameters from an enclosing scope are not captured implicitly, even for read-only access. If a nested function needs access to a variable from the enclosing scope, that variable must be passed explicitly as an argument. If the nested function must modify the variable, the corresponding parameter must be declared using `&` and the call site must pass the variable using `&name`. Record pointers always require reference parameters; modifying or reassigning one additionally requires an `&rec mut` parameter and a mutable argument.
 
 A `return` statement always exits the innermost enclosing function body. A `return` within a nested function therefore returns from the nested function only and does not cause the enclosing function to return.
 
@@ -1595,7 +1632,7 @@ Any function may be called with a mix of positional arguments, named arguments, 
 * No named argument is provided more than once.
 * Only by-value parameters may be omitted. An omitted by-value parameter must either be nullable or have a default value. Every by-reference parameter must be supplied.
 * Any argument corresponding to a by-reference parameter must use the explicit `&identifier` syntax.
-* An argument corresponding to a `rec <table>` or `&rec <table>` parameter must be a record pointer for that same table.
+* An argument corresponding to an `&rec <table>` or `&rec mut <table>` parameter must be a record pointer for that same table and must use `&identifier`. The mutable form additionally requires a mutable argument.
 * The `default` keyword may be used only as the value of a named argument whose corresponding by-value parameter declares a default expression.
 
 When a by-value parameter is omitted, it receives its declared default value. If the parameter has no declared default but has a nullable type, it receives `null`.
@@ -2517,10 +2554,10 @@ simpleStatement = ( `break` | `continue` | expression | returnStatement | variab
 forStatement = `for` identifier `in` expression block
 functionDeclaration = `fn` identifier `(` [ functionParameter { `,` functionParameter } ] `)` [ `:` dataType ] block
 functionParameter = variadicFunctionParameter | byReferenceFunctionParameter | byValueFunctionParameter
-variadicFunctionParameter = `...` identifier `:` parameterType
-byReferenceFunctionParameter = identifier `:` `&` parameterType
-byValueFunctionParameter = identifier `:` parameterType [ `=` expression ]
-parameterType = dataType | `rec` typeReference
+variadicFunctionParameter = `...` identifier `:` dataType
+byReferenceFunctionParameter = identifier `:` `&` referenceParameterType
+byValueFunctionParameter = identifier `:` dataType [ `=` expression ]
+referenceParameterType = dataType | `rec` [ `mut` ] typeReference
 variableDeclaration = ( `const` | `var` ) identifier `:` dataType [ `=` expression ]
 returnStatement = `return` [ expression ]
 ifStatement = `if` expression block [ `else` ( block | ifStatement ) ]
