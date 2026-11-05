@@ -162,7 +162,7 @@ pub enum FindKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FunctionParameterType {
-	RecordPointer(TableReference),
+	RecordPointer { table: TableReference, is_mut: bool },
 	Sequence(SequenceReference),
 	Value(DataType),
 }
@@ -170,8 +170,9 @@ pub enum FunctionParameterType {
 impl FunctionParameterType {
 	pub fn name(&self) -> String {
 		match self {
-			Self::RecordPointer(table) => format!(
-				"rec {}",
+			Self::RecordPointer { table, is_mut } => format!(
+				"rec {}{}",
+				if *is_mut { "mut " } else { "" },
 				table.components.iter().map(|component| component.name.as_str()).collect::<Vec<_>>().join(".")
 			),
 			Self::Sequence(sequence) => format!(

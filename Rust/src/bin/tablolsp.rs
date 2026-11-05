@@ -1001,6 +1001,32 @@ fn Read(config: Config): int {
 	}
 
 	#[test]
+	fn checks_record_reference_parameter_mutability_in_document_diagnostics() {
+		let temp_dir = unique_temp_directory("tablolsp_record_references");
+		std::fs::create_dir_all(&temp_dir).unwrap();
+		let config_path = temp_dir.join("tablo.toml");
+		let schema_path = temp_dir.join("example.schema");
+		std::fs::write(&config_path, format!(
+			"[databases]\nExampleDb = \"sqlite:test.db\"\n[schemas]\nExampleDb = \"{}\"\n",
+			schema_path.display(),
+		)).unwrap();
+		std::fs::write(&schema_path,
+			"database ExampleDb; schema Main implicit; create table Customers (Id int not null);",
+		).unwrap();
+		let uri = format!("file://{}", temp_dir.join("main.tablo").display());
+		let server = LspServer::new();
+		let source = "with ExampleDb; fn Visit(cust: &rec Customers): int { return cust.Id; } fn Main(args: [text]): int { if rec cust = find first Customers { return Visit(&cust); } return 0; }";
+		assert!(server.document_diagnostics(&uri, source).unwrap().is_empty());
+		let mutable_source = source.replace("&rec Customers", "&rec mut Customers");
+		let diagnostics = server.document_diagnostics(&uri, &mutable_source).unwrap();
+		assert!(diagnostics.iter().any(|diagnostic| diagnostic.severity == 1
+			&& diagnostic.message.contains("requires a mutable record pointer, but `cust` is immutable")));
+		std::fs::remove_file(schema_path).unwrap();
+		std::fs::remove_file(config_path).unwrap();
+		std::fs::remove_dir(temp_dir).unwrap();
+	}
+
+	#[test]
 	fn publishes_read_only_record_pointer_lock_warning() {
 		let temp_dir = unique_temp_directory("tablolsp_locked_warning");
 		let config_path = temp_dir.join("tablo.toml");

@@ -270,7 +270,7 @@ impl VirtualMachine {
 
 		if instruction_index >= code_body.instructions.len() {
 			let result = self.stack.pop();
-			return self.complete_frame(result);
+			return self.complete_frame(program, result);
 		}
 
 		let instruction = code_body.instructions[instruction_index].clone();
@@ -279,18 +279,7 @@ impl VirtualMachine {
 		self.frames[frame_index].locals = locals;
 		let outcome = match outcome {
 			Ok(outcome) => outcome,
-			Err(error) => {
-				let rollback_result = self.rollback_active_transactions(error.instruction_index);
-				let mut error = self.enrich_vm_error(program, error);
-				if let Err(rollback_error) = rollback_result {
-					error.message = format!(
-						"{} Also failed to roll back active transaction(s): {}",
-						error.message,
-						rollback_error.message,
-					);
-				}
-				return Err(error);
-			}
+			Err(error) => return Err(self.execution_error(program, error)),
 		};
 
 		match outcome {
@@ -311,7 +300,7 @@ impl VirtualMachine {
 				self.frames[frame_index].instruction_index = next_instruction_index.unwrap_or(instruction_index + 1);
 				Ok(VmExecutionState::Running)
 			}
-			ExecutionOutcome::Return(result) => self.complete_frame(result),
+			ExecutionOutcome::Return(result) => self.complete_frame(program, result),
 		}
 	}
 
@@ -343,8 +332,17 @@ impl VirtualMachine {
 
 	fn complete_frame(
 		&mut self,
+		program: &Program,
 		result: Option<Value>,
 	) -> Result<VmExecutionState, VmError> {
+		let frame = self.frames.last_mut().expect("A frame must exist while completing execution.");
+		let instruction_index = frame.instruction_index;
+		let mut locals = std::mem::take(&mut frame.locals);
+		while let Some(value) = locals.pop() {
+			if let Err(error) = self.release_record_if_unreferenced(value, &locals, instruction_index) {
+				return Err(self.execution_error(program, error));
+			}
+		}
 		Ok(self.finish_current_frame(result))
 	}
 
@@ -353,30 +351,31 @@ impl VirtualMachine {
 		record: RecordPointerValue,
 		instruction_index: usize,
 	) -> Result<Value, VmError> {
-		if !record.exists {
+		if !record.buffer().exists {
 			return Err(vm_error(
 				instruction_index,
 				String::from("Cannot create a record from a record pointer that does not reference a record."),
 			));
 		}
 
-		if record.locked {
+		if record.buffer().locked {
 			return Err(vm_error(
 				instruction_index,
 				String::from("Cannot create a record from a locked record pointer."),
 			));
 		}
 
-		if record.persisted {
+		if record.buffer().persisted {
 			return Err(vm_error(
 				instruction_index,
 				String::from("Cannot create a record that has already been created."),
 			));
 		}
 
-		self.database_runtime.create_record(record)
-			.map(Value::RecordPointer)
-			.map_err(|message| vm_error(instruction_index, message))
+		let updated = self.database_runtime.create_record(record.buffer().clone())
+			.map_err(|message| vm_error(instruction_index, message))?;
+		*record.buffer_mut() = updated;
+		Ok(Value::RecordPointer(record))
 	}
 
 	fn create_record_if_pending(
@@ -384,7 +383,7 @@ impl VirtualMachine {
 		record: RecordPointerValue,
 		instruction_index: usize,
 	) -> Result<Value, VmError> {
-		if record.persisted {
+		if record.buffer().persisted {
 			return Ok(Value::RecordPointer(record));
 		}
 
@@ -403,30 +402,40 @@ impl VirtualMachine {
 		record: RecordPointerValue,
 		instruction_index: usize,
 	) -> Result<Value, VmError> {
-		if !record.exists {
+		if !record.buffer().exists {
 			return Err(vm_error(
 				instruction_index,
 				String::from("Cannot delete a record pointer that does not reference a record."),
 			));
 		}
 
-		if record.locked {
+		if record.buffer().locked {
 			return Err(vm_error(
 				instruction_index,
 				String::from("Cannot delete a locked record pointer."),
 			));
 		}
 
-		if !record.persisted {
+		if !record.buffer().persisted {
 			return Err(vm_error(
 				instruction_index,
 				String::from("Cannot delete a record that has not been created."),
 			));
 		}
 
-		self.database_runtime.delete_record(record)
-			.map(Value::RecordPointer)
-			.map_err(|message| vm_error(instruction_index, message))
+		let updated = self.database_runtime.delete_record(record.buffer().clone())
+			.map_err(|message| vm_error(instruction_index, message))?;
+		*record.buffer_mut() = updated;
+		Ok(Value::RecordPointer(record))
+	}
+
+	fn execution_error(&mut self, program: &Program, error: VmError) -> VmError {
+		let rollback_result = self.rollback_active_transactions(error.instruction_index);
+		let mut error = self.enrich_vm_error(program, error);
+		if let Err(rollback_error) = rollback_result {
+			error.message = format!("{} Also failed to roll back active transaction(s): {}", error.message, rollback_error.message);
+		}
+		error
 	}
 
 	fn enrich_vm_error(&self, program: &Program, mut error: VmError) -> VmError {
@@ -572,7 +581,7 @@ impl VirtualMachine {
 						format!("Unary `exists` requires a record pointer operand, found `{}`.", type_name(&value)),
 					));
 				};
-				self.stack.push(Value::Boolean(record.exists));
+				self.stack.push(Value::Boolean(record.buffer().exists));
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::FieldPathExists(field_path) => {
@@ -683,7 +692,7 @@ impl VirtualMachine {
 						String::from("Projected database value requires a record pointer operand."),
 					));
 				};
-				let value = record.projected_values.get(value_id).cloned().ok_or(vm_error(
+				let value = record.buffer().projected_values.get(value_id).cloned().ok_or(vm_error(
 					instruction_index,
 					format!("Record pointer does not contain projected value {}.", value_id),
 				))?;
@@ -726,7 +735,7 @@ impl VirtualMachine {
 						format!("Unary `locked` requires a record pointer operand, found `{}`.", type_name(&value)),
 					));
 				};
-				self.stack.push(Value::Boolean(record.locked));
+				self.stack.push(Value::Boolean(record.buffer().locked));
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::MakeArray(element_count) => {
@@ -790,7 +799,7 @@ impl VirtualMachine {
 					);
 				}
 
-				self.stack.push(Value::RecordPointer(RecordPointerValue {
+				self.stack.push(Value::record_pointer(RecordBuffer {
 					column_names: field_names.clone(),
 					exists: true,
 					fields,
@@ -995,10 +1004,11 @@ impl VirtualMachine {
 				}
 
 				if let Value::Reference(reference) = locals[slot].clone() {
-					self.store_reference_value(reference, value, instruction_index)?;
+					self.store_reference_value(reference, value, locals, instruction_index)?;
 				}
 				else {
-					locals[slot] = value;
+					let previous = std::mem::replace(&mut locals[slot], value);
+					self.release_record_if_unreferenced(previous, locals, instruction_index)?;
 				}
 				Ok(ExecutionOutcome::Continue(None))
 			}
@@ -1161,7 +1171,7 @@ impl VirtualMachine {
 
 		match value {
 			Value::Boolean(value) => Ok(value),
-			Value::RecordPointer(record) => Ok(record.exists && !record.locked),
+			Value::RecordPointer(record) => Ok(record.buffer().exists && !record.buffer().locked),
 			Value::Null => Err(vm_error(
 				instruction_index,
 				String::from("Expected a `bool` or `record pointer` condition, found `null`."),
@@ -1633,7 +1643,25 @@ impl VirtualMachine {
 		}
 	}
 
-	fn store_reference_value(&mut self, reference: LocalReference, value: Value, instruction_index: usize) -> Result<(), VmError> {
+	fn release_record_if_unreferenced(&mut self, value: Value, locals: &[Value], instruction_index: usize) -> Result<(), VmError> {
+		let Value::RecordPointer(record) = value else { return Ok(()); };
+		// Only pointer variables retain a buffer for automatic writing. Query iterators,
+		// expression temporaries, and debugger snapshots are not language-level owners.
+		let retained = locals.iter().chain(self.frames.iter().flat_map(|frame| frame.locals.iter()))
+			.any(|value| matches!(value, Value::RecordPointer(other) if record.shares_buffer(other)));
+		if retained || !record.buffer().exists || record.buffer().locked {
+			return Ok(());
+		}
+		if !record.buffer().persisted {
+			self.create_record(record, instruction_index)?;
+		}
+		else {
+			self.update_record(record, true, instruction_index)?;
+		}
+		Ok(())
+	}
+
+	fn store_reference_value(&mut self, reference: LocalReference, value: Value, locals: &[Value], instruction_index: usize) -> Result<(), VmError> {
 		let target = {
 			let frame = self.frames.get(reference.frame_index).ok_or(vm_error(
 				instruction_index,
@@ -1646,14 +1674,14 @@ impl VirtualMachine {
 		};
 
 		match target {
-			Value::Reference(next_reference) => self.store_reference_value(next_reference, value, instruction_index),
+			Value::Reference(next_reference) => self.store_reference_value(next_reference, value, locals, instruction_index),
 			_ => {
 				let frame = self.frames.get_mut(reference.frame_index).ok_or(vm_error(
 					instruction_index,
 					String::from("Reference target frame is no longer available."),
 				))?;
-				frame.locals[reference.slot] = value;
-				Ok(())
+				let previous = std::mem::replace(&mut frame.locals[reference.slot], value);
+				self.release_record_if_unreferenced(previous, locals, instruction_index)
 			}
 		}
 	}
@@ -1682,34 +1710,35 @@ impl VirtualMachine {
 		only_if_changed: bool,
 		instruction_index: usize,
 	) -> Result<Value, VmError> {
-		if only_if_changed && !record.is_dirty {
+		if only_if_changed && !record.buffer().is_dirty {
 			return Ok(Value::RecordPointer(record));
 		}
 
-		if !record.exists {
+		if !record.buffer().exists {
 			return Err(vm_error(
 				instruction_index,
 				String::from("Cannot update a record pointer that does not reference a record."),
 			));
 		}
 
-		if record.locked {
+		if record.buffer().locked {
 			return Err(vm_error(
 				instruction_index,
 				String::from("Cannot update a locked record pointer."),
 			));
 		}
 
-		if !record.persisted {
+		if !record.buffer().persisted {
 			return Err(vm_error(
 				instruction_index,
 				String::from("Cannot update a record that has not been created."),
 			));
 		}
 
-		self.database_runtime.update_record(record)
-			.map(Value::RecordPointer)
-			.map_err(|message| vm_error(instruction_index, message))
+		let updated = self.database_runtime.update_record(record.buffer().clone())
+			.map_err(|message| vm_error(instruction_index, message))?;
+		*record.buffer_mut() = updated;
+		Ok(Value::RecordPointer(record))
 	}
 }
 
@@ -1915,7 +1944,7 @@ fn compare_values(lhs: Value, rhs: Value, instruction_index: usize, kind: Compar
 fn condition_value(value: Value, instruction_index: usize) -> Result<bool, VmError> {
 	match value {
 		Value::Boolean(value) => Ok(value),
-		Value::RecordPointer(record) => Ok(record.exists && !record.locked),
+		Value::RecordPointer(record) => Ok(record.buffer().exists && !record.buffer().locked),
 		Value::Null => Err(vm_error(
 			instruction_index,
 			String::from("Expected a `bool` or `record pointer` condition, found `null`."),
@@ -2219,7 +2248,7 @@ fn evaluate_debug_expression(expression: &Expr, frame: &VmStackFrame) -> Result<
 							format!("Unary `exists` requires a record pointer operand, found `{}`.", type_name(&value)),
 						));
 					};
-					Ok(Value::Boolean(record.exists))
+					Ok(Value::Boolean(record.buffer().exists))
 				}
 				UnaryOperator::Locked => {
 					let value = evaluate_debug_expression(&unary.operand, frame)?;
@@ -2229,7 +2258,7 @@ fn evaluate_debug_expression(expression: &Expr, frame: &VmStackFrame) -> Result<
 							format!("Unary `locked` requires a record pointer operand, found `{}`.", type_name(&value)),
 						));
 					};
-					Ok(Value::Boolean(record.locked))
+					Ok(Value::Boolean(record.buffer().locked))
 				}
 				UnaryOperator::Negate => {
 					let value = evaluate_debug_expression(&unary.operand, frame)?;
@@ -2278,6 +2307,7 @@ fn member_path_exists(mut value: Value, field_path: &[(String, bool)], instructi
 				field_value.clone()
 			}
 			Value::RecordPointer(record) => {
+			let record = record.buffer();
 				if !record.exists || record.locked {
 					return Ok(false);
 				}
@@ -2326,7 +2356,8 @@ fn group_boundary_built_in_value(
 	};
 
 	let normalized_key_name = normalize_record_field_name(last_key_name);
-	let Some(boundary) = record.group_boundaries.get(&normalized_key_name) else {
+	let buffer = record.buffer();
+	let Some(boundary) = buffer.group_boundaries.get(&normalized_key_name) else {
 		return Err(vm_error(
 			instruction_index,
 			format!("Grouping level `{last_key_name}` is not available for this record pointer."),
@@ -2474,6 +2505,7 @@ fn load_member_value(object: Value, field_name: &str, quoted: bool, instruction_
 			format!("Object does not contain a field named `{field_name}`."),
 		)),
 		Value::RecordPointer(record) => {
+			let record = record.buffer();
 			if !record.exists {
 				return Err(vm_error(
 					instruction_index,
@@ -2848,93 +2880,32 @@ fn store_field_path_into_record_pointer(
 	value: Value,
 	instruction_index: usize,
 ) -> Result<Value, VmError> {
-	if !record.exists {
-		return Err(vm_error(
-			instruction_index,
-			String::from("Cannot assign fields on a record pointer that does not reference a record."),
-		));
-	}
-
-	if record.locked {
-		return Err(vm_error(
-			instruction_index,
-			String::from("Cannot assign fields on a locked record pointer."),
-		));
-	}
-
-	let exists = record.exists;
-	let column_names = record.column_names;
-	let group_boundaries = record.group_boundaries;
-	let original_fields = record.original_fields;
-	let primary_key_column_names = record.primary_key_column_names;
-	let projected_values = record.projected_values;
-	let locked = record.locked;
-	let persisted = record.persisted;
-	let record_type = record.record_type;
-	let schema_is_implicit = record.schema_is_implicit;
-
-	let Some((field_name, remaining_path)) = field_path.split_first() else {
-		return Err(vm_error(
-			instruction_index,
-			String::from("Field assignment requires at least one field name."),
-		));
-	};
-
-	let normalized_field_name = normalize_record_field_name(field_name);
-	let mut fields = record.fields;
-
-	if remaining_path.is_empty() {
-		let Some(existing_field) = fields.get(&normalized_field_name) else {
-			return Err(vm_error(
-				instruction_index,
-				format!("Record pointer does not contain a field named `{field_name}`."),
-			));
+	{
+		let mut buffer = record.buffer_mut();
+		if !buffer.exists {
+			return Err(vm_error(instruction_index, String::from("Cannot assign fields on a record pointer that does not reference a record.")));
+		}
+		if buffer.locked {
+			return Err(vm_error(instruction_index, String::from("Cannot assign fields on a locked record pointer.")));
+		}
+		let Some((field_name, remaining_path)) = field_path.split_first() else {
+			return Err(vm_error(instruction_index, String::from("Field assignment requires at least one field name.")));
 		};
-		let data_type = existing_field.data_type().clone();
-
-		fields.insert(normalized_field_name, RecordFieldValue::Materialized { data_type, value });
-		return Ok(Value::RecordPointer(RecordPointerValue {
-			column_names,
-			exists,
-			fields,
-			group_boundaries,
-			is_dirty: true,
-			locked,
-			original_fields,
-			primary_key_column_names,
-			projected_values,
-			persisted,
-			record_type,
-			schema_is_implicit,
-		}));
+		let normalized_field_name = normalize_record_field_name(field_name);
+		let field = buffer.fields.get(&normalized_field_name).ok_or_else(|| vm_error(
+			instruction_index, format!("Record pointer does not contain a field named `{field_name}`."),
+		))?;
+		let data_type = field.data_type().clone();
+		let value = if remaining_path.is_empty() {
+			value
+		}
+		else {
+			store_field_path_into_value(resolve_record_field_value(field, instruction_index)?, remaining_path, value, instruction_index)?
+		};
+		buffer.fields.insert(normalized_field_name, RecordFieldValue::Materialized { data_type, value });
+		buffer.is_dirty = true;
 	}
-
-	let child = fields.get(&normalized_field_name).ok_or(vm_error(
-		instruction_index,
-		format!("Record pointer does not contain a field named `{field_name}`."),
-	))?;
-	let updated_child = store_field_path_into_value(
-		resolve_record_field_value(child, instruction_index)?,
-		remaining_path,
-		value,
-		instruction_index,
-	)?;
-	let data_type = child.data_type().clone();
-	fields.insert(normalized_field_name, RecordFieldValue::Materialized { data_type, value: updated_child });
-	Ok(Value::RecordPointer(RecordPointerValue {
-		column_names,
-		exists,
-		fields,
-		group_boundaries,
-		is_dirty: true,
-		locked,
-		original_fields,
-		primary_key_column_names,
-		projected_values,
-		persisted,
-		record_type,
-		schema_is_implicit,
-	}))
+	Ok(Value::RecordPointer(record))
 }
 
 fn store_field_path_into_value(
@@ -3052,6 +3023,7 @@ fn stringify_value(value: &Value) -> String {
 			result
 		}
 		Value::RecordPointer(record) => {
+			let record = record.buffer();
 			if !record.exists {
 				String::from("<record pointer: missing>")
 			}
@@ -3242,7 +3214,7 @@ mod tests {
 					is_const: false,
 					name: String::from("cust"),
 					slot: 0,
-					value: Value::RecordPointer(RecordPointerValue {
+					value: Value::record_pointer(RecordBuffer {
 						column_names: Vec::new(),
 						exists: true,
 						fields: BTreeMap::new(),
@@ -3321,7 +3293,7 @@ mod tests {
 					is_const: false,
 					name: String::from("cust"),
 					slot: 0,
-					value: Value::RecordPointer(RecordPointerValue {
+					value: Value::record_pointer(RecordBuffer {
 						column_names: vec![String::from("Name")],
 						exists: true,
 						fields: BTreeMap::from([

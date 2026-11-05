@@ -73,6 +73,12 @@ pub enum Value {
 	TimestampTz(TimestampTz),
 }
 
+impl Value {
+	pub fn record_pointer(buffer: RecordBuffer) -> Self {
+		Self::RecordPointer(RecordPointerValue::new(buffer))
+	}
+}
+
 impl Display for Value {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
@@ -113,6 +119,7 @@ impl Display for Value {
 				write!(f, "}}")
 			}
 			Value::RecordPointer(record) => {
+				let record = record.buffer();
 				if !record.exists {
 					write!(f, "<record pointer: missing>")
 				}
@@ -565,6 +572,29 @@ pub struct RecordGroupBoundary {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordPointerValue {
+	buffer: std::rc::Rc<std::cell::RefCell<RecordBuffer>>,
+}
+
+impl RecordPointerValue {
+	pub fn new(buffer: RecordBuffer) -> Self {
+		Self { buffer: std::rc::Rc::new(std::cell::RefCell::new(buffer)) }
+	}
+
+	pub fn buffer(&self) -> std::cell::Ref<'_, RecordBuffer> {
+		self.buffer.borrow()
+	}
+
+	pub(crate) fn buffer_mut(&self) -> std::cell::RefMut<'_, RecordBuffer> {
+		self.buffer.borrow_mut()
+	}
+
+	pub(crate) fn shares_buffer(&self, other: &Self) -> bool {
+		std::rc::Rc::ptr_eq(&self.buffer, &other.buffer)
+	}
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordBuffer {
 	pub column_names: Vec<String>,
 	pub exists: bool,
 	pub fields: BTreeMap<String, RecordFieldValue>,

@@ -21,13 +21,12 @@ pub struct Compiler {
 
 #[derive(Default)]
 struct EmissionState {
-	cleanup_scope_stack: Vec<Vec<PendingCreateCleanup>>,
+	cleanup_scope_stack: Vec<Vec<RecordPointerCleanup>>,
 	instructions: Vec<Instruction>,
 	local_scope_stack: Vec<Vec<usize>>,
 	locals: Vec<LocalVariableDebugInfo>,
 	positions: Vec<u32>,
 	transaction_scope_stack: Vec<PendingTransactionCleanup>,
-	update_cleanup_scope_stack: Vec<Vec<PendingUpdateCleanup>>,
 }
 
 #[derive(Default)]
@@ -35,15 +34,9 @@ struct LoopContext {
 	break_jump_indices: Vec<usize>,
 	cleanup_scope_depth: usize,
 	continue_jump_indices: Vec<usize>,
-	iteration_update_cleanup: Option<PendingUpdateCleanup>,
+	iteration_record_cleanup: Option<RecordPointerCleanup>,
 	loop_start: u32,
 	transaction_scope_depth: usize,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct PendingCreateCleanup {
-	position: usize,
-	slot: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,7 +45,7 @@ struct PendingTransactionCleanup {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct PendingUpdateCleanup {
+struct RecordPointerCleanup {
 	position: usize,
 	slot: u32,
 }
@@ -247,7 +240,7 @@ impl Compiler {
 				parameter.name.clone(),
 				slot,
 				semantic_program.display_data_type_name(data_type),
-				false,
+				matches!(parameter.data_type, FunctionParameterType::RecordPointer { is_mut: false, .. }),
 				0,
 			);
 		}
@@ -859,12 +852,11 @@ impl Compiler {
 					));
 				};
 				let cleanup_scope_depth = loop_context.cleanup_scope_depth;
-				let iteration_update_cleanup = loop_context.iteration_update_cleanup.clone();
+				let iteration_record_cleanup = loop_context.iteration_record_cleanup.clone();
 				let transaction_scope_depth = loop_context.transaction_scope_depth;
-				self.emit_pending_create_cleanups_from(emission, cleanup_scope_depth, *position);
-				self.emit_pending_update_cleanups_from(emission, cleanup_scope_depth, *position);
-				if let Some(cleanup) = &iteration_update_cleanup {
-					self.emit_pending_update_cleanup(emission, cleanup, *position);
+				self.emit_record_cleanups_from(emission, cleanup_scope_depth, *position);
+				if let Some(cleanup) = &iteration_record_cleanup {
+					self.emit_record_cleanup(emission, cleanup, *position);
 				}
 				self.emit_transaction_commits_from(emission, transaction_scope_depth, *position);
 				let loop_context = self.loop_stack.last_mut()
@@ -881,12 +873,11 @@ impl Compiler {
 					));
 				};
 				let cleanup_scope_depth = loop_context.cleanup_scope_depth;
-				let iteration_update_cleanup = loop_context.iteration_update_cleanup.clone();
+				let iteration_record_cleanup = loop_context.iteration_record_cleanup.clone();
 				let transaction_scope_depth = loop_context.transaction_scope_depth;
-				self.emit_pending_create_cleanups_from(emission, cleanup_scope_depth, *position);
-				self.emit_pending_update_cleanups_from(emission, cleanup_scope_depth, *position);
-				if let Some(cleanup) = &iteration_update_cleanup {
-					self.emit_pending_update_cleanup(emission, cleanup, *position);
+				self.emit_record_cleanups_from(emission, cleanup_scope_depth, *position);
+				if let Some(cleanup) = &iteration_record_cleanup {
+					self.emit_record_cleanup(emission, cleanup, *position);
 				}
 				self.emit_transaction_commits_from(emission, transaction_scope_depth, *position);
 				let loop_context = self.loop_stack.last_mut()
@@ -950,7 +941,7 @@ impl Compiler {
 					break_jump_indices: Vec::new(),
 					cleanup_scope_depth: emission.cleanup_scope_stack.len(),
 					continue_jump_indices: Vec::new(),
-					iteration_update_cleanup: None,
+					iteration_record_cleanup: None,
 					loop_start,
 					transaction_scope_depth: emission.transaction_scope_stack.len(),
 				});
@@ -1021,6 +1012,7 @@ impl Compiler {
 				self.compiled_queries.push(query);
 
 				self.enter_debug_scope(emission);
+				self.register_record_cleanup(emission, semantic_program, variable.position, variable_slot);
 
 				if let Some(limit) = limit {
 					let limit_slot = semantic_program.for_record_limit_slot(*position).ok_or(self.compile_error(
@@ -1039,15 +1031,10 @@ impl Compiler {
 					break_jump_indices: Vec::new(),
 					cleanup_scope_depth: emission.cleanup_scope_stack.len(),
 					continue_jump_indices: Vec::new(),
-					iteration_update_cleanup: if *is_mut {
-						Some(PendingUpdateCleanup {
-							position: variable.position,
-							slot: variable_slot,
-						})
-					}
-					else {
-						None
-					},
+					iteration_record_cleanup: Some(RecordPointerCleanup {
+						position: variable.position,
+						slot: variable_slot,
+					}),
 					loop_start,
 					transaction_scope_depth: emission.transaction_scope_stack.len(),
 				});
@@ -1076,16 +1063,14 @@ impl Compiler {
 
 				self.compile_statement(&Statement::Block(body.clone()), semantic_program, emission)?;
 
-				if *is_mut {
-					self.emit_pending_update_cleanup(
-						emission,
-						&PendingUpdateCleanup {
-							position: variable.position,
-							slot: variable_slot,
-						},
-						variable.position,
-					);
-				}
+				self.emit_record_cleanup(
+					emission,
+					&RecordPointerCleanup {
+						position: variable.position,
+						slot: variable_slot,
+					},
+					variable.position,
+				);
 
 				self.emit(emission, Instruction::Jump(loop_start), *position);
 
@@ -1136,6 +1121,7 @@ impl Compiler {
 						let jump_if_false_index = emission.instructions.len();
 						self.emit(emission, Instruction::JumpIfFalse(0), *position);
 						self.enter_debug_scope(emission);
+						self.register_record_cleanup(emission, semantic_program, *position, slot);
 						self.record_local_debug(
 							emission,
 							name.clone(),
@@ -1181,8 +1167,7 @@ impl Compiler {
 				))?;
 				self.compile_into(initial_value, semantic_program, emission);
 				self.emit(emission, Instruction::StoreLocal(slot), *position);
-				self.register_pending_create_cleanup(emission, semantic_program, *position, slot);
-				self.register_pending_update_cleanup(emission, semantic_program, *position, slot);
+				self.register_record_cleanup(emission, semantic_program, *position, slot);
 				self.record_local_debug(
 					emission,
 					name.clone(),
@@ -1197,14 +1182,12 @@ impl Compiler {
 			Statement::Return(ReturnStatement { value, .. }) => {
 				if let Some(value) = value {
 					self.compile_into(value, semantic_program, emission);
-					self.emit_all_pending_create_cleanups(emission, value.position());
-					self.emit_all_pending_update_cleanups(emission, value.position());
+					self.emit_all_record_cleanups(emission, value.position());
 					self.emit_all_transaction_commits(emission, value.position());
 					self.emit(emission, Instruction::Return, value.position());
 				}
 				else {
-					self.emit_all_pending_create_cleanups(emission, statement_position(statement));
-					self.emit_all_pending_update_cleanups(emission, statement_position(statement));
+					self.emit_all_record_cleanups(emission, statement_position(statement));
 					self.emit_all_transaction_commits(emission, statement_position(statement));
 					self.emit(emission, Instruction::ReturnNoValue, statement_position(statement));
 				}
@@ -1280,7 +1263,7 @@ impl Compiler {
 					break_jump_indices: Vec::new(),
 					cleanup_scope_depth: emission.cleanup_scope_stack.len(),
 					continue_jump_indices: Vec::new(),
-					iteration_update_cleanup: None,
+					iteration_record_cleanup: None,
 					loop_start,
 					transaction_scope_depth: emission.transaction_scope_stack.len(),
 				});
@@ -1315,12 +1298,8 @@ impl Compiler {
 		emission.positions.push(position.min(u32::MAX as usize) as u32);
 	}
 
-	fn emit_all_pending_create_cleanups(&self, emission: &mut EmissionState, position: usize) {
-		self.emit_pending_create_cleanups_from(emission, 0, position);
-	}
-
-	fn emit_all_pending_update_cleanups(&self, emission: &mut EmissionState, position: usize) {
-		self.emit_pending_update_cleanups_from(emission, 0, position);
+	fn emit_all_record_cleanups(&self, emission: &mut EmissionState, position: usize) {
+		self.emit_record_cleanups_from(emission, 0, position);
 	}
 
 	fn emit_all_transaction_commits(&self, emission: &mut EmissionState, position: usize) {
@@ -1470,18 +1449,17 @@ impl Compiler {
 		}
 	}
 
-	fn emit_pending_create_cleanup(
+	fn emit_record_cleanup(
 		&self,
 		emission: &mut EmissionState,
-		cleanup: &PendingCreateCleanup,
+		cleanup: &RecordPointerCleanup,
 		position: usize,
 	) {
-		self.emit(emission, Instruction::LoadLocal(cleanup.slot), position);
-		self.emit(emission, Instruction::CreateRecordIfPending, position);
+		self.emit(emission, Instruction::PushNull, position);
 		self.emit(emission, Instruction::StoreLocal(cleanup.slot), position);
 	}
 
-	fn emit_pending_create_cleanups_from(
+	fn emit_record_cleanups_from(
 		&self,
 		emission: &mut EmissionState,
 		scope_depth: usize,
@@ -1493,34 +1471,7 @@ impl Compiler {
 			.collect::<Vec<_>>();
 
 		for cleanup in pending_cleanups.iter().rev() {
-			self.emit_pending_create_cleanup(emission, cleanup, position);
-		}
-	}
-
-	fn emit_pending_update_cleanup(
-		&self,
-		emission: &mut EmissionState,
-		cleanup: &PendingUpdateCleanup,
-		position: usize,
-	) {
-		self.emit(emission, Instruction::LoadLocal(cleanup.slot), position);
-		self.emit(emission, Instruction::UpdateRecordIfChanged, position);
-		self.emit(emission, Instruction::StoreLocal(cleanup.slot), position);
-	}
-
-	fn emit_pending_update_cleanups_from(
-		&self,
-		emission: &mut EmissionState,
-		scope_depth: usize,
-		position: usize,
-	) {
-		let pending_cleanups = emission.update_cleanup_scope_stack.iter()
-			.skip(scope_depth)
-			.flat_map(|scope| scope.iter().cloned())
-			.collect::<Vec<_>>();
-
-		for cleanup in pending_cleanups.iter().rev() {
-			self.emit_pending_update_cleanup(emission, cleanup, position);
+			self.emit_record_cleanup(emission, cleanup, position);
 		}
 	}
 
@@ -1543,18 +1494,12 @@ impl Compiler {
 	fn enter_debug_scope(&self, emission: &mut EmissionState) {
 		emission.cleanup_scope_stack.push(Vec::new());
 		emission.local_scope_stack.push(Vec::new());
-		emission.update_cleanup_scope_stack.push(Vec::new());
 	}
 
 	fn exit_debug_scope(&self, emission: &mut EmissionState) {
 		if let Some(pending_cleanups) = emission.cleanup_scope_stack.pop() {
 			for cleanup in pending_cleanups.iter().rev() {
-				self.emit_pending_create_cleanup(emission, cleanup, cleanup.position);
-			}
-		}
-		if let Some(pending_cleanups) = emission.update_cleanup_scope_stack.pop() {
-			for cleanup in pending_cleanups.iter().rev() {
-				self.emit_pending_update_cleanup(emission, cleanup, cleanup.position);
+				self.emit_record_cleanup(emission, cleanup, cleanup.position);
 			}
 		}
 
@@ -1602,46 +1547,19 @@ impl Compiler {
 		}
 	}
 
-	fn register_pending_create_cleanup(
+	fn register_record_cleanup(
 		&self,
 		emission: &mut EmissionState,
 		semantic_program: &SemanticProgram,
 		declaration_position: usize,
 		slot: u32,
 	) {
-		let Some(binding) = semantic_program.record_pointer_binding(declaration_position) else {
-			return;
-		};
-
-		if binding.initialization != RecordPointerInitialization::New {
+		if semantic_program.record_pointer_binding(declaration_position).is_none() {
 			return;
 		}
 
 		if let Some(scope) = emission.cleanup_scope_stack.last_mut() {
-			scope.push(PendingCreateCleanup {
-				position: declaration_position,
-				slot,
-			});
-		}
-	}
-
-	fn register_pending_update_cleanup(
-		&self,
-		emission: &mut EmissionState,
-		semantic_program: &SemanticProgram,
-		declaration_position: usize,
-		slot: u32,
-	) {
-		let Some(binding) = semantic_program.record_pointer_binding(declaration_position) else {
-			return;
-		};
-
-		if binding.initialization != RecordPointerInitialization::Existing || !binding.is_mutable {
-			return;
-		}
-
-		if let Some(scope) = emission.update_cleanup_scope_stack.last_mut() {
-			scope.push(PendingUpdateCleanup {
+			scope.push(RecordPointerCleanup {
 				position: declaration_position,
 				slot,
 			});

@@ -8,7 +8,7 @@ use super::records::locked_record_pointer;
 pub(super) fn lock_conflict_result(query: &SqlQuery) -> Option<Value> {
 	match &query.result_shape {
 		SqlQueryResultShape::RecordPointer(layout) => {
-			Some(Value::RecordPointer(locked_record_pointer(
+			Some(Value::record_pointer(locked_record_pointer(
 				query,
 				layout.known_schema().unwrap_or_default(),
 			)))
@@ -91,7 +91,7 @@ mod tests {
 			panic!("Expected locked record-pointer result.");
 		};
 
-		assert!(record.exists);
-		assert!(record.locked);
+		assert!(record.buffer().exists);
+		assert!(record.buffer().locked);
 	}
 }

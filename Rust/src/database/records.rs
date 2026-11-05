@@ -10,8 +10,8 @@ pub(super) struct LoadedRecord {
 	pub projected_values: BTreeMap<u32, Value>,
 }
 
-pub(super) fn empty_record_pointer(query: &SqlQuery, columns: &[QueryResultColumn]) -> RecordPointerValue {
-	RecordPointerValue {
+pub(super) fn empty_record_pointer(query: &SqlQuery, columns: &[QueryResultColumn]) -> RecordBuffer {
+	RecordBuffer {
 		column_names: columns.iter().map(|column| column.column_name.clone()).collect(),
 		exists: false,
 		fields: BTreeMap::new(),
@@ -34,8 +34,8 @@ pub(super) fn known_record_schema(layout: &QueryRecordLayout) -> Result<&[QueryR
 }
 
 #[cfg(any(test, feature = "driver-mysql", feature = "driver-postgresql"))]
-pub(super) fn locked_record_pointer(query: &SqlQuery, columns: &[QueryResultColumn]) -> RecordPointerValue {
-	RecordPointerValue {
+pub(super) fn locked_record_pointer(query: &SqlQuery, columns: &[QueryResultColumn]) -> RecordBuffer {
+	RecordBuffer {
 		column_names: columns.iter().map(|column| column.column_name.clone()).collect(),
 		exists: true,
 		fields: BTreeMap::new(),
@@ -86,8 +86,8 @@ pub(super) fn record_pointer(
 	original_fields: BTreeMap<String, RecordFieldValue>,
 	group_boundaries: BTreeMap<String, RecordGroupBoundary>,
 	projected_values: BTreeMap<u32, Value>,
-) -> RecordPointerValue {
-	RecordPointerValue {
+) -> RecordBuffer {
+	RecordBuffer {
 		column_names: columns.iter().map(|column| column.column_name.clone()).collect(),
 		exists: true,
 		fields,

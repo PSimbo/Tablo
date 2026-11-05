@@ -895,6 +895,7 @@ impl SemanticAnalyzer {
 							data_type: Self::built_in_validation_data_type(parameter.data_type)?,
 							has_default: false,
 							is_by_ref: false,
+							is_mutable_record: false,
 							is_variadic: parameter.is_variadic,
 							name: parameter.name.to_string(),
 							sequence: None,
@@ -1499,6 +1500,7 @@ impl SemanticAnalyzer {
 				data_type: parameter_type,
 				has_default: parameter.default_value.is_some(),
 				is_by_ref: parameter.is_by_ref,
+				is_mutable_record: matches!(parameter.data_type, FunctionParameterType::RecordPointer { is_mut: true, .. }),
 				is_variadic: parameter.is_variadic,
 				name: parameter.name.clone(),
 				sequence,
@@ -1580,7 +1582,8 @@ impl SemanticAnalyzer {
 					}
 					(None, DataType::RecordPointer(record_pointer)) => {
 						format!(
-							"rec {}.{}.{}",
+							"rec {}{}.{}.{}",
+							if parameter.is_mutable_record { "mut " } else { "" },
 							record_pointer.database_name,
 							record_pointer.schema_name,
 							record_pointer.table_name,
@@ -2280,10 +2283,15 @@ impl SemanticAnalyzer {
 							format!("Variable `{}` is not declared in this scope.", identifier.name),
 						))?;
 
-						if local.is_const {
+						if local.is_const && (!matches!(parameter.data_type, DataType::RecordPointer(_)) || parameter.is_mutable_record) {
 							return Err(self.compile_error(
 								argument.position,
-								format!("Constant `{}` cannot be passed by reference.", identifier.name),
+								if parameter.is_mutable_record {
+									format!("Parameter `{}` requires a mutable record pointer, but `{}` is immutable.", parameter.name, identifier.name)
+								}
+								else {
+									format!("Constant `{}` cannot be passed by reference.", identifier.name)
+								},
 							));
 						}
 
@@ -2483,11 +2491,13 @@ impl SemanticAnalyzer {
 								));
 							}
 
-							let value_type = self.infer_expression_type(value)?;
-
-							if matches!(local.data_type.without_nullability(), DataType::RecordPointer(_)) {
-								self.record_record_pointer_escape(value);
+							let value_type = if matches!(local.data_type.without_nullability(), DataType::RecordPointer(_)) {
+								self.validate_mutable_record_source(value)?;
+								self.infer_expression_type_with_find_lock_mode(value, RecordLockMode::UpdateNoWait)?
 							}
+							else {
+								self.infer_expression_type(value)?
+							};
 
 							self.assignment_result_type(*operator, &local.data_type, &value_type, expression.position(), value.position())
 						}
@@ -3011,6 +3021,18 @@ impl SemanticAnalyzer {
 		let result = self.infer_expression_type(expression);
 		self.current_non_null_assumptions.pop();
 		result
+	}
+
+	fn validate_mutable_record_source(&self, expression: &Expr) -> Result<(), CompileError> {
+		if matches!(expression, Expr::Find(_) | Expr::New(_)) {
+			Ok(())
+		}
+		else {
+			Err(self.compile_error(
+				expression.position(),
+				String::from("A mutable record pointer must obtain a new record buffer from a query or `new`; it cannot copy an existing record pointer."),
+			))
+		}
 	}
 
 	fn infer_expression_type_with_find_lock_mode(
@@ -4941,7 +4963,7 @@ impl SemanticAnalyzer {
 		parameter: &FunctionParameter,
 	) -> Result<(DataType, Option<ResolvedSequenceReference>), CompileError> {
 		match &parameter.data_type {
-			FunctionParameterType::RecordPointer(table) => {
+			FunctionParameterType::RecordPointer { table, .. } => {
 				let resolved_table = self.resolve_table_reference(table)?;
 				Ok((DataType::RecordPointer(RecordPointerType {
 					database_name: resolved_table.database().name().to_string(),
@@ -5846,7 +5868,7 @@ impl SemanticAnalyzer {
 				parameter.position,
 				record_pointer.clone(),
 				RecordPointerInitialization::Existing,
-				true,
+				matches!(parameter.data_type, FunctionParameterType::RecordPointer { is_mut: true, .. }),
 				RecordPointerOrigin::Parameter,
 				None,
 			);
@@ -5854,7 +5876,7 @@ impl SemanticAnalyzer {
 		self.declare_local(parameter.name.clone(), LocalBinding {
 			declaration_position: parameter.position,
 			data_type: parameter_type,
-			is_const: false,
+			is_const: matches!(parameter.data_type, FunctionParameterType::RecordPointer { is_mut: false, .. }),
 			slot,
 		});
 		if let Some(sequence) = sequence {
@@ -6277,7 +6299,7 @@ impl SemanticAnalyzer {
 
 				Ok(())
 			}
-			Statement::Create(CreateStatement { position, target }) => {
+			Statement::Create(CreateStatement { target, .. }) => {
 				let local = self.lookup_local(&target.name).ok_or(self.compile_error(
 					target.position,
 					format!("Variable `{}` is not declared in this scope.", target.name),
@@ -6295,18 +6317,6 @@ impl SemanticAnalyzer {
 					return Err(self.compile_error(
 						target.position,
 						format!("`create` requires a mutable record pointer, but `{}` is immutable.", target.name),
-					));
-				}
-
-				let binding = self.semantic_program.record_pointer_binding(local.declaration_position).ok_or(self.compile_error(
-					*position,
-					String::from("Internal error: missing record pointer binding metadata for `create` statement."),
-				))?;
-
-				if binding.initialization != RecordPointerInitialization::New {
-					return Err(self.compile_error(
-						target.position,
-						String::from("`create` requires a record pointer declared from a `new` expression."),
 					));
 				}
 
@@ -6630,6 +6640,9 @@ impl SemanticAnalyzer {
 						),
 					));
 				};
+				if *is_mut {
+					self.validate_mutable_record_source(initial_value)?;
+				}
 				self.record_record_pointer_escape(initial_value);
 
 				let slot = self.next_local_slot;
@@ -7234,6 +7247,7 @@ struct FunctionParameterSignature {
 	data_type: DataType,
 	has_default: bool,
 	is_by_ref: bool,
+	is_mutable_record: bool,
 	is_variadic: bool,
 	name: String,
 	sequence: Option<ResolvedSequenceReference>,
@@ -7771,12 +7785,12 @@ mod tests {
 		let program = parse_program(
 			concat!(
 				"with exampledb;\n",
-				"fn Visit(cust: rec Customers) {}\n",
+				"fn Visit(cust: &rec Customers) {}\n",
 				"fn Main(args: [text]): int {\n",
 				"  rec cust = find first Customers;\n",
 				"  var present: bool = exists cust;\n",
 				"  return 0;\n",
-				"  Visit(cust);\n",
+				"  Visit(&cust);\n",
 				"}",
 			),
 		);
@@ -8765,12 +8779,12 @@ mod tests {
 		let program = parse_program(
 			concat!(
 				"with exampledb;\n",
-				"fn Visit(cust: rec Customers) {}\n",
+				"fn Visit(cust: &rec Customers) {}\n",
 				"fn Borrow(cust: &rec Customers) {}\n",
 				"fn Main(args: [text]): int {\n",
 				"  rec custValue = find first Customers;\n",
 				"  rec mut custRef = find first Customers;\n",
-				"  Visit(custValue);\n",
+				"  Visit(&custValue);\n",
 				"  Borrow(&custRef);\n",
 				"  return 0;\n",
 				"}",
@@ -9164,7 +9178,7 @@ mod tests {
 			"ExampleDb",
 		);
 		let program = parse_program(
-			"with exampledb;\nfn Visit(cust: rec Customers, other: &rec Customers) {}"
+			"with exampledb;\nfn Visit(cust: &rec Customers, other: &rec mut Customers) {}"
 		);
 		let first_parameter = &program.functions[0].parameters[0];
 		let second_parameter = &program.functions[0].parameters[1];
@@ -9176,7 +9190,7 @@ mod tests {
 
 		assert_eq!(first_binding.origin, RecordPointerOrigin::Parameter);
 		assert_eq!(second_binding.origin, RecordPointerOrigin::Parameter);
-		assert!(first_binding.is_mutable);
+		assert!(!first_binding.is_mutable);
 		assert!(second_binding.is_mutable);
 		assert!(first_binding.assigned_fields.is_empty());
 		assert!(second_binding.assigned_fields.is_empty());
@@ -9323,7 +9337,7 @@ mod tests {
 	}
 
 	#[test]
-	fn rejects_create_statement_for_non_new_record_pointer() {
+	fn accepts_create_statement_after_record_pointer_reassignment() {
 		let schema = sqlite_test_schema(
 			r#"
 				database ExampleDb;
@@ -9335,12 +9349,10 @@ mod tests {
 			"ExampleDb",
 		);
 		let program = parse_program(
-			"with exampledb;\nfn Main(args: [text]): int { rec mut cust = find first Customers where Id == 1; create cust; return 0; }"
+			"with exampledb;\nfn Main(args: [text]): int { rec mut cust = find first Customers where Id == 1; cust = new Customers; create cust; return 0; }"
 		);
 		let mut analyzer = SemanticAnalyzer::new();
-		let error = analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap_err();
-
-		assert_eq!(error.message, "`create` requires a record pointer declared from a `new` expression.");
+		analyzer.analyze_standalone_program_with_schema(&program, Some(&schema)).unwrap();
 	}
 
 	#[test]
@@ -9595,6 +9607,7 @@ mod tests {
 				data_type: DataType::Array(Box::new(DataType::Int)),
 				has_default: false,
 				is_by_ref: false,
+				is_mutable_record: false,
 				is_variadic: true,
 				name: String::from("values"),
 				sequence: None,

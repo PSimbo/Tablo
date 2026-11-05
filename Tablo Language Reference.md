@@ -1336,7 +1336,7 @@ The following query syntax is valid for `count` statements:
 
 ### Create Statements
 
-For the creation of new database records, a mutable record pointer must first be declared and assigned using a `new` expression. It is not valid to omit the assignment.
+For the creation of new database records, a mutable record pointer must first obtain a record buffer using a `new` expression, either in its declaration or through reassignment. It is not valid to omit the initial assignment. `create` may also be used through an `&rec mut` parameter. The runtime checks the current record buffer: attempting to create an already persisted, missing, or locked record produces a runtime error.
 
 With the new record pointer, field values may be assigned as required. Finally, the `create` keyword is used to commit the new record to the database. If the database table contains required fields that have not been assigned a value then a compiler warning is produced. A pending new record is automatically created when normal scope exit or reassignment releases the last pointer to its record buffer. Normal scope exit includes reaching the end of the scope or leaving it through `return` or `break`. Derived immutable pointers can postpone this cleanup by retaining the buffer. No automatic create is performed during runtime-error unwinding. An enclosing transaction still controls whether a database write is committed or rolled back.
 

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::query::{ LoweredBackendQuery, SqlQuery };
 use crate::schema::DatabaseBackend;
-use crate::value::{ RecordPointerValue, Value };
+use crate::value::{ RecordBuffer, Value };
 
 use super::config::*;
 
@@ -10,8 +10,8 @@ use super::config::*;
 pub(super) trait DatabaseDriver {
 	fn advance_sequence(&mut self, schema_is_implicit: bool, schema_name: &str, sequence_name: &str) -> Result<i64, String>;
 	fn commit_transaction(&mut self, target_depth: usize, savepoint_name: &str) -> Result<(), String>;
-	fn create_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String>;
-	fn delete_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String>;
+	fn create_record(&mut self, record: RecordBuffer) -> Result<RecordBuffer, String>;
+	fn delete_record(&mut self, record: RecordBuffer) -> Result<RecordBuffer, String>;
 	fn execute_query(&mut self, query: &SqlQuery, parameters: Vec<Value>) -> Result<Value, String>;
 	fn load_sequence_current(&mut self, schema_is_implicit: bool, schema_name: &str, sequence_name: &str) -> Result<i64, String>;
 	fn rollback_transaction(&mut self, target_depth: usize, savepoint_name: &str) -> Result<(), String>;
@@ -23,7 +23,7 @@ pub(super) trait DatabaseDriver {
 		value: i64,
 	) -> Result<(), String>;
 	fn sync_transactions(&mut self, transaction_names: &[String]) -> Result<(), String>;
-	fn update_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String>;
+	fn update_record(&mut self, record: RecordBuffer) -> Result<RecordBuffer, String>;
 }
 
 pub(crate) struct DatabaseRuntime {
@@ -73,11 +73,11 @@ impl DatabaseRuntime {
 		Ok(())
 	}
 
-	pub(crate) fn create_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String> {
+	pub(crate) fn create_record(&mut self, record: RecordBuffer) -> Result<RecordBuffer, String> {
 		self.session_mut(&record.record_type.database_name)?.create_record(record)
 	}
 
-	pub(crate) fn delete_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String> {
+	pub(crate) fn delete_record(&mut self, record: RecordBuffer) -> Result<RecordBuffer, String> {
 		self.session_mut(&record.record_type.database_name)?.delete_record(record)
 	}
 
@@ -184,7 +184,7 @@ impl DatabaseRuntime {
 		self.session_mut(database_name)?.store_sequence_current(schema_is_implicit, schema_name, sequence_name, value)
 	}
 
-	pub(crate) fn update_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String> {
+	pub(crate) fn update_record(&mut self, record: RecordBuffer) -> Result<RecordBuffer, String> {
 		self.session_mut(&record.record_type.database_name)?.update_record(record)
 	}
 

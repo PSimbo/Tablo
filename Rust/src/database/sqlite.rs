@@ -81,7 +81,7 @@ impl DatabaseDriver for SqliteSession {
 		})
 	}
 
-	fn create_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String> {
+	fn create_record(&mut self, record: RecordBuffer) -> Result<RecordBuffer, String> {
 		let write = create_record_write(&record, WriteDialect::Sqlite)?;
 		let parameter_values = write.parameters.into_iter()
 			.map(runtime_value_to_sqlite)
@@ -93,7 +93,7 @@ impl DatabaseDriver for SqliteSession {
 		Ok(mark_record_created(record))
 	}
 
-	fn delete_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String> {
+	fn delete_record(&mut self, record: RecordBuffer) -> Result<RecordBuffer, String> {
 		let write = delete_record_write(&record, WriteDialect::Sqlite)?;
 		let parameter_values = write.parameters.into_iter()
 			.map(runtime_value_to_sqlite)
@@ -122,11 +122,11 @@ impl DatabaseDriver for SqliteSession {
 				let mut rows = statement.query(params_from_iter(parameters))
 					.map_err(|error| format!("Failed to execute SQLite query: {error}"))?;
 				let Some(row) = rows.next().map_err(|error| format!("Failed to read SQLite query result: {error}"))? else {
-					return Ok(Value::RecordPointer(empty_record_pointer(query, schema)));
+					return Ok(Value::record_pointer(empty_record_pointer(query, schema)));
 				};
 				let fields = load_record_fields(row, &selected_columns)?;
 				let original_fields = fields.clone();
-				Ok(Value::RecordPointer(record_pointer(
+				Ok(Value::record_pointer(record_pointer(
 					query,
 					schema,
 					fields,
@@ -154,7 +154,7 @@ impl DatabaseDriver for SqliteSession {
 
 				let boundaries = record_group_boundaries(&loaded_records, &query.group_by);
 				let records = loaded_records.into_iter().enumerate()
-					.map(|(index, loaded)| Value::RecordPointer(record_pointer(
+					.map(|(index, loaded)| Value::record_pointer(record_pointer(
 						query,
 						schema,
 						loaded.fields,
@@ -214,7 +214,7 @@ impl DatabaseDriver for SqliteSession {
 		})
 	}
 
-	fn update_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String> {
+	fn update_record(&mut self, record: RecordBuffer) -> Result<RecordBuffer, String> {
 		let write = update_record_write(&record, WriteDialect::Sqlite)?;
 		let parameter_values = write.parameters.into_iter()
 			.map(runtime_value_to_sqlite)
@@ -466,8 +466,8 @@ mod tests {
 			let Value::RecordPointer(record) = value else {
 				panic!("Expected a record pointer.");
 			};
-			assert!(!record.fields.contains_key("__tablo_projected_7"));
-			record.projected_values.get(&7).cloned()
+			assert!(!record.buffer().fields.contains_key("__tablo_projected_7"));
+			record.buffer().projected_values.get(&7).cloned()
 		}).collect::<Vec<_>>();
 
 		assert_eq!(projected_counts, vec![Some(Value::Integer(2)), Some(Value::Integer(1))]);
@@ -514,10 +514,10 @@ mod tests {
 			panic!("Expected a record pointer.");
 		};
 
-		assert_eq!(record.column_names, vec![String::from("Id"), String::from("Name")]);
-		assert_eq!(record.primary_key_column_names, vec![String::from("Id")]);
-		assert!(!record.fields.contains_key("id"));
-		assert_eq!(record.fields.get("name").unwrap().materialize().unwrap(), Value::Text(String::from("Acme")));
+		assert_eq!(record.buffer().column_names, vec![String::from("Id"), String::from("Name")]);
+		assert_eq!(record.buffer().primary_key_column_names, vec![String::from("Id")]);
+		assert!(!record.buffer().fields.contains_key("id"));
+		assert_eq!(record.buffer().fields.get("name").unwrap().materialize().unwrap(), Value::Text(String::from("Acme")));
 	}
 
 	#[test]

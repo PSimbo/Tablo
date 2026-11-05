@@ -1645,7 +1645,11 @@ fn resolve_record_pointer_parameter_type<'a>(
 	let Some(rest) = text.strip_prefix("rec") else {
 		return None;
 	};
-	let table_reference = rest.trim_start();
+	let mut table_reference = rest.trim_start();
+	if let Some(rest) = table_reference.strip_prefix("mut")
+		&& rest.starts_with(char::is_whitespace) {
+		table_reference = rest.trim_start();
+	}
 	resolve_table_reference(table_reference, schema_catalog, active_databases)
 }
 
@@ -2074,6 +2078,20 @@ fn Main(args: [text]): int {
 
 		assert!(labels.contains(&String::from("Id")));
 		assert!(labels.contains(&String::from("Name")));
+	}
+
+	#[test]
+	fn member_completion_items_include_record_reference_parameter_fields() {
+		let schema = read_schema_catalog_from_str(
+			"database ExampleDb; schema Main implicit; create table Customers (Id int, Name text);",
+		).unwrap();
+		for parameter_type in ["&rec Customers", "&rec mut Customers", "&rec mut ExampleDb.Main.Customers"] {
+			let source = format!("with ExampleDb; fn Visit(cust: {parameter_type}) {{ cust.");
+			let items = member_completion_items(&source, source.len(), Some(&schema)).unwrap();
+			let labels = items.iter().map(|item| item.label.as_str()).collect::<Vec<_>>();
+			assert!(labels.contains(&"Id"), "{parameter_type}");
+			assert!(labels.contains(&"Name"), "{parameter_type}");
+		}
 	}
 
 	#[test]

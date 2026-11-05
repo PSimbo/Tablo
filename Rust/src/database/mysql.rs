@@ -53,7 +53,7 @@ impl DatabaseDriver for MySqlSession {
 		})
 	}
 
-	fn create_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String> {
+	fn create_record(&mut self, record: RecordBuffer) -> Result<RecordBuffer, String> {
 		let write = create_record_write(&record, WriteDialect::MySql)?;
 		let affected_rows = execute_record_write(&mut self.connection, "create", write)?;
 
@@ -61,7 +61,7 @@ impl DatabaseDriver for MySqlSession {
 		Ok(mark_record_created(record))
 	}
 
-	fn delete_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String> {
+	fn delete_record(&mut self, record: RecordBuffer) -> Result<RecordBuffer, String> {
 		let write = delete_record_write(&record, WriteDialect::MySql)?;
 		let affected_rows = execute_record_write(&mut self.connection, "delete", write)?;
 
@@ -97,11 +97,11 @@ impl DatabaseDriver for MySqlSession {
 				let schema = known_record_schema(layout)?;
 				let selected_columns = selected_record_columns(layout)?;
 				let Some(row) = rows.first() else {
-					return Ok(Value::RecordPointer(empty_record_pointer(query, schema)));
+					return Ok(Value::record_pointer(empty_record_pointer(query, schema)));
 				};
 				let fields = load_record_fields(row, &selected_columns)?;
 				let original_fields = fields.clone();
-				Ok(Value::RecordPointer(record_pointer(
+				Ok(Value::record_pointer(record_pointer(
 					query,
 					schema,
 					fields,
@@ -127,7 +127,7 @@ impl DatabaseDriver for MySqlSession {
 
 				let boundaries = record_group_boundaries(&loaded_records, &query.group_by);
 				let records = loaded_records.into_iter().enumerate()
-					.map(|(index, loaded)| Value::RecordPointer(record_pointer(
+					.map(|(index, loaded)| Value::record_pointer(record_pointer(
 						query,
 						schema,
 						loaded.fields,
@@ -169,7 +169,7 @@ impl DatabaseDriver for MySqlSession {
 		})
 	}
 
-	fn update_record(&mut self, record: RecordPointerValue) -> Result<RecordPointerValue, String> {
+	fn update_record(&mut self, record: RecordBuffer) -> Result<RecordBuffer, String> {
 		let write = update_record_write(&record, WriteDialect::MySql)?;
 		let affected_rows = execute_record_write(&mut self.connection, "update", write)?;
 

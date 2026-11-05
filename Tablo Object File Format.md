@@ -283,6 +283,8 @@ The following payload abbreviations are used:
 | `75`   | `UpdateRecordIfChanged`  | none                                                                              |
 | `76`   | `Xor`                    | none                                                                              |
 
+Record pointer values share a record buffer. `StoreLocal` releases the previous pointer when it replaces a record pointer variable, including when the slot is reached through a reference parameter. If no other pointer variable retains that buffer, its pending insert or update is written at that point. Expression temporaries, query iterators, and debugger views do not retain buffers for this purpose. The compiler emits `PushNull` followed by `StoreLocal` to release record pointer variables on normal scope exit. These writes use the active transaction and are not performed during runtime-error unwinding. Explicit record writes update the shared buffer's status.
+
 `StoreJsonPath` encodes a `u32` component count, followed by components tagged `0` for a field (`text` name and quoted `bool`) or `1` for an index (no inline payload). Before execution the stack holds the JSON root, each integer index in path order, and the assigned value. The instruction returns the assigned JSON contents followed by the updated root; `StoreLocal` writes that root back. Indices are evaluated once in path order, followed by the assigned expression. Failed writes do not publish the updated root.
 
 `LoadIndex` also reads JSON arrays using one-based integer indices. It preserves JSON-domain contents for subsequent access or typed conversion, and rejects out-of-bounds indices and non-array JSON values. No additional opcode or version change is needed for JSON indexing.

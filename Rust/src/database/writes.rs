@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use crate::ast::DataType;
 use crate::sql::*;
-use crate::value::{ RecordPointerValue, Value };
+use crate::value::{ RecordBuffer, Value };
 
 use super::records::normalize_name;
 
@@ -21,7 +21,7 @@ pub(super) struct RecordWrite {
 	pub statement: String,
 }
 
-pub(super) fn create_record_write(record: &RecordPointerValue, dialect: WriteDialect) -> Result<RecordWrite, String> {
+pub(super) fn create_record_write(record: &RecordBuffer, dialect: WriteDialect) -> Result<RecordWrite, String> {
 	let mut parameters = Vec::with_capacity(record.column_names.len());
 	let mut placeholders = Vec::with_capacity(record.column_names.len());
 
@@ -44,7 +44,7 @@ pub(super) fn create_record_write(record: &RecordPointerValue, dialect: WriteDia
 	Ok(RecordWrite { parameters, statement })
 }
 
-pub(super) fn delete_record_write(record: &RecordPointerValue, dialect: WriteDialect) -> Result<RecordWrite, String> {
+pub(super) fn delete_record_write(record: &RecordBuffer, dialect: WriteDialect) -> Result<RecordWrite, String> {
 	let identity_columns = identity_column_names(record);
 	let mut parameters = Vec::with_capacity(identity_columns.len());
 	let mut predicates = Vec::with_capacity(identity_columns.len());
@@ -75,14 +75,14 @@ pub(super) fn expect_one_affected_row(
 	}
 }
 
-pub(super) fn mark_record_created(mut record: RecordPointerValue) -> RecordPointerValue {
+pub(super) fn mark_record_created(mut record: RecordBuffer) -> RecordBuffer {
 	record.is_dirty = false;
 	record.original_fields = record.fields.clone();
 	record.persisted = true;
 	record
 }
 
-pub(super) fn mark_record_deleted(mut record: RecordPointerValue) -> RecordPointerValue {
+pub(super) fn mark_record_deleted(mut record: RecordBuffer) -> RecordBuffer {
 	record.exists = false;
 	record.fields.clear();
 	record.is_dirty = false;
@@ -93,13 +93,13 @@ pub(super) fn mark_record_deleted(mut record: RecordPointerValue) -> RecordPoint
 	record
 }
 
-pub(super) fn mark_record_updated(mut record: RecordPointerValue) -> RecordPointerValue {
+pub(super) fn mark_record_updated(mut record: RecordBuffer) -> RecordBuffer {
 	record.is_dirty = false;
 	record.original_fields = record.fields.clone();
 	record
 }
 
-pub(super) fn update_record_write(record: &RecordPointerValue, dialect: WriteDialect) -> Result<RecordWrite, String> {
+pub(super) fn update_record_write(record: &RecordBuffer, dialect: WriteDialect) -> Result<RecordWrite, String> {
 	let identity_columns = identity_column_names(record);
 	let assignment_columns = update_assignment_column_names(record);
 	let mut parameters = Vec::with_capacity(assignment_columns.len() + identity_columns.len());
@@ -135,7 +135,7 @@ pub(super) fn update_record_write(record: &RecordPointerValue, dialect: WriteDia
 	})
 }
 
-fn identity_column_names(record: &RecordPointerValue) -> &[String] {
+fn identity_column_names(record: &RecordBuffer) -> &[String] {
 	if record.primary_key_column_names.is_empty() { &record.column_names } else { &record.primary_key_column_names }
 }
 
@@ -177,7 +177,7 @@ fn record_field<'a>(
 	})
 }
 
-fn table_source(record: &RecordPointerValue, dialect: WriteDialect) -> String {
+fn table_source(record: &RecordBuffer, dialect: WriteDialect) -> String {
 	let table_name = quoted_identifier(dialect, &record.record_type.table_name);
 
 	if record.schema_is_implicit {
@@ -192,7 +192,7 @@ fn table_source(record: &RecordPointerValue, dialect: WriteDialect) -> String {
 	}
 }
 
-fn update_assignment_column_names(record: &RecordPointerValue) -> Vec<&String> {
+fn update_assignment_column_names(record: &RecordBuffer) -> Vec<&String> {
 	let available_columns = record.column_names.iter()
 		.filter(|column_name| record.fields.contains_key(&normalize_name(column_name)))
 		.collect::<Vec<_>>();
@@ -301,7 +301,7 @@ mod tests {
 		assert_eq!(updated.original_fields, updated.fields);
 	}
 
-	fn test_record() -> RecordPointerValue {
+	fn test_record() -> RecordBuffer {
 		let fields = BTreeMap::from([
 			(
 				String::from("id"),
@@ -319,7 +319,7 @@ mod tests {
 			),
 		]);
 
-		RecordPointerValue {
+		RecordBuffer {
 			column_names: vec![String::from("Id"), String::from("Name")],
 			exists: true,
 			fields: fields.clone(),

@@ -871,7 +871,17 @@ impl Parser {
 		};
 		let data_type = if self.current().is_some_and(|token| token.kind == TokenKind::RecKeyword) {
 			self.next();
-			FunctionParameterType::RecordPointer(self.parse_table_reference()?)
+			if !is_by_ref {
+				return Err(ParseError {
+					message: String::from("Record pointer parameters must be passed by reference using `&rec`."),
+					position: name.start,
+				});
+			}
+			let is_mut = self.current().is_some_and(|token| token.kind == TokenKind::MutKeyword);
+			if is_mut {
+				self.next();
+			}
+			FunctionParameterType::RecordPointer { table: self.parse_table_reference()?, is_mut }
 		}
 		else if self.current().is_some_and(|token| token.kind == TokenKind::SeqKeyword) {
 			self.next();
@@ -2674,8 +2684,8 @@ mod tests {
 	fn normalize_function_parameter(parameter: FunctionParameter) -> FunctionParameter {
 		FunctionParameter {
 			data_type: match parameter.data_type {
-				FunctionParameterType::RecordPointer(table) => {
-					FunctionParameterType::RecordPointer(normalize_table_reference(table))
+				FunctionParameterType::RecordPointer { table, is_mut } => {
+					FunctionParameterType::RecordPointer { table: normalize_table_reference(table), is_mut }
 				}
 				FunctionParameterType::Sequence(sequence) => {
 					FunctionParameterType::Sequence(normalize_sequence_reference(sequence))
@@ -5648,7 +5658,7 @@ mod tests {
 	#[test]
 	fn parses_record_pointer_function_parameters() {
 		assert_eq!(
-			parse_program("fn touch(cust: rec customers, target: &rec ExampleDb.Main.Customers) {}"),
+			parse_program("fn touch(cust: &rec customers, target: &rec mut ExampleDb.Main.Customers) {}"),
 			Program {
 				functions: vec![
 					FunctionDeclaration {
@@ -5659,7 +5669,7 @@ mod tests {
 						name: String::from("touch"),
 						parameters: vec![
 							FunctionParameter {
-								data_type: FunctionParameterType::RecordPointer(TableReference {
+								data_type: FunctionParameterType::RecordPointer { table: TableReference {
 									components: vec![
 										IdentifierExpr {
 											name: String::from("customers"),
@@ -5667,15 +5677,15 @@ mod tests {
 										},
 									],
 									position: 0,
-								}),
+								}, is_mut: false },
 								default_value: None,
-								is_by_ref: false,
+								is_by_ref: true,
 								is_variadic: false,
 								name: String::from("cust"),
 								position: 0,
 							},
 							FunctionParameter {
-								data_type: FunctionParameterType::RecordPointer(TableReference {
+								data_type: FunctionParameterType::RecordPointer { table: TableReference {
 									components: vec![
 										IdentifierExpr {
 											name: String::from("ExampleDb"),
@@ -5691,7 +5701,7 @@ mod tests {
 										},
 									],
 									position: 0,
-								}),
+								}, is_mut: true },
 								default_value: None,
 								is_by_ref: true,
 								is_variadic: false,

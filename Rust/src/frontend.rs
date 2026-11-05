@@ -7416,6 +7416,349 @@ mod tests {
 	}
 
 	#[test]
+	fn rejects_record_pointer_parameters_passed_by_value() {
+		for parameter in ["cust: rec Customers", "cust: rec mut Customers"] {
+			let error = compile_snippet_with_schema_fixture(
+				&format!("with ExampleDb; fn Visit({parameter}) {{}}"),
+				"database ExampleDb; schema Main implicit; create table Customers (Id int not null);",
+			).unwrap_err();
+			assert!(error.to_string().contains("Record pointer parameters must be passed by reference using `&rec`."));
+		}
+	}
+
+	#[test]
+	fn rejects_mutation_through_read_only_record_parameters() {
+		for (body, expected) in [
+			("cust.Name = 'Changed';", "Constant `cust` cannot be assigned"),
+			("cust = find first Customers;", "Constant `cust` cannot be assigned"),
+			("create cust;", "`create` requires a mutable record pointer"),
+			("update cust;", "`update` requires a mutable record pointer"),
+			("delete cust;", "`delete` requires a mutable record pointer"),
+			("Write(&cust);", "requires a mutable record pointer, but `cust` is immutable"),
+			("rec mut copy = cust;", "cannot copy an existing record pointer"),
+			("rec mut copy = find first Customers; copy = cust;", "cannot copy an existing record pointer"),
+		] {
+			let source = format!("with ExampleDb; fn Write(cust: &rec mut Customers) {{}} fn Read(cust: &rec Customers) {{ {body} }}");
+			let error = compile_snippet_with_schema_fixture(
+				&source,
+				"database ExampleDb; schema Main implicit; create table Customers (Id int not null, Name text not null);",
+			).unwrap_err();
+			assert!(error.to_string().contains(expected), "{body}: {error}");
+		}
+	}
+
+	#[test]
+	fn checks_record_reference_arguments() {
+		for (body, expected) in [
+			("rec cust = find first Customers; Write(&cust);", "requires a mutable record pointer, but `cust` is immutable"),
+			("if rec cust = find first Customers { Write(&cust); }", "requires a mutable record pointer, but `cust` is immutable"),
+			("rec cust = find first Customers; Read(cust);", "must be passed by reference"),
+			("rec cust = find first Suppliers; Read(&cust);", "must have type"),
+		] {
+			let source = format!("with ExampleDb; fn Write(cust: &rec mut Customers) {{}} fn Read(cust: &rec Customers) {{}} {body}");
+			let error = compile_snippet_with_schema_fixture(
+				&source,
+				"database ExampleDb; schema Main implicit; create table Customers (Id int not null); create table Suppliers (Id int not null);",
+			).unwrap_err();
+			assert!(error.to_string().contains(expected), "{body}: {error}");
+		}
+	}
+
+	fn check_record_buffer_program(
+		test_name: &str,
+		source: &str,
+		expected: Result<i64, &str>,
+		expected_rows: &[(i64, &str)],
+		expected_writes: &[(&str, i64)],
+	) {
+		let database_path = create_sqlite_test_database(test_name, r#"
+			CREATE TABLE Customers (Id INTEGER PRIMARY KEY, Name TEXT NOT NULL);
+			INSERT INTO Customers VALUES (1, 'Ada'), (2, 'Grace');
+			CREATE TABLE Writes (Operation TEXT NOT NULL, Id INTEGER NOT NULL);
+			CREATE TRIGGER LogCreate AFTER INSERT ON Customers BEGIN INSERT INTO Writes VALUES ('create', NEW.Id); END;
+			CREATE TRIGGER LogUpdate AFTER UPDATE ON Customers BEGIN INSERT INTO Writes VALUES ('update', NEW.Id); END;
+			CREATE TRIGGER LogDelete AFTER DELETE ON Customers BEGIN INSERT INTO Writes VALUES ('delete', OLD.Id); END;
+		"#);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			source,
+			"database ExampleDb; schema Main implicit; create table Customers (Id int primary key, Name text not null);",
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let mut vm = VirtualMachine::with_database_config(
+			RuntimeDatabaseConfig::new().with_sqlite_database("ExampleDb", &database_path));
+		vm.begin_execution(&program);
+		// Retain debugger views throughout execution: they must not postpone writes.
+		let mut snapshots = Vec::new();
+		let result = loop {
+			snapshots.extend(vm.current_stack_frames(&program));
+			match vm.step(&program) {
+				Ok(crate::vm::VmExecutionState::Running) => {}
+				Ok(crate::vm::VmExecutionState::Completed(value)) => break Ok(value),
+				Err(error) => break Err(error),
+			}
+		};
+		match expected {
+			Ok(value) => assert_eq!(result.unwrap(), Some(Value::Integer(value))),
+			Err(message) => {
+				let error = result.unwrap_err();
+				assert!(error.message.contains(message), "{}", error.message);
+			}
+		}
+		let connection = rusqlite::Connection::open(&database_path).unwrap();
+		let rows = connection.prepare("SELECT Id, Name FROM Customers ORDER BY Id").unwrap()
+			.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))).unwrap()
+			.collect::<Result<Vec<_>, _>>().unwrap();
+		assert_eq!(rows, expected_rows.iter().map(|(id, name)| (*id, name.to_string())).collect::<Vec<_>>());
+		let writes = connection.prepare("SELECT Operation, Id FROM Writes ORDER BY rowid").unwrap()
+			.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))).unwrap()
+			.collect::<Result<Vec<_>, _>>().unwrap();
+		assert_eq!(writes, expected_writes.iter().map(|(operation, id)| (operation.to_string(), *id)).collect::<Vec<_>>());
+		drop(connection);
+		drop(vm);
+		drop(snapshots);
+		std::fs::remove_file(database_path).unwrap();
+	}
+
+	#[test]
+	fn derived_record_pointers_share_mutations_and_explicit_write_status() {
+		check_record_buffer_program("record_buffer_shared_mutations", r#"
+			with ExampleDb;
+			fn Main(args: [text]): int {
+				rec mut customer = find first Customers where Id == 1;
+				rec view = customer;
+				rec otherView = view;
+				customer.Name = 'Edited';
+				if view.Name != 'Edited' or otherView.Name != 'Edited' { return 0; }
+				update customer;
+				customer.Name = 'Final';
+				return 1;
+			}
+		"#, Ok(1), &[(1, "Final"), (2, "Grace")], &[("update", 1), ("update", 1)]);
+	}
+
+	#[test]
+	fn derived_pointer_retains_old_buffer_until_its_scope_exits() {
+		check_record_buffer_program("record_buffer_retained_on_reassignment", r#"
+			with ExampleDb;
+			fn Main(args: [text]): int {
+				rec mut customer = find first Customers where Id == 1;
+				{
+					rec view = customer;
+					customer.Name = 'Edited';
+					customer = find first Customers where Id == 2;
+					if view.Name != 'Edited' or customer.Name != 'Grace' { return 0; }
+					rec stored = find first Customers where Id == 1;
+					if stored.Name != 'Ada' { return 0; }
+				}
+				rec stored = find first Customers where Id == 1;
+				if stored.Name != 'Edited' { return 0; }
+				return 1;
+			}
+		"#, Ok(1), &[(1, "Edited"), (2, "Grace")], &[("update", 1)]);
+	}
+
+	#[test]
+	fn reassignment_writes_the_last_buffer_and_handles_new_and_existing_records() {
+		check_record_buffer_program("record_buffer_reassignment_cleanup", r#"
+			with ExampleDb;
+			fn Main(args: [text]): int {
+				rec mut customer = find first Customers where Id == 1;
+				customer.Name = 'Edited';
+				customer = new Customers;
+				customer.Id = 3;
+				customer.Name = 'New';
+				customer = find first Customers where Id == 2;
+				customer.Name = 'Also edited';
+				return 1;
+			}
+		"#, Ok(1), &[(1, "Edited"), (2, "Also edited"), (3, "New")], &[("update", 1), ("create", 3), ("update", 2)]);
+	}
+
+	#[test]
+	fn reference_reassignment_follows_the_variable_and_preserves_derived_views() {
+		check_record_buffer_program("record_buffer_reference_reassignment", r#"
+			with ExampleDb;
+			fn Change(customer: &rec mut Customers, view: &rec Customers) {
+				customer.Name = 'Edited';
+				customer = find first Customers where Id == 2;
+				if view.Id == 2 { customer.Name = 'Followed'; }
+			}
+			fn Main(args: [text]): int {
+				rec mut customer = find first Customers where Id == 1;
+				{
+					rec old = customer;
+					Change(&customer, &customer);
+					if old.Name != 'Edited' or customer.Name != 'Followed' { return 0; }
+				}
+				return 1;
+			}
+		"#, Ok(1), &[(1, "Edited"), (2, "Followed")], &[("update", 1), ("update", 2)]);
+	}
+
+	#[test]
+	fn create_and_delete_through_references_update_all_derived_pointers() {
+		check_record_buffer_program("record_buffer_explicit_create_delete", r#"
+			with ExampleDb;
+			fn Save(customer: &rec mut Customers) { create customer; }
+			fn Main(args: [text]): int {
+				rec mut customer = new Customers;
+				customer.Id = 3;
+				customer.Name = 'New';
+				rec view = customer;
+				Save(&customer);
+				customer.Name = 'Changed';
+				update customer;
+				delete customer;
+				if exists view { return 0; }
+				return 1;
+			}
+		"#, Ok(1), &[(1, "Ada"), (2, "Grace")], &[("create", 3), ("update", 3), ("delete", 3)]);
+	}
+
+	#[test]
+	fn if_record_binding_releases_the_last_buffer_on_return() {
+		check_record_buffer_program("record_buffer_if_binding", r#"
+			with ExampleDb;
+			fn Main(args: [text]): int {
+				rec mut customer = find first Customers where Id == 1;
+				if rec view = customer {
+					customer.Name = 'Edited';
+					customer = find first Customers where Id == 2;
+					if view.Name == 'Edited' { return 1; }
+				}
+				return 0;
+			}
+		"#, Ok(1), &[(1, "Edited"), (2, "Grace")], &[("update", 1)]);
+	}
+
+	#[test]
+	fn record_loop_cleanup_handles_continue_break_and_return() {
+		for exit in ["continue;", "break;", "return 1;"] {
+			check_record_buffer_program("record_buffer_loop_cleanup", &format!(r#"
+				with ExampleDb;
+				fn Main(args: [text]): int {{
+					transaction {{
+						for rec mut customer in Customers where Id == 1 {{
+							rec view = customer;
+							customer.Name = 'Edited';
+							{exit}
+						}}
+					}}
+					return 1;
+				}}
+			"#), Ok(1), &[(1, "Edited"), (2, "Grace")], &[("update", 1)]);
+		}
+	}
+
+	#[test]
+	fn runtime_errors_do_not_write_pending_record_buffers() {
+		for transaction in [false, true] {
+			let body = r#"
+				rec mut customer = find first Customers where Id == 1;
+				rec view = customer;
+				customer.Name = 'Discard on error';
+				rec mut pending = new Customers;
+				pending.Id = 3;
+				pending.Name = 'Not created';
+				return 1 / 0;
+			"#;
+			let body = if transaction { format!("transaction {{ {body} }}") } else { body.to_string() };
+			check_record_buffer_program("record_buffer_error_unwind",
+				&format!("with ExampleDb; fn Main(args: [text]): int {{ {body} }}"),
+				Err("zero"), &[(1, "Ada"), (2, "Grace")], &[]);
+		}
+	}
+
+	#[test]
+	fn reference_reassignment_keeps_a_callee_local_view_alive() {
+		check_record_buffer_program("record_buffer_callee_view", r#"
+			with ExampleDb;
+			fn Change(customer: &rec mut Customers): int {
+				rec old = customer;
+				customer.Name = 'Edited';
+				customer = find first Customers where Id == 2;
+				rec stored = find first Customers where Id == 1;
+				if stored.Name != 'Ada' or old.Name != 'Edited' { return 0; }
+				return 1;
+			}
+			fn Forward(customer: &rec mut Customers): int { return Change(&customer); }
+			fn Main(args: [text]): int {
+				rec mut customer = find first Customers where Id == 1;
+				if Forward(&customer) != 1 { return 0; }
+				if customer.Id != 2 { return 0; }
+				rec stored = find first Customers where Id == 1;
+				if stored.Name != 'Edited' { return 0; }
+				return 1;
+			}
+		"#, Ok(1), &[(1, "Edited"), (2, "Grace")], &[("update", 1)]);
+	}
+
+	#[test]
+	fn pending_create_is_deferred_until_the_final_immutable_pointer_is_released() {
+		check_record_buffer_program("record_buffer_pending_create", r#"
+			with ExampleDb;
+			fn Main(args: [text]): int {
+				rec mut customer = new Customers;
+				customer.Id = 3;
+				customer.Name = 'New';
+				{
+					rec view = customer;
+					customer = find first Customers where Id == 1;
+					if rec unexpected = find first Customers where Id == 3 { return 0; }
+					if view.Name != 'New' { return 0; }
+				}
+				if rec created = find first Customers where Id == 3 { return 1; }
+				return 0;
+			}
+		"#, Ok(1), &[(1, "Ada"), (2, "Grace"), (3, "New")], &[("create", 3)]);
+	}
+
+	#[test]
+	fn explicit_create_is_not_repeated_when_aliases_are_released() {
+		check_record_buffer_program("record_buffer_no_duplicate_create", r#"
+			with ExampleDb;
+			fn Main(args: [text]): int {
+				rec mut customer = find first Customers where Id == 1;
+				customer = new Customers;
+				customer.Id = 3;
+				customer.Name = 'New';
+				rec view = customer;
+				create customer;
+				return 1;
+			}
+		"#, Ok(1), &[(1, "Ada"), (2, "Grace"), (3, "New")], &[("create", 3)]);
+	}
+
+	#[test]
+	fn cleanup_write_failures_roll_back_the_transaction() {
+		check_record_buffer_program("record_buffer_cleanup_failure", r#"
+			with ExampleDb;
+			fn Main(args: [text]): int {
+				transaction {
+					rec mut customer = find first Customers where Id == 1;
+					customer.Name = 'Rolled back';
+					customer = new Customers;
+					customer.Id = 2;
+					customer.Name = 'Duplicate key';
+				}
+				return 1;
+			}
+		"#, Err("UNIQUE constraint failed"), &[(1, "Ada"), (2, "Grace")], &[]);
+	}
+
+	#[test]
+	fn creating_an_existing_record_is_a_runtime_error() {
+		check_record_buffer_program("record_buffer_create_existing", r#"
+			with ExampleDb;
+			fn Main(args: [text]): int {
+				rec mut customer = find first Customers where Id == 1;
+				create customer;
+				return 1;
+			}
+		"#, Err("already been created"), &[(1, "Ada"), (2, "Grace")], &[]);
+	}
+
+	#[test]
 	fn runs_function_calls_with_record_pointer_parameters() {
 		let database_path = create_sqlite_test_database(
 			"runs_function_calls_with_record_pointer_parameters",
@@ -7428,7 +7771,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn ReadName(cust: rec Customers): text { return cust.Name; }\nfn Rename(cust: &rec Customers) { cust.Name = 'Ada Ltd'; }\nfn Main(args: [text]): int { rec mut cust = find first Customers where Id == 1; if cust { if ReadName(cust) == 'Ada' { Rename(&cust); if cust.Name == 'Ada Ltd' { return 1; } } } return 0; }",
+			"with exampledb;\nfn ReadName(cust: &rec Customers): text { return cust.Name; }\nfn Rename(cust: &rec mut Customers) { cust.Name = 'Ada Ltd'; }\nfn ForwardRead(cust: &rec Customers): text { return ReadName(&cust); }\nfn ForwardRename(cust: &rec mut Customers) { Rename(&cust); }\nfn Main(args: [text]): int { rec mut cust = find first Customers where Id == 1; if rec readOnly = find first Customers where Id == 1 { if ForwardRead(&readOnly) != 'Ada' { return 0; } } if cust { if ReadName(&cust) == 'Ada' { ForwardRename(&cust); if cust.Name == 'Ada Ltd' { return 1; } } } return 0; }",
 			r#"
 				database ExampleDb;
 				schema Main implicit;

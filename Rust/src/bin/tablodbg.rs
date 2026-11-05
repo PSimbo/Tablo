@@ -631,6 +631,7 @@ impl DapServer {
 				Ok(variables)
 			}
 			Value::RecordPointer(record) => {
+				let record = record.buffer();
 				if !record.exists || record.locked {
 					return Ok(Vec::new());
 				}
@@ -1334,7 +1335,7 @@ mod tests {
 					is_const: false,
 					name: String::from("cust"),
 					slot: 4,
-					value: Value::RecordPointer(RecordPointerValue {
+					value: Value::record_pointer(RecordBuffer {
 						column_names: Vec::new(),
 						exists: true,
 						fields: BTreeMap::new(),
@@ -1478,7 +1479,7 @@ mod tests {
 			},
 		);
 
-		let value = Value::RecordPointer(RecordPointerValue {
+		let value = Value::record_pointer(RecordBuffer {
 			column_names: vec![String::from("Address1"), String::from("Id"), String::from("Name")],
 			exists: true,
 			fields,
