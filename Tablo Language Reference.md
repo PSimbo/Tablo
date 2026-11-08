@@ -2098,6 +2098,18 @@ Returns the days component of `d`.
 
 Returns the days component of `t`.
 
+### `dec(v: float): dec`
+
+Returns the decimal value obtained by converting `v`. If `v` is non-finite or exceeds the supported decimal range, the function fails at runtime.
+
+### `dec(v: int): dec`
+
+Returns the decimal value of `v`. If the value exceeds the supported decimal range, the function fails at runtime.
+
+### `dec(v: text): dec`
+
+Returns the decimal value obtained by parsing `v`. If the parsed value requires more precision than the implementation supports, the result is rounded away from zero. Invalid numeric text or a value outside the supported decimal range causes a runtime error.
+
 ### `disp(fmt: text)`
 
 Displays the `fmt` text in `stdout`. Note that no new line character is automatically added to the end of `fmt`.
@@ -2114,15 +2126,15 @@ It is valid to call `firstof()` only within the body of a grouped database `for`
 
 ### `float(v: dec): float`
 
-Returns the `float` obtained by casting `v`. If `v` cannot be converted then the function fails.
+Returns the floating-point value obtained by converting `v`. The result may be rounded to the supported floating-point precision, losing decimal precision. If the value exceeds the supported floating-point range, the function fails at runtime.
 
 ### `float(v: int): float`
 
-Returns the `float` obtained by casting `v`. If `v` cannot be converted then the function fails.
+Returns the floating-point value obtained by converting `v`. Large integers may lose precision. If the value exceeds the supported floating-point range, the function fails at runtime.
 
 ### `float(v: text): float`
 
-Returns the `float` obtained by parsing `v`. If `v` cannot be parsed as a `float` then the function fails.
+Returns the floating-point value obtained by parsing `v`. The result may be rounded to the supported floating-point precision and might not exactly represent the numeric value written in the text. Invalid numeric text or a value outside the supported floating-point range causes a runtime error.
 
 ### `format(v: dec, pattern: text): text`
 
@@ -2174,15 +2186,15 @@ Returns `1` if `v` is `true` or `0` otherwise.
 
 ### `int(v: dec): int`
 
-Returns the `int` obtained by casting `v`. If `v` cannot be converted then the function fails.
+Returns the integer obtained by truncating `v` toward zero, discarding any fractional part. For example, `int(3.9)` returns `3` and `int(-3.9)` returns `-3`. If the truncated value is outside the supported integer range, the function fails at runtime.
 
 ### `int(v: float): int`
 
-Returns the `int` obtained by casting `v`. If `v` cannot be converted then the function fails.
+Returns the integer obtained by truncating `v` toward zero, discarding any fractional part. If `v` is non-finite or the truncated value is outside the supported integer range, the function fails at runtime.
 
 ### `int(v: text): int`
 
-Returns the `int` obtained by parsing `v`. If `v` cannot be parsed as an `int` then the function fails.
+Returns the integer obtained by parsing `v`. The text must represent an integer. Invalid integer text or a value outside the supported integer range causes a runtime error.
 
 ### `json(v: text): json`
 
