@@ -179,7 +179,9 @@ Note that the `json` data type does not require that the database backend have e
 
 The language provides a single `json` type, without separate JSON-specific scalar types. Numbers stored within JSON retain their exact numeric values, including numbers beyond the range or precision of Tablo's numeric primitives. Parsing, retaining, copying, and serializing JSON must preserve those numeric values. This does not require preserving their original numeric spelling.
 
-Converting a JSON number to a Tablo numeric primitive may lose precision according to the conversion rules. Such a conversion does not modify the original JSON property or array element unless the converted primitive is subsequently assigned back to that property or element.
+Implicit conversion of a JSON number to `int` or `dec` must preserve its exact numeric value; an explicit `int()` or `dec()` conversion may lose precision, as described under "Automatic Type Conversions". Such a conversion does not modify the original JSON property or array element unless the converted primitive is subsequently assigned back to that property or element.
+
+JSON objects and arrays may also be constructed directly in source code, as described under "JSON Literals".
 
 The root of a `json` value must be an object or array. Its fields and elements may contain nested objects, arrays, strings, numbers, Boolean values, or null. Accessing a field or element does not by itself convert its contents to a Tablo primitive. Objects and arrays obtained through such access have type `json`; scalar contents are implicitly converted when a compatible Tablo target type is required, as described under "Automatic Type Conversions".
 
@@ -365,6 +367,44 @@ var exampleTimestamp: timestamp = @2019-11-28T05:19:03;
 var exampleTimestampTz: timestamptz = @2009-01-09T13:47Z;
 ~~~
 
+JSON Literals
+-------------
+
+A JSON object or array may be constructed directly using a literal in a context whose expected type is `json` or `json?`. No text parsing call is required.
+
+~~~
+var data: json = { "hydrogen": 1.008, "helium": 4.0026, "lithium": 6.94 };
+var values: json = [1, 'two', true, null, { "nested": [] }];
+~~~
+
+The expected type determines whether `{ ... }` and `[ ... ]` construct JSON or ordinary Tablo objects and arrays. A JSON context may come from a variable or field's declared type, an assignment destination, a function's declared return type, or an unambiguously selected by-value function parameter. Nested object and array literals within a JSON literal also construct JSON. An existing native object or array expression is not implicitly converted merely because it appears in a JSON context.
+
+A JSON object literal contains comma-separated property names and value expressions. Property names must use Tablo's double-quoted identifier syntax. They are compared exactly and case-sensitively for duplicate detection; duplicate names are a compile error. Names differing only by case may coexist, with subsequent field access following the JSON lookup rules. String values use Tablo's ordinary single-quoted string syntax, including its escape and interpolation rules.
+
+A JSON array literal contains comma-separated value expressions. Empty objects and arrays are written as `{}` and `[]`. As with other Tablo object and array literals, a trailing comma is permitted.
+
+Property values and array elements may be expressions:
+
+~~~
+var customerName: text = 'Alice';
+var count: int = 2;
+var existingJson: json = { "active": true };
+var data: json = {
+    "name": customerName,
+    "count": count + 1,
+    "details": existingJson,
+    "items": [count, { "description": 'Customer ${customerName}' }],
+};
+~~~
+
+Expressions are evaluated once, in source order. Their results follow the same conversion rules as JSON field and element assignment: `text`, `bool`, `int`, and `dec` supply the corresponding JSON kinds; null supplies JSON null; and existing JSON contents are copied without losing numeric precision. Native objects and arrays require explicit conversion. Unsupported value types are rejected rather than implicitly converted to strings. Constructed JSON has independent value semantics; subsequent mutation does not modify values copied into it.
+
+Numeric literals directly used as JSON property values or array elements, including signed numeric literals, retain their exact numeric values even when they exceed Tablo's `int` or `dec` capacity. They are not first converted to those primitive types. Numeric expressions such as `count + 1` use ordinary Tablo arithmetic and contribute the resulting value; a JSON context does not give arithmetic expressions arbitrary precision.
+
+The root must still be an object or array. A `json?` destination may instead receive `null` to represent absence. Scalar JSON contents do not become valid whole-document JSON values through literal syntax.
+
+Overload resolution must establish the JSON target context without inspecting the literal's property names, shape, or contents to select an overload. If the applicable overload rules leave multiple candidates, the call is ambiguous; the programmer can first assign the literal to a variable explicitly declared as `json`.
+
 Operators
 ---------
 
@@ -538,6 +578,23 @@ Tablo supports a fairly limited set of automatic type conversions. In general, a
 Numeric values may be implicitly converted between `int` and `dec` where necessary.
 
 A scalar obtained from a JSON field or array element is implicitly converted to a compatible Tablo target type when assigned to a typed destination or passed to a by-value function parameter. The target type determines the conversion; the value must be compatible with that type. For example, a JSON string may supply a `text` parameter, a JSON Boolean may supply a `bool` parameter, and a JSON number may supply a compatible numeric parameter. JSON null may supply a nullable target. The conversion does not modify the source JSON field or element. JSON objects and arrays obtained through field or element access can supply a `json` parameter without conversion to an ordinary Tablo object or array.
+
+Implicit conversion of a JSON number to `int` or `dec` succeeds only if the target type can represent the value exactly:
+
+* For `int`, the number must have no fractional part and must be within the supported integer range.
+* For `dec`, the number must fit within the implementation's supported decimal range and precision without rounding.
+
+These checks occur at runtime. A fractional value assigned to `int`, or a value requiring rounding or exceeding the target range, causes a runtime error. Implicit conversion does not truncate, round, or clamp the value. The rules apply equally to typed assignments and by-value function arguments, including nullable numeric targets. JSON null may supply a nullable numeric target; it cannot supply a non-nullable numeric target. JSON strings, Boolean values, objects, and arrays do not implicitly convert to numbers.
+
+Conversion depends on the numeric value, not its JSON spelling. For example, `3`, `3.0`, and `3e0` may all implicitly supply an `int`, but `3.5` may not. Numeric conversions do not modify the source JSON contents.
+
+~~~
+var data: json = json('{"whole":3.0,"fraction":3.5}');
+var whole: int = data.whole;            // Exact implicit conversion: 3.
+var fraction: dec = data.fraction;      // Exact implicit conversion: 3.5.
+var truncated: int = int(data.fraction); // Explicit conversion: 3.
+// var invalid: int = data.fraction;    // Runtime error: fractional value.
+~~~
 
 No implicit conversions are defined to or from `any`, except that values of any type may be assigned to a variable, field, or array element whose declared type is `any`.
 
