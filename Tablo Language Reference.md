@@ -161,11 +161,11 @@ The internal representation of a decimal value, including any tracked metadata s
 
 Every Tablo implementation must support decimal values with at least 38 decimal digits.
 
-Where a decimal arithmetic operation cannot be represented exactly within the supported decimal capacity, the result is rounded to fit. When such rounding is required, values are rounded away from zero.
+Where a decimal arithmetic operation cannot be represented exactly within the supported decimal capacity, the result is rounded to fit. When such rounding is required, values are rounded to the nearest representable value, with ties rounded away from zero.
 
 If a `dec` value is assigned to a database field whose supported range is too small to store the value, the assigned value is clamped to the supported range.
 
-The `any` type allows for dynamically typed values. It is intended for situations where a value's shape is not known statically, such as when receiving loosely-typed JSON-like input that must later be validated and converted into a stronger type.
+The `any` type allows for dynamically typed, non-null values. Use `any?` to allow the type to be null. A non-nullable `any` variable requires an initializer, and an `any` object field has no implicit default. A value of type `any?` defaults to `null`. These dynamic types are intended for situations where a value's shape is not known statically, such as when receiving loosely-typed JSON-like input that must later be validated and converted into a stronger type.
 
 Values of type `any` may be stored in variables, passed to functions, returned from functions, used as object field types, and used as array element types (e.g. `[any]`).
 
@@ -201,7 +201,7 @@ data.Customer.Name = 'Bar'; // INVALID. Cannot create nested object by assignmen
 
 If an unquoted name matches an existing property, the write updates that property without changing its spelling; multiple matches are ambiguous, just as for reads. Quoted names match exactly and may create a distinct case-sensitive property. All intermediate objects and arrays must already exist and have the required kind; writes do not create intermediate containers or replace null or scalar parents automatically.
 
-JSON array writes may replace an existing element or append at exactly one past the current length. Other out-of-bounds writes fail; arrays cannot become sparse. Assigning null stores a present JSON null rather than deleting a property or element. JSON contents may be copied directly, preserving exact numeric values. Tablo `text`, `bool`, `int`, and `dec` values are stored as the corresponding JSON kinds; native objects and arrays require explicit conversion. Mutation of a JSON value does not modify separately assigned copies or the caller's value when passed by value.
+JSON array writes may replace an existing element or append at exactly one past the current length. Other out-of-bounds writes fail; arrays cannot become sparse. Assigning null stores a present JSON null rather than deleting a property or element. JSON contents may be copied directly, preserving exact numeric values. Tablo `text`, `bool`, `int`, and `dec` values are stored as the corresponding JSON kinds. Enum variants are stored as strings containing their declared names, as specified under "JSON and Object Conversion". Native objects and arrays require explicit conversion. Mutation of a JSON value does not modify separately assigned copies or the caller's value when passed by value.
 
 Beyond the primitive data types listed in this section, custom data types may be defined as objects (see the "Objects" section).
 
@@ -397,13 +397,90 @@ var data: json = {
 };
 ~~~
 
-Expressions are evaluated once, in source order. Their results follow the same conversion rules as JSON field and element assignment: `text`, `bool`, `int`, and `dec` supply the corresponding JSON kinds; null supplies JSON null; and existing JSON contents are copied without losing numeric precision. Native objects and arrays require explicit conversion. Unsupported value types are rejected rather than implicitly converted to strings. Constructed JSON has independent value semantics; subsequent mutation does not modify values copied into it.
+Expressions are evaluated once, in source order. Their results follow the same conversion rules as JSON field and element assignment: `text`, `bool`, `int`, and `dec` supply the corresponding JSON kinds; enum variants supply their declared names as JSON strings; null supplies JSON null; and existing JSON contents are copied without losing numeric precision. Native objects and arrays require explicit conversion. Unsupported value types are rejected rather than implicitly converted to strings. Constructed JSON has independent value semantics; subsequent mutation does not modify values copied into it.
 
 Numeric literals directly used as JSON property values or array elements, including signed numeric literals, retain their exact numeric values even when they exceed Tablo's `int` or `dec` capacity. They are not first converted to those primitive types. Numeric expressions such as `count + 1` use ordinary Tablo arithmetic and contribute the resulting value; a JSON context does not give arithmetic expressions arbitrary precision.
 
 The root must still be an object or array. A `json?` destination may instead receive `null` to represent absence. Scalar JSON contents do not become valid whole-document JSON values through literal syntax.
 
 Overload resolution must establish the JSON target context without inspecting the literal's property names, shape, or contents to select an overload. If the applicable overload rules leave multiple candidates, the call is ambiguous; the programmer can first assign the literal to a variable explicitly declared as `json`.
+
+
+JSON and Object Conversion
+--------------------------
+
+Use `json(value)` to convert a native object or array into JSON, and `MyType(payload)` to convert JSON into a named object type. Each named object type provides an implicit JSON conversion constructor that accepts exactly one positional argument of type `json`. This argument has no user-visible parameter name, so named arguments such as `MyType(v: payload)` are not permitted. Qualified inline types use the same syntax, for example `Envelope.Payload(data)`, as do root-array-shaped object types.
+
+This conversion constructor is distinct from field-based construction with `MyType { ... }`. Assignment does not perform these conversions implicitly. The built-in `json` function retains its named parameters; its existing `json(v: text)` overload parses JSON text.
+
+~~~
+pub obj Customer {
+    pub id: int,
+    pub name: text,
+    pub note: text? = null,
+    auditLabel: text = 'internal',
+};
+
+var customer: Customer = Customer(json('{"id":42,"name":"Alice"}'));
+var output: json = json(customer);
+~~~
+
+Conversion validates the selected target recursively. A JSON object supplies object fields, and a JSON array supplies native array elements. JSON strings and Booleans supply the corresponding native types. Numeric conversion must preserve the exact value; whole-object conversion never truncates or rounds. Explicit `int()` or `dec()` operations may be used to prepare individual values when precision loss is intended.
+
+### Properties, defaults, and null
+
+Every accessible target field must have a matching JSON property or an explicit field default. Implicit type defaults do not satisfy missing JSON properties. This includes nullable fields: `value: int?` requires a property, while `value: int? = null` permits omission.
+
+A present JSON null may supply a nullable target, including `any?`, but not a non-nullable target. It never selects a field default. A supplied nested object undergoes the same validation recursively. When an entire property is omitted and its field has an explicit native object default, that default is constructed using ordinary object-construction rules.
+
+Property matching follows the target field declaration: quoted names match exactly, and unquoted names match case-insensitively. Multiple matching JSON properties are an ambiguity error. Unknown properties and properties targeting inaccessible private fields are errors.
+
+### Visibility
+
+Object-to-JSON conversion includes public fields only, regardless of the calling scope. This applies recursively. A caller with access to private fields may explicitly include them on a field-by-field basis:
+
+~~~
+output.privateLabel = customer.privateLabel;
+~~~
+
+Such an assignment uses the ordinary JSON mutation rules. Native object and array values still require explicit conversion; compatible scalars and existing JSON contents may be assigned directly.
+
+JSON-to-object conversion may initialize private fields only when called from their declaring module. Access is checked separately for each nested object's declaring module. Missing inaccessible private fields receive ordinary construction defaults, because the caller cannot initialize them. Conversion fails if an omitted inaccessible field has no available default.
+
+Tablo makes no round-trip or idempotence guarantee for `MyType(json(value))`. Export omits private state; subsequent import may apply defaults or fail when an accessible private field is missing and has no explicit default.
+
+### Unions, enums, temporal values, and any
+
+A JSON value supplied to a union must convert successfully to exactly one member type. No successful member is an incompatibility error, and multiple successful members are an ambiguity error. For example, JSON `3` is ambiguous for `int | dec`. This rule applies within an explicitly selected conversion and does not change function overload resolution.
+
+Enums export as JSON strings containing the declared variant name, preserving its spelling and excluding any enum-type qualifier. Import into an enum target requires a string matching a declared variant name exactly and case-sensitively, regardless of whether the variant was declared using a quoted or unquoted identifier. Unknown names and non-string values are rejected. Backing values do not participate in this conversion, so variants sharing a backing value remain distinguishable by name.
+
+The same representation applies when an enum variant is supplied as a JSON literal value or assigned to a JSON property or array element. To store its backing value instead, explicitly cast the variant to its backing type before supplying it to JSON. An enum variant cannot by itself form a whole JSON document, whose root must remain an object or array.
+
+Date and time fields accept ISO 8601 strings appropriate to their declared types, using the same parsing rules as the corresponding conversion built-ins. Export uses their canonical ISO text. Conversion does not infer locale-specific date formats.
+
+When JSON contents are converted to an `any` or `any?` target, including fields during JSON-to-object conversion, they become native Tablo values according to the following rules:
+
+| JSON content | Native result |
+| ------------ | ------------- |
+| String       | `text`        |
+| Boolean      | `bool`        |
+| Number       | `dec` if the value is exactly representable; otherwise a runtime error |
+| Null         | Absence, permitted only for `any?` |
+| Array        | `[any?]`, with each element converted recursively using these rules |
+| Object       | A runtime error; no native dynamic-object representation is currently defined |
+
+JSON numbers converted to `any` or `any?` always become `dec`, whether or not their values are integral and regardless of their spelling: `3`, `3.0`, and `3e0` all become `dec`. A number outside the supported decimal range or precision causes a runtime error. Conversion never rounds or truncates, and does not modify the source JSON. This rule also applies recursively to numbers in arrays converted to `[any?]`. A declared `int` or `dec` target still uses its declared type and the existing exact-conversion rules; the always-`dec` rule applies only when the target is `any` or `any?`. Explicit numeric conversion is required when an integer is needed from a dynamically converted number.
+
+Strings remain text, including strings resembling dates or times; ISO parsing occurs only when the declared target is a date/time type. An object nested anywhere within an array also causes this conversion to fail.
+
+This conversion is distinct from storing an explicitly supplied `json` document in `any`. For example, `var value: any = json('{}');` retains a concrete value of type `json`, just as assigning another native value retains its concrete type. JSON-to-object conversion does not silently use this storage rule to retain unconverted contents in an `any` field. Declare a field as `json` or `json?` when it is intended to retain a JSON object or array.
+
+When exporting a value held in `any`, its actual runtime value determines the conversion. The root of the resulting JSON document must still be an object or array. Unsupported values fail rather than being implicitly converted to strings.
+
+### Failure behavior
+
+Conversion either produces a complete value or fails at runtime; it does not publish a partial result or modify the source. Errors identify the failing field or array-element path. No permissive mode that ignores unknown properties, substitutes implicit defaults for missing accessible properties, or suppresses conversion failures is currently defined.
 
 Operators
 ---------
@@ -763,13 +840,13 @@ var customers: CustomerCollection = [
 ];
 ~~~
 
-The array literal is conceptually the root-array type's implicit constructor, but no separately invoked named constructor or `CustomerCollection[...]` syntax is introduced.
+The array literal is conceptually the root-array type's implicit constructor for native array values; no `CustomerCollection[...]` syntax is introduced. Conversion from JSON uses the positional conversion constructor described under "JSON and Object Conversion".
 
 Qualified object type names may be used anywhere a data type is expected. This includes local variable declarations, function parameters, return types, array element types, and unions.
 
 Implicit object constructors have no user-defined body and cannot be overloaded. Their scope and visibility are inherited from their object type. An unrelated function may not reuse an object's identifier in the same scope. Tablo does not currently support user-defined constructors, instance methods, static methods, or classes.
 
-Tablo supports bi-directional conversion between JSON data and objects.
+Tablo supports explicit conversion between JSON data and objects, as described under "JSON and Object Conversion".
 
 Object fields are accessed using the `.` operator:
 
@@ -2165,7 +2242,7 @@ Returns the decimal value of `v`. If the value exceeds the supported decimal ran
 
 ### `dec(v: text): dec`
 
-Returns the decimal value obtained by parsing `v`. If the parsed value requires more precision than the implementation supports, the result is rounded away from zero. Invalid numeric text or a value outside the supported decimal range causes a runtime error.
+Returns the decimal value obtained by parsing `v`. If the parsed value requires more precision than the implementation supports, the result is rounded to the nearest representable value, with ties rounded away from zero. Invalid numeric text or a value outside the supported decimal range causes a runtime error.
 
 ### `disp(fmt: text)`
 
@@ -2257,6 +2334,14 @@ Returns the integer obtained by parsing `v`. The text must represent an integer.
 
 Parses `v` as a JSON object or array. Parsing fails if the input is malformed, its root is a scalar (including null), or any object contains duplicate property names. Duplicate names are compared exactly and case-sensitively, including names decoded from escape sequences.
 
+### `json(v: <object>): json`
+### `json(v: [any?]): json`
+### `json(v: json): json`
+### `json(v: any): json`
+
+Converts supported native objects and arrays into JSON using the rules under "JSON and Object Conversion". Object export includes public fields only. Existing JSON retains its contents and exact numbers. For `any`, conversion inspects the actual runtime value; text uses the JSON parsing overload. A scalar or null document root is rejected.
+
+
 ### `max(a: int, b: int): int`
 
 Returns the greater of the two `int` values `a` and `b`.
@@ -2287,7 +2372,7 @@ Returns `true` when the current iteration of a grouped `for` loop is the last it
 
 It is valid to call `lastof()` only within the body of a grouped database `for` loop. It must not be used in query expressions. The arguments passed to `lastof()` must identify the first grouping level, the first two grouping levels, and so on, in the same order as the enclosing `group by` clause. Each argument must be either the simple field reference from the corresponding grouping expression or the alias assigned to that grouping expression.
 
-### `len(v: [any]): int`
+### `len(v: [any?]): int`
 
 Returns the number of elements in the array `v`.
 

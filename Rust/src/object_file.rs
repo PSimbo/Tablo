@@ -24,7 +24,8 @@ const OPCODE_CALL: u8 = OPCODE_BEGIN_TRANSACTION + 1;
 const OPCODE_CALL_BUILT_IN: u8 = OPCODE_CALL + 1;
 const OPCODE_COMMIT_TRANSACTION: u8 = OPCODE_CALL_BUILT_IN + 1;
 const OPCODE_CONVERT_JSON: u8 = OPCODE_COMMIT_TRANSACTION + 1;
-const OPCODE_CREATE_RECORD: u8 = OPCODE_CONVERT_JSON + 1;
+const OPCODE_CONVERT_OBJECT: u8 = OPCODE_CONVERT_JSON + 1;
+const OPCODE_CREATE_RECORD: u8 = OPCODE_CONVERT_OBJECT + 1;
 const OPCODE_CREATE_RECORD_IF_PENDING: u8 = OPCODE_CREATE_RECORD + 1;
 const OPCODE_DELETE_RECORD: u8 = OPCODE_CREATE_RECORD_IF_PENDING + 1;
 const OPCODE_DIVIDE: u8 = OPCODE_DELETE_RECORD + 1;
@@ -52,7 +53,9 @@ const OPCODE_LOAD_REFERENCE: u8 = OPCODE_LOAD_QUOTED_FIELD + 1;
 const OPCODE_LOAD_SEQUENCE_CURRENT: u8 = OPCODE_LOAD_REFERENCE + 1;
 const OPCODE_LOCKED: u8 = OPCODE_LOAD_SEQUENCE_CURRENT + 1;
 const OPCODE_MAKE_ARRAY: u8 = OPCODE_LOCKED + 1;
-const OPCODE_MAKE_OBJECT: u8 = OPCODE_MAKE_ARRAY + 1;
+const OPCODE_MAKE_JSON_ARRAY: u8 = OPCODE_MAKE_ARRAY + 1;
+const OPCODE_MAKE_JSON_OBJECT: u8 = OPCODE_MAKE_JSON_ARRAY + 1;
+const OPCODE_MAKE_OBJECT: u8 = OPCODE_MAKE_JSON_OBJECT + 1;
 const OPCODE_MAKE_RANGE: u8 = OPCODE_MAKE_OBJECT + 1;
 const OPCODE_MAKE_RECORD_POINTER: u8 = OPCODE_MAKE_RANGE + 1;
 const OPCODE_MAKE_STEPPED_RANGE: u8 = OPCODE_MAKE_RECORD_POINTER + 1;
@@ -74,7 +77,8 @@ const OPCODE_PUSH_DATE: u8 = OPCODE_PUSH_CURRENT_TIME_TZ + 1;
 const OPCODE_PUSH_DECIMAL: u8 = OPCODE_PUSH_DATE + 1;
 const OPCODE_PUSH_ENUM_VALUE: u8 = OPCODE_PUSH_DECIMAL + 1;
 const OPCODE_PUSH_INTEGER: u8 = OPCODE_PUSH_ENUM_VALUE + 1;
-const OPCODE_PUSH_NULL: u8 = OPCODE_PUSH_INTEGER + 1;
+const OPCODE_PUSH_JSON_NUMBER: u8 = OPCODE_PUSH_INTEGER + 1;
+const OPCODE_PUSH_NULL: u8 = OPCODE_PUSH_JSON_NUMBER + 1;
 const OPCODE_PUSH_TEXT: u8 = OPCODE_PUSH_NULL + 1;
 const OPCODE_PUSH_TIME: u8 = OPCODE_PUSH_TEXT + 1;
 const OPCODE_PUSH_TIMESTAMP: u8 = OPCODE_PUSH_TIME + 1;
@@ -270,6 +274,14 @@ impl ObjectFileLayout {
 	fn into_program(self) -> Result<Program, ObjectFileError> {
 		let ObjectFileLayout { debug, object_types, queries, sections } = self;
 		validate_object_type_descriptors(&object_types)?;
+
+		let object_ids = object_types.iter().map(|object| object.id()).collect();
+		for scope in &debug.object_scopes {
+			for id in scope.bindings.iter().map(|(_, id)| id).chain(&scope.private_types) {
+				validate_object_type_reference(*id, &object_ids)?;
+			}
+		}
+
 		let mut entry_code = None;
 		let mut entry_function = None;
 		let mut functions = Vec::new();
@@ -418,6 +430,32 @@ impl ObjectFileLayout {
 				bytes.extend_from_slice(&local.scope_end().to_le_bytes());
 			}
 		}
+
+		bytes.extend_from_slice(&(self.debug.object_scopes.len() as u32).to_le_bytes());
+
+		for scope in &self.debug.object_scopes {
+			bytes.push(u8::from(scope.source_name.is_some()));
+
+			if let Some(name) = &scope.source_name {
+				bytes.extend_from_slice(&(name.len() as u32).to_le_bytes());
+				bytes.extend_from_slice(name.as_bytes());
+			}
+
+			bytes.extend_from_slice(&(scope.bindings.len() as u32).to_le_bytes());
+
+			for (name, id) in &scope.bindings {
+				bytes.extend_from_slice(&(name.len() as u32).to_le_bytes());
+				bytes.extend_from_slice(name.as_bytes());
+				bytes.extend_from_slice(&id.raw().to_le_bytes());
+			}
+
+			bytes.extend_from_slice(&(scope.private_types.len() as u32).to_le_bytes());
+
+			for id in &scope.private_types {
+				bytes.extend_from_slice(&id.raw().to_le_bytes());
+			}
+		}
+
 	}
 }
 
@@ -611,7 +649,29 @@ impl<'a> ObjectFileReader<'a> {
 			code_bodies.push(CodeBodyDebugInfo::new(body_name, positions, locals, source_file_index));
 		}
 
-		Ok(DebugInfo::new(code_bodies, source_files))
+		let mut debug = DebugInfo::new(code_bodies, source_files);
+		let scope_count = if self.is_at_end() { 0 } else { self.read_u32()? };
+
+		for _ in 0..scope_count {
+			let source_name = if self.read_bool()? { Some(self.read_string()?) } else { None };
+			let binding_count = self.read_u32()?;
+			let mut bindings = Vec::new();
+
+			for _ in 0..binding_count {
+				bindings.push((self.read_string()?, ObjectTypeId::from_raw(self.read_u32()?)));
+			}
+
+			let private_count = self.read_u32()?;
+			let mut private_types = Vec::new();
+
+			for _ in 0..private_count {
+				private_types.push(ObjectTypeId::from_raw(self.read_u32()?));
+			}
+
+			debug.object_scopes.push(ObjectScopeDebugInfo { source_name, bindings, private_types });
+		}
+
+		Ok(debug)
 	}
 
 	fn read_decimal(&mut self) -> Result<Decimal, ObjectFileError> {
@@ -683,6 +743,14 @@ impl<'a> ObjectFileReader<'a> {
 				})?;
 				Ok(Instruction::CallBuiltIn(built_in, argument_count))
 			}
+			OPCODE_CONVERT_JSON => Ok(Instruction::ConvertJson(self.read_data_type()?)),
+			OPCODE_CONVERT_OBJECT => {
+				let object_type_id = ObjectTypeId::from_raw(self.read_u32()?);
+				let count = self.read_u32()?;
+				let mut private_types = Vec::new();
+				for _ in 0..count { private_types.push(ObjectTypeId::from_raw(self.read_u32()?)); }
+				Ok(Instruction::ConvertObject { object_type_id, private_types })
+			},
 			OPCODE_COMMIT_TRANSACTION => Ok(Instruction::CommitTransaction),
 			OPCODE_CREATE_RECORD => Ok(Instruction::CreateRecord),
 			OPCODE_CREATE_RECORD_IF_PENDING => Ok(Instruction::CreateRecordIfPending),
@@ -707,6 +775,7 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_LOAD_INDEX => Ok(Instruction::LoadIndex),
 			OPCODE_LOAD_LOCAL => Ok(Instruction::LoadLocal(self.read_u32()?)),
 			OPCODE_LOAD_PROJECTED_VALUE => Ok(Instruction::LoadProjectedValue(self.read_u32()?)),
+			OPCODE_LOAD_QUOTED_FIELD => Ok(Instruction::LoadQuotedField(self.read_string()?)),
 			OPCODE_LOAD_REFERENCE => Ok(Instruction::LoadReference(self.read_u32()?)),
 			OPCODE_LOAD_SEQUENCE_CURRENT => Ok(Instruction::LoadSequenceCurrent {
 				database_name: self.read_string()?,
@@ -716,6 +785,13 @@ impl<'a> ObjectFileReader<'a> {
 			}),
 			OPCODE_LOCKED => Ok(Instruction::Locked),
 			OPCODE_MAKE_ARRAY => Ok(Instruction::MakeArray(self.read_u32()?)),
+			OPCODE_MAKE_JSON_ARRAY => Ok(Instruction::MakeJsonArray(self.read_u32()?)),
+			OPCODE_MAKE_JSON_OBJECT => {
+				let count = self.read_u32()?;
+				let mut names = Vec::new();
+				for _ in 0..count { names.push(self.read_string()?); }
+				Ok(Instruction::MakeJsonObject(names))
+			}
 			OPCODE_MAKE_OBJECT => Ok(Instruction::MakeObject {
 				object_type_id: ObjectTypeId::from_raw(self.read_u32()?),
 				field_names: self.read_string_vec()?,
@@ -741,6 +817,12 @@ impl<'a> ObjectFileReader<'a> {
 			}),
 			OPCODE_MAKE_RANGE => Ok(Instruction::MakeRange),
 			OPCODE_MAKE_STEPPED_RANGE => Ok(Instruction::MakeSteppedRange),
+			OPCODE_MEMBER_PATH_EXISTS => {
+				let count = self.read_u32()?;
+				let mut path = Vec::new();
+				for _ in 0..count { path.push((self.read_string()?, self.read_bool()?)); }
+				Ok(Instruction::MemberPathExists(path))
+			},
 			OPCODE_MODULO => Ok(Instruction::Modulo),
 			OPCODE_MULTIPLY => Ok(Instruction::Multiply),
 			OPCODE_NEGATE => Ok(Instruction::Negate),
@@ -769,6 +851,7 @@ impl<'a> ObjectFileReader<'a> {
 				variant_name: self.read_string()?,
 			}),
 			OPCODE_PUSH_INTEGER => Ok(Instruction::PushInteger(self.read_i64()?)),
+			OPCODE_PUSH_JSON_NUMBER => Ok(Instruction::PushJsonNumber(self.read_string()?)),
 			OPCODE_PUSH_NULL => Ok(Instruction::PushNull),
 			OPCODE_PUSH_TEXT => Ok(Instruction::PushText(self.read_string()?)),
 			OPCODE_PUSH_TIME => Ok(Instruction::PushTime(crate::value::Time::from_iso_text(&self.read_string()?).map_err(|message| ObjectFileError {
@@ -824,14 +907,6 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_UPDATE_RECORD => Ok(Instruction::UpdateRecord),
 			OPCODE_UPDATE_RECORD_IF_CHANGED => Ok(Instruction::UpdateRecordIfChanged),
 			OPCODE_XOR => Ok(Instruction::Xor),
-			OPCODE_CONVERT_JSON => Ok(Instruction::ConvertJson(self.read_data_type()?)),
-			OPCODE_LOAD_QUOTED_FIELD => Ok(Instruction::LoadQuotedField(self.read_string()?)),
-			OPCODE_MEMBER_PATH_EXISTS => {
-				let count = self.read_u32()?;
-				let mut path = Vec::new();
-				for _ in 0..count { path.push((self.read_string()?, self.read_bool()?)); }
-				Ok(Instruction::MemberPathExists(path))
-			},
 			_ => Err(ObjectFileError {
 				offset: opcode_offset,
 				message: format!("Unknown opcode {opcode}."),
@@ -1058,7 +1133,15 @@ impl<'a> ObjectFileReader<'a> {
 			OBJECT_VALUE_TYPE_BOOL => Ok(ObjectValueTypeDescriptor::Bool),
 			OBJECT_VALUE_TYPE_DATE => Ok(ObjectValueTypeDescriptor::Date),
 			OBJECT_VALUE_TYPE_DEC => Ok(ObjectValueTypeDescriptor::Dec),
-			OBJECT_VALUE_TYPE_ENUM => Ok(ObjectValueTypeDescriptor::Enum(self.read_string()?)),
+			OBJECT_VALUE_TYPE_ENUM => Ok(ObjectValueTypeDescriptor::Enum {
+				name: self.read_string()?, default_variant: self.read_string()?, default_value: self.read_constant_value()?,
+				variants: {
+					let count = self.read_u32()?;
+					let mut variants = Vec::new();
+					for _ in 0..count { variants.push((self.read_string()?, self.read_constant_value()?)); }
+					variants
+				},
+			}),
 			OBJECT_VALUE_TYPE_INT => Ok(ObjectValueTypeDescriptor::Int),
 			OBJECT_VALUE_TYPE_NULLABLE => Ok(ObjectValueTypeDescriptor::Nullable(Box::new(
 				self.read_object_value_type_descriptor()?,
@@ -1358,7 +1441,7 @@ fn validate_object_value_type_references(
 		| ObjectValueTypeDescriptor::Bool
 		| ObjectValueTypeDescriptor::Date
 		| ObjectValueTypeDescriptor::Dec
-		| ObjectValueTypeDescriptor::Enum(_)
+		| ObjectValueTypeDescriptor::Enum { .. }
 		| ObjectValueTypeDescriptor::Int
 		| ObjectValueTypeDescriptor::Json
 		| ObjectValueTypeDescriptor::Text
@@ -1456,6 +1539,13 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.extend_from_slice(&argument_count.to_le_bytes());
 		}
 		Instruction::CommitTransaction => bytes.push(OPCODE_COMMIT_TRANSACTION),
+		Instruction::ConvertJson(target) => { bytes.push(OPCODE_CONVERT_JSON); write_data_type(bytes, target); }
+		Instruction::ConvertObject { object_type_id, private_types } => {
+			bytes.push(OPCODE_CONVERT_OBJECT);
+			bytes.extend_from_slice(&object_type_id.raw().to_le_bytes());
+			bytes.extend_from_slice(&(private_types.len() as u32).to_le_bytes());
+			for id in private_types { bytes.extend_from_slice(&id.raw().to_le_bytes()); }
+		},
 		Instruction::CreateRecord => bytes.push(OPCODE_CREATE_RECORD),
 		Instruction::CreateRecordIfPending => bytes.push(OPCODE_CREATE_RECORD_IF_PENDING),
 		Instruction::DeleteRecord => bytes.push(OPCODE_DELETE_RECORD),
@@ -1514,6 +1604,7 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.push(OPCODE_LOAD_PROJECTED_VALUE);
 			bytes.extend_from_slice(&value_id.to_le_bytes());
 		}
+		Instruction::LoadQuotedField(name) => { bytes.push(OPCODE_LOAD_QUOTED_FIELD); write_string(bytes, name); }
 		Instruction::LoadReference(slot) => {
 			bytes.push(OPCODE_LOAD_REFERENCE);
 			bytes.extend_from_slice(&slot.to_le_bytes());
@@ -1532,6 +1623,12 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 		Instruction::MakeArray(element_count) => {
 			bytes.push(OPCODE_MAKE_ARRAY);
 			bytes.extend_from_slice(&element_count.to_le_bytes());
+		}
+		Instruction::MakeJsonArray(count) => { bytes.push(OPCODE_MAKE_JSON_ARRAY); bytes.extend_from_slice(&count.to_le_bytes()); }
+		Instruction::MakeJsonObject(names) => {
+			bytes.push(OPCODE_MAKE_JSON_OBJECT);
+			bytes.extend_from_slice(&(names.len() as u32).to_le_bytes());
+			for name in names { bytes.extend_from_slice(&(name.len() as u32).to_le_bytes()); bytes.extend_from_slice(name.as_bytes()); }
 		}
 		Instruction::MakeObject { field_names, object_type_id } => {
 			bytes.push(OPCODE_MAKE_OBJECT);
@@ -1572,6 +1669,11 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.push(u8::from(*schema_is_implicit));
 		}
 		Instruction::MakeSteppedRange => bytes.push(OPCODE_MAKE_STEPPED_RANGE),
+		Instruction::MemberPathExists(path) => {
+			bytes.push(OPCODE_MEMBER_PATH_EXISTS);
+			bytes.extend_from_slice(&(path.len() as u32).to_le_bytes());
+			for (name, quoted) in path { write_string(bytes, name); bytes.push(u8::from(*quoted)); }
+		},
 		Instruction::Modulo => bytes.push(OPCODE_MODULO),
 		Instruction::Multiply => bytes.push(OPCODE_MULTIPLY),
 		Instruction::Negate => bytes.push(OPCODE_NEGATE),
@@ -1640,6 +1742,10 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.push(OPCODE_PUSH_INTEGER);
 			bytes.extend_from_slice(&value.to_le_bytes());
 		}
+		Instruction::PushJsonNumber(number) => {
+			bytes.push(OPCODE_PUSH_JSON_NUMBER);
+			bytes.extend_from_slice(&(number.len() as u32).to_le_bytes()); bytes.extend_from_slice(number.as_bytes());
+		}
 		Instruction::PushNull => bytes.push(OPCODE_PUSH_NULL),
 		Instruction::PushText(value) => {
 			bytes.push(OPCODE_PUSH_TEXT);
@@ -1694,13 +1800,6 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 		Instruction::UpdateRecord => bytes.push(OPCODE_UPDATE_RECORD),
 		Instruction::UpdateRecordIfChanged => bytes.push(OPCODE_UPDATE_RECORD_IF_CHANGED),
 		Instruction::Xor => bytes.push(OPCODE_XOR),
-		Instruction::ConvertJson(target) => { bytes.push(OPCODE_CONVERT_JSON); write_data_type(bytes, target); }
-		Instruction::LoadQuotedField(name) => { bytes.push(OPCODE_LOAD_QUOTED_FIELD); write_string(bytes, name); }
-		Instruction::MemberPathExists(path) => {
-			bytes.push(OPCODE_MEMBER_PATH_EXISTS);
-			bytes.extend_from_slice(&(path.len() as u32).to_le_bytes());
-			for (name, quoted) in path { write_string(bytes, name); bytes.push(u8::from(*quoted)); }
-		}
 	}
 }
 
@@ -1857,9 +1956,13 @@ fn write_object_value_type_descriptor(bytes: &mut Vec<u8>, data_type: &ObjectVal
 		ObjectValueTypeDescriptor::Bool => bytes.push(OBJECT_VALUE_TYPE_BOOL),
 		ObjectValueTypeDescriptor::Date => bytes.push(OBJECT_VALUE_TYPE_DATE),
 		ObjectValueTypeDescriptor::Dec => bytes.push(OBJECT_VALUE_TYPE_DEC),
-		ObjectValueTypeDescriptor::Enum(name) => {
+		ObjectValueTypeDescriptor::Enum { name, default_variant, default_value, variants } => {
 			bytes.push(OBJECT_VALUE_TYPE_ENUM);
 			write_string(bytes, name);
+			write_string(bytes, default_variant);
+			write_inline_constant(bytes, default_value);
+			bytes.extend_from_slice(&(variants.len() as u32).to_le_bytes());
+			for (name, value) in variants { write_string(bytes, name); write_inline_constant(bytes, value); }
 		}
 		ObjectValueTypeDescriptor::Int => bytes.push(OBJECT_VALUE_TYPE_INT),
 		ObjectValueTypeDescriptor::Nullable(inner_type) => {
@@ -1993,6 +2096,28 @@ mod tests {
 	use super::*;
 
 	use crate::ast::*;
+
+	#[test]
+	fn reads_legacy_debug_information_without_conversion_scopes() {
+		let program = Program::new(vec![Instruction::PushInteger(1)]);
+		let mut bytes = write_program(&program);
+		// The old debug layout ended immediately before the new zero scope count.
+		bytes.truncate(bytes.len() - 4);
+		assert_eq!(read_program(&bytes).unwrap(), program);
+	}
+
+	#[test]
+	fn rejects_unknown_type_ids_in_debug_conversion_scopes() {
+		for private in [false, true] {
+			let mut program = Program::new(vec![]);
+			program.debug_info_mut().object_scopes.push(ObjectScopeDebugInfo {
+				source_name: Some("main.tablo".into()),
+				bindings: if private { vec![] } else { vec![("Missing".into(), ObjectTypeId::from_raw(99))] },
+				private_types: if private { vec![ObjectTypeId::from_raw(99)] } else { vec![] },
+			});
+			assert!(read_program(&write_program(&program)).is_err());
+		}
+	}
 
 	#[test]
 	fn rejects_duplicate_object_type_descriptor_ids() {
@@ -2242,7 +2367,7 @@ mod tests {
 			ObjectValueTypeDescriptor::Bool,
 			ObjectValueTypeDescriptor::Date,
 			ObjectValueTypeDescriptor::Dec,
-			ObjectValueTypeDescriptor::Enum(String::from("Status")),
+			ObjectValueTypeDescriptor::Enum { name: String::from("Status"), default_variant: String::from("Ready"), default_value: Constant::Integer(7), variants: vec![("Ready".into(), Constant::Integer(7))] },
 			ObjectValueTypeDescriptor::Int,
 			ObjectValueTypeDescriptor::Nullable(Box::new(ObjectValueTypeDescriptor::Text)),
 			ObjectValueTypeDescriptor::Object(ObjectTypeId::from_raw(0)),

@@ -351,7 +351,10 @@ impl DapServer {
 			.transpose()?
 			.unwrap_or(0);
 		let frame = stack_frames.get(frame_index).ok_or_else(|| format!("Unknown frame id {}.", frame_index + 1))?;
-		let value = VirtualMachine::evaluate_watch_expression(expression, frame)
+		let value = match self.program {
+			Some(program) => VirtualMachine::evaluate_watch_expression_in_program(expression, frame, program),
+			None => VirtualMachine::evaluate_watch_expression(expression, frame),
+		}
 			.map_err(|error| error.message)?;
 		let variables_reference = self.variables_reference_for_value(value.clone(), None);
 
@@ -848,7 +851,7 @@ fn object_value_type_name(
 		ObjectValueTypeDescriptor::Bool => String::from("bool"),
 		ObjectValueTypeDescriptor::Date => String::from("date"),
 		ObjectValueTypeDescriptor::Dec => String::from("dec"),
-		ObjectValueTypeDescriptor::Enum(name) => name.clone(),
+		ObjectValueTypeDescriptor::Enum { name, .. } => name.clone(),
 		ObjectValueTypeDescriptor::Int => String::from("int"),
 		ObjectValueTypeDescriptor::Nullable(inner) => {
 			format!("{}?", object_value_type_name(inner, program))
@@ -1254,6 +1257,55 @@ mod tests {
 
 	use tablo::ast::*;
 	use tablo::utils::{ unique_temp_directory, unique_temp_path };
+
+	#[test]
+	fn evaluates_and_expands_object_conversion_watches_from_object_files() {
+		let directory = tempfile::tempdir().unwrap();
+		let path = directory.path().join("main.tablo");
+		let output = path.with_extension("tobj");
+		let source = r#"pub obj Model { pub value: int, hidden: int = 7 };
+			fn Main(args: [text]): int { var data: json = { "value": 3 }; return 1 / 0; }"#;
+		tablo::executable::compile_object(source, &path, &output, None, DebugInfoLevel::Full).unwrap();
+		let program = Box::leak(Box::new(read_program_from_path(output).unwrap()));
+		let Err(TabloError::Runtime(error)) = tablo::run_program(program) else { panic!("Expected runtime error"); };
+		let mut server = DapServer::new();
+		server.program = Some(program);
+		server.runtime_error = Some(error);
+		let messages = server.handle_evaluate(1, Some(json!({ "expression": "Model(data)", "frameId": 1 }))).unwrap();
+		assert_eq!(messages[0]["body"]["type"], "Model");
+		let reference = messages[0]["body"]["variablesReference"].as_i64().unwrap();
+		let VariableContainer::Value(value, _) = server.variable_containers.get(&reference).unwrap().clone() else { panic!("Expected object result"); };
+		let children = server.child_variables_for_value(&value, None).unwrap();
+		assert!(children.iter().any(|child| child["name"] == "value" && child["value"] == "3"));
+		let messages = server.handle_evaluate(2, Some(json!({ "expression": "text(json(Model(data)))" }))).unwrap();
+		assert_eq!(messages[0]["body"]["result"], r#"{"value":3}"#);
+		assert!(server.handle_evaluate(3, Some(json!({ "expression": "Model(v: data)" }))).is_err());
+	}
+
+	#[test]
+	fn evaluates_json_literal_watches_and_expands_results() {
+		let mut server = DapServer::new();
+		server.runtime_error = Some(VmError {
+			instruction_index: 0,
+			message: String::from("paused"),
+			source_location: None,
+			stack_trace: vec![VmStackFrame { instruction_index: 0, locals: Vec::new(), source_location: None }],
+		});
+		let messages = server.handle_evaluate(1, Some(json!({
+			"expression": r#"json(text({ "values": [999999999999999999999999999999999999999, null] }))"#,
+			"frameId": 1,
+		}))).unwrap();
+		assert_eq!(messages[0]["body"]["type"], "json");
+		let reference = messages[0]["body"]["variablesReference"].as_i64().unwrap();
+		let VariableContainer::Value(value, _) = server.variable_containers.get(&reference).unwrap().clone() else { panic!("Expected JSON result"); };
+		let children = server.child_variables_for_value(&value, None).unwrap();
+		assert_eq!(children[0]["name"], "values");
+		let reference = children[0]["variablesReference"].as_i64().unwrap();
+		let VariableContainer::Value(value, _) = server.variable_containers.get(&reference).unwrap().clone() else { panic!("Expected JSON array"); };
+		let elements = server.child_variables_for_value(&value, None).unwrap();
+		assert_eq!(elements[0]["value"], "999999999999999999999999999999999999999");
+		assert_eq!(elements[1]["value"], "null");
+	}
 
 	#[test]
 	fn expands_json_without_converting_scalar_numbers() {

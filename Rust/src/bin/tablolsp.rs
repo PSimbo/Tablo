@@ -668,6 +668,14 @@ mod tests {
 	}
 
 	#[test]
+	fn accepts_json_literals_in_document_diagnostics() {
+		let server = LspServer::new();
+		let source = r#"fn Build(): json { return { "values": [1, 'two', null, 999999999999999999999999999999999999999] }; }"#;
+		let diagnostics = server.document_diagnostics("file:///tmp/literals.tablo", source).unwrap();
+		assert!(diagnostics.is_empty(), "{diagnostics:?}");
+	}
+
+	#[test]
 	fn accepts_migrated_function_syntax_and_keywords_in_document_diagnostics() {
 		let server = LspServer::new();
 		let source = "\
@@ -1106,6 +1114,28 @@ fn Read(config: Config): int {
 				.and_then(JsonValue::as_str),
 			Some("right: int = 0"),
 		);
+	}
+
+	#[test]
+	fn signature_help_describes_imported_json_conversions_while_typing() {
+		let directory = tempfile::tempdir().unwrap();
+		let source_path = directory.path().join("main.tablo");
+		std::fs::write(directory.path().join("Models.tablo"),
+			"pub obj Customer { pub value: int }; pub obj Rows [int]; obj Hidden { value: int };").unwrap();
+		let uri = format!("file://{}", source_path.display());
+		for (name, expected) in [("Customer", "Models.Customer"), ("Rows", "Models.Rows")] {
+			let source = format!("use './Models'; fn Main(args: [text]): int {{ var value: {name} = {name}(); return 0; }}");
+			let cursor = source.find(&format!("{name}(")).unwrap() + name.len() + 1;
+			let mut server = LspServer::new();
+			server.open_documents.insert(uri.clone(), OpenDocument { text: source.clone(), version: 1 });
+			let help = server.signature_help(&uri, position_at_offset(&source, cursor)).unwrap();
+			assert_eq!(help["signatures"][0]["label"], format!("{name}(json): {expected}"));
+			assert_eq!(help["signatures"][0]["parameters"][0]["label"], "json");
+			let (analysis, source_name) = server.completion_analysis(&uri, cursor).unwrap();
+			let items = object_type_completion_items(&analysis, &source_name);
+			assert!(items.iter().any(|item| item.label == name && item.detail.contains("(json)")));
+			assert!(!items.iter().any(|item| item.label == "Hidden"));
+		}
 	}
 
 	#[test]

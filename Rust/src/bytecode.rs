@@ -33,6 +33,7 @@ pub enum Instruction {
 	CallBuiltIn(BuiltInFunction, u32),
 	CommitTransaction,
 	ConvertJson(DataType),
+	ConvertObject { object_type_id: ObjectTypeId, private_types: Vec<ObjectTypeId> },
 	CreateRecord,
 	CreateRecordIfPending,
 	DeleteRecord,
@@ -66,6 +67,8 @@ pub enum Instruction {
 	},
 	Locked,
 	MakeArray(u32),
+	MakeJsonArray(u32),
+	MakeJsonObject(Vec<String>),
 	MakeObject {
 		field_names: Vec<String>,
 		object_type_id: ObjectTypeId,
@@ -100,6 +103,7 @@ pub enum Instruction {
 		variant_name: String,
 	},
 	PushInteger(i64),
+	PushJsonNumber(String),
 	PushNull,
 	PushText(String),
 	PushTime(crate::value::Time),
@@ -174,7 +178,7 @@ pub enum ObjectValueTypeDescriptor {
 	Bool,
 	Date,
 	Dec,
-	Enum(String),
+	Enum { name: String, default_variant: String, default_value: Constant, variants: Vec<(String, Constant)> },
 	Int,
 	Json,
 	Nullable(Box<ObjectValueTypeDescriptor>),
@@ -218,8 +222,16 @@ pub struct ConstantPool {
 // derived later from the original source text when needed.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DebugInfo {
+	pub(crate) object_scopes: Vec<ObjectScopeDebugInfo>,
 	code_bodies: Vec<CodeBodyDebugInfo>,
 	source_files: Vec<SourceFileDebugInfo>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ObjectScopeDebugInfo {
+	pub source_name: Option<String>,
+	pub bindings: Vec<(String, ObjectTypeId)>,
+	pub private_types: Vec<ObjectTypeId>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -406,6 +418,7 @@ impl DebugInfo {
 		match level {
 			DebugInfoLevel::None => *self = Self::default(),
 			DebugInfoLevel::Lines => {
+				self.object_scopes.clear();
 				for body in &mut self.code_bodies {
 					body.locals.clear();
 				}
@@ -435,7 +448,7 @@ impl DebugInfo {
 	}
 
 	pub fn is_empty(&self) -> bool {
-		self.code_bodies.is_empty() && self.source_files.is_empty()
+		self.code_bodies.is_empty() && self.source_files.is_empty() && self.object_scopes.is_empty()
 	}
 
 	pub fn set_code_body_source_file(&mut self, body_index: usize, source_file_index: u32) {
@@ -686,6 +699,7 @@ impl InstructionSite {
 impl DebugInfo {
 	pub fn new(code_bodies: Vec<CodeBodyDebugInfo>, source_files: Vec<SourceFileDebugInfo>) -> Self {
 		Self {
+			object_scopes: Vec::new(),
 			code_bodies,
 			source_files,
 		}

@@ -595,8 +595,11 @@ impl SemanticAnalyzer {
 				if index_type != DataType::Int { return Err(self.compile_error(index.position(), String::from("JSON mutation indices must have type `int`."))); }
 			}
 		}
-		let value_type = self.infer_expression_type(value)?;
-		if !matches!(value_type.without_nullability(), DataType::Json | DataType::JsonMember | DataType::Text | DataType::Bool | DataType::Int | DataType::Dec | DataType::Null) {
+
+		let value_type = self.infer_expression_for_target(value, &DataType::Json)?;
+
+		if !matches!(value_type.without_nullability(), DataType::Json | DataType::JsonMember | DataType::Text | DataType::Bool | DataType::Int | DataType::Dec | DataType::Null)
+			&& !matches!(value_type.without_nullability(), DataType::Object(name) if self.lookup_enum(name).is_some()) {
 			return Err(self.compile_error(value.position(), format!("Cannot store `{}` in JSON without explicit conversion.", value_type.name())));
 		}
 		self.semantic_program.identifier_slots.insert(root.position, local.slot);
@@ -866,7 +869,7 @@ impl SemanticAnalyzer {
 	fn built_in_validation_data_type(data_type: BuiltInParameterType) -> Option<DataType> {
 		Some(match data_type {
 			BuiltInParameterType::Any => DataType::Any,
-			BuiltInParameterType::ArrayAny => DataType::Array(Box::new(DataType::Any)),
+			BuiltInParameterType::ArrayAny => DataType::Array(Box::new(DataType::Any.into_nullable())),
 			BuiltInParameterType::ArrayText => DataType::Array(Box::new(DataType::Text)),
 			BuiltInParameterType::Bool => DataType::Bool,
 			BuiltInParameterType::Date => DataType::Date,
@@ -1107,6 +1110,21 @@ impl SemanticAnalyzer {
 					});
 				}
 
+				if argument_type == &DataType::Any && !parameter.is_by_ref
+					&& let Some(expression) = argument.expression()
+					&& expression.is_contextual_literal() {
+					let accepts = match parameter.data_type.without_nullability() {
+						DataType::Json => true,
+						DataType::Object(name) => self.lookup_object_type_id(name).is_some_and(|id| {
+							let fields = self.semantic_program.object_type(id).expect("Resolved object type.").declaration().fields().is_some();
+							fields == matches!(expression, Expr::ObjectConstruction(_))
+						}),
+						DataType::Array(_) | DataType::Any => matches!(expression, Expr::Array(_)),
+						_ => false,
+					};
+					return if accepts { None } else { Some(format!("parameter `{}` does not accept this literal", parameter.name)) };
+				}
+
 				let accepts_type = if parameter.is_by_ref {
 					parameter.data_type == *argument_type
 				}
@@ -1130,9 +1148,16 @@ impl SemanticAnalyzer {
 					return Some(format!("has an invalid variadic parameter `{}`", parameter.name));
 				};
 				argument_indices.iter().find_map(|argument_index| {
+					if argument_types[*argument_index as usize] == Some(DataType::Any) {
+						let mut element_parameter = parameter.clone();
+						element_parameter.data_type = *element_type.clone();
+						return self.call_binding_type_rejection(&element_parameter, &CallArgumentBinding::Supplied(*argument_index), arguments, argument_sequences, argument_types);
+					}
+
 					let argument_index = *argument_index as usize;
 					let argument_type = argument_types[argument_index].as_ref()
 						.expect("Variadic call argument bindings must refer to expressions.");
+
 					if arguments[argument_index].is_by_ref {
 						Some(format!("requires variadic parameter `{}` to be passed by value", parameter.name))
 					}
@@ -1380,8 +1405,7 @@ impl SemanticAnalyzer {
 
 	fn data_type_has_implicit_default(&self, data_type: &DataType) -> bool {
 		match data_type {
-			DataType::Any
-			| DataType::Array(_)
+			DataType::Array(_)
 			| DataType::Json
 			| DataType::Bool
 			| DataType::Date
@@ -1395,7 +1419,8 @@ impl SemanticAnalyzer {
 			| DataType::TimestampTz
 			| DataType::Union(_) => true,
 			DataType::Nullable(_) => true,
-			DataType::JsonMember
+			DataType::Any
+			| DataType::JsonMember
 			| DataType::EmptyArray
 			| DataType::Null
 			| DataType::Range(_)
@@ -1602,7 +1627,33 @@ impl SemanticAnalyzer {
 		format!("{name}({parameters})")
 	}
 
+	fn describe_json_default_value(&self, expression: &Expr) -> crate::json::JsonValue {
+		use crate::json::JsonValue;
+		use crate::value::Value;
+
+		if let Some(number) = self.semantic_program.json_literal_numbers.get(&expression.position()) {
+			return JsonValue::number_literal(number).expect("Validated JSON numeric literal.");
+		}
+
+		match expression {
+			Expr::Array(array) => JsonValue::array_literal(array.elements.iter()
+				.map(|value| Value::Json(self.describe_json_default_value(value))).collect()),
+			Expr::Boolean(value) => JsonValue::from_value(Value::Boolean(value.value)),
+			Expr::Null(_) => JsonValue::from_value(Value::Null),
+			Expr::ObjectConstruction(object) => JsonValue::object_literal(
+				&object.fields.iter().map(|field| field.name.clone()).collect::<Vec<_>>(),
+				object.fields.iter().map(|field| Value::Json(self.describe_json_default_value(&field.value))).collect(),
+			),
+			Expr::Text(value) => JsonValue::from_value(Value::Text(value.value.clone())),
+			_ => unreachable!("Validated JSON defaults contain only literals."),
+		}.expect("Validated JSON literal default.")
+	}
+
 	fn describe_object_default_value(&self, expression: &Expr) -> ObjectDefaultValue {
+		if self.semantic_program.json_literals.contains(&expression.position()) {
+			return ObjectDefaultValue::Json(self.describe_json_default_value(expression));
+		}
+
 		match expression {
 			Expr::Array(array) => ObjectDefaultValue::Array(
 				array.elements.iter()
@@ -1652,8 +1703,16 @@ impl SemanticAnalyzer {
 					ObjectValueTypeDescriptor::Object(object_type_id)
 				}
 				else {
-					debug_assert!(self.lookup_enum(name).is_some());
-					ObjectValueTypeDescriptor::Enum(name.to_string())
+					let declaration = self.semantic_program.enum_declaration(name).expect("Resolved enum declaration.");
+					let variant = declaration.variants.first().expect("Validated enum has a default variant.");
+					let EnumValue::Constant(default_value) = self.semantic_program.enum_variant(name, &variant.name).expect("Resolved enum variant.").clone();
+					ObjectValueTypeDescriptor::Enum {
+						name: name.to_string(), default_variant: variant.name.clone(), default_value,
+						variants: declaration.variants.iter().map(|variant| {
+							let EnumValue::Constant(value) = self.semantic_program.enum_variant(name, &variant.name).expect("Resolved enum variant.");
+							(variant.name.clone(), value.clone())
+						}).collect(),
+					}
 				}
 			}
 			DataType::Range(element_type) => ObjectValueTypeDescriptor::Range(Box::new(
@@ -1703,7 +1762,7 @@ impl SemanticAnalyzer {
 				_ => false,
 			}
 		}
-		if contains_content(value) && target != value && target != &DataType::Any {
+		if contains_content(value) && target != value {
 			self.semantic_program.json_conversions.insert(position, target.clone());
 		}
 	}
@@ -1998,6 +2057,79 @@ impl SemanticAnalyzer {
 		names
 	}
 
+	fn has_json_target(target: &DataType) -> bool {
+		match target.without_nullability() {
+			DataType::Array(element) => Self::has_json_target(element),
+			DataType::Json => true,
+			_ => false,
+		}
+	}
+
+	fn infer_json_literal_contents(&mut self, expression: &Expr) -> Result<(), CompileError> {
+		if let Some(number) = expression.json_literal_number() {
+			self.semantic_program.json_literal_numbers.insert(expression.position(), number);
+			return Ok(());
+		}
+
+		if expression.is_contextual_literal() {
+			self.semantic_program.json_literals.insert(expression.position());
+
+			match expression {
+				Expr::Array(array) => {
+					for element in &array.elements { self.infer_json_literal_contents(element)?; }
+				}
+				Expr::ObjectConstruction(object) => {
+					let mut names = BTreeSet::new();
+
+					for field in &object.fields {
+						if !field.is_quoted {
+							return Err(self.compile_error(field.position, String::from("JSON property names must use double-quoted identifiers.")));
+						}
+
+						if !names.insert(&field.name) {
+							return Err(self.compile_error(field.position, format!("JSON property `{}` is specified more than once.", field.name)));
+						}
+
+						self.infer_json_literal_contents(&field.value)?;
+					}
+				}
+				_ => unreachable!(),
+			}
+			return Ok(());
+		}
+
+		let data_type = self.infer_expression_type(expression)?;
+
+		if !matches!(data_type.without_nullability(), DataType::Json | DataType::JsonMember | DataType::Text | DataType::Bool | DataType::Int | DataType::Dec | DataType::Null)
+			&& !matches!(data_type.without_nullability(), DataType::Object(name) if self.lookup_enum(name).is_some()) {
+			return Err(self.compile_error(expression.position(), format!("Cannot store `{}` in a JSON literal without explicit conversion.", data_type.name())));
+		}
+
+		Ok(())
+	}
+
+	fn infer_expression_for_target(&mut self, expression: &Expr, target: &DataType) -> Result<DataType, CompileError> {
+		match (expression, target.without_nullability()) {
+			(expression, DataType::Json) if expression.is_contextual_literal() => {
+				self.infer_json_literal_contents(expression)?;
+				Ok(DataType::Json)
+			}
+			(Expr::Array(array), DataType::Array(element_type)) => {
+				for element in &array.elements {
+					let actual = self.infer_expression_for_target(element, element_type)?;
+					self.ensure_assignable(element_type, &actual, element.position())?;
+				}
+				Ok(target.without_nullability().clone())
+			}
+			(Expr::ObjectConstruction(object), DataType::Object(name)) if object.object_type_name.is_empty() => {
+				let mut object = object.clone();
+				object.object_type_name = name.name.clone();
+				self.infer_expression_type(&Expr::ObjectConstruction(object))
+			}
+			_ => self.infer_expression_type(expression),
+		}
+	}
+
 	fn infer_array_literal_type(&mut self, elements: &[Expr], position: usize) -> Result<DataType, CompileError> {
 		let mut element_type: Option<DataType> = None;
 
@@ -2048,12 +2180,24 @@ impl SemanticAnalyzer {
 			}
 		}
 
+		let mut signatures = self.built_in_validation_signatures(built_in);
 		let mut argument_types = arguments.iter()
 			.map(|argument| {
 				let expression = argument.expression().expect("Built-in arguments must be expressions after default-marker validation.");
-				self.infer_expression_type(expression)
+
+				if expression.is_contextual_literal() && (matches!(expression, Expr::ObjectConstruction(_))
+					|| signatures.iter().any(|signature| signature.parameters.iter().any(|parameter| Self::has_json_target(&parameter.data_type)))) {
+					Ok(DataType::Any)
+				} else { self.infer_expression_type(expression) }
 			})
 			.collect::<Result<Vec<_>, _>>()?;
+
+		if built_in == BuiltInFunction::JsonCast && argument_types.len() == 1 {
+			let target = &argument_types[0];
+			if matches!(target, DataType::Any | DataType::Array(_) | DataType::EmptyArray | DataType::Object(_) | DataType::Json | DataType::JsonMember) {
+				signatures[0].parameters[0].data_type = target.clone();
+			}
+		}
 
 		if built_in == BuiltInFunction::SeqNext {
 			let [argument] = arguments else {
@@ -2077,7 +2221,14 @@ impl SemanticAnalyzer {
 			return Ok(Some(return_type));
 		}
 
-		let signatures = self.built_in_validation_signatures(built_in);
+
+		if matches!(built_in, BuiltInFunction::IntCast | BuiltInFunction::DecCast) && argument_types == [DataType::JsonMember] {
+			// Explicit numeric extraction must receive the JSON number unchanged,
+			// rather than performing an implicit (exact) conversion first.
+			signatures.truncate(1);
+			signatures[0].parameters[0].data_type = DataType::JsonMember;
+		}
+
 		let (signature, argument_bindings) = self.select_function_overload(
 			"built-in function",
 			built_in.name(),
@@ -2086,6 +2237,7 @@ impl SemanticAnalyzer {
 			&argument_types.iter().cloned().map(Some).collect::<Vec<_>>(),
 			position,
 		)?;
+
 		for (parameter, binding) in signature.parameters.iter().zip(&argument_bindings) {
 			let (indices, target) = match binding {
 				CallArgumentBinding::Supplied(index) => (vec![*index], &parameter.data_type),
@@ -2097,12 +2249,19 @@ impl SemanticAnalyzer {
 			};
 			for index in indices {
 				let index = index as usize;
+				let expression = arguments[index].expression().unwrap();
+
+				if argument_types[index] == DataType::Any && expression.is_contextual_literal() {
+					argument_types[index] = self.infer_expression_for_target(expression, target)?;
+				}
+
 				if argument_types[index] == DataType::JsonMember {
 					self.ensure_function_argument_assignable(target, &argument_types[index], arguments[index].expression().unwrap().position())?;
 					argument_types[index] = target.clone();
 				}
 			}
 		}
+
 		let ordered_arguments = Self::call_arguments_in_binding_order(arguments, &argument_bindings);
 		let argument_types = Self::call_argument_types_in_binding_order(&argument_types, &argument_bindings);
 		self.semantic_program.call_argument_bindings.insert(position, argument_bindings);
@@ -2206,10 +2365,33 @@ impl SemanticAnalyzer {
 	fn infer_call_type(&mut self, call: &CallExpr) -> Result<Option<DataType>, CompileError> {
 		let CallExpr { arguments, callee, position } = call;
 
+		if let Some(id) = self.lookup_object_type_id(&callee.name) {
+			if arguments.len() != 1 || arguments[0].is_by_ref || arguments[0].expression().is_none() {
+				return Err(self.compile_error(*position, "Object conversion requires one JSON argument by value."));
+			}
+			if arguments[0].name.is_some() {
+				return Err(self.compile_error(arguments[0].position, "Object conversion requires a positional argument; named arguments are not supported."));
+			}
+			let argument = arguments[0].expression().unwrap();
+			let source_type = self.infer_expression_for_target(argument, &DataType::Json)?;
+			if !matches!(source_type, DataType::Json | DataType::JsonMember) {
+				return Err(self.compile_error(argument.position(), "Object conversion requires JSON contents."));
+			}
+			let private_types = self.semantic_program.object_types().filter(|object| object.source_name() == self.current_source_name.as_deref())
+				.map(|object| object.id()).collect();
+			let result = DataType::Object(callee.name.clone().into());
+			self.semantic_program.object_conversions.insert(*position, (id, private_types));
+			self.semantic_program.call_return_types.insert(*position, result.clone());
+			return Ok(Some(result));
+		}
+
+
 		if let Some(signatures) = self.lookup_functions(&callee.name).map(<[FunctionSignature]>::to_vec) {
 			let mut argument_types = Vec::with_capacity(arguments.len());
 			for argument in arguments {
 				argument_types.push(match argument.expression() {
+					Some(expression) if expression.is_contextual_literal()
+						&& (matches!(expression, Expr::ObjectConstruction(_)) || signatures.iter().any(|signature| signature.parameters.iter().any(|parameter| Self::has_json_target(&parameter.data_type)))) => Some(DataType::Any),
 					Some(expression) => Some(self.infer_expression_type(expression)?),
 					None => None,
 				});
@@ -2222,6 +2404,27 @@ impl SemanticAnalyzer {
 				&argument_types,
 				*position,
 			)?;
+
+			for (parameter, binding) in signature.parameters.iter().zip(&argument_bindings) {
+				let (indices, target) = match binding {
+					CallArgumentBinding::Supplied(index) => (std::slice::from_ref(index), &parameter.data_type),
+					CallArgumentBinding::Variadic(indices) => {
+						let DataType::Array(element) = &parameter.data_type else { unreachable!() };
+						(indices.as_slice(), element.as_ref())
+					}
+					_ => continue,
+				};
+
+				for index in indices {
+					let index = *index as usize;
+
+					if let Some(expression) = arguments[index].expression()
+						&& expression.is_contextual_literal() {
+						argument_types[index] = Some(self.infer_expression_for_target(expression, target)?);
+					}
+				}
+			}
+
 			let mut reference_slots = vec![None; arguments.len()];
 
 			for (parameter_index, binding) in argument_bindings.iter().enumerate() {
@@ -2496,7 +2699,7 @@ impl SemanticAnalyzer {
 								self.infer_expression_type_with_find_lock_mode(value, RecordLockMode::UpdateNoWait)?
 							}
 							else {
-								self.infer_expression_type(value)?
+								self.infer_expression_for_target(value, &local.data_type)?
 							};
 
 							self.assignment_result_type(*operator, &local.data_type, &value_type, expression.position(), value.position())
@@ -2574,7 +2777,8 @@ impl SemanticAnalyzer {
 							}
 						};
 
-						let value_type = self.infer_expression_type(value)?;
+						let value_type = self.infer_expression_for_target(value, element_type)?;
+
 						self.assignment_result_type(*operator, element_type, &value_type, expression.position(), value.position())
 					}
 					AssignmentTarget::Field(target) => {
@@ -2644,7 +2848,8 @@ impl SemanticAnalyzer {
 							}
 						}
 
-						let value_type = self.infer_expression_type(value)?;
+						let value_type = self.infer_expression_for_target(value, &current_type)?;
+
 						self.assignment_result_type(*operator, &current_type, &value_type, expression.position(), value.position())
 					}
 				}
@@ -2679,6 +2884,7 @@ impl SemanticAnalyzer {
 			Expr::Count(count) => self.infer_count_expression_type(count),
 			Expr::Date(_) => Ok(DataType::Date),
 			Expr::Decimal(_) => Ok(DataType::Dec),
+			Expr::ExactNumber(number) => Err(self.compile_error(number.position, String::from("Numeric literal exceeds the supported primitive range; an exact JSON literal context is required."))),
 			Expr::FieldAccess(FieldAccessExpr { field, object, .. }) => {
 				if let Expr::Identifier(identifier) = object.as_ref()
 					&& self.lookup_local(&identifier.name).is_none()
@@ -2825,13 +3031,19 @@ impl SemanticAnalyzer {
 				object_type_name,
 				position,
 			}) => {
+				if object_type_name.is_empty() {
+					return Err(self.compile_error(*position, String::from("Object literal requires an expected JSON or object type.")));
+				}
+
 				let object_type_id = self.lookup_object_type_id(object_type_name)
 					.ok_or_else(|| self.unknown_object_type_error(*position, object_type_name))?;
 				let object_declaration = self.semantic_program.object_type(object_type_id)
 					.map(ResolvedObjectType::declaration)
 					.cloned()
 					.expect("Resolved object type binding is missing its semantic declaration.");
+
 				self.semantic_program.object_construction_type_ids.insert(*position, object_type_id);
+
 				let object_fields = object_declaration.fields().ok_or(self.compile_error(
 					*position,
 					format!("Object `{object_type_name}` uses array syntax and cannot be constructed with named fields."),
@@ -2854,7 +3066,8 @@ impl SemanticAnalyzer {
 						));
 					}
 
-					let value_type = self.infer_expression_type(&field.value)?;
+					let value_type = self.infer_expression_for_target(&field.value, &object_field.data_type)?;
+
 					self.ensure_assignable(&object_field.data_type, &value_type, field.value.position())?;
 				}
 
@@ -3364,6 +3577,7 @@ impl SemanticAnalyzer {
 			)),
 			Expr::Date(_) => Ok(DataType::Date),
 			Expr::Decimal(_) => Ok(DataType::Dec),
+			Expr::ExactNumber(number) => Err(self.compile_error(number.position, String::from("Numeric literal exceeds the supported primitive range; an exact JSON literal context is required."))),
 			Expr::FieldAccess(field_access) => self.infer_query_field_access_type(field_access, table),
 			Expr::Find(_) => Err(self.compile_error(
 				expression.position(),
@@ -3590,11 +3804,15 @@ impl SemanticAnalyzer {
 		}
 
 		if target == &DataType::Any {
-			return true;
+			return match value {
+				DataType::Null | DataType::Nullable(_) => false,
+				DataType::Union(members) => members.iter().all(|member| self.is_assignable_with_numeric_conversion(target, member, allow_numeric_conversion)),
+				_ => true,
+			};
 		}
 
 		if value == &DataType::JsonMember {
-			return matches!(target.without_nullability(), DataType::JsonMember | DataType::Json | DataType::Bool | DataType::Text | DataType::Int | DataType::Dec);
+			return matches!(target.without_nullability(), DataType::Any | DataType::JsonMember | DataType::Json | DataType::Bool | DataType::Text | DataType::Int | DataType::Dec);
 		}
 
 		match (target, value) {
@@ -4090,6 +4308,7 @@ impl SemanticAnalyzer {
 			}
 			Expr::Date(date) => Ok(QueryExpr::Literal(QueryLiteral::Date(date.value))),
 			Expr::Decimal(decimal) => Ok(QueryExpr::Literal(QueryLiteral::Decimal(decimal.value.clone()))),
+			Expr::ExactNumber(number) => Err(self.compile_error(number.position, String::from("Numeric literal exceeds the supported query range."))),
 			Expr::FieldAccess(field_access) => self.lower_query_field_access(field_access, table, backend),
 			Expr::Identifier(identifier) => {
 				if let Some(local) = self.lookup_local(&identifier.name) {
@@ -5581,10 +5800,6 @@ impl SemanticAnalyzer {
 			}
 			DataType::Nullable(inner) => {
 				match inner.as_ref() {
-					DataType::Any => Err(self.compile_error(
-						position,
-						String::from("The `any` type may not currently be marked as nullable."),
-					)),
 					DataType::Union(_) => Err(self.compile_error(
 						position,
 						String::from("Nullable union types are not yet supported."),
@@ -5611,6 +5826,10 @@ impl SemanticAnalyzer {
 		active: &mut Vec<(ObjectDefaultConstructionState, usize)>,
 		path: &mut Vec<ObjectDefaultPathStep>,
 	) -> Result<(), CompileError> {
+		if self.semantic_program.json_literals.contains(&expression.position()) {
+			return Ok(());
+		}
+
 		match expression {
 			Expr::Array(array) => {
 				for element in &array.elements {
@@ -5892,8 +6111,10 @@ impl SemanticAnalyzer {
 		};
 
 		self.validate_function_parameter_default_expression(default_value)?;
+
 		let (parameter_type, _) = self.resolve_function_parameter_type(parameter)?;
-		let default_type = self.infer_expression_type(default_value)?;
+		let default_type = self.infer_expression_for_target(default_value, &parameter_type)?;
+
 		self.ensure_assignable(&parameter_type, &default_type, default_value.position())
 	}
 
@@ -5942,6 +6163,7 @@ impl SemanticAnalyzer {
 			Expr::Boolean(_)
 			| Expr::Date(_)
 			| Expr::Decimal(_)
+			| Expr::ExactNumber(_)
 			| Expr::Integer(_)
 			| Expr::Null(_)
 			| Expr::Text(_)
@@ -6060,6 +6282,10 @@ impl SemanticAnalyzer {
 	}
 
 	fn validate_literal_expression(&mut self, expression: &Expr) -> Result<(), CompileError> {
+		if self.semantic_program.json_literal_numbers.contains_key(&expression.position()) {
+			return Ok(());
+		}
+
 		match expression {
 			Expr::Array(array) => {
 				for element in &array.elements {
@@ -6070,6 +6296,7 @@ impl SemanticAnalyzer {
 			Expr::Boolean(_)
 			| Expr::Date(_)
 			| Expr::Decimal(_)
+			| Expr::ExactNumber(_)
 			| Expr::Integer(_)
 			| Expr::Null(_)
 			| Expr::Text(_)
@@ -6173,8 +6400,8 @@ impl SemanticAnalyzer {
 					}
 
 					if let Some(default_value) = &field.default_value {
+						let default_type = self.infer_expression_for_target(default_value, &field.data_type)?;
 						self.validate_literal_expression(default_value)?;
-						let default_type = self.infer_expression_type(default_value)?;
 						self.ensure_object_field_default_assignable(field, &default_type, default_value.position())?;
 					}
 				}
@@ -6693,7 +6920,7 @@ impl SemanticAnalyzer {
 						String::from("A function without a return type cannot return a value."),
 					)),
 					(Some(expected_type), Some(value)) => {
-						let value_type = self.infer_expression_type(value)?;
+						let value_type = self.infer_expression_for_target(value, &expected_type)?;
 						self.ensure_assignable(&expected_type, &value_type, value.position())
 					}
 					(Some(expected_type), None) => Err(self.compile_error(
@@ -6750,7 +6977,7 @@ impl SemanticAnalyzer {
 				}
 
 				if let Some(initial_value) = initial_value.as_ref() {
-					let initial_type = self.infer_expression_type(initial_value)?;
+					let initial_type = self.infer_expression_for_target(initial_value, data_type)?;
 					self.ensure_assignable(data_type, &initial_type, initial_value.position())?;
 				}
 				else if *is_const {
@@ -6758,6 +6985,17 @@ impl SemanticAnalyzer {
 						*position,
 						format!("Constant `{name}` must currently have an initializer."),
 					));
+				}
+
+				if initial_value.is_none() {
+					if data_type == &DataType::Any {
+						return Err(self.compile_error(*position, "Non-nullable `any` requires an initializer; use `any?` for absence."));
+					}
+					if let DataType::Object(name) = data_type
+						&& let Some(id) = self.lookup_object_type_id(name) {
+						crate::object_construction::ObjectConstructor::new(self.semantic_program.object_type_descriptors())
+							.object_default(id).map_err(|error| self.compile_error(*position, error.to_string()))?;
+					}
 				}
 
 				let slot = self.next_local_slot;
@@ -6837,6 +7075,9 @@ impl SemanticAnalyzer {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SemanticProgram {
+	pub(crate) object_conversions: BTreeMap<usize, (ObjectTypeId, Vec<ObjectTypeId>)>,
+	pub(crate) json_literals: BTreeSet<usize>,
+	pub(crate) json_literal_numbers: BTreeMap<usize, String>,
 	json_assignments: BTreeSet<usize>,
 	active_databases: Vec<String>,
 	built_in_call_targets: BTreeMap<usize, BuiltInFunction>,
@@ -7021,15 +7262,7 @@ impl SemanticProgram {
 	}
 
 	pub fn object_field_default(&self, id: ObjectTypeId, field_name: &str) -> Option<ObjectDefaultValue> {
-		let descriptor = self.object_type_descriptor(id)?;
-		let ObjectTypeDescriptorShape::Fields(fields) = descriptor.shape() else {
-			return None;
-		};
-		let field = fields.iter().find(|field| field.name() == field_name)?;
-
-		field.explicit_default()
-			.map(|value| self.complete_explicit_object_default(value))
-			.unwrap_or_else(|| self.default_for_object_value_type(field.data_type()))
+		crate::object_construction::ObjectConstructor::new(self.object_type_descriptors.values()).field_default(id, field_name).ok()
 	}
 
 	pub fn object_type(&self, id: ObjectTypeId) -> Option<&ResolvedObjectType> {
@@ -7041,7 +7274,7 @@ impl SemanticProgram {
 	}
 
 	pub fn object_type_default(&self, id: ObjectTypeId) -> Option<ObjectDefaultValue> {
-		self.complete_object_default(id, &[])
+		crate::object_construction::ObjectConstructor::new(self.object_type_descriptors.values()).object_default(id).ok()
 	}
 
 	pub fn object_type_descriptor(&self, id: ObjectTypeId) -> Option<&ObjectTypeDescriptor> {
@@ -7111,82 +7344,6 @@ impl SemanticProgram {
 		&self.warnings
 	}
 
-	fn complete_explicit_object_default(&self, value: &ObjectDefaultValue) -> Option<ObjectDefaultValue> {
-		match value {
-			ObjectDefaultValue::Array(values) => Some(ObjectDefaultValue::Array(
-				values.iter()
-					.map(|value| self.complete_explicit_object_default(value))
-					.collect::<Option<Vec<_>>>()?,
-			)),
-			ObjectDefaultValue::Object { fields, object_type_id } => {
-				self.complete_object_default(*object_type_id, fields)
-			}
-			other => Some(other.clone()),
-		}
-	}
-
-	fn complete_object_default(
-		&self,
-		id: ObjectTypeId,
-		supplied_fields: &[(String, ObjectDefaultValue)],
-	) -> Option<ObjectDefaultValue> {
-		let descriptor = self.object_type_descriptor(id)?;
-
-		match descriptor.shape() {
-			ObjectTypeDescriptorShape::Fields(fields) => {
-				let fields = fields.iter()
-					.map(|field| {
-						let value = supplied_fields.iter()
-							.find(|(name, _)| name == field.name())
-							.map(|(_, value)| self.complete_explicit_object_default(value))
-							.unwrap_or_else(|| self.object_field_default(id, field.name()));
-
-						Some((field.name().to_string(), value?))
-					})
-					.collect::<Option<Vec<_>>>()?;
-
-				Some(ObjectDefaultValue::Object {
-					fields,
-					object_type_id: id,
-				})
-			}
-			ObjectTypeDescriptorShape::RootArray(_) => Some(ObjectDefaultValue::Array(Vec::new())),
-		}
-	}
-
-	fn default_for_object_value_type(&self, data_type: &ObjectValueTypeDescriptor) -> Option<ObjectDefaultValue> {
-		match data_type {
-			ObjectValueTypeDescriptor::Any | ObjectValueTypeDescriptor::Nullable(_) => {
-				Some(ObjectDefaultValue::Null)
-			}
-			ObjectValueTypeDescriptor::Array(_) => Some(ObjectDefaultValue::Array(Vec::new())),
-			ObjectValueTypeDescriptor::Bool => Some(ObjectDefaultValue::Boolean(false)),
-			ObjectValueTypeDescriptor::Date => Some(ObjectDefaultValue::CurrentDate),
-			ObjectValueTypeDescriptor::Dec => Some(ObjectDefaultValue::Decimal(
-				crate::value::Decimal::from_integer(0),
-			)),
-			ObjectValueTypeDescriptor::Enum(name) => {
-				let declaration = self.enum_declaration(name)?;
-				let variant = declaration.variants.first()?;
-				let EnumValue::Constant(backing_value) = self.enum_variant(name, &variant.name)?.clone();
-
-				Some(ObjectDefaultValue::Enum {
-					backing_value,
-					enum_name: name.clone(),
-					variant_name: variant.name.clone(),
-				})
-			}
-			ObjectValueTypeDescriptor::Int => Some(ObjectDefaultValue::Integer(0)),
-			ObjectValueTypeDescriptor::Json => Some(ObjectDefaultValue::Json(crate::json::JsonValue::default())),
-			ObjectValueTypeDescriptor::Object(id) => self.complete_object_default(*id, &[]),
-			ObjectValueTypeDescriptor::Text => Some(ObjectDefaultValue::Text(String::new())),
-			ObjectValueTypeDescriptor::Time => Some(ObjectDefaultValue::CurrentTime),
-			ObjectValueTypeDescriptor::TimeTz => Some(ObjectDefaultValue::CurrentTimeTz),
-			ObjectValueTypeDescriptor::Timestamp => Some(ObjectDefaultValue::CurrentTimestamp),
-			ObjectValueTypeDescriptor::TimestampTz => Some(ObjectDefaultValue::CurrentTimestampTz),
-			ObjectValueTypeDescriptor::Range(_) | ObjectValueTypeDescriptor::Union(_) => None,
-		}
-	}
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

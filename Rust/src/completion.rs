@@ -72,14 +72,44 @@ pub fn callable_signatures_with_analysis(
 			}
 		}
 
+		let object = analysis.object_import_bindings.get(name)
+			.and_then(|id| analysis.semantic_program.object_type(*id))
+			.filter(|object| object.visibility() == Visibility::Public)
+			.or_else(|| analysis.semantic_program.object_type_by_name(name)
+				.filter(|object| object.source_name() == Some(analysis.source_name.as_str())));
+		if object.is_some_and(|object| object.declaration().has_explicit_name) {
+			signatures.push(object_conversion_signature(name));
+		}
+
 		for signature in &mut signatures {
 			*signature = qualify_callable_signature(signature, analysis);
 		}
 	}
 
+	else if local_object_conversion_names(source).iter().any(|candidate| candidate == name) {
+		signatures.push(object_conversion_signature(name));
+	}
+
 	let mut seen = std::collections::BTreeSet::new();
 	signatures.retain(|signature| seen.insert(signature.label.clone()));
 	signatures
+}
+
+fn local_object_conversion_names(source: &str) -> Vec<String> {
+	let parsed = crate::frontend::parse_source_text(&SourceText::new(source));
+	let declarations = match parsed {
+		Ok(program) => program.objects,
+		Err(_) => find_brace_declarations(source, "obj").into_iter().flat_map(|(name, body)| {
+			let declaration = format!(r#"obj "{}" {{ {body} }};"#, name.replace('"', r#""""#));
+			crate::frontend::parse_source_text(&SourceText::new(declaration))
+				.map(|program| program.objects).unwrap_or_default()
+		}).collect(),
+	};
+	declarations.into_iter().filter(|object| object.has_explicit_name).map(|object| object.name).collect()
+}
+
+fn object_conversion_signature(name: &str) -> CallableSignature {
+	CallableSignature { label: format!("{name}(json): {name}"), parameters: vec![String::from("json")] }
 }
 
 pub fn collect_document_completion_items(source: &str) -> Vec<CompletionItem> {
@@ -144,9 +174,9 @@ pub fn collect_document_completion_items(source: &str) -> Vec<CompletionItem> {
 			"obj" => {
 				if let Some((name, next_index)) = parse_named_declaration(source, identifier.end) {
 					items.push(CompletionItem {
-						label: name,
+						label: name.clone(),
 						kind: CompletionItemKind::Object,
-						detail: String::from("Object"),
+						detail: object_conversion_signature(&name).label,
 					});
 					index = next_index;
 					continue;
@@ -379,7 +409,7 @@ pub fn object_type_completion_items(
 		.map(|object_type| CompletionItem {
 			label: object_type.display_name().to_string(),
 			kind: CompletionItemKind::Object,
-			detail: String::from("Object type"),
+			detail: object_conversion_signature(object_type.display_name()).label,
 		})
 		.collect::<Vec<_>>();
 
@@ -388,7 +418,7 @@ pub fn object_type_completion_items(
 		(object_type.visibility() == Visibility::Public).then(|| CompletionItem {
 			label: name.clone(),
 			kind: CompletionItemKind::Object,
-			detail: format!("Object type {}", object_type.display_name()),
+			detail: qualify_callable_signature(&object_conversion_signature(name), analysis).label,
 		})
 	}));
 	items
@@ -415,6 +445,14 @@ pub fn source_for_completion_analysis(source: &str, cursor_offset: usize) -> Str
 	let cursor_offset = cursor_offset.min(source.len());
 	let visible_text = &source[..cursor_offset];
 	let trimmed_end = visible_text.trim_end().len();
+	if visible_text[..trimmed_end].ends_with('(')
+		&& source[cursor_offset..].trim_start().starts_with(')')
+		&& active_call(source, cursor_offset).is_some() {
+		let mut prepared = source.to_owned();
+		prepared.insert_str(cursor_offset, "json('{}')");
+		return prepared;
+	}
+
 	if trimmed_end > 0 && visible_text[..trimmed_end].ends_with('.') {
 		let before_dot = &visible_text[..trimmed_end - 1];
 		let receiver_start = before_dot.char_indices()
@@ -500,7 +538,7 @@ fn active_call(source: &str, cursor_offset: usize) -> Option<(String, usize)> {
 			'{' => delimiters.push(Delimiter::Brace),
 			'[' => delimiters.push(Delimiter::Bracket),
 			'(' => {
-				let call_name = identifier_before(source, index).and_then(|(name, name_start)| {
+				let call_name = qualified_identifier_before(source, index).and_then(|(name, name_start)| {
 					let is_declaration = identifier_before(source, name_start)
 						.is_some_and(|(previous, _)| previous == "fn");
 					(!is_declaration).then_some(name)
@@ -547,7 +585,7 @@ fn append_completion_detail(existing: &mut String, additional: &str) {
 }
 
 fn built_in_callable_signatures(built_in: BuiltInFunction) -> Vec<CallableSignature> {
-	built_in.signatures().into_iter()
+	let mut signatures = built_in.signatures().into_iter()
 		.map(|signature| CallableSignature {
 			label: signature.label(built_in.name()),
 			parameters: signature.parameters.into_iter()
@@ -557,7 +595,18 @@ fn built_in_callable_signatures(built_in: BuiltInFunction) -> Vec<CallableSignat
 				})
 				.collect(),
 		})
-		.collect()
+		.collect::<Vec<_>>();
+	if built_in == BuiltInFunction::JsonCast {
+		// The compiler specializes these conversion inputs to their actual
+		// static types before overload checking; display their categories here.
+		for input in ["<object>", "[any?]", "json", "any"] {
+			signatures.push(CallableSignature {
+				label: format!("json(v: {input}): json"),
+				parameters: vec![format!("v: {input}")],
+			});
+		}
+	}
+	signatures
 }
 
 fn built_in_completion_items() -> Vec<CompletionItem> {
@@ -922,7 +971,7 @@ fn completion_member_type_from_descriptor(
 		ObjectValueTypeDescriptor::Bool => Some(CompletionMemberType::Named(String::from("bool"))),
 		ObjectValueTypeDescriptor::Date => Some(CompletionMemberType::Named(String::from("date"))),
 		ObjectValueTypeDescriptor::Dec => Some(CompletionMemberType::Named(String::from("dec"))),
-		ObjectValueTypeDescriptor::Enum(name) => Some(CompletionMemberType::Named(name.clone())),
+		ObjectValueTypeDescriptor::Enum { name, .. } => Some(CompletionMemberType::Named(name.clone())),
 		ObjectValueTypeDescriptor::Int => Some(CompletionMemberType::Named(String::from("int"))),
 		ObjectValueTypeDescriptor::Json => Some(CompletionMemberType::Named(String::from("json"))),
 		ObjectValueTypeDescriptor::Text => Some(CompletionMemberType::Named(String::from("text"))),
@@ -1137,6 +1186,18 @@ fn find_type_end(source: &str, start: usize) -> usize {
 	}
 
 	index
+}
+
+fn qualified_identifier_before(source: &str, end: usize) -> Option<(String, usize)> {
+	let (mut name, mut start) = identifier_before(source, end)?;
+	loop {
+		let prefix = source[..start].trim_end();
+		if !prefix.ends_with('.') { break; }
+		let (parent, parent_start) = identifier_before(source, prefix.len() - 1)?;
+		name = format!("{parent}.{name}");
+		start = parent_start;
+	}
+	Some((name, start))
 }
 
 fn identifier_before(source: &str, end: usize) -> Option<(String, usize)> {
@@ -1964,7 +2025,7 @@ mod tests {
 		}]);
 
 		let first_of = callable_signatures("", "firstof");
-		assert_eq!(first_of[0].parameters, ["v1: any", "...v2: [any]"]);
+		assert_eq!(first_of[0].parameters, ["v1: any", "...v2: [any?]"]);
 		assert_eq!(callable_signatures("", "disp")[0].label, "disp(fmt: text)");
 	}
 
@@ -2092,6 +2153,30 @@ fn Main(args: [text]): int {
 			assert!(labels.contains(&"Id"), "{parameter_type}");
 			assert!(labels.contains(&"Name"), "{parameter_type}");
 		}
+	}
+
+	#[test]
+	fn json_conversion_signatures_describe_supported_inputs() {
+		let signatures = callable_signatures("", "json");
+		let labels = signatures.iter().map(|signature| signature.label.as_str()).collect::<Vec<_>>();
+		assert!(labels.contains(&"json(v: text): json"));
+		assert!(labels.contains(&"json(v: <object>): json"));
+		assert!(labels.contains(&"json(v: [any?]): json"));
+		assert!(labels.contains(&"json(v: any): json"));
+		let items = default_completion_items();
+		let json = items.iter().find(|item| item.label == "json").unwrap();
+		assert!(json.detail.contains("json(v: <object>): json"));
+	}
+
+	#[test]
+	fn conversion_signature_help_handles_nested_literals_and_qualified_types() {
+		let source = r#"obj Outer { inner: obj Inner { value: int } }; fn Main(args: [text]): int { Outer.Inner({ "value": 1, "other": [2,3] }); return 0; }"#;
+		let cursor = source.find("[2,3]").unwrap() + 5;
+		let help = signature_help(source, cursor).unwrap();
+		assert_eq!(help.active_parameter, 0);
+		assert_eq!(help.signatures[0].label, "Outer.Inner(json): Outer.Inner");
+		let source = "obj Customer { value: int }; fn Main(args: [text]): int { Customer(";
+		assert_eq!(signature_help(source, source.len()).unwrap().signatures[0].label, "Customer(json): Customer");
 	}
 
 	#[test]

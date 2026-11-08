@@ -136,6 +136,17 @@ impl VirtualMachine {
 		expression: &str,
 		frame: &VmStackFrame,
 	) -> Result<Value, VmError> {
+		Self::evaluate_watch_with_context(expression, frame, None)
+	}
+
+	/// Evaluate with the type names and private access of the paused source module.
+	#[cfg(feature = "compiler")]
+	pub fn evaluate_watch_expression_in_program(expression: &str, frame: &VmStackFrame, program: &Program) -> Result<Value, VmError> {
+		Self::evaluate_watch_with_context(expression, frame, Some(program))
+	}
+
+	#[cfg(feature = "compiler")]
+	fn evaluate_watch_with_context(expression: &str, frame: &VmStackFrame, program: Option<&Program>) -> Result<Value, VmError> {
 		let source = SourceText::new(expression);
 		let mut lexer = Lexer::new(source.clone());
 		let tokens = lexer.tokenize().map_err(|error| vm_error(
@@ -157,7 +168,7 @@ impl VirtualMachine {
 				Some("<watch expression>"),
 			),
 		))?;
-		evaluate_debug_expression(&expression, frame)
+		evaluate_debug_expression(&expression, &WatchContext { frame, program })
 	}
 
 	pub fn new() -> Self {
@@ -490,7 +501,10 @@ impl VirtualMachine {
 			}
 			Instruction::CallBuiltIn(built_in, argument_count) => {
 				let arguments = self.pop_call_arguments(*argument_count as usize, instruction_index)?;
-				let result = self.run_built_in_function(*built_in, arguments, instruction_index)?;
+				let result = if *built_in == BuiltInFunction::JsonCast && arguments.len() == 1 {
+					Some(Value::Json(crate::json::JsonConversion::new(_program.object_type_descriptors(), &[])
+						.export_document(arguments.into_iter().next().unwrap()).map_err(|error| vm_error(instruction_index, error.to_string()))?))
+				} else { self.run_built_in_function(*built_in, arguments, instruction_index)? };
 				if let Some(result) = result {
 					self.stack.push(result);
 				}
@@ -498,6 +512,15 @@ impl VirtualMachine {
 			}
 			Instruction::CommitTransaction => {
 				self.commit_transaction(instruction_index)?;
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::ConvertObject { object_type_id, private_types } => {
+				let Value::Json(value) = self.pop_value(instruction_index)? else {
+					return Err(vm_error(instruction_index, "Object conversion requires JSON.".into()));
+				};
+				let value = crate::json::JsonConversion::new(_program.object_type_descriptors(), private_types)
+					.import_object(&value, *object_type_id).map_err(|error| vm_error(instruction_index, error.to_string()))?;
+				self.stack.push(value);
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::CreateRecord => {
@@ -749,6 +772,18 @@ impl VirtualMachine {
 				self.stack.push(Value::Array(values));
 				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::MakeJsonArray(count) => {
+				let values = self.pop_call_arguments(*count as usize, instruction_index)?;
+				let value = crate::json::JsonValue::array_literal(values).map_err(|message| vm_error(instruction_index, message))?;
+				self.stack.push(Value::Json(value));
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::MakeJsonObject(names) => {
+				let values = self.pop_call_arguments(names.len(), instruction_index)?;
+				let value = crate::json::JsonValue::object_literal(names, values).map_err(|message| vm_error(instruction_index, message))?;
+				self.stack.push(Value::Json(value));
+				Ok(ExecutionOutcome::Continue(None))
+			}
 			Instruction::MakeObject { field_names, object_type_id } => {
 				let mut values = Vec::with_capacity(field_names.len());
 
@@ -758,7 +793,9 @@ impl VirtualMachine {
 
 				values.reverse();
 				let fields = field_names.iter().cloned().zip(values).collect();
-				self.stack.push(Value::Object(ObjectValue::new(*object_type_id, fields)));
+				let value = crate::object_construction::ObjectConstructor::new(_program.object_type_descriptors().iter())
+					.construct(*object_type_id, fields).map_err(|error| vm_error(instruction_index, error.to_string()))?;
+				self.stack.push(value);
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::MakeRange => {
@@ -902,6 +939,11 @@ impl VirtualMachine {
 					enum_name: enum_name.clone(),
 					variant_name: variant_name.clone(),
 				}));
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::PushJsonNumber(text) => {
+				let value = crate::json::JsonValue::number_literal(text).map_err(|message| vm_error(instruction_index, message))?;
+				self.stack.push(Value::Json(value));
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::PushInteger(value) => {
@@ -1580,7 +1622,26 @@ impl VirtualMachine {
 					format!("Built-in function `year` expects 1 argument(s), found {}.", arguments.len()),
 				)),
 			},
+			BuiltInFunction::DecCast => {
+				let value = match arguments.as_slice() {
+					[Value::Integer(value)] => Value::Decimal(Decimal::from_integer(*value)),
+					[Value::Enum(value)] => (*value.backing_value).clone(),
+					[Value::Text(value)] => Value::Decimal(crate::numeric::ExactNumber::parse(value)
+						.and_then(|number| number.to_decimal()).map_err(|message| vm_error(instruction_index, message))?),
+					[Value::Json(value)] => Value::Decimal(value.to_decimal().map_err(|message| vm_error(instruction_index, message))?),
+					_ => return Err(vm_error(instruction_index, String::from("Built-in function `dec` requires one integer, text, decimal-backed enum, or JSON numeric argument."))),
+				};
+				Ok(Some(value))
+			}
 			BuiltInFunction::IntCast => match arguments.as_slice() {
+				[Value::Json(value)] => value.to_integer().map(|value| Some(Value::Integer(value)))
+					.map_err(|message| vm_error(instruction_index, message)),
+				[Value::Decimal(value)] => {
+					let whole = value.coefficient / 10_i128.pow(value.scale as u32);
+					let whole = i64::try_from(whole).map_err(|_| vm_error(instruction_index,
+						String::from("Decimal value exceeds the supported integer range after truncation.")))?;
+					Ok(Some(Value::Integer(whole)))
+				}
 				[Value::Boolean(value)] => Ok(Some(Value::Integer(if *value { 1 } else { 0 }))),
 				[Value::Enum(value)] => Ok(Some((*value.backing_value).clone())),
 				[Value::Text(value)] => {
@@ -1618,15 +1679,15 @@ impl VirtualMachine {
 				)),
 			},
 			BuiltInFunction::JsonCast => match arguments.as_slice() {
-				[Value::Text(text)] => crate::json::JsonValue::parse(text).map(|value| Some(Value::Json(value))).map_err(|message| vm_error(instruction_index, message)),
-				_ => Err(vm_error(instruction_index, String::from("Built-in function `json` expects one text argument."))),
+				[value] => crate::json::JsonConversion::new(&[], &[]).export_document(value.clone())
+					.map(|value| Some(Value::Json(value))).map_err(|error| vm_error(instruction_index, error.to_string())),
+				_ => Err(vm_error(instruction_index, String::from("Built-in function `json` expects one argument."))),
 			},
 			BuiltInFunction::SeqNext => Err(vm_error(
 				instruction_index,
 				String::from("Built-in function `seqnext` must be compiled into a sequence instruction before runtime."),
 			)),
 			BuiltInFunction::TextCast
-			| BuiltInFunction::DecCast
 			| BuiltInFunction::BoolCast
 			=> match arguments.as_slice() {
 				[Value::Json(value)] if built_in == BuiltInFunction::TextCast => Ok(Some(Value::Text(value.to_text()))),
@@ -2086,7 +2147,39 @@ fn evaluate_boolean_binary(
 }
 
 #[cfg(feature = "compiler")]
-fn evaluate_debug_call(call: &crate::ast::CallExpr, frame: &VmStackFrame) -> Result<Value, VmError> {
+struct WatchContext<'a> {
+	frame: &'a VmStackFrame,
+	program: Option<&'a Program>,
+}
+
+#[cfg(feature = "compiler")]
+impl WatchContext<'_> {
+	fn scope(&self) -> Option<&ObjectScopeDebugInfo> {
+		let source = self.frame.source_location().and_then(|location| location.display_name());
+		self.program?.debug_info().object_scopes.iter().find(|scope| scope.source_name.as_deref() == source)
+	}
+
+	fn conversion(&self) -> crate::json::JsonConversion<'_> {
+		crate::json::JsonConversion::new(
+			self.program.map_or(&[], |program| program.object_type_descriptors()),
+			self.scope().map_or(&[], |scope| scope.private_types.as_slice()),
+		)
+	}
+}
+
+#[cfg(feature = "compiler")]
+fn evaluate_debug_call(call: &crate::ast::CallExpr, frame: &WatchContext<'_>) -> Result<Value, VmError> {
+	if let Some((_, id)) = frame.scope().and_then(|scope| scope.bindings.iter().find(|(name, _)| name == &call.callee.name)) {
+		if call.arguments.len() != 1 || call.arguments[0].is_by_ref || call.arguments[0].name.is_some() || call.arguments[0].expression().is_none() {
+			return Err(vm_error(call.position, "Object conversion requires one positional JSON argument by value.".into()));
+		}
+		let expression = call.arguments[0].expression().unwrap();
+		let value = if expression.is_contextual_literal() {
+			Value::Json(evaluate_debug_json_literal(expression, frame)?)
+		} else { evaluate_debug_expression(expression, frame)? };
+		let Value::Json(value) = value else { return Err(vm_error(call.position, "Object conversion requires JSON contents.".into())); };
+		return frame.conversion().import_object(&value, *id).map_err(|error| vm_error(call.position, error.to_string()));
+	}
 	let Some(built_in) = BuiltInFunction::from_name(&call.callee.name) else {
 		return Err(vm_error(
 			call.position,
@@ -2117,13 +2210,25 @@ fn evaluate_debug_call(call: &crate::ast::CallExpr, frame: &VmStackFrame) -> Res
 				String::from("Watch expressions cannot request a function parameter default."),
 			));
 		};
-		arguments.push(evaluate_debug_expression(expression, frame)?);
+
+		// Only the JSON overload of text accepts a container literal. Other
+		// watch calls retain their ordinary argument interpretation.
+		arguments.push(if built_in == BuiltInFunction::TextCast && expression.is_contextual_literal() {
+			Value::Json(evaluate_debug_json_literal(expression, frame)?)
+		} else {
+			evaluate_debug_expression(expression, frame)?
+		});
 	}
 
 	let argument_order = debug_built_in_argument_order(built_in, call)?;
 	let arguments = argument_order.into_iter()
 		.map(|argument_index| arguments[argument_index].clone())
 		.collect();
+	if built_in == BuiltInFunction::JsonCast {
+		let mut arguments: Vec<Value> = arguments;
+		return frame.conversion().export_document(arguments.remove(0)).map(Value::Json)
+			.map_err(|error| vm_error(call.position, error.to_string()));
+	}
 	let mut vm = VirtualMachine::new();
 	vm.run_built_in_function(built_in, arguments, call.position)?
 		.ok_or(vm_error(
@@ -2133,7 +2238,47 @@ fn evaluate_debug_call(call: &crate::ast::CallExpr, frame: &VmStackFrame) -> Res
 }
 
 #[cfg(feature = "compiler")]
-fn evaluate_debug_expression(expression: &Expr, frame: &VmStackFrame) -> Result<Value, VmError> {
+fn evaluate_debug_json_literal(expression: &Expr, frame: &WatchContext<'_>) -> Result<crate::json::JsonValue, VmError> {
+	use crate::json::JsonValue;
+
+	let position = expression.position();
+
+	if let Some(number) = expression.json_literal_number() {
+		return JsonValue::number_literal(&number).map_err(|message| vm_error(position, message));
+	}
+
+	match expression {
+		Expr::Array(array) => {
+			let values = array.elements.iter().map(|element| {
+				evaluate_debug_json_literal(element, frame).map(Value::Json)
+			}).collect::<Result<Vec<_>, _>>()?;
+			JsonValue::array_literal(values)
+		}
+		Expr::ObjectConstruction(object) if object.object_type_name.is_empty() => {
+			let mut names = Vec::with_capacity(object.fields.len());
+			let mut values = Vec::with_capacity(object.fields.len());
+
+			for field in &object.fields {
+				if !field.is_quoted {
+					return Err(vm_error(field.position, String::from("JSON property names must use double-quoted identifiers.")));
+				}
+
+				if names.contains(&field.name) {
+					return Err(vm_error(field.position, format!("JSON property `{}` is specified more than once.", field.name)));
+				}
+
+				names.push(field.name.clone());
+				values.push(Value::Json(evaluate_debug_json_literal(&field.value, frame)?));
+			}
+
+			JsonValue::object_literal(&names, values)
+		}
+		_ => JsonValue::from_value(evaluate_debug_expression(expression, frame)?),
+	}.map_err(|message| vm_error(position, message))
+}
+
+#[cfg(feature = "compiler")]
+fn evaluate_debug_expression(expression: &Expr, frame: &WatchContext<'_>) -> Result<Value, VmError> {
 	match expression {
 		Expr::Array(array) => {
 			let mut values = Vec::with_capacity(array.elements.len());
@@ -2181,6 +2326,7 @@ fn evaluate_debug_expression(expression: &Expr, frame: &VmStackFrame) -> Result<
 		)),
 		Expr::Date(date) => Ok(Value::Date(date.value)),
 		Expr::Decimal(decimal) => Ok(Value::Decimal(decimal.value.clone())),
+		Expr::ExactNumber(number) => Err(vm_error(number.position, String::from("Exact numeric literals require a JSON context."))),
 		Expr::FieldAccess(field_access) => {
 			let object = evaluate_debug_expression(&field_access.object, frame)?;
 			load_member_value(object, &field_access.field.name, field_access.is_quoted, field_access.position)
@@ -2189,7 +2335,7 @@ fn evaluate_debug_expression(expression: &Expr, frame: &VmStackFrame) -> Result<
 			expression.position(),
 			String::from("Watch expressions do not yet support database query execution."),
 		)),
-		Expr::Identifier(identifier) => frame.local(&identifier.name)
+		Expr::Identifier(identifier) => frame.frame.local(&identifier.name)
 			.map(|local| local.value().clone())
 			.ok_or(vm_error(
 				identifier.position,

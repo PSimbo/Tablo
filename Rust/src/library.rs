@@ -83,7 +83,7 @@ impl Library {
 				match instruction {
 					Instruction::Call(index, _) if *index as usize >= self.program.functions().len() => return Err(String::from("Invalid library function reference.")),
 					Instruction::ExecuteQuery(index) if *index as usize >= self.program.queries().len() => return Err(String::from("Invalid library query reference.")),
-					Instruction::MakeObject { .. } => return Err(String::from("Object types in compiled libraries are not supported yet.")),
+					Instruction::MakeObject { .. } | Instruction::ConvertObject { .. } => return Err(String::from("Object types in compiled libraries are not supported yet.")),
 					_ => {},
 				}
 			}
@@ -136,7 +136,10 @@ pub(crate) fn validate_interface(program: &AstProgram) -> Result<(), String> {
 }
 
 pub(crate) fn link(program: Program, declarations: &AstProgram, imports: &[LibraryImport]) -> Result<Program, CompileError> {
-	if imports.is_empty() { return Ok(program); }
+	if imports.is_empty() {
+		return Ok(program);
+	}
+
 	let error = |message: &str| CompileError { message: message.into(), position: 0 };
 	let declarations = crate::compiler::collect_all_function_declarations(declarations);
 	let mut functions = program.functions().to_vec();
@@ -144,25 +147,31 @@ pub(crate) fn link(program: Program, declarations: &AstProgram, imports: &[Libra
 	let mut sources = program.debug_info().source_files().to_vec();
 	let mut debug = program.debug_info().code_bodies()[..functions.len()].to_vec();
 	let entry_debug = program.debug_info().code_bodies().get(functions.len()).cloned();
+
 	for import in imports {
 		let query_offset = u32::try_from(queries.len()).map_err(|_| error("Too many linked queries."))?;
 		let source_offset = u32::try_from(sources.len()).map_err(|_| error("Too many linked source files."))?;
 		let library = &import.library.program;
 		let mut targets = vec![None; library.functions().len()];
+
 		for (name, position, export) in &import.bindings {
 			let index = declarations.iter().position(|function| function.name == *name && function.position == *position)
 				.ok_or_else(|| error("Missing linked library declaration."))?;
 			targets[*export as usize] = Some(index);
 		}
+
 		let mut next_index = functions.len();
 		let targets = targets.into_iter().map(|target| {
 			let index = target.unwrap_or_else(|| { let index = next_index; next_index += 1; index });
 			u32::try_from(index).map_err(|_| error("Too many linked functions."))
 		}).collect::<Result<Vec<_>, _>>()?;
+
 		let mut relocated = Vec::new();
 		let mut relocated_debug = Vec::new();
+
 		for (index, function) in library.functions().iter().enumerate() {
 			let mut body = function.body().clone();
+
 			for instruction in &mut body.instructions {
 				match instruction {
 					Instruction::Call(target, _) => *target = targets[*target as usize],
@@ -171,15 +180,19 @@ pub(crate) fn link(program: Program, declarations: &AstProgram, imports: &[Libra
 				}
 			}
 			relocated.push(CompiledFunction::new(function.name().map(String::from), function.return_type().cloned(), body));
+
 			let body_debug = library.debug_info().code_bodies().get(index);
+
 			relocated_debug.push(match body_debug {
 				Some(info) => CodeBodyDebugInfo::new(info.body_name().map(String::from), info.instruction_positions().to_vec(), info.locals().to_vec(),
 					info.source_file_index().map(|index| index.checked_add(source_offset).ok_or_else(|| error("Too many linked source files."))).transpose()?),
 				None => CodeBodyDebugInfo::new(function.name().map(String::from), Vec::new(), Vec::new(), None),
 			});
 		}
+
 		for ((function, body_debug), target) in relocated.into_iter().zip(relocated_debug).zip(targets) {
 			let index = target as usize;
+
 			if index < functions.len() {
 				functions[index] = CompiledFunction::new(functions[index].name().map(String::from), function.return_type().cloned(), function.body().clone());
 				debug[index] = body_debug;
@@ -189,14 +202,22 @@ pub(crate) fn link(program: Program, declarations: &AstProgram, imports: &[Libra
 				debug.push(body_debug);
 			}
 		}
+
 		queries.extend_from_slice(library.queries());
 		sources.extend_from_slice(library.debug_info().source_files());
 	}
-	if let Some(entry_debug) = entry_debug { debug.push(entry_debug); }
-	let debug = DebugInfo::new(debug, sources);
+
+	if let Some(entry_debug) = entry_debug {
+		debug.push(entry_debug);
+	}
+
+	let mut debug = DebugInfo::new(debug, sources);
+	debug.object_scopes = program.debug_info().object_scopes.clone();
+
 	let linked = match program.entry_point() {
 		EntryPoint::Function(index) => Program::from_entry_function_with_queries(program.constant_pool().clone(), *index, functions, queries, debug),
 		EntryPoint::Code(body) => Program::from_parts_with_functions_queries_and_debug(program.constant_pool().clone(), body.clone(), functions, queries, debug),
 	};
+
 	Ok(linked.with_object_type_descriptors(program.object_type_descriptors().to_vec()))
 }

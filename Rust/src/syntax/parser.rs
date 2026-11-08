@@ -5,6 +5,7 @@ use super::token::{ Token, TokenKind };
 
 pub struct Parser {
 	allow_object_construction_infix: bool,
+	literal_depth: usize,
 	position: usize,
 	tokens: Vec<Token>,
 }
@@ -35,6 +36,7 @@ impl Parser {
 	pub fn new(tokens: Vec<Token>) -> Self {
 		Self {
 			allow_object_construction_infix: true,
+			literal_depth: 0,
 			position: 0,
 			tokens,
 		}
@@ -210,6 +212,7 @@ impl Parser {
 	}
 
 	fn parse_array_literal(&mut self, start: usize) -> Result<Expr, ParseError> {
+		self.literal_depth += 1;
 		let mut elements = Vec::new();
 
 		if !self.current().is_some_and(|token| token.kind == TokenKind::RightBracket) {
@@ -219,6 +222,7 @@ impl Parser {
 				match self.current() {
 					Some(token) if token.kind == TokenKind::Comma => {
 						self.next();
+						if self.current().is_some_and(|token| token.kind == TokenKind::RightBracket) { break; }
 					}
 					_ => break,
 				}
@@ -227,6 +231,7 @@ impl Parser {
 
 		self.expect_token(TokenKind::RightBracket, "Expected `]` to close array literal.")?;
 
+		self.literal_depth -= 1;
 		Ok(Expr::Array(ArrayLiteral {
 			elements,
 			position: start,
@@ -366,6 +371,10 @@ impl Parser {
 	fn parse_call_expression(&mut self, callee: Expr, start: usize) -> Result<Expr, ParseError> {
 		let callee = match callee {
 			Expr::Identifier(identifier) => identifier,
+			callee @ Expr::FieldAccess(_) => IdentifierExpr {
+				name: self.qualified_identifier_name_from_expr(callee, start)?,
+				position: start,
+			},
 			_ => {
 				return Err(ParseError {
 					message: String::from("Function call target must be an identifier."),
@@ -526,6 +535,10 @@ impl Parser {
 	}
 
 	fn parse_decimal_literal(&self, token: Token) -> Result<Expr, ParseError> {
+		if self.literal_depth > 0 && Decimal::from_literal(&token.lexeme).is_err() {
+			return Ok(Expr::ExactNumber(TextLiteral { position: token.start, value: token.lexeme.replace('_', "") }));
+		}
+
 		let value = Decimal::from_literal(&token.lexeme).map_err(|message| ParseError {
 			message,
 			position: token.start,
@@ -1189,6 +1202,11 @@ impl Parser {
 
 	fn parse_integer_literal(&self, token: Token) -> Result<Expr, ParseError> {
 		let digits: String = token.lexeme.chars().filter(|c| *c != '_').collect();
+
+		if self.literal_depth > 0 && digits.parse::<i64>().is_err() {
+			return Ok(Expr::ExactNumber(TextLiteral { position: token.start, value: digits }));
+		}
+
 		let value = digits.parse::<i64>().map_err(|_| ParseError {
 			message: format!("Integer literal `{}` is out of range.", token.lexeme),
 			position: token.start,
@@ -1283,7 +1301,11 @@ impl Parser {
 
 	fn parse_object_construction_expression(&mut self, object_type: Expr, start: usize) -> Result<Expr, ParseError> {
 		let object_type_name = self.qualified_identifier_name_from_expr(object_type, start)?;
+		self.parse_object_literal(object_type_name, start)
+	}
 
+	fn parse_object_literal(&mut self, object_type_name: String, start: usize) -> Result<Expr, ParseError> {
+		self.literal_depth += 1;
 		let mut fields = Vec::new();
 
 		if !self.current().is_some_and(|token| token.kind == TokenKind::RightBrace) {
@@ -1292,6 +1314,7 @@ impl Parser {
 				self.expect_token(TokenKind::Colon, "Expected `:` after object field name.")?;
 				let value = self.parse_assignment_expression()?;
 				fields.push(ObjectConstructionField {
+					is_quoted: name.is_quoted_identifier,
 					name: name.lexeme,
 					position: name.start,
 					value,
@@ -1312,6 +1335,7 @@ impl Parser {
 
 		self.expect_token(TokenKind::RightBrace, "Expected `}` to close object construction.")?;
 
+		self.literal_depth -= 1;
 		Ok(Expr::ObjectConstruction(ObjectConstructionExpr {
 			fields,
 			object_type_name,
@@ -1641,6 +1665,7 @@ impl Parser {
 			TokenKind::IntegerLiteral => self.parse_integer_literal(token),
 			TokenKind::InterpolatedStringStart => self.parse_interpolated_string(token),
 			TokenKind::LeftBracket => self.parse_array_literal(token.start),
+			TokenKind::LeftBrace => self.parse_object_literal(String::new(), token.start),
 			TokenKind::LeftParenthesis => self.parse_group_expression(token.start),
 			TokenKind::LockedKeyword => self.parse_unary_expression(token.start, UnaryOperator::Locked),
 			TokenKind::NewKeyword => self.parse_new_expression(token.start),
@@ -2554,6 +2579,7 @@ mod tests {
 				position: 0,
 				value,
 			}),
+			Expr::ExactNumber(TextLiteral { value, .. }) => Expr::ExactNumber(TextLiteral { position: 0, value }),
 			Expr::FieldAccess(FieldAccessExpr { field, object, is_quoted, .. }) => Expr::FieldAccess(FieldAccessExpr {
 				is_quoted,
 				field: normalize_identifier(field),
@@ -2736,6 +2762,7 @@ mod tests {
 
 	fn normalize_object_construction_field(field: ObjectConstructionField) -> ObjectConstructionField {
 		ObjectConstructionField {
+			is_quoted: field.is_quoted,
 			name: field.name,
 			position: 0,
 			value: normalize_expr(field.value),
@@ -5266,6 +5293,7 @@ mod tests {
 					object: Box::new(Expr::ObjectConstruction(ObjectConstructionExpr {
 						fields: vec![
 							ObjectConstructionField {
+								is_quoted: false,
 								name: String::from("age"),
 								position: 0,
 								value: Expr::Integer(IntegerLiteral {
@@ -5456,6 +5484,7 @@ mod tests {
 				Statement::Expression(Expr::ObjectConstruction(ObjectConstructionExpr {
 					fields: vec![
 						ObjectConstructionField {
+							is_quoted: false,
 							name: String::from("value"),
 							position: 0,
 							value: Expr::Integer(IntegerLiteral {

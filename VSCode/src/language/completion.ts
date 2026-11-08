@@ -92,7 +92,7 @@ const BUILT_IN_ITEMS = [
 	builtIn("displn", "Write text plus a trailing newline to stdout."),
 	builtIn("format", "Format an `int` or `dec` value as `text` according to a numeric format string."),
 	builtIn("int", "Cast an enum to its `int` backing value."),
-	builtIn("json", "Parse text as a JSON object or array."),
+	builtIn("json", "Parse JSON text, or explicitly convert a native object, array, JSON value, or supported value held in `any`. Object exports include public fields only; the result must be an object or array."),
 	builtIn("len", "Return the length of an array."),
 	builtIn("text", "Serialize JSON or cast an enum to its `text` backing value."),
 ];
@@ -203,7 +203,7 @@ function collectDocumentSymbols(
 		}
 
 		const item = new vscode.CompletionItem(name, kind);
-		item.detail = detail;
+		item.detail = keywordName === "obj" ? `${name}(json): ${name}` : detail;
 		items.set(name, item);
 	}
 

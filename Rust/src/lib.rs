@@ -16,6 +16,8 @@ pub mod executable;
 mod library;
 pub mod format_string;
 pub mod json;
+mod numeric;
+pub mod object_construction;
 pub mod object_file;
 pub mod query;
 pub mod runtime;

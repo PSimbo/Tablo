@@ -369,6 +369,7 @@ impl<'a> FunctionSsaBuilder<'a> {
 			Expr::Boolean(_)
 			| Expr::Date(_)
 			| Expr::Decimal(_)
+			| Expr::ExactNumber(_)
 			| Expr::Integer(_)
 			| Expr::Null(_)
 			| Expr::Text(_)

@@ -135,6 +135,7 @@ pub enum Expr {
 	Count(CountExpr),
 	Date(DateLiteral),
 	Decimal(DecimalLiteral),
+	ExactNumber(TextLiteral),
 	FieldAccess(FieldAccessExpr),
 	Find(FindExpr),
 	Identifier(IdentifierExpr),
@@ -499,6 +500,7 @@ pub struct ObjectConstructionExpr {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectConstructionField {
+	pub is_quoted: bool,
 	pub name: String,
 	pub position: usize,
 	pub value: Expr,
@@ -725,6 +727,31 @@ pub struct WithDeclaration {
 }
 
 impl Expr {
+	#[cfg(feature = "compiler")]
+	pub(crate) fn is_contextual_literal(&self) -> bool {
+		matches!(self, Expr::Array(_))
+			|| matches!(self, Expr::ObjectConstruction(object) if object.object_type_name.is_empty())
+	}
+
+	#[cfg(feature = "compiler")]
+	pub(crate) fn json_literal_number(&self) -> Option<String> {
+		match self {
+			Expr::Decimal(number) => Some(number.value.to_string()),
+			Expr::ExactNumber(number) => {
+				let (whole, fraction) = number.value.split_once('.').map_or((number.value.as_str(), None), |(whole, fraction)| (whole, Some(fraction)));
+				let whole = whole.trim_start_matches('0');
+				let whole = if whole.is_empty() { "0" } else { whole };
+
+				Some(fraction.map_or_else(|| whole.to_owned(), |fraction| format!("{whole}.{fraction}")))
+			}
+			Expr::Integer(number) => Some(number.value.to_string()),
+			Expr::Unary(UnaryExpr { operator: UnaryOperator::Negate, operand, .. }) => {
+				operand.json_literal_number().map(|value| value.strip_prefix('-').map(str::to_owned).unwrap_or_else(|| format!("-{value}")))
+			}
+			_ => None,
+		}
+	}
+
 	pub fn position(&self) -> usize {
 		match self {
 			Expr::Array(expression) => expression.position,
@@ -735,6 +762,7 @@ impl Expr {
 			Expr::Count(expression) => expression.position,
 			Expr::Date(expression) => expression.position,
 			Expr::Decimal(expression) => expression.position,
+			Expr::ExactNumber(expression) => expression.position,
 			Expr::FieldAccess(expression) => expression.position,
 			Expr::Find(expression) => expression.position,
 			Expr::Identifier(expression) => expression.position,

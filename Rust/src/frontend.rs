@@ -72,6 +72,7 @@ struct LinkedModule {
 }
 
 struct LinkedProgram {
+	debug_object_imports: BTreeMap<String, BTreeMap<String, String>>,
 	libraries: Vec<crate::library::LibraryImport>,
 	function_overload_aliases: Vec<FunctionOverloadAlias>,
 	function_source_files: Vec<SourceFileDebugInfo>,
@@ -102,6 +103,7 @@ struct ModuleImportBindings {
 
 #[derive(Default)]
 struct ModuleLinker {
+	debug_object_imports: BTreeMap<String, BTreeMap<String, String>>,
 	libraries: Vec<crate::library::LibraryImport>,
 	declared_modules: BTreeMap<PathBuf, ModuleExports>,
 	function_overload_aliases: Vec<FunctionOverloadAlias>,
@@ -595,6 +597,7 @@ impl ModuleLinker {
 			&object_renames,
 			&module_key.display().to_string(),
 		)?;
+		self.debug_object_imports.insert(module_key.display().to_string(), import_bindings.objects.clone());
 		self.include_local_function_overloads(&import_bindings.functions, &top_level_renames);
 		let source_file = SourceFileDebugInfo::from_source(module_key.display().to_string(), &source_text);
 		let object_display_names = program.objects.iter()
@@ -1274,6 +1277,7 @@ fn compile_ast_program_with_schema_and_analyzer(
 	target: CompilationTarget,
 	schema_catalog: Option<&SchemaCatalog>,
 	mut analyzer: SemanticAnalyzer,
+	debug_object_imports: &BTreeMap<String, BTreeMap<String, String>>,
 ) -> Result<(Program, Vec<SemanticWarning>), TabloError> {
 	let semantic_program = match target {
 		CompilationTarget::Snippet => analyzer.analyze_program_with_schema(program, schema_catalog),
@@ -1282,8 +1286,23 @@ fn compile_ast_program_with_schema_and_analyzer(
 	let warnings = semantic_program.warnings().to_vec();
 
 	let mut compiler = Compiler::new();
-	let program = compiler.compile_program_with_existing_semantics(program, &semantic_program)
+	let mut program = compiler.compile_program_with_existing_semantics(program, &semantic_program)
 		.map_err(TabloError::Compile)?;
+
+	for (source_name, imports) in debug_object_imports {
+		let scopes = &mut program.debug_info_mut().object_scopes;
+		let index = scopes.iter().position(|scope| scope.source_name.as_ref() == Some(source_name)).unwrap_or_else(|| {
+			scopes.push(ObjectScopeDebugInfo { source_name: Some(source_name.clone()), ..Default::default() });
+			scopes.len() - 1
+		});
+
+		for (name, target) in imports {
+			if let Some(id) = semantic_program.object_type_id(target) {
+				scopes[index].bindings.push((name.clone(), id));
+			}
+		}
+	}
+
 	Ok((program, warnings))
 }
 
@@ -1335,6 +1354,7 @@ fn compile_linked_program(
 		target,
 		schema_catalog,
 		analyzer,
+		&linked_program.debug_object_imports,
 	)?;
 	attach_source_debug_info(&mut program, linked_program);
 	let program = crate::library::link(program, &linked_program.program, &linked_program.libraries).map_err(TabloError::Compile)?;
@@ -1571,6 +1591,7 @@ fn link_program_modules(
 
 	let Some(source_name) = source_name else {
 		return Ok(LinkedProgram {
+			debug_object_imports: BTreeMap::new(),
 			libraries: Vec::new(),
 			function_overload_aliases: Vec::new(),
 			function_source_files: Vec::new(),
@@ -1592,6 +1613,7 @@ fn link_program_modules(
 
 	if first_use_statement(program).is_none() {
 		return Ok(LinkedProgram {
+			debug_object_imports: BTreeMap::new(),
 			libraries: Vec::new(),
 			function_overload_aliases: Vec::new(),
 			function_source_files: Vec::new(),
@@ -1729,7 +1751,10 @@ fn link_program_modules(
 		extend_function_source_indices(function, 0, &mut function_source_indices);
 	}
 
+	linker.debug_object_imports.insert(root_display_name.clone(), import_bindings.objects.clone());
+
 	Ok(LinkedProgram {
+		debug_object_imports: linker.debug_object_imports,
 		libraries: linker.libraries,
 		function_overload_aliases: linker.function_overload_aliases,
 		function_source_files: imported_source_files,
@@ -1849,6 +1874,7 @@ fn rewrite_expression_calls(
 		ast::Expr::Boolean(_)
 		| ast::Expr::Date(_)
 		| ast::Expr::Decimal(_)
+		| ast::Expr::ExactNumber(_)
 		| ast::Expr::Integer(_)
 		| ast::Expr::Null(_)
 		| ast::Expr::Text(_)
@@ -1865,6 +1891,9 @@ fn rewrite_expression_calls(
 
 			if !shadowed_function_names.iter().any(|name| name == &call.callee.name) {
 				if let Some(renamed) = import_bindings.get(&call.callee.name) {
+					call.callee.name = renamed.clone();
+				}
+				else if let Some(renamed) = object_renames.get(&call.callee.name) {
 					call.callee.name = renamed.clone();
 				}
 				else if let Some(renamed) = top_level_renames.get(&call.callee.name) {
@@ -5413,7 +5442,7 @@ mod tests {
 
 		assert_eq!(error, TabloError::Compile(crate::compiler::CompileError {
 			message: String::from(
-				"No overload of built-in function `len` accepts the supplied arguments. Candidate `len(v: [any])` rejected argument for parameter `v`: expected `[any]`, found `int`. Candidate `len(str: text)` rejected argument for parameter `str`: expected `text`, found `int`."
+				"No overload of built-in function `len` accepts the supplied arguments. Candidate `len(v: [any?])` rejected argument for parameter `v`: expected `[any?]`, found `int`. Candidate `len(str: text)` rejected argument for parameter `str`: expected `text`, found `int`."
 			),
 			position: 3,
 		}));
@@ -8653,9 +8682,9 @@ mod tests {
 	}
 
 	#[test]
-	fn runs_object_with_implicit_any_field_defaulting_to_null() {
+	fn runs_object_with_nullable_any_field_defaulting_to_null() {
 		let result = evaluate_snippet(
-			"obj Envelope { payload: any, };\nvar env: Envelope = Envelope { };\nenv.payload"
+			"obj Envelope { payload: any?, };\nvar env: Envelope = Envelope { };\nenv.payload"
 		).unwrap();
 
 		assert_eq!(result, Some(Value::Null));

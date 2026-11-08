@@ -11,6 +11,15 @@ fn assert_program(source: &str, expected: Value) {
 	assert_eq!(tablo::run_program(&program).unwrap(), Some(expected));
 }
 
+fn assert_runtime_failure(source: &str) {
+	assert!(matches!(tablo::run(source), Err(tablo::TabloError::Runtime(_))), "{source}");
+	let directory = tempfile::tempdir().unwrap();
+	let path = directory.path().join("program.tobj");
+	tablo::compile(source, &path).unwrap();
+	let program = tablo::object_file::read_program_from_path(path).unwrap();
+	assert!(matches!(tablo::run_program(&program), Err(tablo::TabloError::Runtime(_))), "{source}");
+}
+
 #[test]
 fn defaults_signatures_containers_and_serialization_survive_object_files() {
 	assert_program(r#"
@@ -100,7 +109,7 @@ fn json_signatures_and_defaults_link_without_library_sources() {
 	use tablo::executable::{compile_library, compile_object};
 	let directory = tempfile::tempdir().unwrap();
 	let root = directory.path();
-	let source = r#"pub fn Echo(value: json = json('[1e999999999999999999999]')): json { return value; }"#;
+	let source = r#"pub fn Echo(value: json = [999999999999999999999999999999999999999, json('[1e999999999999999999999]')]): json { return value; }"#;
 	let path = root.join("Library.tablo");
 	std::fs::write(&path, source).unwrap();
 	compile_library(source, &path, &root.join("Library.tlib"), None, DebugInfoLevel::Full).unwrap();
@@ -111,7 +120,7 @@ fn json_signatures_and_defaults_link_without_library_sources() {
 	compile_library(facade, &path, &root.join("Facade.tlib"), None, DebugInfoLevel::Full).unwrap();
 	std::fs::remove_file(path).unwrap();
 	std::fs::remove_file(root.join("Library.tlib")).unwrap();
-	let main = "use './Facade'; fn Main(args: [text]): int { if text(Value()) == '[1e999999999999999999999]' { return 42; } return 0; }";
+	let main = "use './Facade'; fn Main(args: [text]): int { if text(Value()) == '[999999999999999999999999999999999999999,[1e999999999999999999999]]' { return 42; } return 0; }";
 	let path = root.join("main.tablo");
 	std::fs::write(&path, main).unwrap();
 	compile_object(main, &path, &root.join("main.tobj"), None, DebugInfoLevel::Full).unwrap();
@@ -128,16 +137,21 @@ fn json_runs_in_embedded_and_shared_runtimes_without_drivers() {
 	use tablo::executable::{ExecutableBuildOptions, RuntimeMode, compile_executable};
 	let directory = tempfile::tempdir().unwrap();
 	let root = directory.path();
-	let source = r#"fn Main(args: [text]): int {
+	let source = r#"enum State { A: 1, B: 2 }
+	pub obj Payload { pub amount: int, pub state: State, pub values: any };
+	fn Main(args: [text]): int {
+		var converted: Payload = Payload({ "amount": 42, "state": State.B, "values": [3, null, true] });
 		var value: json = json('[9007199254740993,1e999999999999999999999]');
-		var data: json = json('{"Value":42,"value":null}');
+		var data: json = { "Value": 40 + 2, "value": null, "huge": [000999999999999999999999999999999999999999] };
 		var mutation: json = json('{"values":[0]}');
 		mutation.values[1] = 41;
 		mutation.values[2] = 42;
 		var result: int = mutation.values[2];
 		var indexed: json = json('[{"Value":42}]')[1];
-		if json(text(value)) == value and text(value) == '[9007199254740993,1e999999999999999999999]'
-			and exists data."value" and data."value" == null and indexed."Value" == json('[42]')[1] { return result; }
+		if json(converted) == json('{"amount":42,"state":"B","values":[3,null,true]}') and json(text(value)) == value and text(value) == '[9007199254740993,1e999999999999999999999]'
+			and exists data."value" and data."value" == null and indexed."Value" == json('[42]')[1]
+			and dec(42) == 42.0 and dec('1.99999999999999999999999999999999999999') == 2.0
+			and int(json('[3.9]')[1]) == 3 and dec(json('[1.25]')[1]) == 1.25 { return result; }
 		return 0;
 	}"#;
 	let path = root.join("main.tablo");
@@ -222,6 +236,11 @@ fn json_argument_overloads_do_not_inspect_contents() {
 		fn Choose(value: text): int { return 2; }
 		fn Main(args: [text]): int { var data: json = json('{"value":1}'); return Choose(data.value); }
 	"#;
+	assert!(tablo::check(source).unwrap_err().to_string().to_lowercase().contains("ambiguous"));
+	let source = r#"obj Item { value: int };
+		fn Read(value: json): int { return 1; }
+		fn Read(value: Item): int { return 2; }
+		fn Main(args: [text]): int { return Read({ "different": true }); }"#;
 	assert!(tablo::check(source).unwrap_err().to_string().to_lowercase().contains("ambiguous"));
 }
 
@@ -336,6 +355,11 @@ fn json_indices_require_integers_and_reject_compound_mutation() {
 		fn Main(args: [text]): int { return Choose(json('[1]')[1]); }
 	"#;
 	assert!(tablo::check(source).unwrap_err().to_string().to_lowercase().contains("ambiguous"));
+	let source = r#"obj Item { value: int };
+		fn Read(value: json): int { return 1; }
+		fn Read(value: Item): int { return 2; }
+		fn Main(args: [text]): int { return Read({ "different": true }); }"#;
+	assert!(tablo::check(source).unwrap_err().to_string().to_lowercase().contains("ambiguous"));
 }
 
 #[test]
@@ -399,7 +423,7 @@ fn json_mutation_rejects_missing_intermediates_ambiguity_and_sparse_arrays() {
 		}}"#);
 		assert!(matches!(tablo::run(&source), Err(tablo::TabloError::Runtime(_))), "{source}");
 	}
-	for statement in ["data.x = [1];", "data.x = args;", "data.x += 1;", "data.items['1'] = 1;"] {
+	for statement in ["var values: [int] = [1]; data.x = values;", "data.x = args;", "data.x += 1;", "data.items['1'] = 1;"] {
 		let source = format!("fn Main(args: [text]): int {{ var data: json = json('{{}}'); {statement} return 0; }}");
 		assert!(tablo::check(&source).is_err(), "{source}");
 	}
@@ -407,4 +431,236 @@ fn json_mutation_rejects_missing_intermediates_ambiguity_and_sparse_arrays() {
 		let source = format!("fn Main(args: [text]): int {{ const data: json = json('{{}}'); {statement} return 0; }}");
 		assert!(tablo::check(&source).is_err(), "{source}");
 	}
+}
+
+#[test]
+fn explicit_integer_conversion_truncates_without_changing_json() {
+	assert_program(r#"fn Main(args: [text]): int {
+		var data: json = json('[3.9,-3.9,9223372036854775807.9,-9223372036854775808.9,1e-999999999999999]');
+		var original: text = text(data);
+		if int(data[1]) == 3 and int(data[2]) == -3
+			and int(data[3]) == 9223372036854775807
+			and int(data[4]) == (-9223372036854775807 - 1)
+			and int(data[5]) == 0 and int(-3.9) == -3
+			and text(data) == original { return 1; }
+		return 0;
+	}"#, Value::Integer(1));
+}
+
+#[test]
+fn explicit_integer_conversion_rejects_range_errors_and_non_numeric_json() {
+	for contents in ["9223372036854775808", "-9223372036854775809", "1e999999999999999", "null", "true", "\"3\"", "{}", "[]"] {
+		let source = format!("fn Main(args: [text]): int {{ var data: json = json('[{contents}]'); return int(data[1]); }}");
+		assert_runtime_failure(&source);
+	}
+}
+
+#[test]
+fn explicit_decimal_conversion_rounds_to_nearest_with_ties_away_from_zero() {
+	let prefix = "1.123456789012345678901234567890123456";
+	for (tail, expected_tail) in [("74", "7"), ("75", "8"), ("76", "8")] {
+		for sign in ["", "-"] {
+			let input = format!("{sign}{prefix}{tail}");
+			let expected = format!("{sign}{prefix}{expected_tail}");
+			assert_program(&format!(r#"fn Main(args: [text]): int {{
+				var data: json = json('[{input}]');
+				var original: text = text(data);
+				if dec(data[1]) == {expected} and dec(v: '{input}') == {expected}
+					and text(data) == original {{ return 1; }}
+				return 0;
+			}}"#), Value::Integer(1));
+		}
+	}
+}
+
+#[test]
+fn explicit_decimal_conversion_handles_integers_exponents_and_rounding_carry() {
+	assert_program(r#"fn Main(args: [text]): int {
+		if dec(42) == 42.0 and dec(-42) == -42.0
+			and dec('1.25e3') == 1250.0 and dec('+001.25') == 1.25
+			and dec('.5') == 0.5 and dec('1.') == 1.0
+			and dec('1.99999999999999999999999999999999999999') == 2.0
+			and dec('1e-999999999999999999999') == 0.0
+			and dec('5e-38') == 0.0000000000000000000000000000000000001
+			and dec('-5e-38') == -0.0000000000000000000000000000000000001
+			and dec('4e-38') == 0.0 { return 1; }
+		return 0;
+	}"#, Value::Integer(1));
+}
+
+#[test]
+fn explicit_decimal_conversion_rejects_invalid_text_range_errors_and_wrong_json_kinds() {
+	for text in ["", " ", "+-1", "--1", "1e", "1e+", "NaN", "Infinity", "1.2.3", "1_000", "1e999999999999999999999", "99999999999999999999999999999999999999.1"] {
+		let source = format!("fn Main(args: [text]): int {{ var value: dec = dec('{text}'); return 0; }}");
+		assert_runtime_failure(&source);
+	}
+	for contents in ["null", "true", "\"1.5\"", "{}", "[]", "1e999999999999999999999"] {
+		let source = format!("fn Main(args: [text]): int {{ var data: json = json('[{contents}]'); var value: dec = dec(data[1]); return 0; }}");
+		assert_runtime_failure(&source);
+	}
+}
+
+#[test]
+fn json_literals_construct_nested_values_and_evaluate_expressions() {
+	assert_program(r#"
+		fn Next(counter: &int): int { counter += 1; return counter; }
+		fn Main(args: [text]): int {
+			var counter: int = 0;
+			var name: text = 'Alice';
+			var original: json = json('{"active":true}');
+			var data: json = {
+				"name": 'Hello ${name}', "first": Next(&counter),
+				"values": [Next(&counter), { "last": Next(&counter) }, null, true, 'hello'],
+				"details": original, "empty": {},
+			};
+			data.details.active = false;
+			if counter == 3 and int(data."first") == 1 and int(data.values[1]) == 2
+				and int(data.values[2]."last") == 3 and original.active == json('[true]')[1]
+				and data.name == json('["Hello Alice"]')[1] and exists data.values[2]."last" { return 1; }
+			return 0;
+		}
+	"#, Value::Integer(1));
+}
+
+#[test]
+fn json_literals_preserve_large_signed_numbers_and_decimal_precision() {
+	assert_program(r#"fn Main(args: [text]): int {
+		var data: json = { "huge": 12345678901234567890123456789012345678901234567890,
+			"negative": -12345678901234567890123456789012345678901234567890,
+			"fraction": .123456789012345678901234567890123456789,
+			"nested": [000999999999999999999999999999999999999999] };
+		if data == json('{"huge":12345678901234567890123456789012345678901234567890,"negative":-12345678901234567890123456789012345678901234567890,"fraction":0.123456789012345678901234567890123456789,"nested":[999999999999999999999999999999999999999]}') { return 1; }
+		return 0;
+	}"#, Value::Integer(1));
+}
+
+#[test]
+fn json_literals_use_assignment_return_field_and_parameter_contexts() {
+	assert_program(r#"
+		obj Envelope { payload: json };
+		fn Produce(): json { return { "items": [1, 'two'] }; }
+		fn Read(data: json): int { return data.value; }
+		fn Main(args: [text]): int {
+			var optional: json? = {};
+			var values: [json] = [{ "value": 1 }, [2, 3]];
+			var envelope: Envelope = Envelope { payload: { "value": 4 } };
+			envelope.payload = [true, null];
+			optional = { "next": Produce() };
+			values[1] = { "value": 5 };
+			if Read(data: { "value": 6 }) == 6 and int(values[1].value) == 5
+				and envelope.payload[1] == json('[true]')[1] and optional.next.items[2] == json('["two"]')[1] { return 1; }
+			return 0;
+		}
+	"#, Value::Integer(1));
+}
+
+#[test]
+fn json_literal_keys_preserve_case_and_reject_exact_duplicates() {
+	assert_program(r#"fn Main(args: [text]): int {
+		var data: json = { "Name": 1, "name": 2, "property-name": 'yes' };
+		if int(data."Name") == 1 and int(data."name") == 2 and data."property-name" == json('["yes"]')[1] { return 1; }
+		return 0;
+	}"#, Value::Integer(1));
+	let source = r#"fn Main(args: [text]): int { var data: json = { "same": 1, "same": 2 }; return 0; }"#;
+	assert!(tablo::run(source).unwrap_err().to_string().contains("specified more than once"));
+}
+
+#[test]
+fn json_literals_support_defaults_builtins_and_mutation() {
+	assert_program(r#"obj Envelope { payload: json = { "value": -999999999999999999999999999999999999999 } };
+		fn Read(value: json = { "value": 7 }): int { return value.value; }
+		fn Main(args: [text]): int {
+			var envelope: Envelope = Envelope {};
+			var data: json = {};
+			data.items = [1, { "value": Read() }];
+			data.items[1] = { "nested": [true, null] };
+			if int(data.items[2].value) == 7 and data.items[1].nested == json('[true,null]')
+				and text({ "value": 3 }) == '{"value":3}' and text([1, true]) == '[1,true]'
+				and envelope.payload == json('{"value":-999999999999999999999999999999999999999}') { return 1; }
+			return 0;
+		}"#, Value::Integer(1));
+}
+
+#[test]
+fn json_literal_overloads_do_not_inspect_contents() {
+	let source = r#"fn Read(value: json): int { return 1; }
+		fn Read(value: [int]): int { return 2; }
+		fn Main(args: [text]): int { return Read(['text']); }"#;
+	assert!(tablo::check(source).unwrap_err().to_string().to_lowercase().contains("ambiguous"));
+	let source = r#"obj Item { value: int };
+		fn Read(value: json): int { return 1; }
+		fn Read(value: Item): int { return 2; }
+		fn Main(args: [text]): int { return Read({ "different": true }); }"#;
+	assert!(tablo::check(source).unwrap_err().to_string().to_lowercase().contains("ambiguous"));
+	assert_program(r#"fn Read(value: json, flag: int): int { return 1; }
+		fn Read(value: [int], flag: text): int { return 2; }
+		fn Main(args: [text]): int {
+			var data: json = [1];
+			if Read(['text'], 1) == 1 and Read([2], 'native') == 2 and Read(data, 1) == 1 { return 1; }
+			return 0;
+		}"#, Value::Integer(1));
+}
+
+#[test]
+fn json_literals_reject_implicit_native_containers_and_oversized_arithmetic() {
+	for statement in [
+		"var data: json = 1;",
+		"var data: json = { unquoted: 1 };",
+		"var values: [int] = [1]; var data: json = { \"values\": values };",
+		"var data: json = [999999999999999999999999999999999999999 + 1];",
+		"var data: json = [1 + 999999999999999999999999999999999999999];",
+	] {
+		let source = format!("fn Main(args: [text]): int {{ {statement} return 0; }}");
+		assert!(tablo::check(&source).is_err(), "{source}");
+	}
+}
+
+#[test]
+fn json_literals_support_variadic_parameters() {
+	assert_program(r#"fn Read(...values: [json]): int { return values[2].value; }
+		fn Main(args: [text]): int { return Read([], { "value": 7 }); }"#, Value::Integer(7));
+}
+
+#[test]
+fn json_literals_in_watches_match_compiled_expressions() {
+	let frame = tablo::vm::VmStackFrame {
+		instruction_index: 0,
+		locals: vec![tablo::vm::VmVisibleLocal {
+			declared_type: "int".into(), is_const: false, name: "total".into(),
+			slot: 0, value: Value::Integer(3),
+		}],
+		source_location: None,
+	};
+	for (expression, expected) in [
+		(r#"text({ "value": total + 1, "message": 'Count ${total}', "nested": [true, null, {}] })"#, r#"{"message":"Count 3","nested":[true,null,{}],"value":4}"#),
+		(r#"text(v: [000999999999999999999999999999999999999999, -.123456789012345678901234567890123456789])"#, "[999999999999999999999999999999999999999,-0.123456789012345678901234567890123456789]"),
+		(r#"text({ "Name": 1, "name": 2, "copy": json('[1e999999999999999999999]') })"#, r#"{"Name":1,"copy":[1e999999999999999999999],"name":2}"#),
+		("text([])", "[]"),
+		("text({})", "{}"),
+	] {
+		let source = format!("fn Main(args: [text]): int {{ var total: int = 3; if {expression} == '{expected}' {{ return 1; }} return 0; }}");
+		assert_program(&source, Value::Integer(1));
+		assert_eq!(tablo::vm::VirtualMachine::evaluate_watch_expression(expression, &frame).unwrap(), Value::Text(expected.into()), "{expression}");
+	}
+	assert_eq!(frame.locals[0].value, Value::Integer(3));
+}
+
+#[test]
+fn json_literal_watches_reject_invalid_values_and_side_effects() {
+	let frame = tablo::vm::VmStackFrame { instruction_index: 0, locals: Vec::new(), source_location: None };
+	for expression in [
+		r#"text({ unquoted: 1 })"#,
+		r#"text({ "same": 1, "same": 2 })"#,
+		r#"text([999999999999999999999999999999999999999 + 1])"#,
+		r#"text([split('a,b', ',')])"#,
+		r#"text([displn('side effect')])"#,
+		r#"text([missing = 1])"#,
+		r#"text([Unknown()])"#,
+		r#"json({ "value": 1 })"#,
+	] {
+		assert!(tablo::vm::VirtualMachine::evaluate_watch_expression(expression, &frame).is_err(), "{expression}");
+	}
+	assert_eq!(tablo::vm::VirtualMachine::evaluate_watch_expression("[1, 2]", &frame).unwrap(),
+		Value::Array(vec![Value::Integer(1), Value::Integer(2)]));
+	assert!(tablo::vm::VirtualMachine::evaluate_watch_expression(r#"{ "value": 1 }"#, &frame).is_err());
 }

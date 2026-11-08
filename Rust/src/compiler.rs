@@ -310,6 +310,26 @@ impl Compiler {
 	) {
 		let expression_position = debug_position.unwrap_or(expression.position());
 
+		if let Some(number) = semantic_program.json_literal_numbers.get(&expression.position()) {
+			self.emit(emission, Instruction::PushJsonNumber(number.clone()), expression_position);
+			return;
+		}
+
+		if semantic_program.json_literals.contains(&expression.position()) {
+			match expression {
+				Expr::Array(array) => {
+					for element in &array.elements { self.compile_into_with_debug_position(element, semantic_program, emission, debug_position); }
+					self.emit(emission, Instruction::MakeJsonArray(array.elements.len() as u32), expression_position);
+				}
+				Expr::ObjectConstruction(object) => {
+					for field in &object.fields { self.compile_into_with_debug_position(&field.value, semantic_program, emission, debug_position); }
+					self.emit(emission, Instruction::MakeJsonObject(object.fields.iter().map(|field| field.name.clone()).collect()), expression_position);
+				}
+				_ => unreachable!("JSON literal metadata must identify a container literal."),
+			}
+			return;
+		}
+
 		match expression {
 			Expr::Array(ArrayLiteral { elements, .. }) => {
 				for element in elements {
@@ -409,6 +429,12 @@ impl Compiler {
 				self.emit(emission, Instruction::PushBoolean(*value), expression_position);
 			}
 			Expr::Call(CallExpr { arguments, .. }) => {
+				if let Some((object_type_id, private_types)) = semantic_program.object_conversions.get(&expression.position()) {
+					self.compile_into_with_debug_position(arguments[0].expression().unwrap(), semantic_program, emission, debug_position);
+					self.emit(emission, Instruction::ConvertObject { object_type_id: *object_type_id, private_types: private_types.clone() }, expression_position);
+					return;
+				}
+
 				if let Some(resolved_sequence) = semantic_program.sequence_call_target(expression.position()) {
 					self.emit(emission, Instruction::AdvanceSequence {
 						database_name: resolved_sequence.database_name.clone(),
@@ -584,6 +610,7 @@ impl Compiler {
 			Expr::Decimal(DecimalLiteral { value, .. }) => {
 				self.emit(emission, Instruction::PushDecimal(value.clone()), expression_position);
 			}
+			Expr::ExactNumber(_) => unreachable!("Exact numbers outside JSON literals must be rejected by semantic analysis."),
 			Expr::FieldAccess(FieldAccessExpr { field, object, is_quoted, .. }) => {
 				if let Some(enum_value) = semantic_program.enum_variant_value(expression.position()) {
 					let EnumValue::Constant(backing_value) = enum_value;
@@ -792,6 +819,28 @@ impl Compiler {
 	}
 
 	fn compile_program_with_semantics(&mut self, program: &AstProgram, semantic_program: &SemanticProgram) -> Result<Program, CompileError> {
+		let mut program = self.compile_program_bodies(program, semantic_program)?;
+
+		for object in semantic_program.object_types() {
+			let scopes = &mut program.debug_info_mut().object_scopes;
+			let source_name = object.source_name().map(String::from);
+			let index = scopes.iter().position(|scope| scope.source_name == source_name).unwrap_or_else(|| {
+				scopes.push(ObjectScopeDebugInfo { source_name, ..Default::default() });
+				scopes.len() - 1
+			});
+			let scope = &mut scopes[index];
+
+			scope.private_types.push(object.id());
+
+			if object.declaration().has_explicit_name {
+				scope.bindings.push((object.display_name().to_string(), object.id()));
+			}
+		}
+
+		Ok(program)
+	}
+
+	fn compile_program_bodies(&mut self, program: &AstProgram, semantic_program: &SemanticProgram) -> Result<Program, CompileError> {
 		let all_functions = collect_all_function_declarations(program);
 		let mut functions = Vec::with_capacity(all_functions.len());
 		let mut code_body_debug = Vec::with_capacity(all_functions.len() + 1);
@@ -1315,7 +1364,8 @@ impl Compiler {
 		type_position: usize,
 	) {
 		match data_type {
-			crate::ast::DataType::Any | crate::ast::DataType::Nullable(_) => {
+			crate::ast::DataType::Any => unreachable!("Non-nullable any requires an initializer."),
+			crate::ast::DataType::Nullable(_) => {
 				self.emit(emission, Instruction::PushNull, debug_position);
 			}
 			crate::ast::DataType::Array(_) => {

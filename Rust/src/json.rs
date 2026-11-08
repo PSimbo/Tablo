@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use crate::value::Value;
+
 use num_bigint::BigInt;
+use crate::numeric::ExactNumber as JsonNumber;
 use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
 use serde_json::value::RawValue;
 
@@ -20,42 +23,6 @@ enum JsonNode {
 	Object(BTreeMap<String, JsonNode>),
 	String(String),
 }
-
-#[derive(Clone, Debug)]
-struct JsonNumber {
-	text: String,
-	digits: String,
-	exponent: BigInt,
-	negative: bool,
-}
-
-impl JsonNumber {
-	fn new(text: &str) -> Self {
-		let (mantissa, exponent) = text.split_once(['e', 'E']).unwrap_or((text, "0"));
-		let mut exponent: BigInt = exponent.parse().expect("JSON number syntax was validated");
-		let negative = mantissa.starts_with('-');
-		let mantissa = mantissa.trim_start_matches('-');
-		let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-		let digits = format!("{whole}{fraction}");
-		let digits = digits.trim_start_matches('0');
-		let significant = digits.trim_end_matches('0');
-		exponent += BigInt::from(digits.len() - significant.len());
-		exponent -= BigInt::from(fraction.len());
-		Self {
-			text: text.to_string(), digits: significant.to_string(),
-			exponent: if significant.is_empty() { BigInt::from(0) } else { exponent },
-			negative: negative && !significant.is_empty(),
-		}
-	}
-}
-
-impl PartialEq for JsonNumber {
-	fn eq(&self, other: &Self) -> bool {
-		self.negative == other.negative && self.digits == other.digits && self.exponent == other.exponent
-	}
-}
-
-impl Eq for JsonNumber {}
 
 // RawValue keeps number tokens out of serde_json's machine-number conversions.
 // Decode object entries before collecting them so duplicate keys, including
@@ -180,6 +147,7 @@ impl JsonValue {
 			Value::Json(value) => value,
 			Value::Null => Self(JsonNode::Null),
 			Value::Text(value) => Self(JsonNode::String(value)),
+			Value::Enum(value) => Self(JsonNode::String(value.variant_name)),
 			Value::Boolean(value) => Self(JsonNode::Boolean(value)),
 			Value::Integer(value) => Self(JsonNode::Number(JsonNumber::new(&value.to_string()))),
 			Value::Decimal(value) => Self(JsonNode::Number(JsonNumber::new(&value.to_string()))),
@@ -220,6 +188,66 @@ impl JsonValue {
 		Ok(self)
 	}
 
+	pub(crate) fn number_literal(text: &str) -> Result<Self, String> {
+		let raw: Box<RawValue> = serde_json::from_str(text).map_err(|error| error.to_string())?;
+		let node = JsonNode::parse(&raw, 0)?;
+		if !matches!(node, JsonNode::Number(_)) { return Err(String::from("JSON numeric literal requires a number.")); }
+		Ok(Self(node))
+	}
+
+	pub(crate) fn array_literal(values: Vec<Value>) -> Result<Self, String> {
+		values.into_iter().map(Self::from_value).map(|value| value.map(|value| value.0))
+			.collect::<Result<Vec<_>, _>>().map(|values| Self(JsonNode::Array(values)))
+	}
+
+	pub(crate) fn object_literal(names: &[String], values: Vec<Value>) -> Result<Self, String> {
+		let mut fields = BTreeMap::new();
+		for (name, value) in names.iter().zip(values) {
+			if fields.insert(name.clone(), Self::from_value(value)?.0).is_some() {
+				return Err(format!("JSON property `{name}` is specified more than once."));
+			}
+		}
+		Ok(Self(JsonNode::Object(fields)))
+	}
+
+	pub(crate) fn to_integer(&self) -> Result<i64, String> {
+		let JsonNode::Number(number) = &self.0 else {
+			return Err(String::from("Explicit `int` conversion requires a JSON number."));
+		};
+		let whole_digits = BigInt::from(number.digits.len()) + &number.exponent;
+
+		if number.digits.is_empty() || whole_digits <= BigInt::from(0) {
+			return Ok(0);
+		}
+
+		let overflow = || String::from("JSON number exceeds the supported integer range after truncation.");
+
+		if whole_digits > BigInt::from(19) {
+			return Err(overflow());
+		}
+
+		let length = usize::try_from(whole_digits).map_err(|_| overflow())?;
+		let mut text = number.digits[..length.min(number.digits.len())].to_string();
+
+		text.extend(std::iter::repeat_n('0', length.saturating_sub(number.digits.len())));
+
+		if number.negative {
+			text.insert(0, '-');
+		}
+
+		text.parse().map_err(|_| overflow())
+	}
+
+	pub(crate) fn to_decimal(&self) -> Result<crate::value::Decimal, String> {
+		let JsonNode::Number(number) = &self.0 else {
+			return Err(String::from("Explicit `dec` conversion requires a JSON number."));
+		};
+
+		number.to_decimal()
+	}
+
+	pub(crate) fn is_document(&self) -> bool { matches!(self.0, JsonNode::Object(_) | JsonNode::Array(_)) }
+
 	pub(crate) fn is_null(&self) -> bool { matches!(self.0, JsonNode::Null) }
 
 	pub(crate) fn convert(&self, target: &crate::ast::DataType) -> Result<crate::value::Value, String> {
@@ -228,7 +256,7 @@ impl JsonValue {
 		if self.is_null() && target.is_nullable() { return Ok(Value::Null); }
 		let incompatible = || format!("JSON content cannot be converted to `{}`.", target.name());
 		match (target.without_nullability(), &self.0) {
-			(DataType::Any, _) => Ok(Value::Json(self.clone())),
+			(DataType::Any, _) if !self.is_null() => self.native_contents().map_err(|error| error.to_string()),
 			(DataType::Json, JsonNode::Object(_) | JsonNode::Array(_)) => Ok(Value::Json(self.clone())),
 			(DataType::Text, JsonNode::String(value)) => Ok(Value::Text(value.clone())),
 			(DataType::Bool, JsonNode::Boolean(value)) => Ok(Value::Boolean(*value)),
@@ -248,6 +276,21 @@ impl JsonValue {
 				Decimal::from_database_text(&text).map(Value::Decimal).map_err(|_| incompatible())
 			}
 			_ => Err(incompatible()),
+		}
+	}
+
+	// Materialize JSON contents for an `any` target, preserving exact numbers.
+	// Array elements are nullable; the caller checks nullability of the root.
+	fn native_contents(&self) -> Result<Value, crate::object_construction::ObjectConstructionError> {
+		match &self.0 {
+			JsonNode::Null => Ok(Value::Null),
+			JsonNode::String(value) => Ok(Value::Text(value.clone())),
+			JsonNode::Boolean(value) => Ok(Value::Boolean(*value)),
+			JsonNode::Number(_) => self.convert(&crate::ast::DataType::Dec).map_err(JsonConversion::error),
+			JsonNode::Array(values) => values.iter().enumerate().map(|(index, value)| {
+				Self(value.clone()).native_contents().map_err(|error| error.at(format!("[{}]", index + 1)))
+			}).collect::<Result<Vec<_>, _>>().map(Value::Array),
+			JsonNode::Object(_) => Err(JsonConversion::error("JSON objects cannot be converted to `any`; use an explicit object type or retain a whole JSON document.")),
 		}
 	}
 
@@ -305,5 +348,233 @@ mod tests {
 		assert!(JsonValue::parse(&nested).is_err());
 		assert!(JsonValue::parse("{} []").is_err());
 		assert_eq!(JsonValue::parse(" \n {} \t").unwrap(), JsonValue::default());
+	}
+}
+
+// Conversion is deliberately separate from ordinary JSON field access: it
+// validates a complete, explicitly selected native shape before publishing it.
+pub(crate) struct JsonConversion<'a> {
+	descriptors: &'a [crate::bytecode::ObjectTypeDescriptor],
+	private_types: &'a [crate::bytecode::ObjectTypeId],
+}
+
+impl<'a> JsonConversion<'a> {
+	pub(crate) fn new(descriptors: &'a [crate::bytecode::ObjectTypeDescriptor], private_types: &'a [crate::bytecode::ObjectTypeId]) -> Self {
+		Self { descriptors, private_types }
+	}
+
+	fn error(message: impl Into<String>) -> crate::object_construction::ObjectConstructionError {
+		crate::object_construction::ObjectConstructionError::new(message)
+	}
+
+	fn descriptor(&self, id: crate::bytecode::ObjectTypeId) -> Result<&'a crate::bytecode::ObjectTypeDescriptor, crate::object_construction::ObjectConstructionError> {
+		self.descriptors.iter().find(|descriptor| descriptor.id() == id)
+			.ok_or_else(|| Self::error(format!("Unknown object type ID {}.", id.raw())))
+	}
+
+	pub(crate) fn export_document(&self, value: Value) -> Result<JsonValue, crate::object_construction::ObjectConstructionError> {
+		// The existing text overload remains a parser, not a scalar encoder.
+		if let Value::Text(text) = value { return JsonValue::parse(&text).map_err(Self::error); }
+		let result = self.export(value)?;
+		if !result.is_document() { return Err(Self::error("JSON conversion requires an object or array root.")); }
+		Ok(result)
+	}
+
+	fn export(&self, value: Value) -> Result<JsonValue, crate::object_construction::ObjectConstructionError> {
+		use crate::bytecode::ObjectTypeDescriptorShape;
+		use crate::ast::Visibility;
+		match value {
+			Value::Array(values) => Ok(JsonValue(JsonNode::Array(values.into_iter().enumerate()
+				.map(|(index, value)| self.export(value).map(|value| value.0).map_err(|error| error.at(format!("[{}]", index + 1))))
+				.collect::<Result<Vec<_>, _>>()?))),
+			Value::Object(object) => {
+				let ObjectTypeDescriptorShape::Fields(fields) = self.descriptor(object.object_type_id)?.shape() else {
+					return Err(Self::error("Expected a field-shaped object."));
+				};
+				let mut result = BTreeMap::new();
+				for field in fields.iter().filter(|field| field.visibility() == Visibility::Public) {
+					let value = object.fields.get(field.name()).ok_or_else(|| Self::error("Incomplete native object.").at(field.name()))?;
+					result.insert(field.name().to_owned(), self.export(value.clone()).map_err(|error| error.at(field.name()))?.0);
+				}
+				Ok(JsonValue(JsonNode::Object(result)))
+			}
+			Value::Enum(value) => Ok(JsonValue(JsonNode::String(value.variant_name))),
+			Value::Date(value) => Ok(JsonValue(JsonNode::String(value.to_string()))),
+			Value::Time(value) => Ok(JsonValue(JsonNode::String(value.to_string()))),
+			Value::TimeTz(value) => Ok(JsonValue(JsonNode::String(value.to_string()))),
+			Value::Timestamp(value) => Ok(JsonValue(JsonNode::String(value.to_string()))),
+			Value::TimestampTz(value) => Ok(JsonValue(JsonNode::String(value.to_string()))),
+			value => JsonValue::from_value(value).map_err(Self::error),
+		}
+	}
+
+	pub(crate) fn import_object(&self, value: &JsonValue, id: crate::bytecode::ObjectTypeId) -> Result<Value, crate::object_construction::ObjectConstructionError> {
+		use crate::bytecode::{ObjectTypeDescriptorShape, ObjectValueTypeDescriptor};
+		use crate::ast::Visibility;
+		let descriptor = self.descriptor(id)?;
+		let fields = match descriptor.shape() {
+			ObjectTypeDescriptorShape::Fields(fields) => fields,
+			ObjectTypeDescriptorShape::RootArray(element) => return self.import(value, &ObjectValueTypeDescriptor::Array(Box::new(element.clone()))),
+		};
+		let JsonNode::Object(properties) = &value.0 else { return Err(Self::error("Expected a JSON object.")); };
+		let mut used = std::collections::BTreeSet::new();
+		let mut supplied = Vec::new();
+		for field in fields {
+			let matches = properties.iter().filter(|(name, _)| {
+				if field.is_quoted() { *name == field.name() } else { name.eq_ignore_ascii_case(field.name()) }
+			}).collect::<Vec<_>>();
+			if matches.len() > 1 { return Err(Self::error("Multiple JSON properties match this field.").at(field.name())); }
+			let accessible = field.visibility() == Visibility::Public || self.private_types.contains(&id);
+			if let Some((name, value)) = matches.first() {
+				if !accessible { return Err(Self::error("JSON property targets an inaccessible private field.").at(*name)); }
+				used.insert((*name).clone());
+				supplied.push((field.name().to_owned(), self.import(&JsonValue((*value).clone()), field.data_type())
+					.map_err(|error| error.at(*name))?));
+			} else if accessible && field.explicit_default().is_none() {
+				return Err(Self::error("Missing JSON property; an explicit field default is required.").at(field.name()));
+			}
+		}
+		if let Some(name) = properties.keys().find(|name| !used.contains(*name)) {
+			return Err(Self::error("Unexpected JSON property.").at(name));
+		}
+		crate::object_construction::ObjectConstructor::new(self.descriptors.iter()).construct(id, supplied)
+	}
+
+	fn import(&self, value: &JsonValue, target: &crate::bytecode::ObjectValueTypeDescriptor) -> Result<Value, crate::object_construction::ObjectConstructionError> {
+		use crate::bytecode::{ObjectValueTypeDescriptor as T, Constant};
+		use crate::ast::DataType;
+		use crate::value::{Date, Time, TimeTz, Timestamp, TimestampTz, EnumValue};
+		if let T::Nullable(inner) = target {
+			return if value.is_null() { Ok(Value::Null) } else { self.import(value, inner) };
+		}
+		if let T::Union(members) = target {
+			let mut matches = members.iter().filter_map(|member| self.import(value, member).ok());
+			let first = matches.next().ok_or_else(|| Self::error("JSON value matches no union member."))?;
+			return if matches.next().is_some() { Err(Self::error("JSON value matches multiple union members.")) } else { Ok(first) };
+		}
+		if value.is_null() { return Err(Self::error("JSON null requires a nullable target.")); }
+		let primitive = match target {
+			T::Any => return value.native_contents(),
+			T::Array(element) => {
+				let JsonNode::Array(values) = &value.0 else { return Err(Self::error("Expected a JSON array.")); };
+				return Ok(Value::Array(values.iter().enumerate().map(|(index, value)| self.import(&JsonValue(value.clone()), element)
+					.map_err(|error| error.at(format!("[{}]", index + 1)))).collect::<Result<Vec<_>, _>>()?));
+			}
+			T::Object(id) => return self.import_object(value, *id),
+			T::Enum { name, variants, .. } => {
+				let JsonNode::String(variant_name) = &value.0 else {
+					return Err(Self::error("Expected an enum variant name as a JSON string."));
+				};
+
+				let (variant, backing) = variants.iter().find(|(name, _)| name == variant_name)
+					.ok_or_else(|| Self::error(format!("Unknown enum variant `{variant_name}` for `{name}`.")))?;
+
+				let backing = match backing {
+					Constant::Boolean(value) => Value::Boolean(*value),
+					Constant::Date(value) => Value::Date(*value),
+					Constant::Decimal(value) => Value::Decimal(value.clone()),
+					Constant::Integer(value) => Value::Integer(*value),
+					Constant::Text(value) => Value::Text(value.clone()),
+				};
+
+				return Ok(Value::Enum(EnumValue { enum_name: name.clone(), variant_name: variant.clone(), backing_value: Box::new(backing) }));
+			}
+			T::Date | T::Time | T::TimeTz | T::Timestamp | T::TimestampTz => {
+				let JsonNode::String(text) = &value.0 else { return Err(Self::error("Expected an ISO date/time string.")); };
+				return match target {
+					T::Date => Date::from_iso_text(text).map(Value::Date),
+					T::Time => Time::from_iso_text(text).map(Value::Time),
+					T::TimeTz => TimeTz::from_iso_text(text).map(Value::TimeTz),
+					T::Timestamp => Timestamp::from_iso_text(text).map(Value::Timestamp),
+					T::TimestampTz => TimestampTz::from_iso_text(text).map(Value::TimestampTz),
+					_ => unreachable!(),
+				}.map_err(Self::error);
+			}
+			T::Bool => DataType::Bool,
+			T::Dec => DataType::Dec,
+			T::Int => DataType::Int,
+			T::Json => DataType::Json,
+			T::Text => DataType::Text,
+			T::Range(_) => return Err(Self::error("JSON range conversion is unsupported.")),
+			T::Nullable(_) | T::Union(_) => unreachable!(),
+		};
+		value.convert(&primitive).map_err(Self::error)
+	}
+}
+
+#[cfg(test)]
+mod conversion_tests {
+	use super::*;
+	use crate::ast::Visibility;
+	use crate::bytecode::*;
+
+	#[test]
+	fn any_contents_materialize_native_values_in_runtime_only_builds() {
+		use crate::ast::DataType;
+		use crate::value::Decimal;
+
+		let conversion = JsonConversion::new(&[], &[]);
+
+		for spelling in ["3", "3.0", "3e0", "3.25", "-0.125"] {
+			let value = JsonValue::number_literal(spelling).unwrap();
+			let expected = Value::Decimal(Decimal::from_database_text(spelling).unwrap());
+			assert_eq!(value.convert(&DataType::Any).unwrap(), expected);
+			assert_eq!(conversion.import(&value, &ObjectValueTypeDescriptor::Any).unwrap(), expected);
+		}
+
+		let source = JsonValue::parse(r#"[3,true,null,["2026-11-13"]]"#).unwrap();
+		let original = source.clone();
+
+		assert_eq!(source.convert(&DataType::Any).unwrap(), Value::Array(vec![
+			Value::Decimal(Decimal::from_database_text("3").unwrap()), Value::Boolean(true), Value::Null,
+			Value::Array(vec![Value::Text("2026-11-13".into())]),
+		]));
+
+		assert_eq!(source, original);
+
+		for source in ["{}", "[{}]", "[999999999999999999999999999999999999999999]", "[0.123456789012345678901234567890123456789]"] {
+			let value = JsonValue::parse(source).unwrap();
+			let original = value.clone();
+			assert!(value.convert(&DataType::Any).is_err(), "{source}");
+			assert!(conversion.import(&value, &ObjectValueTypeDescriptor::Any).is_err(), "{source}");
+			assert_eq!(value, original);
+		}
+	}
+
+	#[test]
+	fn runtime_only_conversion_is_atomic_and_obeys_private_access() {
+		let id = ObjectTypeId::from_raw(0);
+		let descriptors = vec![ObjectTypeDescriptor {
+			id, display_name: "Model".into(), shape: ObjectTypeDescriptorShape::Fields(vec![
+				ObjectFieldDescriptor {
+					name: "amount".into(), data_type: ObjectValueTypeDescriptor::Int,
+					explicit_default: None, visibility: Visibility::Public, is_quoted: false,
+				},
+				ObjectFieldDescriptor {
+					name: "hidden".into(), data_type: ObjectValueTypeDescriptor::Text,
+					explicit_default: Some(ObjectDefaultValue::Text("default".into())), visibility: Visibility::Private, is_quoted: false,
+				},
+			]),
+		}];
+		let public = JsonConversion::new(&descriptors, &[]);
+		let source = JsonValue::parse(r#"{"amount":3.5}"#).unwrap();
+		let original = source.clone();
+		assert!(public.import_object(&source, id).is_err());
+		assert_eq!(source, original);
+		let source = JsonValue::parse(r#"{"amount":3,"hidden":"secret"}"#).unwrap();
+		assert!(public.import_object(&source, id).is_err());
+		let private_types = [id];
+		let internal = JsonConversion::new(&descriptors, &private_types);
+		let object = internal.import_object(&source, id).unwrap();
+		assert_eq!(internal.export_document(object).unwrap(), JsonValue::parse(r#"{"amount":3}"#).unwrap());
+
+		let program = Program::new(vec![
+			Instruction::PushText(r#"{"amount":3,"hidden":"secret"}"#.into()),
+			Instruction::CallBuiltIn(crate::builtins::BuiltInFunction::JsonCast, 1),
+			Instruction::ConvertObject { object_type_id: id, private_types: vec![id] },
+			Instruction::CallBuiltIn(crate::builtins::BuiltInFunction::JsonCast, 1),
+		]).with_object_type_descriptors(descriptors);
+		let program = crate::object_file::read_program(&crate::object_file::write_program(&program)).unwrap();
+		assert_eq!(crate::vm::VirtualMachine::new().run(&program).unwrap(), Some(Value::Json(JsonValue::parse(r#"{"amount":3}"#).unwrap())));
 	}
 }

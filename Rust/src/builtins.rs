@@ -271,6 +271,8 @@ impl BuiltInFunction {
 				Self::signature(&[("t", TimestampTz)], Some(DataType::Int)),
 			],
 			Self::DecCast => vec![
+				Self::signature(&[("v", Int)], Some(DataType::Dec)),
+				Self::signature(&[("v", Text)], Some(DataType::Dec)),
 				Self::signature(&[("v", EnumBacked(DataType::Dec))], Some(DataType::Dec)),
 			],
 			Self::Disp => vec![
@@ -304,6 +306,7 @@ impl BuiltInFunction {
 				Self::signature(&[("v", Bool)], Some(DataType::Int)),
 				Self::signature(&[("v", Text)], Some(DataType::Int)),
 				Self::signature(&[("v", EnumBacked(DataType::Int))], Some(DataType::Int)),
+				Self::signature(&[("v", Dec)], Some(DataType::Int)),
 			],
 			Self::LastOf => vec![
 				Self::variadic_signature("v1", Any, "v2", ArrayAny, DataType::Bool),
@@ -508,12 +511,12 @@ impl BuiltInFunction {
 				_ => None,
 			},
 			Self::IntCast => match argument_types {
-				[arg] if matches!(arg.without_nullability(), DataType::Bool) => Some(DataType::Int),
+				[arg] if matches!(arg.without_nullability(), DataType::Bool | DataType::Dec | DataType::JsonMember) => Some(DataType::Int),
 				[arg] if matches!(arg.without_nullability(), DataType::Text) => Some(DataType::Int),
 				_ => None,
 			},
 			Self::JsonCast => match argument_types {
-				[DataType::Text] => Some(DataType::Json),
+				[arg] if matches!(arg, DataType::Text | DataType::Any | DataType::Array(_) | DataType::EmptyArray | DataType::Object(_) | DataType::Json | DataType::JsonMember) => Some(DataType::Json),
 				_ => None,
 			},
 			Self::TextCast => match argument_types {
@@ -521,7 +524,11 @@ impl BuiltInFunction {
 				_ => None,
 			},
 			Self::SeqNext => None,
-			Self::DecCast | Self::BoolCast => None,
+			Self::DecCast => match argument_types {
+				[arg] if matches!(arg.without_nullability(), DataType::Int | DataType::Text | DataType::JsonMember) => Some(DataType::Dec),
+				_ => None,
+			},
+			Self::BoolCast => None,
 		}
 	}
 
@@ -573,7 +580,7 @@ impl BuiltInParameterType {
 	pub(crate) fn name(&self) -> String {
 		match self {
 			Self::Any => String::from("any"),
-			Self::ArrayAny => String::from("[any]"),
+			Self::ArrayAny => String::from("[any?]"),
 			Self::ArrayText => String::from("[text]"),
 			Self::Bool => String::from("bool"),
 			Self::Date => String::from("date"),
@@ -659,7 +666,7 @@ mod tests {
 		assert_eq!(BuiltInFunction::Disp.signature_labels(), ["disp(fmt: text)"]);
 		assert_eq!(
 			BuiltInFunction::FirstOf.signature_labels(),
-			["firstof(v1: any, ...v2: [any]): bool"],
+			["firstof(v1: any, ...v2: [any?]): bool"],
 		);
 	}
 
