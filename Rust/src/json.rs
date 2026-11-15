@@ -144,13 +144,20 @@ impl JsonValue {
 	pub(crate) fn from_value(value: crate::value::Value) -> Result<Self, String> {
 		use crate::value::Value;
 		Ok(match value {
+			Value::Boolean(value) => Self(JsonNode::Boolean(value)),
+			Value::Decimal(value) => Self(JsonNode::Number(JsonNumber::new(&value.to_string()))),
+			Value::Enum(value) => Self(JsonNode::String(value.variant_name)),
+			Value::Float(value) => {
+				if !value.0.is_finite() {
+					return Err(String::from("Non-finite float cannot be represented as a JSON number."));
+				}
+
+				Self(JsonNode::Number(JsonNumber::new(&value.to_string())))
+			}
+			Value::Integer(value) => Self(JsonNode::Number(JsonNumber::new(&value.to_string()))),
 			Value::Json(value) => value,
 			Value::Null => Self(JsonNode::Null),
 			Value::Text(value) => Self(JsonNode::String(value)),
-			Value::Enum(value) => Self(JsonNode::String(value.variant_name)),
-			Value::Boolean(value) => Self(JsonNode::Boolean(value)),
-			Value::Integer(value) => Self(JsonNode::Number(JsonNumber::new(&value.to_string()))),
-			Value::Decimal(value) => Self(JsonNode::Number(JsonNumber::new(&value.to_string()))),
 			_ => return Err(String::from("Value cannot be stored in JSON without explicit conversion.")),
 		})
 	}
@@ -238,6 +245,14 @@ impl JsonValue {
 		text.parse().map_err(|_| overflow())
 	}
 
+	pub(crate) fn to_float(&self) -> Result<crate::float::Float, String> {
+		let JsonNode::Number(number) = &self.0 else {
+			return Err(String::from("Float conversion requires a JSON number."));
+		};
+
+		crate::float::Float::parse(&number.text)
+	}
+
 	pub(crate) fn to_decimal(&self) -> Result<crate::value::Decimal, String> {
 		let JsonNode::Number(number) = &self.0 else {
 			return Err(String::from("Explicit `dec` conversion requires a JSON number."));
@@ -260,6 +275,7 @@ impl JsonValue {
 			(DataType::Json, JsonNode::Object(_) | JsonNode::Array(_)) => Ok(Value::Json(self.clone())),
 			(DataType::Text, JsonNode::String(value)) => Ok(Value::Text(value.clone())),
 			(DataType::Bool, JsonNode::Boolean(value)) => Ok(Value::Boolean(*value)),
+			(DataType::Float, JsonNode::Number(_)) => self.to_float().map(Value::Float),
 			(DataType::Int, JsonNode::Number(value)) => {
 				if value.digits.is_empty() { return Ok(Value::Integer(0)); }
 				let exponent = i32::try_from(&value.exponent).map_err(|_| incompatible())?;
@@ -492,6 +508,7 @@ impl<'a> JsonConversion<'a> {
 			}
 			T::Bool => DataType::Bool,
 			T::Dec => DataType::Dec,
+			T::Float => DataType::Float,
 			T::Int => DataType::Int,
 			T::Json => DataType::Json,
 			T::Text => DataType::Text,
@@ -507,6 +524,29 @@ mod conversion_tests {
 	use super::*;
 	use crate::ast::Visibility;
 	use crate::bytecode::*;
+
+	#[test]
+	fn float_json_round_trips_and_non_finite_export_errors() {
+		use crate::float::{Float, NativeFloat};
+
+		let conversion = JsonConversion::new(&[], &[]);
+
+		for number in [0.0, -0.0, 0.1, NativeFloat::MAX, NativeFloat::MIN_POSITIVE, NativeFloat::from_bits(1)] {
+			let original = Float(number);
+			let json = JsonValue::from_value(Value::Float(original)).unwrap();
+			let reparsed = JsonValue::number_literal(&json.to_text()).unwrap();
+
+			assert_eq!(reparsed.to_float().unwrap(), original);
+			assert_eq!(conversion.import(&reparsed, &ObjectValueTypeDescriptor::Float).unwrap(), Value::Float(original));
+		}
+
+		for number in [NativeFloat::NAN, NativeFloat::INFINITY, NativeFloat::NEG_INFINITY] {
+			assert!(JsonValue::from_value(Value::Float(Float(number))).is_err());
+		}
+
+		assert!(conversion.import(&JsonValue::number_literal("1.25").unwrap(),
+			&ObjectValueTypeDescriptor::Union(vec![ObjectValueTypeDescriptor::Dec, ObjectValueTypeDescriptor::Float])).is_err());
+	}
 
 	#[test]
 	fn any_contents_materialize_native_values_in_runtime_only_builds() {

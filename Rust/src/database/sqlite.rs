@@ -81,7 +81,9 @@ impl DatabaseDriver for SqliteSession {
 		})
 	}
 
-	fn create_record(&mut self, record: RecordBuffer) -> Result<RecordBuffer, String> {
+	fn create_record(&mut self, mut record: RecordBuffer) -> Result<RecordBuffer, String> {
+		normalize_float_assignments(&mut record, WriteDialect::Sqlite)?;
+
 		let write = create_record_write(&record, WriteDialect::Sqlite)?;
 		let parameter_values = write.parameters.into_iter()
 			.map(runtime_value_to_sqlite)
@@ -214,7 +216,9 @@ impl DatabaseDriver for SqliteSession {
 		})
 	}
 
-	fn update_record(&mut self, record: RecordBuffer) -> Result<RecordBuffer, String> {
+	fn update_record(&mut self, mut record: RecordBuffer) -> Result<RecordBuffer, String> {
+		normalize_float_assignments(&mut record, WriteDialect::Sqlite)?;
+	
 		let write = update_record_write(&record, WriteDialect::Sqlite)?;
 		let parameter_values = write.parameters.into_iter()
 			.map(runtime_value_to_sqlite)
@@ -318,6 +322,8 @@ fn runtime_value_to_sqlite(value: Value) -> Result<SqlValue, String> {
 		Value::Boolean(value) => Ok(SqlValue::Integer(if value { 1 } else { 0 })),
 		Value::Date(value) => Ok(SqlValue::Text(value.to_string())),
 		Value::Decimal(value) => Ok(SqlValue::Text(value.to_string())),
+		Value::Float(value) if value.0.is_nan() => Err("SQLite cannot store NaN as a floating-point value.".into()),
+		Value::Float(value) => Ok(SqlValue::Real(value.0 as f64)),
 		Value::Integer(value) => Ok(SqlValue::Integer(value)),
 		Value::Null => Ok(SqlValue::Null),
 		Value::Text(value) => Ok(SqlValue::Text(value)),
@@ -372,6 +378,22 @@ mod tests {
 	use super::*;
 
 	use crate::ast::DataType;
+
+	#[test]
+	fn native_float_parameters_preserve_values_and_reject_nan() {
+		use crate::float::{Float, NativeFloat};
+
+		let connection = rusqlite::Connection::open_in_memory().unwrap();
+
+		for value in [0.1, -0.0, NativeFloat::MAX, NativeFloat::INFINITY, NativeFloat::NEG_INFINITY] {
+			let parameter = runtime_value_to_sqlite(Value::Float(Float(value))).unwrap();
+			let result: f64 = connection.query_row("SELECT ?1", [parameter], |row| row.get(0)).unwrap();
+
+			assert_eq!(result.to_bits(), (value as f64).to_bits());
+		}
+
+		assert!(runtime_value_to_sqlite(Value::Float(Float(NativeFloat::NAN))).is_err());
+	}
 
 	#[test]
 	fn advances_sqlite_sequence_stored_as_text() {

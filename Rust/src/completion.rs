@@ -251,6 +251,7 @@ pub fn default_completion_items() -> Vec<CompletionItem> {
 		CompletionItem { label: String::from("if"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("in"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("int"), kind: CompletionItemKind::Type, detail: String::from("Type") },
+		CompletionItem { label: String::from("float"), kind: CompletionItemKind::Type, detail: String::from("Type") },
 		CompletionItem { label: String::from("json"), kind: CompletionItemKind::Type, detail: String::from("Type") },
 		CompletionItem { label: String::from("last"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("limit"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
@@ -972,6 +973,7 @@ fn completion_member_type_from_descriptor(
 		ObjectValueTypeDescriptor::Date => Some(CompletionMemberType::Named(String::from("date"))),
 		ObjectValueTypeDescriptor::Dec => Some(CompletionMemberType::Named(String::from("dec"))),
 		ObjectValueTypeDescriptor::Enum { name, .. } => Some(CompletionMemberType::Named(name.clone())),
+		ObjectValueTypeDescriptor::Float => Some(CompletionMemberType::Named("float".into())),
 		ObjectValueTypeDescriptor::Int => Some(CompletionMemberType::Named(String::from("int"))),
 		ObjectValueTypeDescriptor::Json => Some(CompletionMemberType::Named(String::from("json"))),
 		ObjectValueTypeDescriptor::Text => Some(CompletionMemberType::Named(String::from("text"))),
@@ -1964,6 +1966,18 @@ mod tests {
 	use super::*;
 
 	use crate::schema_fixture::*;
+
+	#[test]
+	fn float_conversion_signatures_are_available() {
+		let signatures = callable_signatures("", "float");
+		let labels: Vec<_> = signatures.iter().map(|signature| signature.label.as_str()).collect();
+
+		assert!(labels.contains(&"float(v: int): float"));
+		assert!(labels.contains(&"float(v: dec): float"));
+		assert!(labels.contains(&"float(v: text): float"));
+		assert!(callable_signatures("", "dec").iter().any(|signature| signature.label == "dec(v: float): dec"));
+		assert!(default_completion_items().iter().any(|item| item.label == "float"));
+	}
 
 	#[test]
 	fn built_in_completion_items_describe_every_overload() {

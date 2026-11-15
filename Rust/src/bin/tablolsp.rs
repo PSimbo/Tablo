@@ -668,6 +668,14 @@ mod tests {
 	}
 
 	#[test]
+	fn accepts_native_float_types_and_contextual_literals() {
+		let server = LspServer::new();
+		let source = "fn Read(value: float): float { return value + 0.5; } fn Main(args: [text]): int { var value: float = 1.25; return int(Read(value)); }";
+		let diagnostics = server.document_diagnostics("file:///tmp/floats.tablo", source).unwrap();
+		assert!(diagnostics.is_empty(), "{diagnostics:?}");
+	}
+
+	#[test]
 	fn accepts_json_literals_in_document_diagnostics() {
 		let server = LspServer::new();
 		let source = r#"fn Build(): json { return { "values": [1, 'two', null, 999999999999999999999999999999999999999] }; }"#;

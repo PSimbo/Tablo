@@ -23,6 +23,36 @@ pub(super) struct MySqlSession {
 }
 
 impl MySqlSession {
+	fn resolve_float_widths(&mut self, record: &mut RecordBuffer) -> Result<(), String> {
+		if !needs_float_widths(record) {
+			return Ok(());
+		}
+
+		let schema = if record.schema_is_implicit {
+			None
+		}
+		else {
+			Some(record.record_type.schema_name.as_str())
+		};
+
+		let columns: Vec<(String, String)> = self.connection.exec(
+			"SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = COALESCE(?, DATABASE()) AND TABLE_NAME = ?",
+			(schema, &record.record_type.table_name),
+		).map_err(|error| format!("Failed to discover MySQL float widths: {error}"))?;
+
+		for (name, kind) in columns {
+			let width = match kind.as_str() {
+				"float" => crate::float::FloatWidth::Binary32,
+				"double" => crate::float::FloatWidth::Binary64,
+				_ => continue
+			};
+
+			record.float_widths.entry(normalize_name(&name)).or_insert(width);
+		}
+
+		Ok(())
+	}
+
 	pub fn open(database_name: &str, connection_string: &str) -> Result<Self, String> {
 		let url = connection_url(database_name, connection_string)?;
 		let options = Opts::from_url(url).map_err(|error| {
@@ -53,7 +83,10 @@ impl DatabaseDriver for MySqlSession {
 		})
 	}
 
-	fn create_record(&mut self, record: RecordBuffer) -> Result<RecordBuffer, String> {
+	fn create_record(&mut self, mut record: RecordBuffer) -> Result<RecordBuffer, String> {
+		self.resolve_float_widths(&mut record)?;
+		normalize_float_assignments(&mut record, WriteDialect::MySql)?;
+
 		let write = create_record_write(&record, WriteDialect::MySql)?;
 		let affected_rows = execute_record_write(&mut self.connection, "create", write)?;
 
@@ -169,7 +202,10 @@ impl DatabaseDriver for MySqlSession {
 		})
 	}
 
-	fn update_record(&mut self, record: RecordBuffer) -> Result<RecordBuffer, String> {
+	fn update_record(&mut self, mut record: RecordBuffer) -> Result<RecordBuffer, String> {
+		self.resolve_float_widths(&mut record)?;
+		normalize_float_assignments(&mut record, WriteDialect::MySql)?;
+
 		let write = update_record_write(&record, WriteDialect::MySql)?;
 		let affected_rows = execute_record_write(&mut self.connection, "update", write)?;
 
@@ -209,7 +245,7 @@ fn database_value(value: &MySqlValue, data_type: &DataType) -> Result<DatabaseVa
 			}
 		}
 		MySqlValue::Double(value) => Ok(DatabaseValue::Real(value.to_string())),
-		MySqlValue::Float(value) => Ok(DatabaseValue::Real(value.to_string())),
+		MySqlValue::Float(value) => Ok(DatabaseValue::Real((*value as f64).to_string())),
 		MySqlValue::Int(value) => Ok(DatabaseValue::Integer(*value)),
 		MySqlValue::NULL => Ok(DatabaseValue::Null),
 		MySqlValue::Time(negative, days, hour, minute, second, microsecond) => {
@@ -340,6 +376,8 @@ fn runtime_value_to_mysql(value: Value) -> Result<MySqlValue, String> {
 		Value::Boolean(value) => Ok(MySqlValue::Int(if value { 1 } else { 0 })),
 		Value::Date(value) => Ok(MySqlValue::Bytes(value.to_string().into_bytes())),
 		Value::Decimal(value) => Ok(MySqlValue::Bytes(value.to_string().into_bytes())),
+		Value::Float(value) if !value.0.is_finite() => Err("MySQL cannot store a non-finite floating-point value.".into()),
+		Value::Float(value) => Ok(MySqlValue::Double(value.0 as f64)),
 		Value::Integer(value) => Ok(MySqlValue::Int(value)),
 		Value::Null => Ok(MySqlValue::NULL),
 		Value::Text(value) => Ok(MySqlValue::Bytes(value.into_bytes())),
@@ -369,6 +407,21 @@ fn unsupported_sequence(sequence_name: &str) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn native_float_parameters_preserve_values_and_reject_non_finite() {
+		use crate::float::{Float, NativeFloat};
+
+		assert_eq!(runtime_value_to_mysql(Value::Float(Float(1.25))).unwrap(), mysql::Value::Double(1.25));
+
+		let value = database_value(&mysql::Value::Float(0.1_f32), &DataType::Float).unwrap();
+
+		assert_eq!(database_record_field_runtime_value(&value, &DataType::Float, false).unwrap(), Value::Float(Float(0.1_f32 as NativeFloat)));
+
+		for value in [NativeFloat::NAN, NativeFloat::INFINITY, NativeFloat::NEG_INFINITY] {
+			assert!(runtime_value_to_mysql(Value::Float(Float(value))).is_err());
+		}
+	}
 
 	#[test]
 	fn accepts_standard_mysql_url() {

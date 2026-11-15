@@ -296,6 +296,11 @@ impl Compiler {
 		debug_position: Option<usize>,
 	) {
 		self.compile_expression_value(expression, semantic_program, emission, debug_position);
+
+		if semantic_program.float_conversions.contains(&expression.position()) {
+			self.emit(emission, Instruction::ConvertFloat, expression.position());
+		}
+
 		if let Some(target) = semantic_program.json_conversion(expression.position()) {
 			self.emit(emission, Instruction::ConvertJson(target.clone()), debug_position.unwrap_or(expression.position()));
 		}
@@ -309,6 +314,11 @@ impl Compiler {
 		debug_position: Option<usize>,
 	) {
 		let expression_position = debug_position.unwrap_or(expression.position());
+
+		if let Some(value) = semantic_program.float_literals.get(&expression.position()) {
+			self.emit(emission, Instruction::PushFloatLiteral(value.clone()), expression_position);
+			return;
+		}
 
 		if let Some(number) = semantic_program.json_literal_numbers.get(&expression.position()) {
 			self.emit(emission, Instruction::PushJsonNumber(number.clone()), expression_position);
@@ -1365,9 +1375,6 @@ impl Compiler {
 	) {
 		match data_type {
 			crate::ast::DataType::Any => unreachable!("Non-nullable any requires an initializer."),
-			crate::ast::DataType::Nullable(_) => {
-				self.emit(emission, Instruction::PushNull, debug_position);
-			}
 			crate::ast::DataType::Array(_) => {
 				self.emit(emission, Instruction::MakeArray(0), debug_position);
 			}
@@ -1384,11 +1391,15 @@ impl Compiler {
 					debug_position,
 				);
 			}
+			crate::ast::DataType::Float => self.emit(emission, Instruction::PushFloat(crate::float::Float::default()), debug_position),
+			crate::ast::DataType::Int => {
+				self.emit(emission, Instruction::PushInteger(0), debug_position);
+			}
 			crate::ast::DataType::Json => {
 				self.emit_object_default_value(&ObjectDefaultValue::Json(crate::json::JsonValue::default()), emission, debug_position);
 			}
-			crate::ast::DataType::Int => {
-				self.emit(emission, Instruction::PushInteger(0), debug_position);
+			crate::ast::DataType::Nullable(_) => {
+				self.emit(emission, Instruction::PushNull, debug_position);
 			}
 			crate::ast::DataType::Object(name) => {
 				if let Some(object_type_id) = semantic_program.object_type_id_for_reference(type_position, &[]) {
@@ -1472,6 +1483,8 @@ impl Compiler {
 					variant_name: variant_name.clone(),
 				}, debug_position);
 			}
+			ObjectDefaultValue::Float(value) => self.emit(emission, Instruction::PushFloat(*value), debug_position),
+			ObjectDefaultValue::FloatLiteral(value) => self.emit(emission, Instruction::PushFloatLiteral(value.clone()), debug_position),
 			ObjectDefaultValue::Integer(value) => {
 				self.emit(emission, Instruction::PushInteger(*value), debug_position);
 			}

@@ -32,7 +32,11 @@ impl SqlRenderer for PostgreSqlRenderer {
 		quote_ansi_identifier(identifier)
 	}
 
-	fn result_column(&self, table_name: &str, column_name: &str, _data_type: &DataType) -> String {
+	fn result_column(&self, table_name: &str, column_name: &str, data_type: &DataType) -> String {
+		if data_type.without_nullability() == &DataType::Float {
+			return format!("CAST(CAST({}.{} AS DOUBLE PRECISION) AS TEXT)", quote_ansi_identifier(table_name), quote_ansi_identifier(column_name));
+		}
+
 		format!(
 			"CAST({}.{} AS TEXT)",
 			quote_ansi_identifier(table_name),
@@ -43,13 +47,17 @@ impl SqlRenderer for PostgreSqlRenderer {
 	fn result_expression(
 		&self,
 		expression: &QueryExpr,
-		_data_type: &DataType,
+		data_type: &DataType,
 		parameters: &mut Vec<SqlParameter>,
 	) -> Result<String, QueryLoweringError> {
-		Ok(format!("CAST({} AS TEXT)", lower_expression(expression, parameters)?))
+		Ok(self.result_sql_expression(&lower_expression(expression, parameters)?, data_type))
 	}
 
-	fn result_sql_expression(&self, expression: &str, _data_type: &DataType) -> String {
+	fn result_sql_expression(&self, expression: &str, data_type: &DataType) -> String {
+		if data_type.without_nullability() == &DataType::Float {
+			return format!("CAST(CAST({expression} AS DOUBLE PRECISION) AS TEXT)");
+		}
+
 		format!("CAST({expression} AS TEXT)")
 	}
 }
@@ -145,6 +153,7 @@ fn lower_expression(expression: &QueryExpr, parameters: &mut Vec<SqlParameter>) 
 		QueryExpr::Literal(QueryLiteral::Boolean(value)) => Ok(if *value { String::from("TRUE") } else { String::from("FALSE") }),
 		QueryExpr::Literal(QueryLiteral::Date(value)) => Ok(typed_temporal_literal("DATE", &value.to_string())),
 		QueryExpr::Literal(QueryLiteral::Decimal(value)) => Ok(value.to_string()),
+		QueryExpr::Literal(QueryLiteral::Float(value)) => Ok(format!("CAST({} AS DOUBLE PRECISION)", quote_text_literal(value))),
 		QueryExpr::Literal(QueryLiteral::Integer(value)) => Ok(value.to_string()),
 		QueryExpr::Literal(QueryLiteral::Text(value)) => Ok(quote_text_literal(value)),
 		QueryExpr::Literal(QueryLiteral::Time(value)) => Ok(typed_temporal_literal("TIME", &value.to_string())),

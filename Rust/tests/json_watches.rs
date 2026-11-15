@@ -80,3 +80,20 @@ fn stripped_debug_info_does_not_grant_conversion_scope_access() {
 		assert!(VirtualMachine::evaluate_watch_expression_in_program("Model({})", &frames[0], &stripped).is_err());
 	}
 }
+
+#[test]
+fn float_json_watches_share_runtime_conversion_rules() {
+	let directory = tempfile::tempdir().unwrap();
+	let program = compile(r#"pub obj Model { pub value: float };
+		fn Main(args: [text]): int {
+			var data: json = { "value": 0.1 };
+			var model: Model = Model(data);
+			return 1 / 0;
+		}"#, &directory.path().join("float.tablo"));
+	let frames = paused_frames(&program);
+	let frame = &frames[0];
+	assert_eq!(watch(&program, frame, "float(data.value)"), Value::Float(tablo::float::Float(0.1)));
+	assert_eq!(watch(&program, frame, "Model(data)"), frame.local("model").unwrap().value);
+	assert_eq!(watch(&program, frame, "float(json(model).value)"), Value::Float(tablo::float::Float(0.1)));
+	assert!(VirtualMachine::evaluate_watch_expression_in_program(r#"json([float('NaN')])"#, frame, &program).is_err());
+}

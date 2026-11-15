@@ -151,9 +151,17 @@ Tablo supports the following primitive data types:
 
 It is up to the Tablo interpreter to determine how these types map to the available data types in the connected database and target language. Some target languages may support options by which the type mapping can be modified. In rare cases, some data types may be unsupported for a certain database type or target language.
 
-Note that there are no separate types for `float`s and `int`s of different byte lengths. Both types are always treated as having the largest byte length supported by the operating system. Also note that integers do not overflow or underflow. Adding to an integer such that the results exceeds the maximum value results in the value being set to the maximum value. If a `float` or `int` is assigned to a database field that lacks the precision to store the value, the assigned value is clamped to the supported range.
+There are no separate language-level types for different widths of `float` or `int`. A `float` uses IEEE 754 binary32 on a 32-bit execution target and binary64 on a 64-bit execution target. The execution target is the architecture of the Tablo runtime, not the machine running a cross-compiler. Integers use the largest supported integer width. Integers do not overflow or underflow. Adding to an integer such that the results exceeds the maximum value results in the value being set to the maximum value. If an `int` is assigned to a database field whose supported range is too small to store the value, the assigned value is clamped to the supported range.
 
 Likewise, due to limited support in backend databases, Tablo does not have a dedicated type for unsigned integers.
+
+Floating-point arithmetic follows IEEE 754 native operations with the usual round-to-nearest, ties-to-even rounding. All IEEE 754 value categories are supported: finite values, subnormal values, positive and negative zero, positive and negative infinity, and NaN. Arithmetic overflow produces signed infinity. Underflow may produce a subnormal value or signed zero. A nonzero finite value divided by zero produces signed infinity; zero divided by zero produces NaN. These floating-point results do not raise Tablo runtime errors.
+
+Conversions between floating-point formats, including database reads and writes, use IEEE 754 round-to-nearest, ties-to-even. Overflow produces signed infinity; underflow may produce a subnormal value or signed zero. If a database cannot represent the resulting infinity or NaN, the operation fails at runtime. Database storage may impose additional representation limits, including loss of the sign of zero.
+
+Database schemas use the types and syntax of their database backend. Tablo exposes compatible floating-point columns through its `float` type; the implementation determines each column's storage width for database conversions. Floating-point field values in a record buffer use the same Tablo `float` representation as ordinary variables. The column's true storage width is separate metadata used for conversion. When a floating-point database field is read, its value is converted to a Tablo `float` and stored in the record buffer. Writes (`create` or `update`) convert the buffered value to the destination column's true floating-point format. After a successful write, the record buffer and its saved values for identifying the stored record retain the converted value, represented as an ordinary Tablo `float`.
+
+Positive and negative zero compare equal. NaN compares unequal to every value, including itself; ordered comparisons involving NaN are false. These rules also apply when floats occur inside arrays, objects, or `any`. Arithmetic does not guarantee preservation of a NaN's payload bits or sign.
 
 Decimal values are exact decimal numbers. They are not floating-point approximations.
 
@@ -201,7 +209,7 @@ data.Customer.Name = 'Bar'; // INVALID. Cannot create nested object by assignmen
 
 If an unquoted name matches an existing property, the write updates that property without changing its spelling; multiple matches are ambiguous, just as for reads. Quoted names match exactly and may create a distinct case-sensitive property. All intermediate objects and arrays must already exist and have the required kind; writes do not create intermediate containers or replace null or scalar parents automatically.
 
-JSON array writes may replace an existing element or append at exactly one past the current length. Other out-of-bounds writes fail; arrays cannot become sparse. Assigning null stores a present JSON null rather than deleting a property or element. JSON contents may be copied directly, preserving exact numeric values. Tablo `text`, `bool`, `int`, and `dec` values are stored as the corresponding JSON kinds. Enum variants are stored as strings containing their declared names, as specified under "JSON and Object Conversion". Native objects and arrays require explicit conversion. Mutation of a JSON value does not modify separately assigned copies or the caller's value when passed by value.
+JSON array writes may replace an existing element or append at exactly one past the current length. Other out-of-bounds writes fail; arrays cannot become sparse. Assigning null stores a present JSON null rather than deleting a property or element. JSON contents may be copied directly, preserving exact numeric values. Tablo `text`, `bool`, `int`, `dec`, and finite `float` values are stored as the corresponding JSON kinds. Floats use a decimal spelling that round-trips to the same float on the same runtime architecture, preserving signed zero; this need not be the exact decimal expansion of the binary value. NaN and infinities cause a runtime error because JSON cannot represent them. Enum variants are stored as strings containing their declared names, as specified under "JSON and Object Conversion". Native objects and arrays require explicit conversion. Mutation of a JSON value does not modify separately assigned copies or the caller's value when passed by value.
 
 Beyond the primitive data types listed in this section, custom data types may be defined as objects (see the "Objects" section).
 
@@ -317,9 +325,18 @@ A decimal literal is represented as, at minimum, a `.` followed by a sequence of
 
 Negative values are specified be prefixing the digits with a `-`.
 
-Decimal literals are represented exactly. If the integer part is omitted, it is treated as `0`. For example, `.5` is equivalent to `0.5`.
+A decimal literal adopts `float` when its expected numeric type is `float`, including nullable float targets. It is then rounded directly to the target's IEEE 754 precision. Otherwise it is a `dec` and is represented exactly. In particular, `var value: any = 123.45;` stores a `dec`. If the integer part is omitted, it is treated as `0`; `.5` is equivalent to `0.5`.
 
-Attempting to assign a decimal literal to a variable of a type for which the number is outside the supported range results in a compile error.
+The expected numeric type can come from a declared variable or field, an assignment, a return type, a selected function parameter, an array element type, or the other operand of a numeric operation. A float target also propagates through arithmetic subexpressions. Integer literals can likewise adopt a float target. This contextual typing applies to literals, not to existing `dec` values. When overloads leave the literal's numeric type unresolved, its ordinary `int` or `dec` type is preferred.
+
+~~~
+var approximate: float = 123.45;
+var exact: dec = 123.45;
+var dynamic: any = 123.45; // Contains a dec.
+var incremented: float = approximate + 0.5;
+~~~
+
+A literal in a `dec` context must fit exactly within the supported decimal range and precision or compilation fails. A literal in a `float` context uses IEEE 754 rounding, overflow, and underflow behavior.
 
 At present, only base-10 digits are supported. Exponential notation is not supported.
 
@@ -397,7 +414,7 @@ var data: json = {
 };
 ~~~
 
-Expressions are evaluated once, in source order. Their results follow the same conversion rules as JSON field and element assignment: `text`, `bool`, `int`, and `dec` supply the corresponding JSON kinds; enum variants supply their declared names as JSON strings; null supplies JSON null; and existing JSON contents are copied without losing numeric precision. Native objects and arrays require explicit conversion. Unsupported value types are rejected rather than implicitly converted to strings. Constructed JSON has independent value semantics; subsequent mutation does not modify values copied into it.
+Expressions are evaluated once, in source order. Their results follow the same conversion rules as JSON field and element assignment: `text`, `bool`, `int`, `dec`, and finite `float` supply the corresponding JSON kinds; enum variants supply their declared names as JSON strings; null supplies JSON null; and existing JSON contents are copied without losing numeric precision. Native objects and arrays require explicit conversion. Unsupported value types are rejected rather than implicitly converted to strings. Constructed JSON has independent value semantics; subsequent mutation does not modify values copied into it.
 
 Numeric literals directly used as JSON property values or array elements, including signed numeric literals, retain their exact numeric values even when they exceed Tablo's `int` or `dec` capacity. They are not first converted to those primitive types. Numeric expressions such as `count + 1` use ordinary Tablo arithmetic and contribute the resulting value; a JSON context does not give arithmetic expressions arbitrary precision.
 
@@ -425,7 +442,7 @@ var customer: Customer = Customer(json('{"id":42,"name":"Alice"}'));
 var output: json = json(customer);
 ~~~
 
-Conversion validates the selected target recursively. A JSON object supplies object fields, and a JSON array supplies native array elements. JSON strings and Booleans supply the corresponding native types. Numeric conversion must preserve the exact value; whole-object conversion never truncates or rounds. Explicit `int()` or `dec()` operations may be used to prepare individual values when precision loss is intended.
+Conversion validates the selected target recursively. A JSON object supplies object fields, and a JSON array supplies native array elements. JSON strings and Booleans supply the corresponding native types. Numeric conversion to `int` or `dec` must preserve the exact value; whole-object conversion never truncates or rounds those targets. Conversion to `float` uses the IEEE rounding rules described under "Automatic Type Conversions". Explicit `int()` or `dec()` operations may be used to prepare individual values when precision loss is intended.
 
 ### Properties, defaults, and null
 
@@ -652,7 +669,7 @@ or
 
 Tablo supports a fairly limited set of automatic type conversions. In general, an explicit conversion is required when using one type in a place where another is expected.
 
-Numeric values may be implicitly converted between `int` and `dec` where necessary.
+Numeric values may be implicitly converted between `int` and `dec` where necessary. An `int` may also implicitly convert to `float` in assignments and mixed numeric operations; large integers may lose precision. A `float` never implicitly converts to `int` or `dec`.
 
 A scalar obtained from a JSON field or array element is implicitly converted to a compatible Tablo target type when assigned to a typed destination or passed to a by-value function parameter. The target type determines the conversion; the value must be compatible with that type. For example, a JSON string may supply a `text` parameter, a JSON Boolean may supply a `bool` parameter, and a JSON number may supply a compatible numeric parameter. JSON null may supply a nullable target. The conversion does not modify the source JSON field or element. JSON objects and arrays obtained through field or element access can supply a `json` parameter without conversion to an ordinary Tablo object or array.
 
@@ -661,7 +678,9 @@ Implicit conversion of a JSON number to `int` or `dec` succeeds only if the targ
 * For `int`, the number must have no fractional part and must be within the supported integer range.
 * For `dec`, the number must fit within the implementation's supported decimal range and precision without rounding.
 
-These checks occur at runtime. A fractional value assigned to `int`, or a value requiring rounding or exceeding the target range, causes a runtime error. Implicit conversion does not truncate, round, or clamp the value. The rules apply equally to typed assignments and by-value function arguments, including nullable numeric targets. JSON null may supply a nullable numeric target; it cannot supply a non-nullable numeric target. JSON strings, Boolean values, objects, and arrays do not implicitly convert to numbers.
+These checks occur at runtime. A fractional value assigned to `int`, or a value requiring rounding or exceeding the target range, causes a runtime error. Implicit conversion to `int` or `dec` does not truncate, round, or clamp the value. The rules apply equally to typed assignments and by-value function arguments, including nullable numeric targets. JSON null may supply a nullable numeric target; it cannot supply a non-nullable numeric target. JSON strings, Boolean values, objects, and arrays do not implicitly convert to numbers.
+
+Conversion of a JSON number to `float`, either implicitly or with `float()`, rounds directly to the native IEEE precision using round-to-nearest, ties-to-even. Overflow produces signed infinity; underflow may produce a subnormal value or signed zero. No intermediate `int` or `dec` conversion occurs. These rules apply to object fields and array elements during explicit JSON-to-object conversion as well as typed assignments and function arguments. Non-number JSON contents do not convert to `float`, except that null may supply a nullable target. JSON numbers targeting `any` still become `dec`, with the existing exactness checks.
 
 Conversion depends on the numeric value, not its JSON spelling. For example, `3`, `3.0`, and `3e0` may all implicitly supply an `int`, but `3.5` may not. Numeric conversions do not modify the source JSON contents.
 
@@ -683,7 +702,7 @@ When the `+` operator is used and either operand is of type `text`, the other op
 
 In all of the above cases, if both operands are non-nullable then the result is also a non-nullable type. If either or both operands are nullable then the result is a nullable type.
 
-Automatic conversions when passing arguments to functions are limited to the JSON scalar conversions described above and conversion from a non-nullable type to the corresponding nullable type. Other arguments must match the parameter types or a compile error results. A value of type `int` may be used where `int?` is expected, but a value of type `int?` may not be used where `int` is required without first proving or converting away the nullability. Ordinary `int` and `dec` arguments are not automatically converted to one another at a function boundary.
+Automatic conversions when passing arguments to functions are limited to the JSON scalar conversions described above and conversion from a non-nullable type to the corresponding nullable type. Other arguments must match the parameter types or a compile error results. A value of type `int` may be used where `int?` is expected, but a value of type `int?` may not be used where `int` is required without first proving or converting away the nullability. Ordinary `int` and `dec` arguments are not automatically converted to one another at a function boundary. An existing `int` argument also does not implicitly convert to a `float` parameter. A numeric literal may adopt the selected parameter's type.
 
 Variables
 ---------
@@ -2260,15 +2279,19 @@ It is valid to call `firstof()` only within the body of a grouped database `for`
 
 ### `float(v: dec): float`
 
-Returns the floating-point value obtained by converting `v`. The result may be rounded to the supported floating-point precision, losing decimal precision. If the value exceeds the supported floating-point range, the function fails at runtime.
+Returns the floating-point value obtained by converting `v`. The result may be rounded to the supported floating-point precision, losing decimal precision. Overflow produces signed infinity; underflow may produce a subnormal value or signed zero.
 
 ### `float(v: int): float`
 
-Returns the floating-point value obtained by converting `v`. Large integers may lose precision. If the value exceeds the supported floating-point range, the function fails at runtime.
+Returns the floating-point value obtained by converting `v`. Large integers may lose precision. Overflow produces signed infinity; underflow may produce a subnormal value or signed zero.
+
+### `float(v: JSON number): float`
+
+Converts numeric contents read from a JSON property or array element directly to native float precision. IEEE rounding, overflow, and underflow rules apply. Other JSON contents cause a runtime error. This notation describes JSON contents, not a separate language type.
 
 ### `float(v: text): float`
 
-Returns the floating-point value obtained by parsing `v`. The result may be rounded to the supported floating-point precision and might not exactly represent the numeric value written in the text. Invalid numeric text or a value outside the supported floating-point range causes a runtime error.
+Returns the floating-point value obtained by parsing `v`. The result may be rounded to the supported floating-point precision and might not exactly represent the numeric value written in the text. Invalid numeric text causes a runtime error. Overflow produces signed infinity; underflow may produce a subnormal value or signed zero.
 
 ### `format(v: dec, pattern: text): text`
 
@@ -2412,7 +2435,7 @@ Returns the string representation of `v`.
 
 Returns the string representation of `v`.
 
-### `text(v:float): text`
+### `text(v: float): text`
 
 Returns the string representation of `v`.
 

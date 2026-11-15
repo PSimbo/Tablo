@@ -852,6 +852,7 @@ fn object_value_type_name(
 		ObjectValueTypeDescriptor::Date => String::from("date"),
 		ObjectValueTypeDescriptor::Dec => String::from("dec"),
 		ObjectValueTypeDescriptor::Enum { name, .. } => name.clone(),
+		ObjectValueTypeDescriptor::Float => String::from("float"),
 		ObjectValueTypeDescriptor::Int => String::from("int"),
 		ObjectValueTypeDescriptor::Nullable(inner) => {
 			format!("{}?", object_value_type_name(inner, program))
@@ -1235,6 +1236,7 @@ fn runtime_variable_type_name(value: &Value) -> &'static str {
 		Value::Decimal(_) => "dec",
 		Value::DecimalRange(_) => "range",
 		Value::Enum(_) => "enum",
+		Value::Float(_) => "float",
 		Value::Integer(_) => "int",
 		Value::IntegerRange(_) => "range",
 		Value::Iterator(_) => "iterator",
@@ -1388,6 +1390,7 @@ mod tests {
 					name: String::from("cust"),
 					slot: 4,
 					value: Value::record_pointer(RecordBuffer {
+						float_widths: BTreeMap::new(),
 						column_names: Vec::new(),
 						exists: true,
 						fields: BTreeMap::new(),
@@ -1532,6 +1535,7 @@ mod tests {
 		);
 
 		let value = Value::record_pointer(RecordBuffer {
+			float_widths: BTreeMap::new(),
 			column_names: vec![String::from("Address1"), String::from("Id"), String::from("Name")],
 			exists: true,
 			fields,

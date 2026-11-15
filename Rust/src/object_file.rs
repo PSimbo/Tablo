@@ -23,7 +23,8 @@ const OPCODE_BEGIN_TRANSACTION: u8 = OPCODE_AND + 1;
 const OPCODE_CALL: u8 = OPCODE_BEGIN_TRANSACTION + 1;
 const OPCODE_CALL_BUILT_IN: u8 = OPCODE_CALL + 1;
 const OPCODE_COMMIT_TRANSACTION: u8 = OPCODE_CALL_BUILT_IN + 1;
-const OPCODE_CONVERT_JSON: u8 = OPCODE_COMMIT_TRANSACTION + 1;
+const OPCODE_CONVERT_FLOAT: u8 = OPCODE_COMMIT_TRANSACTION + 1;
+const OPCODE_CONVERT_JSON: u8 = OPCODE_CONVERT_FLOAT + 1;
 const OPCODE_CONVERT_OBJECT: u8 = OPCODE_CONVERT_JSON + 1;
 const OPCODE_CREATE_RECORD: u8 = OPCODE_CONVERT_OBJECT + 1;
 const OPCODE_CREATE_RECORD_IF_PENDING: u8 = OPCODE_CREATE_RECORD + 1;
@@ -76,7 +77,9 @@ const OPCODE_PUSH_CURRENT_TIME_TZ: u8 = OPCODE_PUSH_CURRENT_TIMESTAMP_TZ + 1;
 const OPCODE_PUSH_DATE: u8 = OPCODE_PUSH_CURRENT_TIME_TZ + 1;
 const OPCODE_PUSH_DECIMAL: u8 = OPCODE_PUSH_DATE + 1;
 const OPCODE_PUSH_ENUM_VALUE: u8 = OPCODE_PUSH_DECIMAL + 1;
-const OPCODE_PUSH_INTEGER: u8 = OPCODE_PUSH_ENUM_VALUE + 1;
+const OPCODE_PUSH_FLOAT: u8 = OPCODE_PUSH_ENUM_VALUE + 1;
+const OPCODE_PUSH_FLOAT_LITERAL: u8 = OPCODE_PUSH_FLOAT + 1;
+const OPCODE_PUSH_INTEGER: u8 = OPCODE_PUSH_FLOAT_LITERAL + 1;
 const OPCODE_PUSH_JSON_NUMBER: u8 = OPCODE_PUSH_INTEGER + 1;
 const OPCODE_PUSH_NULL: u8 = OPCODE_PUSH_JSON_NUMBER + 1;
 const OPCODE_PUSH_TEXT: u8 = OPCODE_PUSH_NULL + 1;
@@ -103,7 +106,8 @@ const DATA_TYPE_TAG_BOOL: u8 = DATA_TYPE_TAG_ARRAY + 1;
 const DATA_TYPE_TAG_DATE: u8 = DATA_TYPE_TAG_BOOL + 1;
 const DATA_TYPE_TAG_DEC: u8 = DATA_TYPE_TAG_DATE + 1;
 const DATA_TYPE_TAG_EMPTY_ARRAY: u8 = DATA_TYPE_TAG_DEC + 1;
-const DATA_TYPE_TAG_INT: u8 = DATA_TYPE_TAG_EMPTY_ARRAY + 1;
+const DATA_TYPE_TAG_FLOAT: u8 = DATA_TYPE_TAG_EMPTY_ARRAY + 1;
+const DATA_TYPE_TAG_INT: u8 = DATA_TYPE_TAG_FLOAT + 1;
 const DATA_TYPE_TAG_JSON: u8 = DATA_TYPE_TAG_INT + 1;
 const DATA_TYPE_TAG_NULLABLE: u8 = DATA_TYPE_TAG_JSON + 1;
 const DATA_TYPE_TAG_OBJECT: u8 = DATA_TYPE_TAG_NULLABLE + 1;
@@ -126,7 +130,9 @@ const OBJECT_DEFAULT_CURRENT_TIMESTAMP_TZ: u8 = OBJECT_DEFAULT_CURRENT_TIMESTAMP
 const OBJECT_DEFAULT_DATE: u8 = OBJECT_DEFAULT_CURRENT_TIMESTAMP_TZ + 1;
 const OBJECT_DEFAULT_DECIMAL: u8 = OBJECT_DEFAULT_DATE + 1;
 const OBJECT_DEFAULT_ENUM: u8 = OBJECT_DEFAULT_DECIMAL + 1;
-const OBJECT_DEFAULT_INTEGER: u8 = OBJECT_DEFAULT_ENUM + 1;
+const OBJECT_DEFAULT_FLOAT: u8 = OBJECT_DEFAULT_ENUM + 1;
+const OBJECT_DEFAULT_FLOAT_LITERAL: u8 = OBJECT_DEFAULT_FLOAT + 1;
+const OBJECT_DEFAULT_INTEGER: u8 = OBJECT_DEFAULT_FLOAT_LITERAL + 1;
 const OBJECT_DEFAULT_JSON: u8 = OBJECT_DEFAULT_INTEGER + 1;
 const OBJECT_DEFAULT_NULL: u8 = OBJECT_DEFAULT_JSON + 1;
 const OBJECT_DEFAULT_OBJECT: u8 = OBJECT_DEFAULT_NULL + 1;
@@ -145,7 +151,8 @@ const OBJECT_VALUE_TYPE_BOOL: u8 = OBJECT_VALUE_TYPE_ARRAY + 1;
 const OBJECT_VALUE_TYPE_DATE: u8 = OBJECT_VALUE_TYPE_BOOL + 1;
 const OBJECT_VALUE_TYPE_DEC: u8 = OBJECT_VALUE_TYPE_DATE + 1;
 const OBJECT_VALUE_TYPE_ENUM: u8 = OBJECT_VALUE_TYPE_DEC + 1;
-const OBJECT_VALUE_TYPE_INT: u8 = OBJECT_VALUE_TYPE_ENUM + 1;
+const OBJECT_VALUE_TYPE_FLOAT: u8 = OBJECT_VALUE_TYPE_ENUM + 1;
+const OBJECT_VALUE_TYPE_INT: u8 = OBJECT_VALUE_TYPE_FLOAT + 1;
 const OBJECT_VALUE_TYPE_JSON: u8 = OBJECT_VALUE_TYPE_INT + 1;
 const OBJECT_VALUE_TYPE_NULLABLE: u8 = OBJECT_VALUE_TYPE_JSON + 1;
 const OBJECT_VALUE_TYPE_OBJECT: u8 = OBJECT_VALUE_TYPE_NULLABLE + 1;
@@ -554,6 +561,7 @@ impl<'a> ObjectFileReader<'a> {
 			DATA_TYPE_TAG_BOOL => Ok(DataType::Bool),
 			DATA_TYPE_TAG_DEC => Ok(DataType::Dec),
 			DATA_TYPE_TAG_EMPTY_ARRAY => Ok(DataType::EmptyArray),
+			DATA_TYPE_TAG_FLOAT => Ok(DataType::Float),
 			DATA_TYPE_TAG_INT => Ok(DataType::Int),
 			DATA_TYPE_TAG_JSON => Ok(DataType::Json),
 			DATA_TYPE_TAG_OBJECT => Ok(DataType::Object(self.read_string()?.into())),
@@ -703,6 +711,16 @@ impl<'a> ObjectFileReader<'a> {
 		Ok(slice)
 	}
 
+	fn read_float(&mut self) -> Result<crate::float::Float, ObjectFileError> {
+		let bytes: [u8; 8] = self.read_exact(8)?.try_into().unwrap();
+		Ok(crate::float::Float(f64::from_le_bytes(bytes) as crate::float::NativeFloat))
+	}
+
+	fn read_float_literal(&mut self) -> Result<crate::float::FloatLiteral, ObjectFileError> {
+		let offset = self.offset;
+		crate::float::FloatLiteral::parse(&self.read_string()?).map_err(|message| ObjectFileError { offset, message })
+	}
+
 	fn read_i32(&mut self) -> Result<i32, ObjectFileError> {
 		let mut bytes = [0; 4];
 		bytes.copy_from_slice(self.read_exact(4)?);
@@ -743,6 +761,8 @@ impl<'a> ObjectFileReader<'a> {
 				})?;
 				Ok(Instruction::CallBuiltIn(built_in, argument_count))
 			}
+			OPCODE_COMMIT_TRANSACTION => Ok(Instruction::CommitTransaction),
+			OPCODE_CONVERT_FLOAT => Ok(Instruction::ConvertFloat),
 			OPCODE_CONVERT_JSON => Ok(Instruction::ConvertJson(self.read_data_type()?)),
 			OPCODE_CONVERT_OBJECT => {
 				let object_type_id = ObjectTypeId::from_raw(self.read_u32()?);
@@ -751,7 +771,6 @@ impl<'a> ObjectFileReader<'a> {
 				for _ in 0..count { private_types.push(ObjectTypeId::from_raw(self.read_u32()?)); }
 				Ok(Instruction::ConvertObject { object_type_id, private_types })
 			},
-			OPCODE_COMMIT_TRANSACTION => Ok(Instruction::CommitTransaction),
 			OPCODE_CREATE_RECORD => Ok(Instruction::CreateRecord),
 			OPCODE_CREATE_RECORD_IF_PENDING => Ok(Instruction::CreateRecordIfPending),
 			OPCODE_DELETE_RECORD => Ok(Instruction::DeleteRecord),
@@ -850,6 +869,8 @@ impl<'a> ObjectFileReader<'a> {
 				enum_name: self.read_string()?,
 				variant_name: self.read_string()?,
 			}),
+			OPCODE_PUSH_FLOAT => Ok(Instruction::PushFloat(self.read_float()?)),
+			OPCODE_PUSH_FLOAT_LITERAL => Ok(Instruction::PushFloatLiteral(self.read_float_literal()?)),
 			OPCODE_PUSH_INTEGER => Ok(Instruction::PushInteger(self.read_i64()?)),
 			OPCODE_PUSH_JSON_NUMBER => Ok(Instruction::PushJsonNumber(self.read_string()?)),
 			OPCODE_PUSH_NULL => Ok(Instruction::PushNull),
@@ -1024,6 +1045,8 @@ impl<'a> ObjectFileReader<'a> {
 				enum_name: self.read_string()?,
 				variant_name: self.read_string()?,
 			}),
+			OBJECT_DEFAULT_FLOAT => Ok(ObjectDefaultValue::Float(self.read_float()?)),
+			OBJECT_DEFAULT_FLOAT_LITERAL => Ok(ObjectDefaultValue::FloatLiteral(self.read_float_literal()?)),
 			OBJECT_DEFAULT_INTEGER => Ok(ObjectDefaultValue::Integer(self.read_i64()?)),
 			OBJECT_DEFAULT_NULL => Ok(ObjectDefaultValue::Null),
 			OBJECT_DEFAULT_OBJECT => {
@@ -1142,6 +1165,7 @@ impl<'a> ObjectFileReader<'a> {
 					variants
 				},
 			}),
+			OBJECT_VALUE_TYPE_FLOAT => Ok(ObjectValueTypeDescriptor::Float),
 			OBJECT_VALUE_TYPE_INT => Ok(ObjectValueTypeDescriptor::Int),
 			OBJECT_VALUE_TYPE_NULLABLE => Ok(ObjectValueTypeDescriptor::Nullable(Box::new(
 				self.read_object_value_type_descriptor()?,
@@ -1360,6 +1384,8 @@ fn validate_object_default_references(
 		| ObjectDefaultValue::Date(_)
 		| ObjectDefaultValue::Decimal(_)
 		| ObjectDefaultValue::Enum { .. }
+		| ObjectDefaultValue::Float(_)
+		| ObjectDefaultValue::FloatLiteral(_)
 		| ObjectDefaultValue::Integer(_)
 		| ObjectDefaultValue::Json(_)
 		| ObjectDefaultValue::Null
@@ -1442,6 +1468,7 @@ fn validate_object_value_type_references(
 		| ObjectValueTypeDescriptor::Date
 		| ObjectValueTypeDescriptor::Dec
 		| ObjectValueTypeDescriptor::Enum { .. }
+		| ObjectValueTypeDescriptor::Float
 		| ObjectValueTypeDescriptor::Int
 		| ObjectValueTypeDescriptor::Json
 		| ObjectValueTypeDescriptor::Text
@@ -1473,6 +1500,7 @@ fn write_data_type(bytes: &mut Vec<u8>, data_type: &DataType) {
 		DataType::Date => bytes.push(DATA_TYPE_TAG_DATE),
 		DataType::Dec => bytes.push(DATA_TYPE_TAG_DEC),
 		DataType::EmptyArray => bytes.push(DATA_TYPE_TAG_EMPTY_ARRAY),
+		DataType::Float => bytes.push(DATA_TYPE_TAG_FLOAT),
 		DataType::Int => bytes.push(DATA_TYPE_TAG_INT),
 		DataType::Null => panic!("internal data type `null` must not be serialized into object files"),
 		DataType::Nullable(inner) => {
@@ -1539,6 +1567,7 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.extend_from_slice(&argument_count.to_le_bytes());
 		}
 		Instruction::CommitTransaction => bytes.push(OPCODE_COMMIT_TRANSACTION),
+		Instruction::ConvertFloat => bytes.push(OPCODE_CONVERT_FLOAT),
 		Instruction::ConvertJson(target) => { bytes.push(OPCODE_CONVERT_JSON); write_data_type(bytes, target); }
 		Instruction::ConvertObject { object_type_id, private_types } => {
 			bytes.push(OPCODE_CONVERT_OBJECT);
@@ -1696,6 +1725,47 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.push(value.month);
 			bytes.push(value.day);
 		}
+		Instruction::PushDecimal(value) => {
+			bytes.push(OPCODE_PUSH_DECIMAL);
+			bytes.extend_from_slice(&value.coefficient.to_le_bytes());
+			bytes.push(value.precision);
+			bytes.push(value.scale);
+		}
+		Instruction::PushEnumValue {
+			backing_value,
+			enum_name,
+			variant_name,
+		} => {
+			bytes.push(OPCODE_PUSH_ENUM_VALUE);
+			write_inline_constant(bytes, backing_value);
+			bytes.extend_from_slice(&(enum_name.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(enum_name.as_bytes());
+			bytes.extend_from_slice(&(variant_name.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(variant_name.as_bytes());
+		}
+		Instruction::PushFloat(value) => {
+			bytes.push(OPCODE_PUSH_FLOAT);
+			bytes.extend_from_slice(&(value.0 as f64).to_le_bytes());
+		}
+		Instruction::PushFloatLiteral(value) => {
+			bytes.push(OPCODE_PUSH_FLOAT_LITERAL);
+			bytes.extend_from_slice(&(value.text.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(value.text.as_bytes());
+		}
+		Instruction::PushInteger(value) => {
+			bytes.push(OPCODE_PUSH_INTEGER);
+			bytes.extend_from_slice(&value.to_le_bytes());
+		}
+		Instruction::PushJsonNumber(number) => {
+			bytes.push(OPCODE_PUSH_JSON_NUMBER);
+			bytes.extend_from_slice(&(number.len() as u32).to_le_bytes()); bytes.extend_from_slice(number.as_bytes());
+		}
+		Instruction::PushNull => bytes.push(OPCODE_PUSH_NULL),
+		Instruction::PushText(value) => {
+			bytes.push(OPCODE_PUSH_TEXT);
+			bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(value.as_bytes());
+		}
 		Instruction::PushTime(value) => {
 			bytes.push(OPCODE_PUSH_TIME);
 			let text = value.to_string();
@@ -1719,38 +1789,6 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			let text = value.to_string();
 			bytes.extend_from_slice(&(text.len() as u32).to_le_bytes());
 			bytes.extend_from_slice(text.as_bytes());
-		}
-		Instruction::PushDecimal(value) => {
-			bytes.push(OPCODE_PUSH_DECIMAL);
-			bytes.extend_from_slice(&value.coefficient.to_le_bytes());
-			bytes.push(value.precision);
-			bytes.push(value.scale);
-		}
-		Instruction::PushEnumValue {
-			backing_value,
-			enum_name,
-			variant_name,
-		} => {
-			bytes.push(OPCODE_PUSH_ENUM_VALUE);
-			write_inline_constant(bytes, backing_value);
-			bytes.extend_from_slice(&(enum_name.len() as u32).to_le_bytes());
-			bytes.extend_from_slice(enum_name.as_bytes());
-			bytes.extend_from_slice(&(variant_name.len() as u32).to_le_bytes());
-			bytes.extend_from_slice(variant_name.as_bytes());
-		}
-		Instruction::PushInteger(value) => {
-			bytes.push(OPCODE_PUSH_INTEGER);
-			bytes.extend_from_slice(&value.to_le_bytes());
-		}
-		Instruction::PushJsonNumber(number) => {
-			bytes.push(OPCODE_PUSH_JSON_NUMBER);
-			bytes.extend_from_slice(&(number.len() as u32).to_le_bytes()); bytes.extend_from_slice(number.as_bytes());
-		}
-		Instruction::PushNull => bytes.push(OPCODE_PUSH_NULL),
-		Instruction::PushText(value) => {
-			bytes.push(OPCODE_PUSH_TEXT);
-			bytes.extend_from_slice(&(value.len() as u32).to_le_bytes());
-			bytes.extend_from_slice(value.as_bytes());
 		}
 		Instruction::ReorderCallArguments(argument_order) => {
 			bytes.push(OPCODE_REORDER_CALL_ARGUMENTS);
@@ -1878,9 +1916,22 @@ fn write_object_default_value(bytes: &mut Vec<u8>, value: &ObjectDefaultValue) {
 			write_string(bytes, enum_name);
 			write_string(bytes, variant_name);
 		}
+		ObjectDefaultValue::Float(value) => {
+			bytes.push(OBJECT_DEFAULT_FLOAT);
+			bytes.extend_from_slice(&(value.0 as f64).to_le_bytes());
+		}
+		ObjectDefaultValue::FloatLiteral(value) => {
+			bytes.push(OBJECT_DEFAULT_FLOAT_LITERAL);
+			bytes.extend_from_slice(&(value.text.len() as u32).to_le_bytes());
+			bytes.extend_from_slice(value.text.as_bytes());
+		}
 		ObjectDefaultValue::Integer(value) => {
 			bytes.push(OBJECT_DEFAULT_INTEGER);
 			bytes.extend_from_slice(&value.to_le_bytes());
+		}
+		ObjectDefaultValue::Json(value) => {
+			bytes.push(OBJECT_DEFAULT_JSON);
+			write_string(bytes, &value.to_text());
 		}
 		ObjectDefaultValue::Null => bytes.push(OBJECT_DEFAULT_NULL),
 		ObjectDefaultValue::Object { fields, object_type_id } => {
@@ -1891,10 +1942,6 @@ fn write_object_default_value(bytes: &mut Vec<u8>, value: &ObjectDefaultValue) {
 				write_string(bytes, name);
 				write_object_default_value(bytes, value);
 			}
-		}
-		ObjectDefaultValue::Json(value) => {
-			bytes.push(OBJECT_DEFAULT_JSON);
-			write_string(bytes, &value.to_text());
 		}
 		ObjectDefaultValue::Text(value) => {
 			bytes.push(OBJECT_DEFAULT_TEXT);
@@ -1964,6 +2011,7 @@ fn write_object_value_type_descriptor(bytes: &mut Vec<u8>, data_type: &ObjectVal
 			bytes.extend_from_slice(&(variants.len() as u32).to_le_bytes());
 			for (name, value) in variants { write_string(bytes, name); write_inline_constant(bytes, value); }
 		}
+		ObjectValueTypeDescriptor::Float => bytes.push(OBJECT_VALUE_TYPE_FLOAT),
 		ObjectValueTypeDescriptor::Int => bytes.push(OBJECT_VALUE_TYPE_INT),
 		ObjectValueTypeDescriptor::Nullable(inner_type) => {
 			bytes.push(OBJECT_VALUE_TYPE_NULLABLE);

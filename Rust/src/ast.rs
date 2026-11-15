@@ -59,6 +59,7 @@ pub enum DataType {
 	Date,
 	Dec,
 	EmptyArray,
+	Float,
 	Int,
 	Json,
 	// Field and element contents remain in the JSON domain until a destination supplies a type.
@@ -100,6 +101,7 @@ impl DataType {
 			Self::Date => String::from("date"),
 			Self::Dec => String::from("dec"),
 			Self::EmptyArray => String::from("empty array"),
+			Self::Float => String::from("float"),
 			Self::Int => String::from("int"),
 			Self::Json => String::from("json"),
 			Self::JsonMember => String::from("JSON content"),
@@ -731,6 +733,22 @@ impl Expr {
 	pub(crate) fn is_contextual_literal(&self) -> bool {
 		matches!(self, Expr::Array(_))
 			|| matches!(self, Expr::ObjectConstruction(object) if object.object_type_name.is_empty())
+	}
+
+	#[cfg(feature = "compiler")]
+	pub(crate) fn can_adopt_float_context(&self) -> bool {
+		match self {
+			Expr::Binary(binary) => matches!(binary.operator, BinaryOperator::Add | BinaryOperator::Divide | BinaryOperator::Modulo | BinaryOperator::Multiply | BinaryOperator::Subtract)
+				&& binary.left.can_adopt_float_context() && binary.right.can_adopt_float_context(),
+			Expr::Decimal(_) | Expr::ExactNumber(_) | Expr::Integer(_) => true,
+			Expr::Unary(unary) => unary.operator == UnaryOperator::Negate && unary.operand.can_adopt_float_context(),
+			_ => false,
+		}
+	}
+
+	#[cfg(feature = "compiler")]
+	pub(crate) fn is_exact_number_literal(&self) -> bool {
+		matches!(self, Expr::ExactNumber(_)) || matches!(self, Expr::Unary(unary) if unary.operator == UnaryOperator::Negate && unary.operand.is_exact_number_literal())
 	}
 
 	#[cfg(feature = "compiler")]

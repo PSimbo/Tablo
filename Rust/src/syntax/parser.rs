@@ -535,7 +535,7 @@ impl Parser {
 	}
 
 	fn parse_decimal_literal(&self, token: Token) -> Result<Expr, ParseError> {
-		if self.literal_depth > 0 && Decimal::from_literal(&token.lexeme).is_err() {
+		if Decimal::from_literal(&token.lexeme).is_err() {
 			return Ok(Expr::ExactNumber(TextLiteral { position: token.start, value: token.lexeme.replace('_', "") }));
 		}
 
@@ -1203,7 +1203,7 @@ impl Parser {
 	fn parse_integer_literal(&self, token: Token) -> Result<Expr, ParseError> {
 		let digits: String = token.lexeme.chars().filter(|c| *c != '_').collect();
 
-		if self.literal_depth > 0 && digits.parse::<i64>().is_err() {
+		if digits.parse::<i64>().is_err() {
 			return Ok(Expr::ExactNumber(TextLiteral { position: token.start, value: digits }));
 		}
 
@@ -1644,9 +1644,10 @@ impl Parser {
 				message: String::from("`default` may only be used as the value of a named argument."),
 				position: token.start,
 			}),
-			TokenKind::DateKeyword
+			TokenKind::BoolKeyword
+			| TokenKind::DateKeyword
 			| TokenKind::DecKeyword
-			| TokenKind::BoolKeyword
+			| TokenKind::FloatKeyword
 			| TokenKind::IntKeyword
 			| TokenKind::JsonKeyword
 			| TokenKind::TextKeyword
@@ -1692,6 +1693,7 @@ impl Parser {
 			TokenKind::BoolKeyword => Ok(DataType::Bool),
 			TokenKind::DateKeyword => Ok(DataType::Date),
 			TokenKind::DecKeyword => Ok(DataType::Dec),
+			TokenKind::FloatKeyword => Ok(DataType::Float),
 			TokenKind::Identifier => {
 				let position = token.start;
 				Ok(DataType::Object(ObjectTypeName::new(

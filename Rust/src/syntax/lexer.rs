@@ -386,6 +386,7 @@ impl Lexer {
 			"false" => TokenKind::FalseKeyword,
 			"find" => TokenKind::FindKeyword,
 			"first" => TokenKind::FirstKeyword,
+			"float" => TokenKind::FloatKeyword,
 			"fn" => TokenKind::FnKeyword,
 			"for" => TokenKind::ForKeyword,
 			"from" => TokenKind::FromKeyword,

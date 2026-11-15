@@ -58,6 +58,7 @@ pub enum Value {
 	Decimal(Decimal),
 	DecimalRange(DecimalRange),
 	Enum(EnumValue),
+	Float(crate::float::Float),
 	Integer(i64),
 	IntegerRange(IntegerRange),
 	Iterator(IteratorState),
@@ -100,6 +101,7 @@ impl Display for Value {
 			Value::Decimal(value) => write!(f, "{value}"),
 			Value::DecimalRange(range) => write!(f, "{range}"),
 			Value::Enum(value) => write!(f, "{}", value.variant_name),
+			Value::Float(value) => write!(f, "{value}"),
 			Value::Integer(value) => write!(f, "{value}"),
 			Value::IntegerRange(range) => write!(f, "{range}"),
 			Value::Iterator(_) => write!(f, "<iterator>"),
@@ -595,6 +597,8 @@ impl RecordPointerValue {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordBuffer {
+	#[doc(hidden)]
+	pub float_widths: BTreeMap<String, crate::float::FloatWidth>,
 	pub column_names: Vec<String>,
 	pub exists: bool,
 	pub fields: BTreeMap<String, RecordFieldValue>,
@@ -916,6 +920,11 @@ pub fn database_record_field_runtime_value(
 				database_value_name(other),
 			)),
 		},
+		DataType::Float => match value {
+			DatabaseValue::Integer(value) => Ok(Value::Float(crate::float::Float::from_integer(*value))),
+			DatabaseValue::Real(value) | DatabaseValue::Text(value) => crate::float::Float::parse(value).map(Value::Float),
+			other => Err(format!("Cannot convert database value `{}` to `float`.", database_value_name(other))),
+		},
 		DataType::Int => match value {
 			DatabaseValue::Integer(value) => Ok(Value::Integer(*value)),
 			DatabaseValue::Text(value) => value.parse::<i64>()
@@ -992,6 +1001,7 @@ fn data_type_name_for_database_runtime(data_type: &DataType) -> &'static str {
 		DataType::Date => "date",
 		DataType::Dec => "dec",
 		DataType::EmptyArray => "empty array",
+		DataType::Float => "float",
 		DataType::Int => "int",
 		DataType::Json => "json",
 		DataType::JsonMember => "JSON content",
@@ -1238,6 +1248,24 @@ fn write_time_value(
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn database_float_materialization_uses_native_ieee_values() {
+		use crate::float::{Float, NativeFloat};
+
+		for text in ["0.1", "-0", "1e9999", "-1e-9999", "Infinity", "-Infinity"] {
+			assert_eq!(database_record_field_runtime_value(&DatabaseValue::Real(text.into()), &DataType::Float, false).unwrap(), Value::Float(Float::parse(text).unwrap()));
+		}
+
+		let Value::Float(nan) = database_record_field_runtime_value(&DatabaseValue::Text("NaN".into()), &DataType::Float, false).unwrap() else { panic!("Expected float"); };
+
+		assert!(nan.0.is_nan());
+		assert_eq!(database_record_field_runtime_value(&DatabaseValue::Integer(3), &DataType::Float, false).unwrap(), Value::Float(Float(3.0)));
+		assert_eq!(database_record_field_runtime_value(&DatabaseValue::Null, &DataType::Float, true).unwrap(), Value::Null);
+		assert!(database_record_field_runtime_value(&DatabaseValue::Null, &DataType::Float, false).is_err());
+		assert!(database_record_field_runtime_value(&DatabaseValue::Text("invalid".into()), &DataType::Float, false).is_err());
+		assert!(Float::parse("1e9999").unwrap().0 == NativeFloat::INFINITY);
+	}
 
 	#[test]
 	fn accepts_38_digit_decimal_literal() {

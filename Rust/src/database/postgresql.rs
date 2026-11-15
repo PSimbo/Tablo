@@ -25,6 +25,38 @@ pub(super) struct PostgreSqlSession {
 }
 
 impl PostgreSqlSession {
+	fn resolve_float_widths(&mut self, record: &mut RecordBuffer) -> Result<(), String> {
+		if !needs_float_widths(record) {
+			return Ok(());
+		}
+
+		let table = if record.schema_is_implicit {
+			quote_identifier(&record.record_type.table_name)
+		}
+		else {
+			format!("{}.{}", quote_identifier(&record.record_type.schema_name), quote_identifier(&record.record_type.table_name))
+		};
+
+		let columns = self.client.query(
+			"SELECT a.attname::text, t.typname::text FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid WHERE a.attrelid = to_regclass($1) AND a.attnum > 0 AND NOT a.attisdropped",
+			&[&table],
+		).map_err(|error| format!("Failed to discover PostgreSQL float widths: {error}"))?;
+
+		for column in columns {
+			let name: String = column.get(0);
+			let kind: String = column.get(1);
+			let width = match kind.as_str() {
+				"float4" => crate::float::FloatWidth::Binary32,
+				"float8" => crate::float::FloatWidth::Binary64,
+				_ => continue
+			};
+
+			record.float_widths.entry(normalize_name(&name)).or_insert(width);
+		}
+
+		Ok(())
+	}
+
 	pub fn open(database_name: &str, connection_string: &str) -> Result<Self, String> {
 		let connection_string = client_connection_string(database_name, connection_string)?;
 		let connector = TlsConnector::builder().build().map(MakeTlsConnector::new).map_err(|error| {
@@ -60,7 +92,10 @@ impl DatabaseDriver for PostgreSqlSession {
 		})
 	}
 
-	fn create_record(&mut self, record: RecordBuffer) -> Result<RecordBuffer, String> {
+	fn create_record(&mut self, mut record: RecordBuffer) -> Result<RecordBuffer, String> {
+		self.resolve_float_widths(&mut record)?;
+		normalize_float_assignments(&mut record, WriteDialect::PostgreSql)?;
+
 		let write = create_record_write(&record, WriteDialect::PostgreSql)?;
 		let affected_rows = execute_record_write(&mut self.client, "create", write)?;
 
@@ -215,7 +250,10 @@ impl DatabaseDriver for PostgreSqlSession {
 		})
 	}
 
-	fn update_record(&mut self, record: RecordBuffer) -> Result<RecordBuffer, String> {
+	fn update_record(&mut self, mut record: RecordBuffer) -> Result<RecordBuffer, String> {
+		self.resolve_float_widths(&mut record)?;
+		normalize_float_assignments(&mut record, WriteDialect::PostgreSql)?;
+
 		let write = update_record_write(&record, WriteDialect::PostgreSql)?;
 		let affected_rows = execute_record_write(&mut self.client, "update", write)?;
 
@@ -321,6 +359,7 @@ fn runtime_value_to_postgresql(value: Value) -> Result<Option<String>, String> {
 		Value::Boolean(value) => Ok(Some(value.to_string())),
 		Value::Date(value) => Ok(Some(value.to_string())),
 		Value::Decimal(value) => Ok(Some(value.to_string())),
+		Value::Float(value) => Ok(Some(super::values::float_parameter_text(value))),
 		Value::Integer(value) => Ok(Some(value.to_string())),
 		Value::Null => Ok(None),
 		Value::Text(value) => Ok(Some(value)),
@@ -369,6 +408,20 @@ fn transaction_statement(command: &TransactionCommand) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn native_float_parameters_preserve_values_and_specials() {
+		use crate::float::{Float, NativeFloat};
+
+		for value in [0.1, -0.0, NativeFloat::MAX, NativeFloat::INFINITY, NativeFloat::NEG_INFINITY] {
+			let text = runtime_value_to_postgresql(Value::Float(Float(value))).unwrap().unwrap();
+
+			assert_eq!(Float::parse(&text).unwrap(), Float(value));
+			assert_eq!(text.parse::<f64>().unwrap().to_bits(), (value as f64).to_bits());
+		}
+
+		assert_eq!(runtime_value_to_postgresql(Value::Float(Float(NativeFloat::NAN))).unwrap(), Some("NaN".into()));
+	}
 
 	#[test]
 	fn extracts_keyword_connection_parameters() {

@@ -122,6 +122,7 @@ fn lower_expression(expression: &QueryExpr, parameters: &mut Vec<SqlParameter>) 
 		QueryExpr::Literal(QueryLiteral::Boolean(value)) => Ok(if *value { String::from("1") } else { String::from("0") }),
 		QueryExpr::Literal(QueryLiteral::Date(value)) => Ok(quote_text_literal(&value.to_string())),
 		QueryExpr::Literal(QueryLiteral::Decimal(value)) => Ok(value.to_string()),
+		QueryExpr::Literal(QueryLiteral::Float(value)) => Ok(format!("CAST({} AS REAL)", quote_text_literal(value))),
 		QueryExpr::Literal(QueryLiteral::Integer(value)) => Ok(value.to_string()),
 		QueryExpr::Literal(QueryLiteral::Text(value)) => Ok(quote_text_literal(value)),
 		QueryExpr::Literal(QueryLiteral::Time(value)) => Ok(quote_text_literal(&value.to_string())),

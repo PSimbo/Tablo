@@ -598,7 +598,7 @@ impl SemanticAnalyzer {
 
 		let value_type = self.infer_expression_for_target(value, &DataType::Json)?;
 
-		if !matches!(value_type.without_nullability(), DataType::Json | DataType::JsonMember | DataType::Text | DataType::Bool | DataType::Int | DataType::Dec | DataType::Null)
+		if !matches!(value_type.without_nullability(), DataType::Json | DataType::JsonMember | DataType::Text | DataType::Bool | DataType::Int | DataType::Dec | DataType::Float | DataType::Null)
 			&& !matches!(value_type.without_nullability(), DataType::Object(name) if self.lookup_enum(name).is_some()) {
 			return Err(self.compile_error(value.position(), format!("Cannot store `{}` in JSON without explicit conversion.", value_type.name())));
 		}
@@ -877,6 +877,7 @@ impl SemanticAnalyzer {
 			BuiltInParameterType::EnumBacked(backing_type) => {
 				DataType::Object(format!("{BUILT_IN_ENUM_TYPE_PREFIX}{}_enum", backing_type.name()).into())
 			}
+			BuiltInParameterType::Float => DataType::Float,
 			BuiltInParameterType::Int => DataType::Int,
 			BuiltInParameterType::Json => DataType::Json,
 			BuiltInParameterType::Sequence => return None,
@@ -1125,12 +1126,18 @@ impl SemanticAnalyzer {
 					return if accepts { None } else { Some(format!("parameter `{}` does not accept this literal", parameter.name)) };
 				}
 
+				if !parameter.is_by_ref && parameter.data_type.without_nullability() == &DataType::Float
+					&& argument.expression().is_some_and(|expression| expression.can_adopt_float_context()) {
+					return None;
+				}
+
 				let accepts_type = if parameter.is_by_ref {
 					parameter.data_type == *argument_type
 				}
 				else {
 					self.is_function_argument_assignable(&parameter.data_type, argument_type)
 				};
+
 				if accepts_type {
 					None
 				}
@@ -1389,7 +1396,8 @@ impl SemanticAnalyzer {
 			SchemaDataType::Array(element_type) => Ok(DataType::Array(Box::new(self.data_type_from_schema_type(element_type)?))),
 			SchemaDataType::Bool => Ok(DataType::Bool),
 			SchemaDataType::Date => Ok(DataType::Date),
-			SchemaDataType::Dec | SchemaDataType::Float => Ok(DataType::Dec),
+			SchemaDataType::Dec => Ok(DataType::Dec),
+			SchemaDataType::Float => Ok(DataType::Float),
 			SchemaDataType::Int => Ok(DataType::Int),
 			SchemaDataType::Text => Ok(DataType::Text),
 			SchemaDataType::Time => Ok(DataType::Time),
@@ -1410,6 +1418,7 @@ impl SemanticAnalyzer {
 			| DataType::Bool
 			| DataType::Date
 			| DataType::Dec
+			| DataType::Float
 			| DataType::Int
 			| DataType::Object(_)
 			| DataType::Text
@@ -1650,6 +1659,10 @@ impl SemanticAnalyzer {
 	}
 
 	fn describe_object_default_value(&self, expression: &Expr) -> ObjectDefaultValue {
+		if let Some(value) = self.semantic_program.float_literals.get(&expression.position()) {
+			return ObjectDefaultValue::FloatLiteral(value.clone());
+		}
+
 		if self.semantic_program.json_literals.contains(&expression.position()) {
 			return ObjectDefaultValue::Json(self.describe_json_default_value(expression));
 		}
@@ -1693,6 +1706,7 @@ impl SemanticAnalyzer {
 			DataType::Bool => ObjectValueTypeDescriptor::Bool,
 			DataType::Date => ObjectValueTypeDescriptor::Date,
 			DataType::Dec => ObjectValueTypeDescriptor::Dec,
+			DataType::Float => ObjectValueTypeDescriptor::Float,
 			DataType::Int => ObjectValueTypeDescriptor::Int,
 			DataType::Json => ObjectValueTypeDescriptor::Json,
 			DataType::Nullable(inner) => ObjectValueTypeDescriptor::Nullable(Box::new(
@@ -1755,6 +1769,20 @@ impl SemanticAnalyzer {
 	}
 
 	fn record_json_conversion(&mut self, target: &DataType, value: &DataType, position: usize) {
+		fn float_target(analyzer: &SemanticAnalyzer, target: &DataType, value: &DataType) -> bool {
+			match (target.without_nullability(), value.without_nullability()) {
+				(DataType::Float, DataType::Int) => true,
+				(DataType::Array(target), DataType::Array(value)) => float_target(analyzer, target, value),
+				(DataType::Union(members), _) => !members.iter().any(|member| analyzer.is_assignable_with_numeric_conversion(member, value, false))
+					&& members.iter().any(|member| float_target(analyzer, member, value)),
+				_ => false,
+			}
+		}
+
+		if float_target(self, target, value) {
+			self.semantic_program.float_conversions.insert(position);
+		}
+
 		fn contains_content(data_type: &DataType) -> bool {
 			match data_type {
 				DataType::JsonMember => true,
@@ -1762,6 +1790,7 @@ impl SemanticAnalyzer {
 				_ => false,
 			}
 		}
+
 		if contains_content(value) && target != value {
 			self.semantic_program.json_conversions.insert(position, target.clone());
 		}
@@ -2100,7 +2129,7 @@ impl SemanticAnalyzer {
 
 		let data_type = self.infer_expression_type(expression)?;
 
-		if !matches!(data_type.without_nullability(), DataType::Json | DataType::JsonMember | DataType::Text | DataType::Bool | DataType::Int | DataType::Dec | DataType::Null)
+		if !matches!(data_type.without_nullability(), DataType::Json | DataType::JsonMember | DataType::Text | DataType::Bool | DataType::Int | DataType::Dec | DataType::Float | DataType::Null)
 			&& !matches!(data_type.without_nullability(), DataType::Object(name) if self.lookup_enum(name).is_some()) {
 			return Err(self.compile_error(expression.position(), format!("Cannot store `{}` in a JSON literal without explicit conversion.", data_type.name())));
 		}
@@ -2109,6 +2138,66 @@ impl SemanticAnalyzer {
 	}
 
 	fn infer_expression_for_target(&mut self, expression: &Expr, target: &DataType) -> Result<DataType, CompileError> {
+		if let Some(effective) = self.effective_object_data_type(target) {
+			return self.infer_expression_for_target(expression, &effective);
+		}
+
+		if target.without_nullability() == &DataType::Float {
+			if let Some(text) = expression.json_literal_number() {
+				let value = crate::float::FloatLiteral::parse(&text).map_err(|message| self.compile_error(expression.position(), message))?;
+				self.semantic_program.float_literals.insert(expression.position(), value);
+				return Ok(DataType::Float);
+			}
+
+			if let Expr::Unary(unary) = expression {
+				if expression.can_adopt_float_context() {
+					return self.infer_expression_for_target(&unary.operand, target);
+				}
+			}
+
+			if let Expr::Ternary(ternary) = expression {
+				let condition = self.infer_expression_type(&ternary.condition)?;
+
+				if !self.is_truthy_condition_type(&condition) {
+					return Err(self.compile_error(ternary.position, "Ternary condition must be bool or a record pointer."));
+				}
+
+				let mut branches = Vec::new();
+
+				for (branch, truthy) in [(&ternary.true_branch, true), (&ternary.false_branch, false)] {
+					let assumption = self.refined_expression_for_branch(&ternary.condition, truthy);
+
+					if let Some(assumption) = &assumption {
+						self.current_non_null_assumptions.push(assumption.clone());
+					}
+
+					let result = self.infer_expression_for_target(branch, target);
+
+					if assumption.is_some() {
+						self.current_non_null_assumptions.pop();
+					}
+
+					branches.push(result?);
+				}
+
+				let result = self.infer_ternary_result_type(&branches[0], &branches[1], ternary.position)?;
+
+				self.record_json_conversion(&result, &branches[0], ternary.true_branch.position());
+				self.record_json_conversion(&result, &branches[1], ternary.false_branch.position());
+
+				return Ok(result);
+			}
+
+			if let Expr::Binary(binary) = expression {
+				if matches!(binary.operator, BinaryOperator::Add | BinaryOperator::Subtract | BinaryOperator::Multiply | BinaryOperator::Divide | BinaryOperator::Modulo) {
+					let left = self.infer_expression_for_target(&binary.left, target)?;
+					let right = self.infer_expression_for_target(&binary.right, target)?;
+
+					return self.binary_result_type(binary.operator, &left, &right, binary.position);
+				}
+			}
+		}
+
 		match (expression, target.without_nullability()) {
 			(expression, DataType::Json) if expression.is_contextual_literal() => {
 				self.infer_json_literal_contents(expression)?;
@@ -2132,9 +2221,11 @@ impl SemanticAnalyzer {
 
 	fn infer_array_literal_type(&mut self, elements: &[Expr], position: usize) -> Result<DataType, CompileError> {
 		let mut element_type: Option<DataType> = None;
+		let mut element_types = Vec::with_capacity(elements.len());
 
 		for element in elements {
 			let candidate = self.infer_expression_type(element)?;
+			element_types.push(candidate.clone());
 
 			element_type = Some(match &element_type {
 				None => candidate,
@@ -2143,7 +2234,12 @@ impl SemanticAnalyzer {
 		}
 
 		match element_type {
-			Some(element_type) => Ok(DataType::Array(Box::new(element_type))),
+			Some(element_type) => {
+				for (element, actual) in elements.iter().zip(&element_types) {
+					self.record_json_conversion(&element_type, actual, element.position());
+				}
+				Ok(DataType::Array(Box::new(element_type)))
+			}
 			None => Ok(DataType::EmptyArray),
 		}
 	}
@@ -2185,7 +2281,10 @@ impl SemanticAnalyzer {
 			.map(|argument| {
 				let expression = argument.expression().expect("Built-in arguments must be expressions after default-marker validation.");
 
-				if expression.is_contextual_literal() && (matches!(expression, Expr::ObjectConstruction(_))
+				if built_in == BuiltInFunction::FloatCast && expression.json_literal_number().is_some() {
+					// Parse directly at float precision after ordinary argument binding.
+					Ok(DataType::Text)
+				} else if expression.is_contextual_literal() && (matches!(expression, Expr::ObjectConstruction(_))
 					|| signatures.iter().any(|signature| signature.parameters.iter().any(|parameter| Self::has_json_target(&parameter.data_type)))) {
 					Ok(DataType::Any)
 				} else { self.infer_expression_type(expression) }
@@ -2222,11 +2321,16 @@ impl SemanticAnalyzer {
 		}
 
 
-		if matches!(built_in, BuiltInFunction::IntCast | BuiltInFunction::DecCast) && argument_types == [DataType::JsonMember] {
+		if matches!(built_in, BuiltInFunction::IntCast | BuiltInFunction::DecCast | BuiltInFunction::FloatCast) && argument_types == [DataType::JsonMember] {
 			// Explicit numeric extraction must receive the JSON number unchanged,
 			// rather than performing an implicit (exact) conversion first.
 			signatures.truncate(1);
 			signatures[0].parameters[0].data_type = DataType::JsonMember;
+		}
+
+		if built_in == BuiltInFunction::TextCast && argument_types == [DataType::JsonMember] {
+			// Preserve JSON serialization rather than selecting float formatting.
+			signatures.retain(|signature| signature.parameters[0].data_type == DataType::Json);
 		}
 
 		let (signature, argument_bindings) = self.select_function_overload(
@@ -2251,7 +2355,8 @@ impl SemanticAnalyzer {
 				let index = index as usize;
 				let expression = arguments[index].expression().unwrap();
 
-				if argument_types[index] == DataType::Any && expression.is_contextual_literal() {
+				if (argument_types[index] == DataType::Any && expression.is_contextual_literal())
+					|| target.without_nullability() == &DataType::Float {
 					argument_types[index] = self.infer_expression_for_target(expression, target)?;
 				}
 
@@ -2262,8 +2367,16 @@ impl SemanticAnalyzer {
 			}
 		}
 
+		if built_in == BuiltInFunction::FloatCast && arguments.len() == 1 {
+			if let Some(text) = arguments[0].expression().and_then(Expr::json_literal_number) {
+				let value = crate::float::FloatLiteral::parse(&text).map_err(|message| self.compile_error(position, message))?;
+				self.semantic_program.float_literals.insert(position, value);
+			}
+		}
+
 		let ordered_arguments = Self::call_arguments_in_binding_order(arguments, &argument_bindings);
 		let argument_types = Self::call_argument_types_in_binding_order(&argument_types, &argument_bindings);
+
 		self.semantic_program.call_argument_bindings.insert(position, argument_bindings);
 
 		let return_type = built_in.return_type(&argument_types).map_err(|_| self.compile_error(
@@ -2392,6 +2505,8 @@ impl SemanticAnalyzer {
 				argument_types.push(match argument.expression() {
 					Some(expression) if expression.is_contextual_literal()
 						&& (matches!(expression, Expr::ObjectConstruction(_)) || signatures.iter().any(|signature| signature.parameters.iter().any(|parameter| Self::has_json_target(&parameter.data_type)))) => Some(DataType::Any),
+					Some(expression) if expression.is_exact_number_literal()
+						&& signatures.iter().any(|signature| signature.parameters.iter().any(|parameter| parameter.data_type.without_nullability() == &DataType::Float)) => Some(DataType::Dec),
 					Some(expression) => Some(self.infer_expression_type(expression)?),
 					None => None,
 				});
@@ -2419,7 +2534,7 @@ impl SemanticAnalyzer {
 					let index = *index as usize;
 
 					if let Some(expression) = arguments[index].expression()
-						&& expression.is_contextual_literal() {
+						&& (expression.is_contextual_literal() || expression.is_exact_number_literal() || target.without_nullability() == &DataType::Float) {
 						argument_types[index] = Some(self.infer_expression_for_target(expression, target)?);
 					}
 				}
@@ -2636,6 +2751,10 @@ impl SemanticAnalyzer {
 	}
 
 	fn infer_expression_type(&mut self, expression: &Expr) -> Result<DataType, CompileError> {
+		if self.semantic_program.float_literals.contains_key(&expression.position()) {
+			return Ok(DataType::Float);
+		}
+
 		let data_type = match expression {
 			Expr::Array(array) => self.infer_array_literal_type(array.elements.as_slice(), array.position),
 			Expr::Assignment(AssignmentExpr { operator, target, value, .. }) => {
@@ -2855,9 +2974,28 @@ impl SemanticAnalyzer {
 				}
 			}
 			Expr::Binary(BinaryExpr { left, operator, right, .. }) => {
-				let left_type = self.infer_expression_type(left)?;
-				let right_type = self.infer_expression_type(right)?;
+				let mut left_type;
+				let right_type;
+
+				if left.can_adopt_float_context() && !right.can_adopt_float_context() {
+					right_type = self.infer_expression_type(right)?;
+					left_type = self.infer_expression_for_target(left, &right_type)?;
+				} else {
+					left_type = self.infer_expression_type(left)?;
+					right_type = if left_type.without_nullability() == &DataType::Float { self.infer_expression_for_target(right, &left_type)? } else { self.infer_expression_type(right)? };
+				}
+
+				if right_type.without_nullability() == &DataType::Float && left.can_adopt_float_context() {
+					left_type = self.infer_expression_for_target(left, &right_type)?;
+				}
+
 				let result = self.binary_result_type(*operator, &left_type, &right_type, expression.position())?;
+
+				if matches!(result.without_nullability(), DataType::Array(_)) {
+					self.record_json_conversion(&result, &left_type, left.position());
+					self.record_json_conversion(&result, &right_type, right.position());
+				}
+
 				self.record_null_comparison_semantics(
 					expression.position(),
 					left,
@@ -2884,7 +3022,7 @@ impl SemanticAnalyzer {
 			Expr::Count(count) => self.infer_count_expression_type(count),
 			Expr::Date(_) => Ok(DataType::Date),
 			Expr::Decimal(_) => Ok(DataType::Dec),
-			Expr::ExactNumber(number) => Err(self.compile_error(number.position, String::from("Numeric literal exceeds the supported primitive range; an exact JSON literal context is required."))),
+			Expr::ExactNumber(number) => Err(self.compile_error(number.position, String::from("Numeric literal exceeds the supported decimal or integer range; a float or JSON literal context is required."))),
 			Expr::FieldAccess(FieldAccessExpr { field, object, .. }) => {
 				if let Expr::Identifier(identifier) = object.as_ref()
 					&& self.lookup_local(&identifier.name).is_none()
@@ -3089,7 +3227,7 @@ impl SemanticAnalyzer {
 				let start_type = self.infer_expression_type(start)?;
 				let end_type = self.infer_expression_type(end)?;
 
-				if !self.is_numeric_type(&start_type) || !self.is_numeric_type(&end_type) {
+				if !matches!(start_type, DataType::Int | DataType::Dec) || !matches!(end_type, DataType::Int | DataType::Dec) {
 					return Err(self.compile_error(
 						*position,
 						format!(
@@ -3103,7 +3241,7 @@ impl SemanticAnalyzer {
 				let element_type = if let Some(step) = step {
 					let step_type = self.infer_expression_type(step)?;
 
-					if !self.is_numeric_type(&step_type) {
+					if !matches!(step_type, DataType::Int | DataType::Dec) {
 						return Err(self.compile_error(
 							step.position(),
 							format!("Range step must be numeric, found `{}`.", step_type.name()),
@@ -3468,6 +3606,10 @@ impl SemanticAnalyzer {
 		expression: &Expr,
 		table: &TableReference,
 	) -> Result<DataType, CompileError> {
+		if self.semantic_program.float_literals.contains_key(&expression.position()) {
+			return Ok(DataType::Float);
+		}
+
 		match expression {
 			Expr::Array(array) => self.infer_array_literal_type(&array.elements, array.position),
 			Expr::Assignment(_) => Err(self.compile_error(
@@ -3475,9 +3617,30 @@ impl SemanticAnalyzer {
 				String::from("Assignments are not permitted in `where` clauses."),
 			)),
 			Expr::Binary(BinaryExpr { left, operator, right, .. }) => {
-				let left_type = self.infer_query_expression_type(left, table)?;
-				let right_type = self.infer_query_expression_type(right, table)?;
+				let (left_type, right_type) = if left.can_adopt_float_context() && !right.can_adopt_float_context() {
+					let right_type = self.infer_query_expression_type(right, table)?;
+					let left_type = if right_type.without_nullability() == &DataType::Float {
+						self.infer_expression_for_target(left, &right_type)?
+					}
+					else {
+						self.infer_query_expression_type(left, table)?
+					};
+
+					(left_type, right_type)
+				} else {
+					let left_type = self.infer_query_expression_type(left, table)?;
+					let right_type = if left_type.without_nullability() == &DataType::Float && right.can_adopt_float_context() {
+						self.infer_expression_for_target(right, &left_type)?
+					}
+					else {
+						self.infer_query_expression_type(right, table)?
+					};
+
+					(left_type, right_type)
+				};
+
 				let result = self.binary_result_type(*operator, &left_type, &right_type, expression.position())?;
+
 				self.record_null_comparison_semantics(
 					expression.position(),
 					left,
@@ -3486,6 +3649,7 @@ impl SemanticAnalyzer {
 					right,
 					&right_type,
 				);
+
 				Ok(result)
 			}
 			Expr::Boolean(_) => Ok(DataType::Bool),
@@ -3577,7 +3741,7 @@ impl SemanticAnalyzer {
 			)),
 			Expr::Date(_) => Ok(DataType::Date),
 			Expr::Decimal(_) => Ok(DataType::Dec),
-			Expr::ExactNumber(number) => Err(self.compile_error(number.position, String::from("Numeric literal exceeds the supported primitive range; an exact JSON literal context is required."))),
+			Expr::ExactNumber(number) => Err(self.compile_error(number.position, String::from("Numeric literal exceeds the supported decimal or integer range; a float or JSON literal context is required."))),
 			Expr::FieldAccess(field_access) => self.infer_query_field_access_type(field_access, table),
 			Expr::Find(_) => Err(self.compile_error(
 				expression.position(),
@@ -3812,7 +3976,7 @@ impl SemanticAnalyzer {
 		}
 
 		if value == &DataType::JsonMember {
-			return matches!(target.without_nullability(), DataType::Any | DataType::JsonMember | DataType::Json | DataType::Bool | DataType::Text | DataType::Int | DataType::Dec);
+			return matches!(target.without_nullability(), DataType::Any | DataType::Bool | DataType::Dec | DataType::Float | DataType::Int | DataType::Json | DataType::JsonMember | DataType::Text);
 		}
 
 		match (target, value) {
@@ -3839,7 +4003,7 @@ impl SemanticAnalyzer {
 		}
 
 		if target == value
-			|| (allow_numeric_conversion && target == &DataType::Dec && value == &DataType::Int) {
+			|| (allow_numeric_conversion && matches!(target, DataType::Dec | DataType::Float) && value == &DataType::Int) {
 			return true;
 		}
 
@@ -3869,7 +4033,7 @@ impl SemanticAnalyzer {
 	}
 
 	fn is_numeric_type(&self, data_type: &DataType) -> bool {
-		matches!(data_type.without_nullability(), DataType::Dec | DataType::Int)
+		matches!(data_type.without_nullability(), DataType::Dec | DataType::Float | DataType::Int)
 	}
 
 	fn is_read_only_record_pointer_expression(&self, expression: &Expr) -> bool {
@@ -4149,6 +4313,10 @@ impl SemanticAnalyzer {
 		table: &TableReference,
 		backend: DatabaseBackend,
 	) -> Result<QueryExpr, CompileError> {
+		if let Some(literal) = self.semantic_program.float_literals.get(&expression.position()) {
+			return Ok(QueryExpr::Literal(QueryLiteral::Float(literal.text.clone())));
+		}
+
 		match expression {
 			Expr::Array(_) => Err(self.compile_error(
 				expression.position(),
@@ -4441,12 +4609,7 @@ impl SemanticAnalyzer {
 			lhs.clone()
 		}
 		else if self.is_numeric_type(lhs) && self.is_numeric_type(rhs) {
-			if lhs == &DataType::Int && rhs == &DataType::Int {
-				DataType::Int
-			}
-			else {
-				DataType::Dec
-			}
+			self.numeric_result_type(lhs, rhs, position)?
 		}
 		else if let (DataType::Array(lhs_element), DataType::Array(rhs_element)) = (lhs, rhs) {
 			DataType::Array(Box::new(self.merge_array_element_types(lhs_element, rhs_element, position)?))
@@ -4496,6 +4659,11 @@ impl SemanticAnalyzer {
 					rhs.name(),
 				),
 			));
+		}
+
+		if lhs == &DataType::Float || rhs == &DataType::Float {
+			if lhs == &DataType::Dec || rhs == &DataType::Dec { return Err(self.compile_error(position, "Mixing float and dec requires an explicit conversion.")); }
+			return Ok(DataType::Float);
 		}
 
 		if lhs == &DataType::Int && rhs == &DataType::Int {
@@ -4966,6 +5134,10 @@ impl SemanticAnalyzer {
 	}
 
 	fn require_equality_operands(&self, lhs: &DataType, rhs: &DataType, position: usize) -> Result<(), CompileError> {
+		if matches!((lhs.without_nullability(), rhs.without_nullability()), (DataType::Float, DataType::Dec) | (DataType::Dec, DataType::Float)) {
+			return Err(self.compile_error(position, "Mixing float and dec requires an explicit conversion."));
+		}
+
 		let lhs = lhs.without_nullability();
 		let rhs = rhs.without_nullability();
 
@@ -5014,6 +5186,10 @@ impl SemanticAnalyzer {
 	}
 
 	fn require_ordering_operands(&self, lhs: &DataType, rhs: &DataType, position: usize) -> Result<(), CompileError> {
+		if matches!((lhs.without_nullability(), rhs.without_nullability()), (DataType::Float, DataType::Dec) | (DataType::Dec, DataType::Float)) {
+			return Err(self.compile_error(position, "Mixing float and dec requires an explicit conversion."));
+		}
+
 		let lhs = lhs.without_nullability();
 		let rhs = rhs.without_nullability();
 
@@ -5540,12 +5716,38 @@ impl SemanticAnalyzer {
 						argument_types,
 					)
 				});
+
 			if let Some(rejection) = rejection {
 				rejections.push(format!("Candidate `{description}` {rejection}."));
 			}
 			else {
 				candidates.push((signature.clone(), argument_bindings));
 			}
+		}
+
+		let contextual_cost = |candidate: &(FunctionSignature, Vec<CallArgumentBinding>)| {
+			candidate.0.parameters.iter().zip(&candidate.1).map(|(parameter, binding)| {
+				let indices = match binding {
+					CallArgumentBinding::Supplied(index) => vec![*index],
+					CallArgumentBinding::Variadic(indices) => indices.clone(),
+					_ => vec![],
+				};
+
+				let target = if parameter.is_variadic {
+					match &parameter.data_type { DataType::Array(inner) => inner.as_ref(), other => other }
+				}
+				else {
+					&parameter.data_type
+				};
+
+				indices.iter().filter(|index| target.without_nullability() == &DataType::Float
+					&& argument_types[**index as usize].as_ref().is_some_and(|actual| actual.without_nullability() != &DataType::Float)
+					&& arguments[**index as usize].expression().is_some_and(|expression| expression.can_adopt_float_context())).count()
+			}).sum::<usize>()
+		};
+
+		if let Some(best) = candidates.iter().map(&contextual_cost).min() {
+			candidates.retain(|candidate| contextual_cost(candidate) == best);
 		}
 
 		match candidates.as_slice() {
@@ -7078,6 +7280,8 @@ pub struct SemanticProgram {
 	pub(crate) object_conversions: BTreeMap<usize, (ObjectTypeId, Vec<ObjectTypeId>)>,
 	pub(crate) json_literals: BTreeSet<usize>,
 	pub(crate) json_literal_numbers: BTreeMap<usize, String>,
+	pub(crate) float_literals: BTreeMap<usize, crate::float::FloatLiteral>,
+	pub(crate) float_conversions: BTreeSet<usize>,
 	json_assignments: BTreeSet<usize>,
 	active_databases: Vec<String>,
 	built_in_call_targets: BTreeMap<usize, BuiltInFunction>,

@@ -144,6 +144,7 @@ impl<'a> ObjectConstructor<'a> {
 			ObjectValueTypeDescriptor::Enum { name, default_variant, default_value, .. } => ObjectDefaultValue::Enum {
 				backing_value: default_value.clone(), enum_name: name.clone(), variant_name: default_variant.clone(),
 			},
+			ObjectValueTypeDescriptor::Float => ObjectDefaultValue::Float(crate::float::Float::default()),
 			ObjectValueTypeDescriptor::Int => ObjectDefaultValue::Integer(0),
 			ObjectValueTypeDescriptor::Json => ObjectDefaultValue::Json(crate::json::JsonValue::default()),
 			ObjectValueTypeDescriptor::Object(id) => return self.complete_object(*id, &[], active),
@@ -181,6 +182,8 @@ impl<'a> ObjectConstructor<'a> {
 				}),
 				enum_name: enum_name.clone(), variant_name: variant_name.clone(),
 			}),
+			ObjectDefaultValue::Float(value) => Value::Float(*value),
+			ObjectDefaultValue::FloatLiteral(value) => Value::Float(value.value),
 			ObjectDefaultValue::Integer(value) => Value::Integer(*value),
 			ObjectDefaultValue::Json(value) => Value::Json(value.clone()),
 			ObjectDefaultValue::Null => Value::Null,
@@ -234,6 +237,7 @@ impl<'a> ObjectConstructor<'a> {
 			(ObjectValueTypeDescriptor::Bool, Value::Boolean(_))
 			| (ObjectValueTypeDescriptor::Date, Value::Date(_))
 			| (ObjectValueTypeDescriptor::Dec, Value::Decimal(_) | Value::Integer(_))
+			| (ObjectValueTypeDescriptor::Float, Value::Float(_))
 			| (ObjectValueTypeDescriptor::Int, Value::Integer(_))
 			| (ObjectValueTypeDescriptor::Text, Value::Text(_))
 			| (ObjectValueTypeDescriptor::Time, Value::Time(_))

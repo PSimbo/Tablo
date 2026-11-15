@@ -21,6 +21,47 @@ pub(super) struct RecordWrite {
 	pub statement: String,
 }
 
+/// Only materialized assignments are normalized. Deferred database fields retain
+/// their original representation and are not eagerly read as a side effect of a write.
+pub(super) fn normalize_float_assignments(record: &mut RecordBuffer, dialect: WriteDialect) -> Result<(), String> {
+	use crate::float::FloatWidth;
+	use crate::value::RecordFieldValue;
+
+	for (name, field) in &mut record.fields {
+		let RecordFieldValue::Materialized { value: Value::Float(value), .. } = field else {
+			continue;
+		};
+
+		let width = if dialect == WriteDialect::Sqlite {
+			FloatWidth::Binary64
+		} else {
+			*record.float_widths.get(name).ok_or_else(|| format!("Physical float width is unknown for column `{name}`."))?
+		};
+
+		if width == FloatWidth::Binary32 {
+			value.0 = (value.0 as f32) as crate::float::NativeFloat;
+		}
+
+		if dialect == WriteDialect::MySql && !value.0.is_finite() {
+			return Err(format!("MySQL cannot store non-finite float in column `{name}` after conversion to its physical width."));
+		}
+
+		if dialect == WriteDialect::Sqlite && value.0.is_nan() {
+			return Err(format!("SQLite cannot store NaN in column `{name}`."));
+		}
+	}
+
+	Ok(())
+}
+
+#[cfg(any(feature = "driver-mysql", feature = "driver-postgresql"))]
+pub(super) fn needs_float_widths(record: &RecordBuffer) -> bool {
+	record
+		.fields
+		.iter()
+		.any(|(name, field)| field.data_type().without_nullability() == &DataType::Float && !record.float_widths.contains_key(name))
+}
+
 pub(super) fn create_record_write(record: &RecordBuffer, dialect: WriteDialect) -> Result<RecordWrite, String> {
 	let mut parameters = Vec::with_capacity(record.column_names.len());
 	let mut placeholders = Vec::with_capacity(record.column_names.len());
@@ -51,7 +92,7 @@ pub(super) fn delete_record_write(record: &RecordBuffer, dialect: WriteDialect) 
 
 	for column_name in identity_columns {
 		let field = record_field(&record.original_fields, column_name)?;
-		parameters.push(field.materialize()?);
+		parameters.push(identity_parameter(field)?);
 		let parameter = parameter(dialect, parameters.len(), field.data_type())?;
 		predicates.push(null_safe_predicate(dialect, column_name, &parameter));
 	}
@@ -119,7 +160,7 @@ pub(super) fn update_record_write(record: &RecordBuffer, dialect: WriteDialect) 
 
 	for column_name in identity_columns {
 		let field = record_field(&record.original_fields, column_name)?;
-		parameters.push(field.materialize()?);
+		parameters.push(identity_parameter(field)?);
 		let parameter = parameter(dialect, parameters.len(), field.data_type())?;
 		predicates.push(null_safe_predicate(dialect, column_name, &parameter));
 	}
@@ -133,6 +174,32 @@ pub(super) fn update_record_write(record: &RecordBuffer, dialect: WriteDialect) 
 			predicates.join(" AND "),
 		),
 	})
+}
+
+// A 32-bit runtime may round a fetched binary64 value for Tablo arithmetic.
+// Row identity must still compare against the original database value.
+fn identity_parameter(field: &crate::value::RecordFieldValue) -> Result<Value, String> {
+	use crate::value::{DatabaseValue, RecordFieldValue};
+
+	if let RecordFieldValue::Deferred { data_type, value, .. } = field {
+		if data_type.without_nullability() == &DataType::Float {
+			match value {
+				DatabaseValue::Real(text) | DatabaseValue::Text(text) => {
+					if let Ok(original) = text.parse::<f64>() {
+						if original.is_finite() && (original as crate::float::NativeFloat) as f64 != original {
+							return Ok(Value::Text(text.clone()));
+						}
+					}
+				}
+				DatabaseValue::Integer(value) => {
+					return Ok(Value::Integer(*value));
+				}
+				_ => {}
+			}
+		}
+	}
+
+	field.materialize()
 }
 
 fn identity_column_names(record: &RecordBuffer) -> &[String] {
@@ -222,6 +289,35 @@ mod tests {
 
 	use crate::ast::*;
 	use crate::value::*;
+
+	#[test]
+	fn normalizes_float_assignments_before_saving_identity() {
+		use crate::float::FloatWidth;
+		use crate::float::{Float, NativeFloat};
+
+		let mut record = test_record();
+
+		record.float_widths.insert("amount".into(), FloatWidth::Binary32);
+		record.fields.insert("amount".into(), RecordFieldValue::Materialized { data_type: DataType::Float, value: Value::Float(Float(1.000000059604644775390625)) });
+
+		normalize_float_assignments(&mut record, WriteDialect::PostgreSql).unwrap();
+		assert_eq!(record.fields["amount"].materialize().unwrap(), Value::Float(Float(1.0)));
+
+		let saved = mark_record_updated(record.clone());
+		assert_eq!(saved.original_fields["amount"], saved.fields["amount"]);
+
+		for (input, expected) in [("1e40", NativeFloat::INFINITY), ("-1e40", NativeFloat::NEG_INFINITY), ("-1e-99", -0.0)] {
+			record.fields.insert("amount".into(), RecordFieldValue::Materialized { data_type: DataType::Float, value: Value::Float(Float::parse(input).unwrap()) });
+			normalize_float_assignments(&mut record, WriteDialect::PostgreSql).unwrap();
+			assert_eq!(record.fields["amount"].materialize().unwrap(), Value::Float(Float(expected)));
+		}
+
+		record.fields.insert("amount".into(), RecordFieldValue::Materialized { data_type: DataType::Float, value: Value::Float(Float::parse("1e40").unwrap()) });
+		assert!(normalize_float_assignments(&mut record.clone(), WriteDialect::MySql).is_err());
+
+		record.float_widths.clear();
+		assert!(normalize_float_assignments(&mut record, WriteDialect::PostgreSql).is_err());
+	}
 
 	#[test]
 	fn deleted_record_no_longer_references_persisted_data() {
@@ -320,6 +416,7 @@ mod tests {
 		]);
 
 		RecordBuffer {
+			float_widths: BTreeMap::new(),
 			column_names: vec![String::from("Id"), String::from("Name")],
 			exists: true,
 			fields: fields.clone(),

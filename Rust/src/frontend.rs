@@ -4768,9 +4768,9 @@ mod tests {
 	fn rejects_39_digit_decimal_source_text() {
 		let error = evaluate_snippet("3.14159265358979323846264338327950288415").unwrap_err();
 
-		assert_eq!(error, TabloError::Parse(crate::syntax::parser::ParseError {
+		assert_eq!(error, TabloError::Compile(CompileError {
 			position: 0,
-			message: String::from("Decimal literal `3.14159265358979323846264338327950288415` exceeds the supported precision."),
+			message: String::from("Numeric literal exceeds the supported decimal or integer range; a float or JSON literal context is required."),
 		}));
 	}
 
@@ -9959,6 +9959,72 @@ mod tests {
 		let result = run("fn Main(args: [text]): int { var dynamic: any = true; return dynamic == 1 ? 1 : 0; }").unwrap();
 
 		assert_eq!(result, Some(Value::Integer(0)));
+	}
+
+	#[test]
+	fn sqlite_float_row_identity_preserves_database_precision() {
+		let database_path = create_sqlite_test_database(
+			"sqlite_float_row_identity_preserves_database_precision",
+			"CREATE TABLE Numbers (Id INTEGER NOT NULL, Amount REAL NOT NULL);
+			 INSERT INTO Numbers VALUES (1, 0.1), (2, 1e999);",
+		);
+		let source = "with ExampleDb;
+			fn Main(args: [text]): int {
+				rec mut row = find first Numbers where Id == 1;
+				var amount: float = row.Amount;
+
+				if amount != float('0.1') {
+					return 0;
+				}
+
+				row.Id = 3;
+				update row;
+				delete row;
+
+				rec mut infinity = find first Numbers where Id == 2;
+
+				if infinity.Amount != float('inf') {
+					return 0;
+				}
+
+				infinity.Id = 4;
+				update infinity;
+				delete infinity;
+
+				var remaining: int = count Numbers;
+				return remaining == 0 ? 1 : 0;
+			}";
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			source,
+			"database ExampleDb; schema Main implicit;
+			 create table Numbers (Id int not null, Amount float not null);",
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let program = crate::object_file::read_program(&crate::object_file::write_program(&program)).unwrap();
+		let config = RuntimeDatabaseConfig::new().with_sqlite_database("ExampleDb", &database_path);
+		let result = run_program_with_database_config(&program, config);
+
+		let _ = std::fs::remove_file(database_path);
+
+		assert_eq!(result.unwrap(), Some(Value::Integer(1)));
+	}
+
+	#[test]
+	fn sqlite_native_float_reads_queries_and_writes() {
+		let database_path = create_sqlite_test_database("sqlite_native_float_reads_queries_and_writes",
+			"CREATE TABLE Numbers (Id INTEGER PRIMARY KEY, Amount REAL NOT NULL, Optional REAL); INSERT INTO Numbers VALUES (1, 1.25, NULL);");
+		let fixture = "database ExampleDb; schema Main implicit; create table Numbers (Id int not null, Amount float not null, Optional float null);";
+		let source = "with ExampleDb; fn Main(args: [text]): int { var target: float = 1.25; rec mut row = find first Numbers where Amount == target and Amount == 1.25; var original: float = row.Amount; if row.Optional != null { return 0; } row.Amount = original + 0.5; update row; return count Numbers where Amount == 1.75 and (0.75 + 1.0) == Amount; }";
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(source, fixture, &[("ExampleDb", DatabaseBackend::Sqlite)]).unwrap();
+		let program = crate::object_file::read_program(&crate::object_file::write_program(&program)).unwrap();
+		let config = RuntimeDatabaseConfig::new().with_sqlite_database("ExampleDb", &database_path);
+		assert_eq!(run_program_with_database_config(&program, config).unwrap(), Some(Value::Integer(1)));
+		let stored: f64 = Connection::open(&database_path).unwrap().query_row("SELECT Amount FROM Numbers", [], |row| row.get(0)).unwrap();
+		assert_eq!(stored, 1.75);
+		let _ = std::fs::remove_file(database_path);
+		for backend in [DatabaseBackend::MySql, DatabaseBackend::PostgreSql] {
+			compile_standalone_with_schema_fixture_and_backends(source, fixture, &[("ExampleDb", backend)]).unwrap();
+		}
 	}
 
 	#[test]

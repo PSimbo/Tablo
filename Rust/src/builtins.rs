@@ -9,7 +9,8 @@ const BUILTIN_DEC_CAST: u8 = BUILTIN_DAY + 1;
 const BUILTIN_DISP: u8 = BUILTIN_DEC_CAST + 1;
 const BUILTIN_DISPLN: u8 = BUILTIN_DISP + 1;
 const BUILTIN_FIRST_OF: u8 = BUILTIN_DISPLN + 1;
-const BUILTIN_FORMAT: u8 = BUILTIN_FIRST_OF + 1;
+const BUILTIN_FLOAT_CAST: u8 = BUILTIN_FIRST_OF + 1;
+const BUILTIN_FORMAT: u8 = BUILTIN_FLOAT_CAST + 1;
 const BUILTIN_HOUR: u8 = BUILTIN_FORMAT + 1;
 const BUILTIN_INDEX_OF: u8 = BUILTIN_HOUR + 1;
 const BUILTIN_INT_CAST: u8 = BUILTIN_INDEX_OF + 1;
@@ -36,6 +37,7 @@ pub enum BuiltInFunction {
 	Disp,
 	Displn,
 	FirstOf,
+	FloatCast,
 	Format,
 	Hour,
 	IndexOf,
@@ -65,6 +67,7 @@ impl BuiltInFunction {
 			Self::Disp,
 			Self::Displn,
 			Self::FirstOf,
+			Self::FloatCast,
 			Self::Format,
 			Self::Hour,
 			Self::IndexOf,
@@ -94,6 +97,7 @@ impl BuiltInFunction {
 			BUILTIN_DISP => Some(Self::Disp),
 			BUILTIN_DISPLN => Some(Self::Displn),
 			BUILTIN_FIRST_OF => Some(Self::FirstOf),
+			BUILTIN_FLOAT_CAST => Some(Self::FloatCast),
 			BUILTIN_FORMAT => Some(Self::Format),
 			BUILTIN_HOUR => Some(Self::Hour),
 			BUILTIN_INDEX_OF => Some(Self::IndexOf),
@@ -124,6 +128,7 @@ impl BuiltInFunction {
 			"disp" => Some(Self::Disp),
 			"displn" => Some(Self::Displn),
 			"firstof" => Some(Self::FirstOf),
+			"float" => Some(Self::FloatCast),
 			"format" => Some(Self::Format),
 			"hour" => Some(Self::Hour),
 			"indexof" => Some(Self::IndexOf),
@@ -154,6 +159,7 @@ impl BuiltInFunction {
 			Self::Disp => BUILTIN_DISP,
 			Self::Displn => BUILTIN_DISPLN,
 			Self::FirstOf => BUILTIN_FIRST_OF,
+			Self::FloatCast => BUILTIN_FLOAT_CAST,
 			Self::Format => BUILTIN_FORMAT,
 			Self::Hour => BUILTIN_HOUR,
 			Self::IndexOf => BUILTIN_INDEX_OF,
@@ -183,6 +189,7 @@ impl BuiltInFunction {
 			Self::Disp => "disp",
 			Self::Displn => "displn",
 			Self::FirstOf => "firstof",
+			Self::FloatCast => "float",
 			Self::Format => "format",
 			Self::Hour => "hour",
 			Self::IndexOf => "indexof",
@@ -210,6 +217,7 @@ impl BuiltInFunction {
 			| Self::Day
 			| Self::DecCast
 			| Self::FirstOf
+			| Self::FloatCast
 			| Self::Format
 			| Self::Hour
 			| Self::IndexOf
@@ -271,6 +279,7 @@ impl BuiltInFunction {
 				Self::signature(&[("t", TimestampTz)], Some(DataType::Int)),
 			],
 			Self::DecCast => vec![
+				Self::signature(&[("v", Float)], Some(DataType::Dec)),
 				Self::signature(&[("v", Int)], Some(DataType::Dec)),
 				Self::signature(&[("v", Text)], Some(DataType::Dec)),
 				Self::signature(&[("v", EnumBacked(DataType::Dec))], Some(DataType::Dec)),
@@ -283,6 +292,11 @@ impl BuiltInFunction {
 			],
 			Self::FirstOf => vec![
 				Self::variadic_signature("v1", Any, "v2", ArrayAny, DataType::Bool),
+			],
+			Self::FloatCast => vec![
+				Self::signature(&[("v", Dec)], Some(DataType::Float)),
+				Self::signature(&[("v", Int)], Some(DataType::Float)),
+				Self::signature(&[("v", Text)], Some(DataType::Float)),
 			],
 			Self::Format => vec![
 				Self::signature(&[("v", Dec), ("pattern", Text)], Some(DataType::Text)),
@@ -304,9 +318,10 @@ impl BuiltInFunction {
 			Self::JsonCast => vec![Self::signature(&[("v", Text)], Some(DataType::Json))],
 			Self::IntCast => vec![
 				Self::signature(&[("v", Bool)], Some(DataType::Int)),
-				Self::signature(&[("v", Text)], Some(DataType::Int)),
-				Self::signature(&[("v", EnumBacked(DataType::Int))], Some(DataType::Int)),
 				Self::signature(&[("v", Dec)], Some(DataType::Int)),
+				Self::signature(&[("v", EnumBacked(DataType::Int))], Some(DataType::Int)),
+				Self::signature(&[("v", Float)], Some(DataType::Int)),
+				Self::signature(&[("v", Text)], Some(DataType::Int)),
 			],
 			Self::LastOf => vec![
 				Self::variadic_signature("v1", Any, "v2", ArrayAny, DataType::Bool),
@@ -342,8 +357,9 @@ impl BuiltInFunction {
 				),
 			],
 			Self::TextCast => vec![
-				Self::signature(&[("v", Json)], Some(DataType::Text)),
 				Self::signature(&[("v", EnumBacked(DataType::Text))], Some(DataType::Text)),
+				Self::signature(&[("v", Float)], Some(DataType::Text)),
+				Self::signature(&[("v", Json)], Some(DataType::Text)),
 			],
 			Self::Trim => vec![
 				Self::signature(&[("str", Text)], Some(DataType::Text)),
@@ -371,6 +387,7 @@ impl BuiltInFunction {
 			| Self::DecCast
 			| Self::Disp
 			| Self::Displn
+			| Self::FloatCast
 			| Self::Hour
 			| Self::IntCast
 			| Self::JsonCast
@@ -403,6 +420,7 @@ impl BuiltInFunction {
 
 	fn value_return_type(self, argument_types: &[DataType]) -> Option<DataType> {
 		match self {
+			Self::BoolCast => None,
 			Self::Contains => match argument_types {
 				[left, right]
 					if matches!(left.without_nullability(), DataType::Text)
@@ -435,14 +453,26 @@ impl BuiltInFunction {
 				}
 				_ => None,
 			},
+			Self::DateCast => match argument_types {
+				[arg] if matches!(arg.without_nullability(), DataType::Text) => Some(DataType::Date),
+				_ => None,
+			},
 			Self::Day => match argument_types {
 				[arg] if matches!(arg.without_nullability(), DataType::Date | DataType::Timestamp | DataType::TimestampTz) => Some(DataType::Int),
+				_ => None,
+			},
+			Self::DecCast => match argument_types {
+				[arg] if matches!(arg.without_nullability(), DataType::Float | DataType::Int | DataType::Text | DataType::JsonMember) => Some(DataType::Dec),
 				_ => None,
 			},
 			Self::Disp | Self::Displn => None,
 			Self::FirstOf | Self::LastOf => match argument_types {
 				[] => None,
 				_ => Some(DataType::Bool),
+			},
+			Self::FloatCast => match argument_types {
+				[arg] if matches!(arg.without_nullability(), DataType::Dec | DataType::Int | DataType::JsonMember | DataType::Text) => Some(DataType::Float),
+				_ => None,
 			},
 			Self::Format => match argument_types {
 				[left, right]
@@ -472,6 +502,15 @@ impl BuiltInFunction {
 				}
 				_ => None,
 			},
+			Self::IntCast => match argument_types {
+				[arg] if matches!(arg.without_nullability(), DataType::Bool | DataType::Dec | DataType::Float | DataType::JsonMember) => Some(DataType::Int),
+				[arg] if matches!(arg.without_nullability(), DataType::Text) => Some(DataType::Int),
+				_ => None,
+			},
+			Self::JsonCast => match argument_types {
+				[arg] if matches!(arg, DataType::Text | DataType::Any | DataType::Array(_) | DataType::EmptyArray | DataType::Object(_) | DataType::Json | DataType::JsonMember) => Some(DataType::Json),
+				_ => None,
+			},
 			Self::Len => match argument_types {
 				[arg] if matches!(arg.without_nullability(), DataType::Array(_) | DataType::EmptyArray | DataType::Text) => {
 					Some(DataType::Int)
@@ -490,6 +529,7 @@ impl BuiltInFunction {
 				[arg] if matches!(arg.without_nullability(), DataType::Time | DataType::TimeTz | DataType::Timestamp | DataType::TimestampTz) => Some(DataType::Int),
 				_ => None,
 			},
+			Self::SeqNext => None,
 			Self::Split => match argument_types {
 				[left, right]
 					if matches!(left.without_nullability(), DataType::Text)
@@ -506,29 +546,10 @@ impl BuiltInFunction {
 				[arg] if matches!(arg.without_nullability(), DataType::Date | DataType::Timestamp | DataType::TimestampTz) => Some(DataType::Int),
 				_ => None,
 			},
-			Self::DateCast => match argument_types {
-				[arg] if matches!(arg.without_nullability(), DataType::Text) => Some(DataType::Date),
-				_ => None,
-			},
-			Self::IntCast => match argument_types {
-				[arg] if matches!(arg.without_nullability(), DataType::Bool | DataType::Dec | DataType::JsonMember) => Some(DataType::Int),
-				[arg] if matches!(arg.without_nullability(), DataType::Text) => Some(DataType::Int),
-				_ => None,
-			},
-			Self::JsonCast => match argument_types {
-				[arg] if matches!(arg, DataType::Text | DataType::Any | DataType::Array(_) | DataType::EmptyArray | DataType::Object(_) | DataType::Json | DataType::JsonMember) => Some(DataType::Json),
-				_ => None,
-			},
 			Self::TextCast => match argument_types {
-				[DataType::Json] => Some(DataType::Text),
+				[DataType::Json | DataType::Float] => Some(DataType::Text),
 				_ => None,
 			},
-			Self::SeqNext => None,
-			Self::DecCast => match argument_types {
-				[arg] if matches!(arg.without_nullability(), DataType::Int | DataType::Text | DataType::JsonMember) => Some(DataType::Dec),
-				_ => None,
-			},
-			Self::BoolCast => None,
 		}
 	}
 
@@ -566,6 +587,7 @@ pub enum BuiltInParameterType {
 	Date,
 	Dec,
 	EnumBacked(DataType),
+	Float,
 	Int,
 	Json,
 	Sequence,
@@ -586,6 +608,7 @@ impl BuiltInParameterType {
 			Self::Date => String::from("date"),
 			Self::Dec => String::from("dec"),
 			Self::EnumBacked(backing_type) => format!("<{}-backed enum>", backing_type.name()),
+			Self::Float => String::from("float"),
 			Self::Int => String::from("int"),
 			Self::Json => String::from("json"),
 			Self::Sequence => String::from("seq <sequence>"),

@@ -35,6 +35,7 @@ pub enum TokenKind {
 	FalseKeyword,
 	FindKeyword,
 	FirstKeyword,
+	FloatKeyword,
 	FnKeyword,
 	ForKeyword,
 	ForwardSlash,

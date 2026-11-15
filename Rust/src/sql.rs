@@ -13,6 +13,7 @@ pub(crate) fn postgresql_type_name(data_type: &DataType) -> Option<&'static str>
 		DataType::Bool => Some("BOOLEAN"),
 		DataType::Date => Some("DATE"),
 		DataType::Dec => Some("NUMERIC"),
+		DataType::Float => Some("DOUBLE PRECISION"),
 		DataType::Int => Some("BIGINT"),
 		DataType::Text => Some("TEXT"),
 		DataType::Time => Some("TIME"),

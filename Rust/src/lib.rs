@@ -14,6 +14,7 @@ pub mod diagnostics;
 pub mod executable;
 #[cfg(feature = "compiler")]
 mod library;
+pub mod float;
 pub mod format_string;
 pub mod json;
 mod numeric;

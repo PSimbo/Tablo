@@ -514,6 +514,11 @@ impl VirtualMachine {
 				self.commit_transaction(instruction_index)?;
 				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::ConvertFloat => {
+				let value = self.stack.pop().ok_or_else(|| vm_error(instruction_index, "Missing float conversion operand.".into()))?;
+				self.stack.push(convert_native_float(value, instruction_index)?);
+				Ok(ExecutionOutcome::Continue(None))
+			}
 			Instruction::ConvertObject { object_type_id, private_types } => {
 				let Value::Json(value) = self.pop_value(instruction_index)? else {
 					return Err(vm_error(instruction_index, "Object conversion requires JSON.".into()));
@@ -837,6 +842,7 @@ impl VirtualMachine {
 				}
 
 				self.stack.push(Value::record_pointer(RecordBuffer {
+					float_widths: BTreeMap::new(),
 					column_names: field_names.clone(),
 					exists: true,
 					fields,
@@ -939,6 +945,14 @@ impl VirtualMachine {
 					enum_name: enum_name.clone(),
 					variant_name: variant_name.clone(),
 				}));
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::PushFloat(value) => {
+				self.stack.push(Value::Float(*value));
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::PushFloatLiteral(value) => {
+				self.stack.push(Value::Float(value.value));
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::PushJsonNumber(text) => {
@@ -1340,6 +1354,21 @@ impl VirtualMachine {
 		instruction_index: usize,
 	) -> Result<Option<Value>, VmError> {
 		match built_in {
+			BuiltInFunction::BoolCast
+			| BuiltInFunction::TextCast
+			=> match arguments.as_slice() {
+				[Value::Enum(value)] => Ok(Some((*value.backing_value).clone())),
+				[Value::Float(value)] if built_in == BuiltInFunction::TextCast => Ok(Some(Value::Text(value.to_string()))),
+				[Value::Json(value)] if built_in == BuiltInFunction::TextCast => Ok(Some(Value::Text(value.to_text()))),
+				[value] => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `{}` does not accept a `{}` value.", built_in.name(), type_name(value)),
+				)),
+				_ => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `{}` expects 1 argument(s), found {}.", built_in.name(), arguments.len()),
+				)),
+			},
 			BuiltInFunction::Contains => match arguments.as_slice() {
 				[Value::Text(value), Value::Text(substring)] => {
 					Ok(Some(Value::Boolean(value.contains(substring))))
@@ -1384,6 +1413,24 @@ impl VirtualMachine {
 					format!("Built-in function `countof` expects 2 argument(s), found {}.", arguments.len()),
 				)),
 			},
+			BuiltInFunction::DateCast => match arguments.as_slice() {
+				[Value::Enum(value)] => Ok(Some((*value.backing_value).clone())),
+				[Value::Text(value)] => {
+					let parsed = crate::value::Date::from_iso_text(value).map_err(|_| vm_error(
+						instruction_index,
+						format!("Built-in function `date` could not parse `{value}` as an ISO-8601 date."),
+					))?;
+					Ok(Some(Value::Date(parsed)))
+				}
+				[value] => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `date` does not accept a `{}` value.", type_name(value)),
+				)),
+				_ => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `date` expects 1 argument(s), found {}.", arguments.len()),
+				)),
+			},
 			BuiltInFunction::Day => match arguments.as_slice() {
 				[Value::Date(value)] => Ok(Some(Value::Integer(value.day as i64))),
 				[Value::Timestamp(value)] => Ok(Some(Value::Integer(value.date().day as i64))),
@@ -1396,6 +1443,18 @@ impl VirtualMachine {
 					instruction_index,
 					format!("Built-in function `day` expects 1 argument(s), found {}.", arguments.len()),
 				)),
+			},
+			BuiltInFunction::DecCast => {
+				let value = match arguments.as_slice() {
+					[Value::Enum(value)] => (*value.backing_value).clone(),
+					[Value::Float(value)] => Value::Decimal(value.to_decimal().map_err(|message| vm_error(instruction_index, message))?),
+					[Value::Integer(value)] => Value::Decimal(Decimal::from_integer(*value)),
+					[Value::Json(value)] => Value::Decimal(value.to_decimal().map_err(|message| vm_error(instruction_index, message))?),
+					[Value::Text(value)] => Value::Decimal(crate::numeric::ExactNumber::parse(value)
+						.and_then(|number| number.to_decimal()).map_err(|message| vm_error(instruction_index, message))?),
+					_ => return Err(vm_error(instruction_index, String::from("Built-in function `dec` requires one integer, text, decimal-backed enum, or JSON numeric argument."))),
+				};
+				Ok(Some(value))
 			},
 			BuiltInFunction::Disp => match arguments.as_slice() {
 				[Value::Text(value)] => {
@@ -1431,6 +1490,16 @@ impl VirtualMachine {
 				arguments.as_slice(),
 				instruction_index,
 			),
+			BuiltInFunction::FloatCast => {
+				let value = match arguments.as_slice() {
+					[Value::Json(value)] => value.to_float().map_err(|message| vm_error(instruction_index, message))?,
+					[Value::Decimal(value)] => crate::float::Float::parse(&value.to_string()).map_err(|message| vm_error(instruction_index, message))?,
+					[Value::Integer(value)] => crate::float::Float::from_integer(*value),
+					[Value::Text(value)] => crate::float::Float::parse(value).map_err(|message| vm_error(instruction_index, message))?,
+					_ => return Err(vm_error(instruction_index, "float requires an integer, decimal, text, or JSON number value.".into())),
+				};
+				Ok(Some(Value::Float(value)))
+			},
 			BuiltInFunction::Format => match arguments.as_slice() {
 				[Value::Date(value), Value::Text(pattern)] => {
 					let pattern = TemporalFormatPattern::parse(pattern, TemporalFormatTarget::Date)
@@ -1515,6 +1584,39 @@ impl VirtualMachine {
 					format!("Built-in function `indexof` expects 2 argument(s), found {}.", arguments.len()),
 				)),
 			},
+			BuiltInFunction::IntCast => match arguments.as_slice() {
+				[Value::Boolean(value)] => Ok(Some(Value::Integer(if *value { 1 } else { 0 }))),
+				[Value::Decimal(value)] => {
+					let whole = value.coefficient / 10_i128.pow(value.scale as u32);
+					let whole = i64::try_from(whole).map_err(|_| vm_error(instruction_index,
+						String::from("Decimal value exceeds the supported integer range after truncation.")))?;
+					Ok(Some(Value::Integer(whole)))
+				}
+				[Value::Enum(value)] => Ok(Some((*value.backing_value).clone())),
+				[Value::Float(value)] => value.to_integer().map(|value| Some(Value::Integer(value))).map_err(|message| vm_error(instruction_index, message)),
+				[Value::Json(value)] => value.to_integer().map(|value| Some(Value::Integer(value)))
+					.map_err(|message| vm_error(instruction_index, message)),
+				[Value::Text(value)] => {
+					let parsed = value.parse::<i64>().map_err(|_| vm_error(
+						instruction_index,
+						format!("Built-in function `int` could not parse `{value}` as an `int`."),
+					))?;
+					Ok(Some(Value::Integer(parsed)))
+				}
+				[value] => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `int` does not accept a `{}` value.", type_name(value)),
+				)),
+				_ => Err(vm_error(
+					instruction_index,
+					format!("Built-in function `int` expects 1 argument(s), found {}.", arguments.len()),
+				)),
+			},
+			BuiltInFunction::JsonCast => match arguments.as_slice() {
+				[value] => crate::json::JsonConversion::new(&[], &[]).export_document(value.clone())
+					.map(|value| Some(Value::Json(value))).map_err(|error| vm_error(instruction_index, error.to_string())),
+				_ => Err(vm_error(instruction_index, String::from("Built-in function `json` expects one argument."))),
+			},
 			BuiltInFunction::LastOf => group_boundary_built_in_value(
 				BuiltInFunction::LastOf,
 				arguments.as_slice(),
@@ -1573,6 +1675,10 @@ impl VirtualMachine {
 					format!("Built-in function `second` expects 1 argument(s), found {}.", arguments.len()),
 				)),
 			},
+			BuiltInFunction::SeqNext => Err(vm_error(
+				instruction_index,
+				String::from("Built-in function `seqnext` must be compiled into a sequence instruction before runtime."),
+			)),
 			BuiltInFunction::Split => match arguments.as_slice() {
 				[Value::Text(value), Value::Text(separator)] => {
 					if separator.is_empty() {
@@ -1620,85 +1726,6 @@ impl VirtualMachine {
 				_ => Err(vm_error(
 					instruction_index,
 					format!("Built-in function `year` expects 1 argument(s), found {}.", arguments.len()),
-				)),
-			},
-			BuiltInFunction::DecCast => {
-				let value = match arguments.as_slice() {
-					[Value::Integer(value)] => Value::Decimal(Decimal::from_integer(*value)),
-					[Value::Enum(value)] => (*value.backing_value).clone(),
-					[Value::Text(value)] => Value::Decimal(crate::numeric::ExactNumber::parse(value)
-						.and_then(|number| number.to_decimal()).map_err(|message| vm_error(instruction_index, message))?),
-					[Value::Json(value)] => Value::Decimal(value.to_decimal().map_err(|message| vm_error(instruction_index, message))?),
-					_ => return Err(vm_error(instruction_index, String::from("Built-in function `dec` requires one integer, text, decimal-backed enum, or JSON numeric argument."))),
-				};
-				Ok(Some(value))
-			}
-			BuiltInFunction::IntCast => match arguments.as_slice() {
-				[Value::Json(value)] => value.to_integer().map(|value| Some(Value::Integer(value)))
-					.map_err(|message| vm_error(instruction_index, message)),
-				[Value::Decimal(value)] => {
-					let whole = value.coefficient / 10_i128.pow(value.scale as u32);
-					let whole = i64::try_from(whole).map_err(|_| vm_error(instruction_index,
-						String::from("Decimal value exceeds the supported integer range after truncation.")))?;
-					Ok(Some(Value::Integer(whole)))
-				}
-				[Value::Boolean(value)] => Ok(Some(Value::Integer(if *value { 1 } else { 0 }))),
-				[Value::Enum(value)] => Ok(Some((*value.backing_value).clone())),
-				[Value::Text(value)] => {
-					let parsed = value.parse::<i64>().map_err(|_| vm_error(
-						instruction_index,
-						format!("Built-in function `int` could not parse `{value}` as an `int`."),
-					))?;
-					Ok(Some(Value::Integer(parsed)))
-				}
-				[value] => Err(vm_error(
-					instruction_index,
-					format!("Built-in function `int` does not accept a `{}` value.", type_name(value)),
-				)),
-				_ => Err(vm_error(
-					instruction_index,
-					format!("Built-in function `int` expects 1 argument(s), found {}.", arguments.len()),
-				)),
-			},
-			BuiltInFunction::DateCast => match arguments.as_slice() {
-				[Value::Enum(value)] => Ok(Some((*value.backing_value).clone())),
-				[Value::Text(value)] => {
-					let parsed = crate::value::Date::from_iso_text(value).map_err(|_| vm_error(
-						instruction_index,
-						format!("Built-in function `date` could not parse `{value}` as an ISO-8601 date."),
-					))?;
-					Ok(Some(Value::Date(parsed)))
-				}
-				[value] => Err(vm_error(
-					instruction_index,
-					format!("Built-in function `date` does not accept a `{}` value.", type_name(value)),
-				)),
-				_ => Err(vm_error(
-					instruction_index,
-					format!("Built-in function `date` expects 1 argument(s), found {}.", arguments.len()),
-				)),
-			},
-			BuiltInFunction::JsonCast => match arguments.as_slice() {
-				[value] => crate::json::JsonConversion::new(&[], &[]).export_document(value.clone())
-					.map(|value| Some(Value::Json(value))).map_err(|error| vm_error(instruction_index, error.to_string())),
-				_ => Err(vm_error(instruction_index, String::from("Built-in function `json` expects one argument."))),
-			},
-			BuiltInFunction::SeqNext => Err(vm_error(
-				instruction_index,
-				String::from("Built-in function `seqnext` must be compiled into a sequence instruction before runtime."),
-			)),
-			BuiltInFunction::TextCast
-			| BuiltInFunction::BoolCast
-			=> match arguments.as_slice() {
-				[Value::Json(value)] if built_in == BuiltInFunction::TextCast => Ok(Some(Value::Text(value.to_text()))),
-				[Value::Enum(value)] => Ok(Some((*value.backing_value).clone())),
-				[value] => Err(vm_error(
-					instruction_index,
-					format!("Built-in function `{}` does not accept a `{}` value.", built_in.name(), type_name(value)),
-				)),
-				_ => Err(vm_error(
-					instruction_index,
-					format!("Built-in function `{}` expects 1 argument(s), found {}.", built_in.name(), arguments.len()),
 				)),
 			},
 		}
@@ -1814,7 +1841,34 @@ impl CallFrame {
 	}
 }
 
+fn convert_native_float(value: Value, position: usize) -> Result<Value, VmError> {
+	match value {
+		Value::Array(values) => values.into_iter().map(|value| convert_native_float(value, position)).collect::<Result<Vec<_>, _>>().map(Value::Array),
+		Value::Float(_) | Value::Null => Ok(value),
+		Value::Integer(value) => Ok(Value::Float(crate::float::Float::from_integer(value))),
+		_ => Err(vm_error(position, "Implicit float conversion requires an integer.".into())),
+	}
+}
+
+fn float_operands(lhs: &Value, rhs: &Value, position: usize) -> Result<Option<(crate::float::NativeFloat, crate::float::NativeFloat)>, VmError> {
+	if !matches!(lhs, Value::Float(_)) && !matches!(rhs, Value::Float(_)) {
+		return Ok(None);
+	}
+
+	let operand = |value: &Value| match value {
+		Value::Float(value) => Ok(value.0),
+		Value::Integer(value) => Ok(crate::float::Float::from_integer(*value).0),
+		_ => Err(vm_error(position, "Floating-point arithmetic requires float or int operands.".into())),
+	};
+
+	Ok(Some((operand(lhs)?, operand(rhs)?)))
+}
+
 fn add_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
+	if !matches!(lhs, Value::Text(_)) && !matches!(rhs, Value::Text(_)) {
+		if let Some((left, right)) = float_operands(&lhs, &rhs, instruction_index)? { return Ok(Value::Float(crate::float::Float(left + right))); }
+	}
+
 	match (lhs, rhs) {
 		(Value::Array(mut lhs), Value::Array(rhs)) => {
 			lhs.extend(rhs);
@@ -1892,6 +1946,15 @@ fn compare_decimals(lhs: &Decimal, rhs: &Decimal, instruction_index: usize) -> R
 }
 
 fn compare_values(lhs: Value, rhs: Value, instruction_index: usize, kind: ComparisonKind) -> Result<Value, VmError> {
+	if let Some((left, right)) = float_operands(&lhs, &rhs, instruction_index)? {
+		return Ok(Value::Boolean(match kind {
+			ComparisonKind::GreaterThan => left > right,
+			ComparisonKind::GreaterThanOrEqual => left >= right,
+			ComparisonKind::LessThan => left < right,
+			ComparisonKind::LessThanOrEqual => left <= right,
+		}));
+	}
+
 	if matches!(lhs, Value::Enum(_)) || matches!(rhs, Value::Enum(_)) {
 		return Err(vm_error(
 			instruction_index,
@@ -2113,6 +2176,10 @@ fn debug_built_in_argument_order(
 }
 
 fn divide_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
+	if let Some((left, right)) = float_operands(&lhs, &rhs, instruction_index)? {
+		return Ok(Value::Float(crate::float::Float(left / right)));
+	}
+
 	match (lhs, rhs) {
 		(Value::Integer(lhs), Value::Integer(rhs)) => {
 			if rhs == 0 {
@@ -2213,7 +2280,9 @@ fn evaluate_debug_call(call: &crate::ast::CallExpr, frame: &WatchContext<'_>) ->
 
 		// Only the JSON overload of text accepts a container literal. Other
 		// watch calls retain their ordinary argument interpretation.
-		arguments.push(if built_in == BuiltInFunction::TextCast && expression.is_contextual_literal() {
+		arguments.push(if built_in == BuiltInFunction::FloatCast && expression.json_literal_number().is_some() {
+			Value::Text(expression.json_literal_number().unwrap())
+		} else if built_in == BuiltInFunction::TextCast && expression.is_contextual_literal() {
 			Value::Json(evaluate_debug_json_literal(expression, frame)?)
 		} else {
 			evaluate_debug_expression(expression, frame)?
@@ -2224,12 +2293,15 @@ fn evaluate_debug_call(call: &crate::ast::CallExpr, frame: &WatchContext<'_>) ->
 	let arguments = argument_order.into_iter()
 		.map(|argument_index| arguments[argument_index].clone())
 		.collect();
+
 	if built_in == BuiltInFunction::JsonCast {
 		let mut arguments: Vec<Value> = arguments;
 		return frame.conversion().export_document(arguments.remove(0)).map(Value::Json)
 			.map_err(|error| vm_error(call.position, error.to_string()));
 	}
+
 	let mut vm = VirtualMachine::new();
+
 	vm.run_built_in_function(built_in, arguments, call.position)?
 		.ok_or(vm_error(
 			call.position,
@@ -2278,6 +2350,39 @@ fn evaluate_debug_json_literal(expression: &Expr, frame: &WatchContext<'_>) -> R
 }
 
 #[cfg(feature = "compiler")]
+fn evaluate_debug_numeric_operand(expression: &Expr, other: &Value, frame: &WatchContext<'_>) -> Result<Value, VmError> {
+	if matches!(other, Value::Float(_)) {
+		if let Some(number) = expression.json_literal_number() {
+			return crate::float::Float::parse(&number).map(Value::Float).map_err(|message| vm_error(expression.position(), message));
+		}
+
+		if let Expr::Unary(unary) = expression {
+			if expression.can_adopt_float_context() {
+				return evaluate_debug_numeric_operand(&unary.operand, other, frame).map(negate_value);
+			}
+		}
+
+		if let Expr::Binary(binary) = expression {
+			if matches!(binary.operator, BinaryOperator::Add | BinaryOperator::Subtract | BinaryOperator::Multiply | BinaryOperator::Divide | BinaryOperator::Modulo) {
+				let left = evaluate_debug_numeric_operand(&binary.left, other, frame)?;
+				let right = evaluate_debug_numeric_operand(&binary.right, other, frame)?;
+
+				return match binary.operator {
+					BinaryOperator::Add => add_values(left, right, binary.position),
+					BinaryOperator::Subtract => subtract_values(left, right, binary.position),
+					BinaryOperator::Multiply => multiply_values(left, right, binary.position),
+					BinaryOperator::Divide => divide_values(left, right, binary.position),
+					BinaryOperator::Modulo => modulo_values(left, right, binary.position),
+					_ => unreachable!(),
+				};
+			}
+		}
+	}
+
+	evaluate_debug_expression(expression, frame)
+}
+
+#[cfg(feature = "compiler")]
 fn evaluate_debug_expression(expression: &Expr, frame: &WatchContext<'_>) -> Result<Value, VmError> {
 	match expression {
 		Expr::Array(array) => {
@@ -2294,8 +2399,15 @@ fn evaluate_debug_expression(expression: &Expr, frame: &WatchContext<'_>) -> Res
 			String::from("Watch expressions do not support assignment."),
 		)),
 		Expr::Binary(binary) => {
-			let lhs = evaluate_debug_expression(&binary.left, frame)?;
-			let rhs = evaluate_debug_expression(&binary.right, frame)?;
+			let (lhs, rhs) = if binary.left.can_adopt_float_context() && !binary.right.can_adopt_float_context() {
+				let rhs = evaluate_debug_expression(&binary.right, frame)?;
+				let lhs = evaluate_debug_numeric_operand(&binary.left, &rhs, frame)?;
+				(lhs, rhs)
+			} else {
+				let lhs = evaluate_debug_expression(&binary.left, frame)?;
+				let rhs = evaluate_debug_numeric_operand(&binary.right, &lhs, frame)?;
+				(lhs, rhs)
+			};
 
 			match binary.operator {
 				BinaryOperator::Add => add_values(lhs, rhs, binary.position),
@@ -2394,6 +2506,7 @@ fn evaluate_debug_expression(expression: &Expr, frame: &WatchContext<'_>) -> Res
 							format!("Unary `exists` requires a record pointer operand, found `{}`.", type_name(&value)),
 						));
 					};
+
 					Ok(Value::Boolean(record.buffer().exists))
 				}
 				UnaryOperator::Locked => {
@@ -2404,11 +2517,12 @@ fn evaluate_debug_expression(expression: &Expr, frame: &WatchContext<'_>) -> Res
 							format!("Unary `locked` requires a record pointer operand, found `{}`.", type_name(&value)),
 						));
 					};
+
 					Ok(Value::Boolean(record.buffer().locked))
 				}
 				UnaryOperator::Negate => {
 					let value = evaluate_debug_expression(&unary.operand, frame)?;
-					if !matches!(value, Value::Decimal(_) | Value::Integer(_)) {
+					if !matches!(value, Value::Decimal(_) | Value::Float(_) | Value::Integer(_)) {
 						return Err(vm_error(
 							unary.position,
 							format!("Expected a numeric operand, found a {} value.", type_name(&value)),
@@ -2886,6 +3000,10 @@ fn make_range_value(start: Value, step: Option<Value>, end: Value, instruction_i
 }
 
 fn modulo_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
+	if let Some((left, right)) = float_operands(&lhs, &rhs, instruction_index)? {
+		return Ok(Value::Float(crate::float::Float(left % right)));
+	}
+
 	match (lhs, rhs) {
 		(Value::Integer(lhs), Value::Integer(rhs)) => {
 			if rhs == 0 {
@@ -2902,6 +3020,10 @@ fn modulo_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Val
 }
 
 fn multiply_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
+	if let Some((left, right)) = float_operands(&lhs, &rhs, instruction_index)? {
+		return Ok(Value::Float(crate::float::Float(left * right)));
+	}
+
 	match (lhs, rhs) {
 		(Value::Integer(lhs), Value::Integer(rhs)) => Ok(Value::Integer(lhs.saturating_mul(rhs))),
 		(lhs, rhs) => {
@@ -2922,6 +3044,7 @@ fn negate_value(value: Value) -> Value {
 		}
 		Value::DecimalRange(_) => unreachable!("Range values are rejected before numeric negation."),
 		Value::Enum(_) => unreachable!("Enum values are rejected before numeric negation."),
+		Value::Float(value) => Value::Float(crate::float::Float(-value.0)),
 		Value::Integer(integer) => Value::Integer(integer.saturating_neg()),
 		Value::IntegerRange(_) => unreachable!("Range values are rejected before numeric negation."),
 		Value::Iterator(_) => unreachable!("Iterator values are rejected before numeric negation."),
@@ -3147,6 +3270,7 @@ fn stringify_value(value: &Value) -> String {
 		Value::Decimal(value) => value.to_string(),
 		Value::DecimalRange(value) => value.to_string(),
 		Value::Enum(value) => value.variant_name.clone(),
+		Value::Float(value) => value.to_string(),
 		Value::Integer(value) => value.to_string(),
 		Value::IntegerRange(value) => value.to_string(),
 		Value::Iterator(_) => String::from("<iterator>"),
@@ -3190,6 +3314,10 @@ fn stringify_value(value: &Value) -> String {
 }
 
 fn subtract_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<Value, VmError> {
+	if let Some((left, right)) = float_operands(&lhs, &rhs, instruction_index)? {
+		return Ok(Value::Float(crate::float::Float(left - right)));
+	}
+
 	match (lhs, rhs) {
 		(Value::Integer(lhs), Value::Integer(rhs)) => Ok(Value::Integer(lhs.saturating_sub(rhs))),
 		(lhs, rhs) => {
@@ -3207,6 +3335,7 @@ fn type_name(value: &Value) -> &'static str {
 		Value::Decimal(_) => "dec",
 		Value::DecimalRange(_) => "range",
 		Value::Enum(_) => "enum",
+		Value::Float(_) => "float",
 		Value::Integer(_) => "int",
 		Value::IntegerRange(_) => "range",
 		Value::Iterator(_) => "iterator",
@@ -3240,6 +3369,9 @@ fn values_equal(lhs: &Value, rhs: &Value, instruction_index: usize) -> Result<bo
 		}
 		(Value::Boolean(lhs), Value::Boolean(rhs)) => Ok(lhs == rhs),
 		(Value::Date(lhs), Value::Date(rhs)) => Ok(lhs == rhs),
+		(Value::Float(lhs), Value::Float(rhs)) => Ok(lhs.0 == rhs.0),
+		(Value::Float(lhs), Value::Integer(rhs)) => Ok(lhs.0 == crate::float::Float::from_integer(*rhs).0),
+		(Value::Integer(lhs), Value::Float(rhs)) => Ok(crate::float::Float::from_integer(*lhs).0 == rhs.0),
 		(Value::Decimal(lhs), Value::Decimal(rhs)) => {
 			Ok(compare_decimals(lhs, rhs, instruction_index)?.is_eq())
 		}
@@ -3361,6 +3493,7 @@ mod tests {
 					name: String::from("cust"),
 					slot: 0,
 					value: Value::record_pointer(RecordBuffer {
+						float_widths: BTreeMap::new(),
 						column_names: Vec::new(),
 						exists: true,
 						fields: BTreeMap::new(),
@@ -3440,6 +3573,7 @@ mod tests {
 					name: String::from("cust"),
 					slot: 0,
 					value: Value::record_pointer(RecordBuffer {
+						float_widths: BTreeMap::new(),
 						column_names: vec![String::from("Name")],
 						exists: true,
 						fields: BTreeMap::from([

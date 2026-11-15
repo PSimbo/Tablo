@@ -65,6 +65,7 @@ pub enum QueryLiteral {
 	Boolean(bool),
 	Date(Date),
 	Decimal(Decimal),
+	Float(String),
 	Integer(i64),
 	Text(String),
 	Time(Time),
