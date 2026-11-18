@@ -72,8 +72,6 @@ Object types in libraries, and object, record, or sequence types in public signa
 
 `--debug-info lines` is the default and keeps source locations without debugger local-variable records. `full` retains those records; `none` removes optional debug records. VS Code requests full debug information automatically. The former positional output argument and `--schema` option are no longer accepted; use `-o` and TOML configuration.
 
-Run the native integration tests explicitly with `cargo test --manifest-path Rust/Cargo.toml --test embedded_executable --test shared_executable -- --ignored`. They use offline Cargo builds and reuse `Rust/target/embedded-test-cache`. The shared-runtime test also requires `readelf` (from binutils).
-
 Object version compatibility
 ----------------------------
 
