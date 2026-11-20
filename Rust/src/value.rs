@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::Display;
 
 use crate::ast::{ DataType, RecordPointerType };
-use crate::bytecode::ObjectTypeId;
+use crate::bytecode::{ObjectTypeId, ObjectValueTypeDescriptor};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DatabaseValue {
@@ -57,6 +57,10 @@ pub enum Value {
 	Date(Date),
 	Decimal(Decimal),
 	DecimalRange(DecimalRange),
+	DynamicArray {
+		data_type: Box<ObjectValueTypeDescriptor>,
+		values: Vec<Value>,
+	},
 	Enum(EnumValue),
 	Float(crate::float::Float),
 	Integer(i64),
@@ -75,6 +79,17 @@ pub enum Value {
 }
 
 impl Value {
+	pub(crate) fn preserve_dynamic_type(self, ty: &ObjectValueTypeDescriptor) -> Self {
+		match (ty, self) {
+			(ObjectValueTypeDescriptor::Nullable(inner), value) => value.preserve_dynamic_type(inner),
+			(ObjectValueTypeDescriptor::Dec, Self::Integer(value)) => Self::Decimal(Decimal::from_integer(value)),
+			(ObjectValueTypeDescriptor::Array(_) | ObjectValueTypeDescriptor::Object(_), Self::Array(values)) => {
+				Self::DynamicArray { data_type: Box::new(ty.clone()), values }
+			}
+			(_, value) => value,
+		}
+	}
+
 	pub fn record_pointer(buffer: RecordBuffer) -> Self {
 		Self::RecordPointer(RecordPointerValue::new(buffer))
 	}
@@ -83,7 +98,7 @@ impl Value {
 impl Display for Value {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
-			Value::Array(values) => {
+			Value::Array(values) | Value::DynamicArray { values, .. } => {
 				write!(f, "[")?;
 
 				for (index, value) in values.iter().enumerate() {

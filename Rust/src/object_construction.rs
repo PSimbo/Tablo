@@ -205,7 +205,7 @@ impl<'a> ObjectConstructor<'a> {
 			(ObjectValueTypeDescriptor::Any, _) => true,
 			(ObjectValueTypeDescriptor::Nullable(_), Value::Null) => true,
 			(ObjectValueTypeDescriptor::Nullable(inner), value) => return self.validate(inner, value),
-			(ObjectValueTypeDescriptor::Array(inner), Value::Array(values)) => {
+			(ObjectValueTypeDescriptor::Array(inner), Value::Array(values) | Value::DynamicArray { values, .. }) => {
 				for (index, value) in values.iter().enumerate() {
 					self.validate(inner, value).map_err(|error| error.at(format!("[{}]", index + 1)))?;
 				}

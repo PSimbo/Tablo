@@ -146,9 +146,18 @@ impl DatabaseRuntime {
 	}
 
 	pub(crate) fn rollback_active_transactions(&mut self) -> Result<(), String> {
+		self.rollback_to_depth(0)
+	}
+
+	pub(crate) fn transaction_depth(&self) -> usize {
+		self.transactions.len()
+	}
+
+	pub(crate) fn rollback_to_depth(&mut self, depth: usize) -> Result<(), String> {
 		let mut first_error = None;
 
-		while let Some(transaction) = self.transactions.last().cloned() {
+		while self.transactions.len() > depth {
+			let transaction = self.transactions.last().expect("Active transaction");
 			let target_depth = self.transactions.len();
 
 			if let Some(database_name) = self.transaction_database_name() {

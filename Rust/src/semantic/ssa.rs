@@ -9,6 +9,7 @@ pub type SsaVersionId = usize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalDeclarationKind {
+	CatchBinding,
 	ForIterator,
 	ForRecordIterator,
 	IfRecordBinding,
@@ -55,8 +56,15 @@ pub enum SsaTerminator {
 		then_block: SsaBlockId,
 	},
 	End,
+	Fail {
+		handler: Option<SsaBlockId>,
+	},
 	Jump {
 		target: SsaBlockId,
+	},
+	MayFail {
+		handler: SsaBlockId,
+		normal: SsaBlockId,
 	},
 	Return {
 		position: usize,
@@ -87,6 +95,8 @@ impl FunctionLocalUsage {
 }
 
 struct FunctionSsaBuilder<'a> {
+	finalizers: Vec<SsaBlockId>,
+	handler: Option<SsaBlockId>,
 	blocks: Vec<PendingBlock>,
 	function: &'a FunctionDeclaration,
 	next_version_id: SsaVersionId,
@@ -108,6 +118,8 @@ impl<'a> FunctionSsaBuilder<'a> {
 
 	fn build(function: &'a FunctionDeclaration, semantic_program: &'a SemanticProgram) -> SsaFunction {
 		let mut builder = Self {
+			finalizers: Vec::new(),
+			handler: None,
 			blocks: vec![PendingBlock::default()],
 			function,
 			next_version_id: 0,
@@ -487,6 +499,7 @@ impl<'a> FunctionSsaBuilder<'a> {
 			&for_statement.body,
 			Some(body_block),
 			Some(LoopTargets {
+				finally_depth: self.finalizers.len(),
 				break_target: exit_block,
 				continue_target: loop_header,
 			}),
@@ -528,6 +541,7 @@ impl<'a> FunctionSsaBuilder<'a> {
 			&for_statement.body,
 			Some(body_block),
 			Some(LoopTargets {
+				finally_depth: self.finalizers.len(),
 				break_target: exit_block,
 				continue_target: loop_header,
 			}),
@@ -576,6 +590,10 @@ impl<'a> FunctionSsaBuilder<'a> {
 			Some(else_block)
 		};
 
+		self.join_exits(then_exit, else_exit)
+	}
+
+	fn join_exits(&mut self, then_exit: Option<SsaBlockId>, else_exit: Option<SsaBlockId>) -> Option<SsaBlockId> {
 		match (then_exit, else_exit) {
 			(None, None) => None,
 			(Some(block), None) | (None, Some(block)) => Some(block),
@@ -619,6 +637,7 @@ impl<'a> FunctionSsaBuilder<'a> {
 					return None;
 				};
 
+				let block_id = self.finalizer_edges(block_id, loop_targets.finally_depth);
 				self.blocks[block_id].terminator = Some(SsaTerminator::Jump {
 					target: loop_targets.break_target,
 				});
@@ -630,6 +649,7 @@ impl<'a> FunctionSsaBuilder<'a> {
 					return None;
 				};
 
+				let block_id = self.finalizer_edges(block_id, loop_targets.finally_depth);
 				self.blocks[block_id].terminator = Some(SsaTerminator::Jump {
 					target: loop_targets.continue_target,
 				});
@@ -655,6 +675,14 @@ impl<'a> FunctionSsaBuilder<'a> {
 				self.lower_expression(block_id, expression);
 				Some(block_id)
 			}
+			Statement::Fail { value, .. } => {
+				self.lower_expression(block_id, value);
+				self.blocks[block_id].terminator = Some(SsaTerminator::Fail { handler: self.handler });
+				if let Some(handler) = self.handler {
+					self.append_predecessor(handler, block_id);
+				}
+				None
+			}
 			Statement::For(for_statement) => self.lower_for_statement(block_id, for_statement),
 			Statement::ForRecord(for_statement) => self.lower_for_record_statement(block_id, for_statement),
 			Statement::FunctionDeclaration(_) => Some(block_id),
@@ -668,6 +696,7 @@ impl<'a> FunctionSsaBuilder<'a> {
 					self.lower_expression(block_id, value);
 				}
 
+				let block_id = self.finalizer_edges(block_id, 0);
 				self.blocks[block_id].terminator = Some(SsaTerminator::Return {
 					position: return_statement.position,
 				});
@@ -675,6 +704,67 @@ impl<'a> FunctionSsaBuilder<'a> {
 			}
 			Statement::Transaction(transaction_statement) => {
 				self.lower_block_statement(&transaction_statement.body, Some(block_id), loop_targets)
+			}
+			Statement::Try(statement) => {
+				let handler = self.ensure_block();
+				let outer_handler = self.handler.replace(handler);
+				let protected = self.split_for_failure(block_id, handler);
+				let cleanup = statement.finally.as_ref().map(|_| self.ensure_block());
+
+				if let Some(cleanup) = cleanup {
+					self.finalizers.push(cleanup);
+				}
+
+				let mut normal = self.lower_statement(&statement.body, Some(protected), loop_targets);
+				self.handler = cleanup.or(outer_handler);
+
+				let mut dispatch = Some(handler);
+
+				for clause in &statement.catches {
+					let entry = dispatch.take().expect("Bare catch must come last");
+					let arm = if let Some((name, _)) = &clause.binding {
+						let matched = self.ensure_block();
+						let next = self.ensure_block();
+
+						self.blocks[entry].terminator = Some(SsaTerminator::Branch {
+							then_block: matched, else_block: next, position: name.position,
+						});
+
+						self.append_predecessor(matched, entry);
+						self.append_predecessor(next, entry);
+						dispatch = Some(next);
+
+						if let Some(slot) = self.semantic_program.declaration_slot(name.position) {
+							self.push_write(matched, slot, name.position, SsaWriteKind::Declaration);
+						}
+
+						matched
+					} else {
+						entry
+					};
+
+					let handled = self.lower_statement(&clause.body, Some(arm), loop_targets);
+					normal = self.join_exits(normal, handled);
+				}
+
+				if let Some(unmatched) = dispatch {
+					self.blocks[unmatched].terminator = Some(SsaTerminator::Fail { handler: self.handler });
+					if let Some(handler) = self.handler {
+						self.append_predecessor(handler, unmatched);
+					}
+				}
+
+				self.handler = outer_handler;
+
+				if let (Some(arm), Some(cleanup)) = (&statement.finally, cleanup) {
+					self.finalizers.pop();
+					let entry = self.join_exits(normal, Some(cleanup));
+					let after = self.lower_statement(arm, entry, loop_targets);
+
+					return normal.and(after);
+				}
+
+				normal
 			}
 			Statement::Update(update) => {
 				if let Some(slot) = self.semantic_program.identifier_slot(update.target.position) {
@@ -699,6 +789,24 @@ impl<'a> FunctionSsaBuilder<'a> {
 		}
 	}
 
+	// The bytecode VM resumes a pending return or loop jump after cleanup.
+	// Record both reachable paths for local usage and query field analysis.
+	fn finalizer_edges(&mut self, mut block: SsaBlockId, depth: usize) -> SsaBlockId {
+		for index in (depth..self.finalizers.len()).rev() {
+			block = self.split_for_failure(block, self.finalizers[index]);
+		}
+
+		block
+	}
+
+	fn split_for_failure(&mut self, block: SsaBlockId, handler: SsaBlockId) -> SsaBlockId {
+		let normal = self.ensure_block();
+		self.blocks[block].terminator = Some(SsaTerminator::MayFail { normal, handler });
+		self.append_predecessor(normal, block);
+		self.append_predecessor(handler, block);
+		normal
+	}
+
 	fn lower_statement_list(
 		&mut self,
 		statements: &[Statement],
@@ -707,6 +815,10 @@ impl<'a> FunctionSsaBuilder<'a> {
 	) -> Option<SsaBlockId> {
 		for statement in statements {
 			current_block = self.lower_statement(statement, current_block, loop_targets);
+
+			if let (Some(block), Some(handler)) = (current_block, self.handler) {
+				current_block = Some(self.split_for_failure(block, handler));
+			}
 		}
 
 		current_block
@@ -734,6 +846,7 @@ impl<'a> FunctionSsaBuilder<'a> {
 			&while_statement.body,
 			Some(body_block),
 			Some(LoopTargets {
+				finally_depth: self.finalizers.len(),
 				break_target: exit_block,
 				continue_target: condition_block,
 			}),
@@ -798,6 +911,7 @@ impl LocalUsage {
 
 #[derive(Clone, Copy)]
 struct LoopTargets {
+	finally_depth: usize,
 	break_target: SsaBlockId,
 	continue_target: SsaBlockId,
 }
@@ -941,7 +1055,12 @@ pub(crate) fn reachable_read_positions(
 					pending_blocks.push(else_block);
 					pending_blocks.push(then_block);
 				}
+				SsaTerminator::Fail { handler } => pending_blocks.extend(handler),
 				SsaTerminator::Jump { target } => pending_blocks.push(target),
+				SsaTerminator::MayFail { normal, handler } => {
+					pending_blocks.push(normal);
+					pending_blocks.push(handler);
+				}
 				SsaTerminator::End | SsaTerminator::Return { .. } => {}
 			}
 		}
@@ -1147,6 +1266,11 @@ fn collect_statement_function_local_usage(
 				collect_statement_function_local_usage(statement, semantic_program, ssa_program, functions);
 			}
 		}
+		Statement::Try(statement) => {
+			for arm in statement.arms() {
+				collect_statement_function_local_usage(arm, semantic_program, ssa_program, functions);
+			}
+		}
 		Statement::While(while_statement) => {
 			for statement in &while_statement.body.statements {
 				collect_statement_function_local_usage(statement, semantic_program, ssa_program, functions);
@@ -1158,6 +1282,7 @@ fn collect_statement_function_local_usage(
 		| Statement::Delete(_)
 		| Statement::EnumDeclaration(_)
 		| Statement::Expression(_)
+		| Statement::Fail { .. }
 		| Statement::RecordPointerDeclaration(_)
 		| Statement::Return(_)
 		| Statement::Update(_)
@@ -1198,6 +1323,11 @@ fn collect_statement_function_ssa(statement: &Statement, semantic_program: &Sema
 				collect_statement_function_ssa(statement, semantic_program, functions);
 			}
 		}
+		Statement::Try(statement) => {
+			for arm in statement.arms() {
+				collect_statement_function_ssa(arm, semantic_program, functions);
+			}
+		}
 		Statement::While(while_statement) => {
 			for statement in &while_statement.body.statements {
 				collect_statement_function_ssa(statement, semantic_program, functions);
@@ -1209,6 +1339,7 @@ fn collect_statement_function_ssa(statement: &Statement, semantic_program: &Sema
 		| Statement::Delete(_)
 		| Statement::EnumDeclaration(_)
 		| Statement::Expression(_)
+		| Statement::Fail { .. }
 		| Statement::RecordPointerDeclaration(_)
 		| Statement::Return(_)
 		| Statement::Update(_)
@@ -1281,6 +1412,17 @@ fn collect_statement_local_declarations(
 		Statement::Transaction(transaction_statement) => {
 			collect_statement_list_local_declarations(&transaction_statement.body.statements, semantic_program, locals);
 		}
+		Statement::Try(statement) => {
+			for clause in &statement.catches {
+				if let Some((name, _)) = &clause.binding {
+					collect_identifier_declaration(name, LocalDeclarationKind::CatchBinding, semantic_program, locals);
+				}
+			}
+
+			for arm in statement.arms() {
+				collect_statement_local_declarations(arm, semantic_program, locals);
+			}
+		}
 		Statement::VariableDeclaration(declaration) => {
 			collect_variable_declaration(declaration, semantic_program, locals);
 		}
@@ -1293,6 +1435,7 @@ fn collect_statement_local_declarations(
 		| Statement::Delete(_)
 		| Statement::EnumDeclaration(_)
 		| Statement::Expression(_)
+		| Statement::Fail { .. }
 		| Statement::Return(_)
 		| Statement::Update(_)
 		| Statement::Use(_) => {}

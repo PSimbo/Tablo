@@ -214,6 +214,10 @@ pub enum Statement {
 	Delete(DeleteStatement),
 	EnumDeclaration(EnumDeclaration),
 	Expression(Expr),
+	Fail {
+		value: Expr,
+		position: usize,
+	},
 	For(ForStatement),
 	ForRecord(ForRecordStatement),
 	FunctionDeclaration(FunctionDeclaration),
@@ -221,6 +225,7 @@ pub enum Statement {
 	RecordPointerDeclaration(RecordPointerDeclaration),
 	Return(ReturnStatement),
 	Transaction(TransactionStatement),
+	Try(TryStatement),
 	Update(UpdateStatement),
 	Use(UseDeclaration),
 	VariableDeclaration(VariableDeclaration),
@@ -309,6 +314,12 @@ pub struct CallExpr {
 	pub arguments: Vec<CallArgument>,
 	pub callee: IdentifierExpr,
 	pub position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatchClause {
+	pub binding: Option<(IdentifierExpr, DataType)>,
+	pub body: Statement,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -684,6 +695,22 @@ pub struct TimestampTzLiteral {
 pub struct TransactionStatement {
 	pub body: BlockStatement,
 	pub position: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TryStatement {
+	pub body: Box<Statement>,
+	pub catches: Vec<CatchClause>,
+	pub finally: Option<Box<Statement>>,
+	pub position: usize,
+}
+
+impl TryStatement {
+	pub fn arms(&self) -> impl Iterator<Item = &Statement> {
+		std::iter::once(self.body.as_ref())
+			.chain(self.catches.iter().map(|clause| &clause.body))
+			.chain(self.finally.as_deref())
+	}
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

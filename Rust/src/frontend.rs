@@ -1426,6 +1426,13 @@ fn extend_function_source_indices_from_statement(
 				extend_function_source_indices_from_statement(statement, source_file_index, source_indices);
 			}
 		}
+		ast::Statement::Break(_) => {}
+		ast::Statement::Continue(_) => {}
+		ast::Statement::Create(_) => {}
+		ast::Statement::Delete(_) => {}
+		ast::Statement::EnumDeclaration(_) => {}
+		ast::Statement::Expression(_) => {}
+		ast::Statement::Fail { .. } => {}
 		ast::Statement::For(for_statement) => {
 			for statement in &for_statement.body.statements {
 				extend_function_source_indices_from_statement(statement, source_file_index, source_indices);
@@ -1448,27 +1455,26 @@ fn extend_function_source_indices_from_statement(
 				extend_function_source_indices_from_statement(else_branch, source_file_index, source_indices);
 			}
 		}
+		ast::Statement::RecordPointerDeclaration(_) => {}
+		ast::Statement::Return(_) => {}
 		ast::Statement::Transaction(transaction_statement) => {
 			for statement in &transaction_statement.body.statements {
 				extend_function_source_indices_from_statement(statement, source_file_index, source_indices);
 			}
 		}
+		ast::Statement::Try(statement) => {
+			for arm in statement.arms() {
+				extend_function_source_indices_from_statement(arm, source_file_index, source_indices);
+			}
+		}
+		ast::Statement::Update(_) => {}
+		ast::Statement::Use(_) => {}
 		ast::Statement::While(while_statement) => {
 			for statement in &while_statement.body.statements {
 				extend_function_source_indices_from_statement(statement, source_file_index, source_indices);
 			}
 		}
-		ast::Statement::Break(_)
-		| ast::Statement::Continue(_)
-		| ast::Statement::Create(_)
-		| ast::Statement::Delete(_)
-		| ast::Statement::EnumDeclaration(_)
-		| ast::Statement::Expression(_)
-		| ast::Statement::RecordPointerDeclaration(_)
-		| ast::Statement::Return(_)
-		| ast::Statement::Update(_)
-		| ast::Statement::Use(_)
-		| ast::Statement::VariableDeclaration(_) => {}
+		ast::Statement::VariableDeclaration(_) => {}
 	}
 }
 
@@ -1533,6 +1539,11 @@ fn first_use_in_non_top_level_blocks(statements: &[ast::Statement]) -> Option<us
 					return Some(position);
 				}
 			}
+			ast::Statement::Try(statement) => {
+				if let Some(position) = statement.arms().find_map(first_use_in_statement) {
+					return Some(position);
+				}
+			}
 			ast::Statement::While(while_statement) => {
 				if let Some(position) = first_use_in_statements(&while_statement.body.statements) {
 					return Some(position);
@@ -1556,6 +1567,7 @@ fn first_use_in_statement(statement: &ast::Statement) -> Option<usize> {
 			first_use_in_statements(&if_statement.then_branch.statements)
 				.or_else(|| if_statement.else_branch.as_ref().and_then(|else_branch| first_use_in_statement(else_branch)))
 		}
+		ast::Statement::Try(statement) => statement.arms().find_map(first_use_in_statement),
 		ast::Statement::While(while_statement) => first_use_in_statements(&while_statement.body.statements),
 		_ => None,
 	}
@@ -2026,7 +2038,7 @@ fn rewrite_statement_calls(
 				}
 			}
 		}
-		ast::Statement::Expression(expression) => {
+		ast::Statement::Expression(expression) | ast::Statement::Fail { value: expression, .. } => {
 			rewrite_expression_calls(expression, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 		}
 		ast::Statement::For(for_statement) => {
@@ -2080,6 +2092,19 @@ fn rewrite_statement_calls(
 		}
 		ast::Statement::Transaction(transaction_statement) => {
 			rewrite_statements_calls(&mut transaction_statement.body.statements, top_level_renames, import_bindings, object_renames, shadowed_function_names);
+		}
+		ast::Statement::Try(statement) => {
+			for clause in &mut statement.catches {
+				if let Some((_, ty)) = &mut clause.binding {
+					rewrite_data_type_object_names(ty, object_renames);
+				}
+			}
+
+			for arm in std::iter::once(statement.body.as_mut())
+				.chain(statement.catches.iter_mut().map(|clause| &mut clause.body))
+				.chain(statement.finally.as_deref_mut()) {
+				rewrite_statement_calls(arm, top_level_renames, import_bindings, object_renames, shadowed_function_names);
+			}
 		}
 		ast::Statement::VariableDeclaration(variable) => {
 			rewrite_data_type_object_names(&mut variable.data_type, object_renames);
@@ -6405,6 +6430,51 @@ mod tests {
 	}
 
 	#[test]
+	fn catches_failure_after_rolling_back_only_the_inner_transaction() {
+		let database_path = create_sqlite_test_database(
+			"catches_failure_after_rolling_back_only_the_inner_transaction",
+			"CREATE TABLE Items (Id INTEGER PRIMARY KEY);",
+		);
+		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
+			"with exampledb;
+			fn Insert(id: int) {
+				rec mut item = new Items;
+				item.Id = id;
+			}
+			fn Main(args: [text]): int {
+				transaction {
+					Insert(1);
+					try {
+						transaction { Insert(2); fail 3; }
+					} catch id: int {
+						Insert(id);
+					} finally {
+						Insert(5);
+					}
+				}
+				try {
+					rec mut abandoned = new Items;
+					abandoned.Id = 4;
+					fail 'discard';
+				} catch {}
+				return 0;
+			}",
+			"database ExampleDb; schema Main implicit; create table Items (Id int not null primary key);",
+			&[("ExampleDb", DatabaseBackend::Sqlite)],
+		).unwrap();
+		let config = RuntimeDatabaseConfig::new().with_sqlite_database("ExampleDb", &database_path);
+		assert_eq!(run_program_with_database_config(&program, config).unwrap(), Some(Value::Integer(0)));
+
+		let connection = Connection::open(&database_path).unwrap();
+		let ids: String = connection.query_row(
+			"SELECT group_concat(Id, ',') FROM (SELECT Id FROM Items ORDER BY Id)",
+			[], |row| row.get(0),
+		).unwrap();
+		assert_eq!(ids, "1,3,5");
+		let _ = fs::remove_file(database_path);
+	}
+
+	#[test]
 	fn rolls_back_auto_created_record_after_transaction_runtime_error() {
 		let database_path = create_sqlite_test_database(
 			"rolls_back_auto_created_record_after_transaction_runtime_error",
@@ -6416,7 +6486,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]): int {\n    transaction {\n        {\n            rec mut cust = new Customers;\n            cust.Id = 23;\n            cust.Name = 'Noor';\n        }\n        var fail: int = 1 / 0;\n    }\n    return 0;\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    transaction {\n        {\n            rec mut cust = new Customers;\n            cust.Id = 23;\n            cust.Name = 'Noor';\n        }\n        var quotient: int = 1 / 0;\n    }\n    return 0;\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -6455,7 +6525,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]): int {\n    transaction {\n        rec mut cust = find first Customers where Id == 33;\n        delete cust;\n        var fail: int = 1 / 0;\n    }\n    return 0;\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    transaction {\n        rec mut cust = find first Customers where Id == 33;\n        delete cust;\n        var quotient: int = 1 / 0;\n    }\n    return 0;\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;
@@ -6494,7 +6564,7 @@ mod tests {
 			"#,
 		);
 		let (program, _) = compile_standalone_with_schema_fixture_and_backends(
-			"with exampledb;\nfn Main(args: [text]): int {\n    transaction {\n        rec mut cust = find first Customers where Id == 9;\n        cust.Name = 'Noor';\n        update cust;\n        var fail: int = 1 / 0;\n    }\n    return 0;\n}",
+			"with exampledb;\nfn Main(args: [text]): int {\n    transaction {\n        rec mut cust = find first Customers where Id == 9;\n        cust.Name = 'Noor';\n        update cust;\n        var quotient: int = 1 / 0;\n    }\n    return 0;\n}",
 			r#"
 				database ExampleDb;
 				schema Main implicit;

@@ -29,6 +29,14 @@ TABLO_TEST_POSTGRES='host=/path/to/socket port=5432 user=test dbname=postgres ss
 TABLO_TEST_MYSQL='mysql://test@localhost/mysql?socket=%2Fpath%2Fto%2Fmysql.sock' cargo test --manifest-path Rust/Cargo.toml --test float_database mysql_float_widths_live -- --ignored
 ```
 
+To exercise the 32-bit drivers on Linux x86-64, install the i686 Rust target, 32-bit linker and libc, and matching i386 OpenSSL development files. With both test connection strings exported, run the same live tests under i686:
+
+```sh
+cargo test --manifest-path Rust/Cargo.toml --target i686-unknown-linux-gnu --test float_database -- --ignored
+```
+
+For a cross-build, point `I686_UNKNOWN_LINUX_GNU_OPENSSL_INCLUDE_DIR` and `I686_UNKNOWN_LINUX_GNU_OPENSSL_LIB_DIR` at the target headers and libraries if Cargo cannot locate them. The tests insert a binary64 `0.1` directly through SQL and verify that the runtime can update and delete that row after reading the value as a native float.
+
 Replace the example connection strings with those for your test servers. The MySQL socket path in the URL is percent-encoded.
 
 ## 32-bit float verification

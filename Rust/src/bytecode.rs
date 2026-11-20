@@ -28,7 +28,19 @@ pub enum Instruction {
 		sequence_name: String,
 	},
 	And,
+	BeginCatch {
+		first_local: u32,
+		clauses: Vec<CatchTarget>,
+	},
+	BeginFinally {
+		first_local: u32,
+		target: u32,
+	},
 	BeginTransaction,
+	BeginTry {
+		target: u32,
+		first_local: u32,
+	},
 	Call(u32, u32),
 	CallBuiltIn(BuiltInFunction, u32),
 	CommitTransaction,
@@ -38,11 +50,14 @@ pub enum Instruction {
 	CreateRecord,
 	CreateRecordIfPending,
 	DeleteRecord,
+	DiscardFinally,
 	Divide,
 	Dup2,
+	EndTry,
 	Equal,
 	ExecuteQuery(u32),
 	Exists,
+	Fail,
 	FieldPathExists(Vec<String>),
 	GreaterThan,
 	GreaterThanOrEqual,
@@ -90,6 +105,7 @@ pub enum Instruction {
 	NotEqual,
 	Or,
 	Pop,
+	PreserveDynamicType(ObjectValueTypeDescriptor),
 	PushBoolean(bool),
 	PushCurrentDate,
 	PushCurrentTime,
@@ -114,8 +130,10 @@ pub enum Instruction {
 	PushTimestamp(crate::value::Timestamp),
 	PushTimestampTz(crate::value::TimestampTz),
 	ReorderCallArguments(Vec<u32>),
+	ResumeFinally,
 	Return,
 	ReturnNoValue,
+	RunFinally,
 	StoreFieldPath(Vec<String>),
 	StoreIndex,
 	StoreJsonPath(Vec<JsonMutationPart>),
@@ -196,6 +214,12 @@ pub enum ObjectValueTypeDescriptor {
 	Timestamp,
 	TimestampTz,
 	Union(Vec<ObjectValueTypeDescriptor>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatchTarget {
+	pub binding: Option<(ObjectValueTypeDescriptor, u32)>,
+	pub target: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -340,6 +364,8 @@ impl ObjectTypeDescriptor {
 pub struct ObjectTypeId(pub(crate) u32);
 
 impl ObjectTypeId {
+	pub(crate) const RUNTIME_ERROR: Self = Self(u32::MAX);
+
 	pub(crate) const fn from_raw(value: u32) -> Self {
 		Self(value)
 	}

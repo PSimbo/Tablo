@@ -19,8 +19,11 @@ const MAGIC_BYTES: [u8; 4] = *b"TBO1";
 const OPCODE_ADD: u8 = 1;
 const OPCODE_ADVANCE_SEQUENCE: u8 = OPCODE_ADD + 1;
 const OPCODE_AND: u8 = OPCODE_ADVANCE_SEQUENCE + 1;
-const OPCODE_BEGIN_TRANSACTION: u8 = OPCODE_AND + 1;
-const OPCODE_CALL: u8 = OPCODE_BEGIN_TRANSACTION + 1;
+const OPCODE_BEGIN_CATCH: u8 = OPCODE_AND + 1;
+const OPCODE_BEGIN_FINALLY: u8 = OPCODE_BEGIN_CATCH + 1;
+const OPCODE_BEGIN_TRANSACTION: u8 = OPCODE_BEGIN_FINALLY + 1;
+const OPCODE_BEGIN_TRY: u8 = OPCODE_BEGIN_TRANSACTION + 1;
+const OPCODE_CALL: u8 = OPCODE_BEGIN_TRY + 1;
 const OPCODE_CALL_BUILT_IN: u8 = OPCODE_CALL + 1;
 const OPCODE_COMMIT_TRANSACTION: u8 = OPCODE_CALL_BUILT_IN + 1;
 const OPCODE_CONVERT_FLOAT: u8 = OPCODE_COMMIT_TRANSACTION + 1;
@@ -29,12 +32,15 @@ const OPCODE_CONVERT_OBJECT: u8 = OPCODE_CONVERT_JSON + 1;
 const OPCODE_CREATE_RECORD: u8 = OPCODE_CONVERT_OBJECT + 1;
 const OPCODE_CREATE_RECORD_IF_PENDING: u8 = OPCODE_CREATE_RECORD + 1;
 const OPCODE_DELETE_RECORD: u8 = OPCODE_CREATE_RECORD_IF_PENDING + 1;
-const OPCODE_DIVIDE: u8 = OPCODE_DELETE_RECORD + 1;
+const OPCODE_DISCARD_FINALLY: u8 = OPCODE_DELETE_RECORD + 1;
+const OPCODE_DIVIDE: u8 = OPCODE_DISCARD_FINALLY + 1;
 const OPCODE_DUP2: u8 = OPCODE_DIVIDE + 1;
-const OPCODE_EQUAL: u8 = OPCODE_DUP2 + 1;
+const OPCODE_END_TRY: u8 = OPCODE_DUP2 + 1;
+const OPCODE_EQUAL: u8 = OPCODE_END_TRY + 1;
 const OPCODE_EXECUTE_QUERY: u8 = OPCODE_EQUAL + 1;
 const OPCODE_EXISTS: u8 = OPCODE_EXECUTE_QUERY + 1;
-const OPCODE_FIELD_PATH_EXISTS: u8 = OPCODE_EXISTS + 1;
+const OPCODE_FAIL: u8 = OPCODE_EXISTS + 1;
+const OPCODE_FIELD_PATH_EXISTS: u8 = OPCODE_FAIL + 1;
 const OPCODE_GREATER_THAN: u8 = OPCODE_FIELD_PATH_EXISTS + 1;
 const OPCODE_GREATER_THAN_OR_EQUAL: u8 = OPCODE_GREATER_THAN + 1;
 const OPCODE_ITER_HAS_NEXT: u8 = OPCODE_GREATER_THAN_OR_EQUAL + 1;
@@ -68,7 +74,8 @@ const OPCODE_NOT: u8 = OPCODE_NEGATE + 1;
 const OPCODE_NOT_EQUAL: u8 = OPCODE_NOT + 1;
 const OPCODE_OR: u8 = OPCODE_NOT_EQUAL + 1;
 const OPCODE_POP: u8 = OPCODE_OR + 1;
-const OPCODE_PUSH_BOOLEAN: u8 = OPCODE_POP + 1;
+const OPCODE_PRESERVE_DYNAMIC_TYPE: u8 = OPCODE_POP + 1;
+const OPCODE_PUSH_BOOLEAN: u8 = OPCODE_PRESERVE_DYNAMIC_TYPE + 1;
 const OPCODE_PUSH_CURRENT_DATE: u8 = OPCODE_PUSH_BOOLEAN + 1;
 const OPCODE_PUSH_CURRENT_TIME: u8 = OPCODE_PUSH_CURRENT_DATE + 1;
 const OPCODE_PUSH_CURRENT_TIMESTAMP: u8 = OPCODE_PUSH_CURRENT_TIME + 1;
@@ -88,9 +95,11 @@ const OPCODE_PUSH_TIMESTAMP: u8 = OPCODE_PUSH_TIME + 1;
 const OPCODE_PUSH_TIMESTAMP_TZ: u8 = OPCODE_PUSH_TIMESTAMP + 1;
 const OPCODE_PUSH_TIME_TZ: u8 = OPCODE_PUSH_TIMESTAMP_TZ + 1;
 const OPCODE_REORDER_CALL_ARGUMENTS: u8 = OPCODE_PUSH_TIME_TZ + 1;
-const OPCODE_RETURN: u8 = OPCODE_REORDER_CALL_ARGUMENTS + 1;
+const OPCODE_RESUME_FINALLY: u8 = OPCODE_REORDER_CALL_ARGUMENTS + 1;
+const OPCODE_RETURN: u8 = OPCODE_RESUME_FINALLY + 1;
 const OPCODE_RETURN_NO_VALUE: u8 = OPCODE_RETURN + 1;
-const OPCODE_STORE_FIELD_PATH: u8 = OPCODE_RETURN_NO_VALUE + 1;
+const OPCODE_RUN_FINALLY: u8 = OPCODE_RETURN_NO_VALUE + 1;
+const OPCODE_STORE_FIELD_PATH: u8 = OPCODE_RUN_FINALLY + 1;
 const OPCODE_STORE_INDEX: u8 = OPCODE_STORE_FIELD_PATH + 1;
 const OPCODE_STORE_JSON_PATH: u8 = OPCODE_STORE_INDEX + 1;
 const OPCODE_STORE_LOCAL: u8 = OPCODE_STORE_JSON_PATH + 1;
@@ -294,6 +303,16 @@ impl ObjectFileLayout {
 		let mut functions = Vec::new();
 
 		for section in sections {
+			let body = match &section {
+				ObjectFileSection::EntryCode(body) => Some(body),
+				ObjectFileSection::Function(function) => Some(function.body()),
+				ObjectFileSection::EntryFunction(_) => None,
+			};
+
+			if let Some(body) = body {
+				validate_handler_instructions(body, &object_ids)?;
+			}
+
 			match section {
 				ObjectFileSection::EntryFunction(function_index) => {
 					if entry_code.is_some() || entry_function.is_some() {
@@ -750,7 +769,33 @@ impl<'a> ObjectFileReader<'a> {
 				sequence_name: self.read_string()?,
 			}),
 			OPCODE_AND => Ok(Instruction::And),
+			OPCODE_BEGIN_CATCH => {
+				let first_local = self.read_u32()?;
+				let count = self.read_u32()?;
+				let mut clauses = Vec::new();
+
+				for _ in 0..count {
+					let target = self.read_u32()?;
+					let binding = if self.read_bool()? {
+						Some((self.read_object_value_type_descriptor()?, self.read_u32()?))
+					} else {
+						None
+					};
+
+					clauses.push(CatchTarget { target, binding });
+				}
+
+				Ok(Instruction::BeginCatch { first_local, clauses })
+			}
+			OPCODE_BEGIN_FINALLY => Ok(Instruction::BeginFinally {
+				first_local: self.read_u32()?,
+				target: self.read_u32()?,
+			}),
 			OPCODE_BEGIN_TRANSACTION => Ok(Instruction::BeginTransaction),
+			OPCODE_BEGIN_TRY => Ok(Instruction::BeginTry {
+				target: self.read_u32()?,
+				first_local: self.read_u32()?,
+			}),
 			OPCODE_CALL => Ok(Instruction::Call(self.read_u32()?, self.read_u32()?)),
 			OPCODE_CALL_BUILT_IN => {
 				let built_in_id = self.read_u8()?;
@@ -774,11 +819,14 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_CREATE_RECORD => Ok(Instruction::CreateRecord),
 			OPCODE_CREATE_RECORD_IF_PENDING => Ok(Instruction::CreateRecordIfPending),
 			OPCODE_DELETE_RECORD => Ok(Instruction::DeleteRecord),
+			OPCODE_DISCARD_FINALLY => Ok(Instruction::DiscardFinally),
 			OPCODE_DIVIDE => Ok(Instruction::Divide),
 			OPCODE_DUP2 => Ok(Instruction::Dup2),
+			OPCODE_END_TRY => Ok(Instruction::EndTry),
 			OPCODE_EQUAL => Ok(Instruction::Equal),
 			OPCODE_EXECUTE_QUERY => Ok(Instruction::ExecuteQuery(self.read_u32()?)),
 			OPCODE_EXISTS => Ok(Instruction::Exists),
+			OPCODE_FAIL => Ok(Instruction::Fail),
 			OPCODE_FIELD_PATH_EXISTS => Ok(Instruction::FieldPathExists(self.read_string_vec()?)),
 			OPCODE_GREATER_THAN => Ok(Instruction::GreaterThan),
 			OPCODE_GREATER_THAN_OR_EQUAL => Ok(Instruction::GreaterThanOrEqual),
@@ -849,6 +897,7 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_NOT_EQUAL => Ok(Instruction::NotEqual),
 			OPCODE_OR => Ok(Instruction::Or),
 			OPCODE_POP => Ok(Instruction::Pop),
+			OPCODE_PRESERVE_DYNAMIC_TYPE => Ok(Instruction::PreserveDynamicType(self.read_object_value_type_descriptor()?)),
 			OPCODE_PUSH_BOOLEAN => Ok(Instruction::PushBoolean(self.read_bool()?)),
 			OPCODE_PUSH_CURRENT_DATE => Ok(Instruction::PushCurrentDate),
 			OPCODE_PUSH_CURRENT_TIME => Ok(Instruction::PushCurrentTime),
@@ -901,8 +950,10 @@ impl<'a> ObjectFileReader<'a> {
 
 				Ok(Instruction::ReorderCallArguments(argument_order))
 			}
+			OPCODE_RESUME_FINALLY => Ok(Instruction::ResumeFinally),
 			OPCODE_RETURN => Ok(Instruction::Return),
 			OPCODE_RETURN_NO_VALUE => Ok(Instruction::ReturnNoValue),
+			OPCODE_RUN_FINALLY => Ok(Instruction::RunFinally),
 			OPCODE_STORE_FIELD_PATH => Ok(Instruction::StoreFieldPath(self.read_string_vec()?)),
 			OPCODE_STORE_INDEX => Ok(Instruction::StoreIndex),
 			OPCODE_STORE_JSON_PATH => {
@@ -1399,6 +1450,41 @@ fn validate_object_default_references(
 	Ok(())
 }
 
+fn validate_handler_instructions(body: &CodeBody, ids: &BTreeSet<ObjectTypeId>) -> Result<(), ObjectFileError> {
+	let validate_target = |target: u32| {
+		if target as usize <= body.instructions.len() {
+			Ok(())
+		} else {
+			Err(ObjectFileError { offset: 0, message: format!("Handler target {target} is outside its code body.") })
+		}
+	};
+
+	for instruction in &body.instructions {
+		match instruction {
+			Instruction::BeginCatch { clauses, first_local } => {
+				for (index, clause) in clauses.iter().enumerate() {
+					validate_target(clause.target)?;
+
+					if let Some((ty, slot)) = &clause.binding {
+						validate_object_value_type_references(ty, ids)?;
+
+						if slot < first_local {
+							return Err(ObjectFileError { offset: 0, message: "Catch binding overlaps an enclosing local.".into() });
+						}
+					} else if index + 1 != clauses.len() {
+						return Err(ObjectFileError { offset: 0, message: "Unconditional catch must be last.".into() });
+					}
+				}
+			}
+			Instruction::BeginFinally { target, .. } => validate_target(*target)?,
+			Instruction::PreserveDynamicType(ty) => validate_object_value_type_references(ty, ids)?,
+			_ => {}
+		}
+	}
+
+	Ok(())
+}
+
 fn validate_object_type_descriptors(object_types: &[ObjectTypeDescriptor]) -> Result<(), ObjectFileError> {
 	let mut object_type_ids = BTreeSet::new();
 
@@ -1555,7 +1641,32 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.extend_from_slice(sequence_name.as_bytes());
 		}
 		Instruction::And => bytes.push(OPCODE_AND),
+		Instruction::BeginCatch { first_local, clauses } => {
+			bytes.push(OPCODE_BEGIN_CATCH);
+			bytes.extend_from_slice(&first_local.to_le_bytes());
+			bytes.extend_from_slice(&(clauses.len() as u32).to_le_bytes());
+
+			for clause in clauses {
+				bytes.extend_from_slice(&clause.target.to_le_bytes());
+				bytes.push(u8::from(clause.binding.is_some()));
+
+				if let Some((ty, slot)) = &clause.binding {
+					write_object_value_type_descriptor(bytes, ty);
+					bytes.extend_from_slice(&slot.to_le_bytes());
+				}
+			}
+		}
+		Instruction::BeginFinally { first_local, target } => {
+			bytes.push(OPCODE_BEGIN_FINALLY);
+			bytes.extend_from_slice(&first_local.to_le_bytes());
+			bytes.extend_from_slice(&target.to_le_bytes());
+		}
 		Instruction::BeginTransaction => bytes.push(OPCODE_BEGIN_TRANSACTION),
+		Instruction::BeginTry { target, first_local } => {
+			bytes.push(OPCODE_BEGIN_TRY);
+			bytes.extend_from_slice(&target.to_le_bytes());
+			bytes.extend_from_slice(&first_local.to_le_bytes());
+		}
 		Instruction::Call(function_index, argument_count) => {
 			bytes.push(OPCODE_CALL);
 			bytes.extend_from_slice(&function_index.to_le_bytes());
@@ -1578,14 +1689,17 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 		Instruction::CreateRecord => bytes.push(OPCODE_CREATE_RECORD),
 		Instruction::CreateRecordIfPending => bytes.push(OPCODE_CREATE_RECORD_IF_PENDING),
 		Instruction::DeleteRecord => bytes.push(OPCODE_DELETE_RECORD),
+		Instruction::DiscardFinally => bytes.push(OPCODE_DISCARD_FINALLY),
 		Instruction::Divide => bytes.push(OPCODE_DIVIDE),
 		Instruction::Dup2 => bytes.push(OPCODE_DUP2),
+		Instruction::EndTry => bytes.push(OPCODE_END_TRY),
 		Instruction::Equal => bytes.push(OPCODE_EQUAL),
 		Instruction::ExecuteQuery(query_index) => {
 			bytes.push(OPCODE_EXECUTE_QUERY);
 			bytes.extend_from_slice(&query_index.to_le_bytes());
 		}
 		Instruction::Exists => bytes.push(OPCODE_EXISTS),
+		Instruction::Fail => bytes.push(OPCODE_FAIL),
 		Instruction::FieldPathExists(field_path) => {
 			bytes.push(OPCODE_FIELD_PATH_EXISTS);
 			bytes.extend_from_slice(&(field_path.len() as u32).to_le_bytes());
@@ -1710,6 +1824,10 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 		Instruction::NotEqual => bytes.push(OPCODE_NOT_EQUAL),
 		Instruction::Or => bytes.push(OPCODE_OR),
 		Instruction::Pop => bytes.push(OPCODE_POP),
+		Instruction::PreserveDynamicType(ty) => {
+			bytes.push(OPCODE_PRESERVE_DYNAMIC_TYPE);
+			write_object_value_type_descriptor(bytes, ty);
+		}
 		Instruction::PushBoolean(value) => {
 			bytes.push(OPCODE_PUSH_BOOLEAN);
 			bytes.push(u8::from(*value));
@@ -1798,8 +1916,10 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 				bytes.extend_from_slice(&argument_index.to_le_bytes());
 			}
 		}
+		Instruction::ResumeFinally => bytes.push(OPCODE_RESUME_FINALLY),
 		Instruction::Return => bytes.push(OPCODE_RETURN),
 		Instruction::ReturnNoValue => bytes.push(OPCODE_RETURN_NO_VALUE),
+		Instruction::RunFinally => bytes.push(OPCODE_RUN_FINALLY),
 		Instruction::StoreFieldPath(field_path) => {
 			bytes.push(OPCODE_STORE_FIELD_PATH);
 			bytes.extend_from_slice(&(field_path.len() as u32).to_le_bytes());

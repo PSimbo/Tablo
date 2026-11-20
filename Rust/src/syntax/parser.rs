@@ -2095,6 +2095,14 @@ impl Parser {
 			Some(token) if token.kind == TokenKind::LeftBrace => self.parse_block_statement(),
 			Some(token) if token.kind == TokenKind::RecKeyword => self.parse_record_pointer_declaration_statement(),
 			Some(token) if token.kind == TokenKind::ReturnKeyword => self.parse_return_statement(),
+			Some(token) if token.kind == TokenKind::FailKeyword => {
+				let position = token.start;
+				self.next();
+				let value = self.parse_assignment_expression()?;
+				self.expect_token(TokenKind::Semicolon, "Expected `;` after failure value.")?;
+				Ok(Statement::Fail { value, position })
+			}
+			Some(token) if token.kind == TokenKind::TryKeyword => self.parse_try_statement(),
 			Some(token) if token.kind == TokenKind::TransactionKeyword => self.parse_transaction_statement(),
 			Some(token) if token.kind == TokenKind::UpdateKeyword => self.parse_update_statement(),
 			Some(token) if token.kind == TokenKind::UseKeyword => Ok(Statement::Use(self.parse_use_declaration()?)),
@@ -2246,6 +2254,43 @@ impl Parser {
 			position: token.start,
 			value: token.lexeme,
 		})
+	}
+
+	fn parse_try_statement(&mut self) -> Result<Statement, ParseError> {
+		let position = self.expect_token(TokenKind::TryKeyword, "Expected `try`.")?.start;
+		let body = Box::new(self.parse_block_statement()?);
+		let mut catches = Vec::<CatchClause>::new();
+
+		while self.current().is_some_and(|token| token.kind == TokenKind::CatchKeyword) {
+			let start = self.next().unwrap().start;
+
+			if catches.last().is_some_and(|clause| clause.binding.is_none()) {
+				return Err(ParseError { message: "A bare `catch` must be the last handler.".into(), position: start });
+			}
+
+			let binding = if self.current().is_some_and(|token| token.kind == TokenKind::LeftBrace) {
+				None
+			} else {
+				let name = self.expect_token(TokenKind::Identifier, "Expected a catch binding name or `{`.")?;
+				self.expect_token(TokenKind::Colon, "Expected `:` and a type after the catch binding name.")?;
+				Some((IdentifierExpr { name: name.lexeme, position: name.start }, self.parse_data_type()?))
+			};
+
+			catches.push(CatchClause { binding, body: self.parse_block_statement()? });
+		}
+
+		let finally = if self.current().is_some_and(|token| token.kind == TokenKind::FinallyKeyword) {
+			self.next();
+			Some(Box::new(self.parse_block_statement()?))
+		} else {
+			None
+		};
+
+		if catches.is_empty() && finally.is_none() {
+			return Err(ParseError { message: "Expected `catch` or `finally` after `try` block.".into(), position });
+		}
+
+		Ok(Statement::Try(TryStatement { body, catches, finally, position }))
 	}
 
 	fn parse_transaction_statement(&mut self) -> Result<Statement, ParseError> {
@@ -2860,6 +2905,7 @@ mod tests {
 				Statement::EnumDeclaration(normalize_enum_declaration(declaration))
 			}
 			Statement::Expression(expression) => Statement::Expression(normalize_expr(expression)),
+			Statement::Fail { value, .. } => Statement::Fail { value: normalize_expr(value), position: 0 },
 			Statement::For(for_statement) => Statement::For(normalize_for_statement(for_statement)),
 			Statement::ForRecord(for_statement) => Statement::ForRecord(normalize_for_record_statement(for_statement)),
 			Statement::FunctionDeclaration(function) => {
@@ -2872,6 +2918,15 @@ mod tests {
 			Statement::Return(return_statement) => Statement::Return(normalize_return_statement(return_statement)),
 			Statement::Transaction(transaction_statement) => Statement::Transaction(TransactionStatement {
 				body: normalize_block(transaction_statement.body),
+				position: 0,
+			}),
+			Statement::Try(statement) => Statement::Try(TryStatement {
+				body: Box::new(normalize_statement(*statement.body)),
+				catches: statement.catches.into_iter().map(|clause| CatchClause {
+					binding: clause.binding.map(|(name, ty)| (normalize_identifier(name), ty)),
+					body: normalize_statement(clause.body),
+				}).collect(),
+				finally: statement.finally.map(|arm| Box::new(normalize_statement(*arm))),
 				position: 0,
 			}),
 			Statement::Update(update_statement) => Statement::Update(UpdateStatement {

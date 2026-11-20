@@ -7,6 +7,13 @@ use crate::bytecode::*;
 use crate::schema::SchemaCatalog;
 use crate::semantic::analyzer::*;
 
+#[derive(Clone, Copy)]
+enum TryExit {
+	DiscardFinally,
+	EndCatch,
+	RunFinally,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompileError {
 	pub message: String,
@@ -27,6 +34,7 @@ struct EmissionState {
 	locals: Vec<LocalVariableDebugInfo>,
 	positions: Vec<u32>,
 	transaction_scope_stack: Vec<PendingTransactionCleanup>,
+	try_scopes: Vec<TryScope>,
 }
 
 #[derive(Default)]
@@ -37,6 +45,7 @@ struct LoopContext {
 	iteration_record_cleanup: Option<RecordPointerCleanup>,
 	loop_start: u32,
 	transaction_scope_depth: usize,
+	try_depth: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -48,6 +57,13 @@ struct PendingTransactionCleanup {
 struct RecordPointerCleanup {
 	position: usize,
 	slot: u32,
+}
+
+#[derive(Clone, Copy)]
+struct TryScope {
+	exit: TryExit,
+	record_depth: usize,
+	transaction_depth: usize,
 }
 
 impl AssignmentOperator {
@@ -303,6 +319,10 @@ impl Compiler {
 
 		if let Some(target) = semantic_program.json_conversion(expression.position()) {
 			self.emit(emission, Instruction::ConvertJson(target.clone()), debug_position.unwrap_or(expression.position()));
+		}
+
+		if let Some(ty) = semantic_program.dynamic_types.get(&expression.position()) {
+			self.emit(emission, Instruction::PreserveDynamicType(ty.clone()), expression.position());
 		}
 	}
 
@@ -624,10 +644,8 @@ impl Compiler {
 			Expr::FieldAccess(FieldAccessExpr { field, object, is_quoted, .. }) => {
 				if let Some(enum_value) = semantic_program.enum_variant_value(expression.position()) {
 					let EnumValue::Constant(backing_value) = enum_value;
-					let enum_name = match object.as_ref() {
-						Expr::Identifier(identifier) => identifier.name.clone(),
-						_ => panic!("Enum variant access must be rooted at an enum identifier."),
-					};
+					let enum_name = semantic_program.enum_runtime_names[&expression.position()].clone();
+
 					self.emit(emission, Instruction::PushEnumValue {
 						backing_value: backing_value.clone(),
 						enum_name,
@@ -910,18 +928,21 @@ impl Compiler {
 						String::from("`break` may only be used inside a `while` or `for` loop."),
 					));
 				};
+
 				let cleanup_scope_depth = loop_context.cleanup_scope_depth;
 				let iteration_record_cleanup = loop_context.iteration_record_cleanup.clone();
 				let transaction_scope_depth = loop_context.transaction_scope_depth;
-				self.emit_record_cleanups_from(emission, cleanup_scope_depth, *position);
-				if let Some(cleanup) = &iteration_record_cleanup {
-					self.emit_record_cleanup(emission, cleanup, *position);
-				}
-				self.emit_transaction_commits_from(emission, transaction_scope_depth, *position);
+				let try_depth = loop_context.try_depth;
+
+				self.emit_exit_cleanups(emission, cleanup_scope_depth, transaction_scope_depth,
+					try_depth, iteration_record_cleanup.as_ref(), *position);
+
 				let loop_context = self.loop_stack.last_mut()
 					.expect("Loop context must still exist while compiling `break`.");
+
 				loop_context.break_jump_indices.push(emission.instructions.len());
 				self.emit(emission, Instruction::Jump(0), *position);
+
 				Ok(())
 			}
 			Statement::Continue(ContinueStatement { position }) => {
@@ -931,18 +952,21 @@ impl Compiler {
 						String::from("`continue` may only be used inside a `while` or `for` loop."),
 					));
 				};
+
 				let cleanup_scope_depth = loop_context.cleanup_scope_depth;
 				let iteration_record_cleanup = loop_context.iteration_record_cleanup.clone();
 				let transaction_scope_depth = loop_context.transaction_scope_depth;
-				self.emit_record_cleanups_from(emission, cleanup_scope_depth, *position);
-				if let Some(cleanup) = &iteration_record_cleanup {
-					self.emit_record_cleanup(emission, cleanup, *position);
-				}
-				self.emit_transaction_commits_from(emission, transaction_scope_depth, *position);
+				let try_depth = loop_context.try_depth;
+
+				self.emit_exit_cleanups(emission, cleanup_scope_depth, transaction_scope_depth,
+					try_depth, iteration_record_cleanup.as_ref(), *position);
+
 				let loop_context = self.loop_stack.last_mut()
 					.expect("Loop context must still exist while compiling `continue`.");
+
 				loop_context.continue_jump_indices.push(emission.instructions.len());
 				self.emit(emission, Instruction::Jump(0), *position);
+
 				Ok(())
 			}
 			Statement::Create(CreateStatement { position, target }) => {
@@ -975,6 +999,12 @@ impl Compiler {
 
 				Ok(())
 			}
+			Statement::Fail { value, position } => {
+				self.compile_into(value, semantic_program, emission);
+				self.emit(emission, Instruction::Fail, *position);
+
+				Ok(())
+			}
 			Statement::For(ForStatement {
 				body,
 				iterable,
@@ -1003,6 +1033,7 @@ impl Compiler {
 					iteration_record_cleanup: None,
 					loop_start,
 					transaction_scope_depth: emission.transaction_scope_stack.len(),
+					try_depth: emission.try_scopes.len(),
 				});
 
 				self.emit(emission, Instruction::LoadLocal(iterator_slot), *position);
@@ -1014,10 +1045,12 @@ impl Compiler {
 				self.emit(emission, Instruction::IterNext, iterable.position());
 				self.emit(emission, Instruction::StoreLocal(iterator_slot), *position);
 				self.emit(emission, Instruction::StoreLocal(variable_slot), variable.position);
+
 				let variable_type = semantic_program.declaration_type(variable.position).ok_or(self.compile_error(
 					variable.position,
 					format!("Missing declared type for loop variable `{}`.", variable.name),
 				))?;
+
 				self.record_local_debug(
 					emission,
 					variable.name.clone(),
@@ -1096,6 +1129,7 @@ impl Compiler {
 					}),
 					loop_start,
 					transaction_scope_depth: emission.transaction_scope_stack.len(),
+					try_depth: emission.try_scopes.len(),
 				});
 
 				self.emit(emission, Instruction::LoadLocal(iterator_slot), *position);
@@ -1107,10 +1141,12 @@ impl Compiler {
 				self.emit(emission, Instruction::IterNext, *position);
 				self.emit(emission, Instruction::StoreLocal(iterator_slot), *position);
 				self.emit(emission, Instruction::StoreLocal(variable_slot), variable.position);
+
 				let variable_type = semantic_program.declaration_type(variable.position).ok_or(self.compile_error(
 					variable.position,
 					format!("Missing declared type for record loop variable `{}`.", variable.name),
 				))?;
+
 				self.record_local_debug(
 					emission,
 					variable.name.clone(),
@@ -1241,13 +1277,11 @@ impl Compiler {
 			Statement::Return(ReturnStatement { value, .. }) => {
 				if let Some(value) = value {
 					self.compile_into(value, semantic_program, emission);
-					self.emit_all_record_cleanups(emission, value.position());
-					self.emit_all_transaction_commits(emission, value.position());
+					self.emit_exit_cleanups(emission, 0, 0, 0, None, value.position());
 					self.emit(emission, Instruction::Return, value.position());
 				}
 				else {
-					self.emit_all_record_cleanups(emission, statement_position(statement));
-					self.emit_all_transaction_commits(emission, statement_position(statement));
+					self.emit_exit_cleanups(emission, 0, 0, 0, None, statement_position(statement));
 					self.emit(emission, Instruction::ReturnNoValue, statement_position(statement));
 				}
 
@@ -1264,6 +1298,7 @@ impl Compiler {
 				self.emit(emission, Instruction::CommitTransaction, transaction.position);
 				Ok(())
 			}
+			Statement::Try(statement) => self.compile_try(statement, semantic_program, emission),
 			Statement::Update(UpdateStatement { position, target }) => {
 				let slot = semantic_program.identifier_slot(target.position).ok_or(self.compile_error(
 					target.position,
@@ -1318,6 +1353,7 @@ impl Compiler {
 				..
 			}) => {
 				let loop_start = emission.instructions.len() as u32;
+
 				self.loop_stack.push(LoopContext {
 					break_jump_indices: Vec::new(),
 					cleanup_scope_depth: emission.cleanup_scope_stack.len(),
@@ -1325,7 +1361,9 @@ impl Compiler {
 					iteration_record_cleanup: None,
 					loop_start,
 					transaction_scope_depth: emission.transaction_scope_stack.len(),
+					try_depth: emission.try_scopes.len(),
 				});
+
 				self.compile_into(condition, semantic_program, emission);
 				let jump_if_false_index = emission.instructions.len();
 				self.emit(emission, Instruction::JumpIfFalse(0), condition.position());
@@ -1355,14 +1393,6 @@ impl Compiler {
 	fn emit(&self, emission: &mut EmissionState, instruction: Instruction, position: usize) {
 		emission.instructions.push(instruction);
 		emission.positions.push(position.min(u32::MAX as usize) as u32);
-	}
-
-	fn emit_all_record_cleanups(&self, emission: &mut EmissionState, position: usize) {
-		self.emit_record_cleanups_from(emission, 0, position);
-	}
-
-	fn emit_all_transaction_commits(&self, emission: &mut EmissionState, position: usize) {
-		self.emit_transaction_commits_from(emission, 0, position);
 	}
 
 	fn emit_default_value(
@@ -1407,7 +1437,8 @@ impl Compiler {
 						.unwrap_or_else(|| panic!("Object `{name}` has no defined default value."));
 					self.emit_object_default_value(&default, emission, debug_position);
 				}
-				else if let Some(enum_declaration) = semantic_program.enum_declaration(name) {
+				else if let Some(name) = semantic_program.enum_runtime_names.get(&type_position) {
+					let enum_declaration = semantic_program.enum_declaration(name).expect("Resolved enum declaration");
 					let variant = enum_declaration.variants.first()
 						.unwrap_or_else(|| panic!("Missing variants for enum `{name}`."));
 					let value = semantic_program.enum_variant(name, &variant.name)
@@ -1522,34 +1553,128 @@ impl Compiler {
 		self.emit(emission, Instruction::StoreLocal(cleanup.slot), position);
 	}
 
-	fn emit_record_cleanups_from(
-		&self,
-		emission: &mut EmissionState,
-		scope_depth: usize,
-		position: usize,
-	) {
-		let pending_cleanups = emission.cleanup_scope_stack.iter()
-			.skip(scope_depth)
-			.flat_map(|scope| scope.iter().cloned())
-			.collect::<Vec<_>>();
+	fn compile_try(&mut self, statement: &TryStatement, semantic: &SemanticProgram, emission: &mut EmissionState) -> Result<(), CompileError> {
+		let position = statement.position;
+		let first_local = semantic.try_local_boundaries[&position];
 
-		for cleanup in pending_cleanups.iter().rev() {
-			self.emit_record_cleanup(emission, cleanup, position);
+		let scope = TryScope {
+			record_depth: emission.cleanup_scope_stack.len(),
+			transaction_depth: emission.transaction_scope_stack.len(),
+			exit: TryExit::RunFinally,
+		};
+
+		let start = emission.instructions.len();
+
+		if statement.finally.is_some() {
+			self.emit(emission, Instruction::BeginFinally { first_local, target: 0 }, position);
+			emission.try_scopes.push(scope);
 		}
+
+		if statement.catches.is_empty() {
+			self.compile_statement(&statement.body, semantic, emission)?;
+		} else {
+			let begin = emission.instructions.len();
+
+			self.emit(emission, Instruction::BeginCatch { first_local, clauses: Vec::new() }, position);
+			emission.try_scopes.push(TryScope { exit: TryExit::EndCatch, ..scope });
+			self.compile_statement(&statement.body, semantic, emission)?;
+			emission.try_scopes.pop();
+			self.emit(emission, Instruction::EndTry, position);
+
+			let mut exits = vec![emission.instructions.len()];
+			self.emit(emission, Instruction::Jump(0), position);
+			let mut clauses = Vec::new();
+
+			for clause in &statement.catches {
+				let target = emission.instructions.len() as u32;
+
+				self.enter_debug_scope(emission);
+
+				let binding = clause.binding.as_ref().map(|(name, ty)| {
+					let slot = semantic.declaration_slot(name.position).expect("Validated catch binding");
+					self.record_local_debug(emission, name.name.clone(), slot,
+						semantic.display_data_type_name(ty), true, target);
+					(semantic.catch_types[&name.position].clone(), slot)
+				});
+
+				clauses.push(CatchTarget { target, binding });
+				self.compile_statement(&clause.body, semantic, emission)?;
+				self.exit_debug_scope(emission);
+				exits.push(emission.instructions.len());
+				self.emit(emission, Instruction::Jump(0), position);
+			}
+
+			emission.instructions[begin] = Instruction::BeginCatch { first_local, clauses };
+
+			let end = emission.instructions.len() as u32;
+
+			for exit in exits {
+				emission.instructions[exit] = Instruction::Jump(end);
+			}
+		}
+
+		if let Some(finally) = &statement.finally {
+			emission.try_scopes.pop();
+			self.emit(emission, Instruction::RunFinally, position);
+			let skip = emission.instructions.len();
+			self.emit(emission, Instruction::Jump(0), position);
+			let target = emission.instructions.len() as u32;
+			emission.instructions[start] = Instruction::BeginFinally { first_local, target };
+			emission.try_scopes.push(TryScope { exit: TryExit::DiscardFinally, ..scope });
+			self.compile_statement(finally, semantic, emission)?;
+			emission.try_scopes.pop();
+			self.emit(emission, Instruction::ResumeFinally, position);
+			emission.instructions[skip] = Instruction::Jump(emission.instructions.len() as u32);
+		}
+
+		Ok(())
 	}
 
-	fn emit_transaction_commits_from(
+	fn emit_exit_cleanups(
 		&self,
 		emission: &mut EmissionState,
-		scope_depth: usize,
+		record_depth: usize,
+		transaction_depth: usize,
+		try_depth: usize,
+		iteration_record: Option<&RecordPointerCleanup>,
 		position: usize,
 	) {
-		let pending_transactions = emission.transaction_scope_stack.iter()
-			.skip(scope_depth)
-			.cloned()
-			.collect::<Vec<_>>();
+		let mut record_end = emission.cleanup_scope_stack.len();
+		let mut transaction_end = emission.transaction_scope_stack.len();
 
-		for _transaction in pending_transactions.iter().rev() {
+		// A failure while releasing an outer scope must reach its own handler.
+		for index in (try_depth..emission.try_scopes.len()).rev() {
+			let boundary = emission.try_scopes[index];
+			self.emit_scope_cleanups(emission, boundary.record_depth..record_end,
+				boundary.transaction_depth..transaction_end, None, position);
+			self.emit(emission, boundary.exit.instruction(), position);
+			record_end = boundary.record_depth;
+			transaction_end = boundary.transaction_depth;
+		}
+
+		self.emit_scope_cleanups(emission, record_depth..record_end,
+			transaction_depth..transaction_end, iteration_record, position);
+	}
+
+	fn emit_scope_cleanups(
+		&self,
+		emission: &mut EmissionState,
+		records: std::ops::Range<usize>,
+		transactions: std::ops::Range<usize>,
+		iteration_record: Option<&RecordPointerCleanup>,
+		position: usize,
+	) {
+		let cleanups: Vec<_> = emission.cleanup_scope_stack[records].iter().flatten().cloned().collect();
+
+		for cleanup in cleanups.iter().rev() {
+			self.emit_record_cleanup(emission, cleanup, position);
+		}
+
+		if let Some(cleanup) = iteration_record {
+			self.emit_record_cleanup(emission, cleanup, position);
+		}
+
+		for _ in transactions {
 			self.emit(emission, Instruction::CommitTransaction, position);
 		}
 	}
@@ -1630,6 +1755,16 @@ impl Compiler {
 	}
 }
 
+impl TryExit {
+	fn instruction(self) -> Instruction {
+		match self {
+			Self::DiscardFinally => Instruction::DiscardFinally,
+			Self::EndCatch => Instruction::EndTry,
+			Self::RunFinally => Instruction::RunFinally,
+		}
+	}
+}
+
 pub(crate) fn collect_all_function_declarations(program: &AstProgram) -> Vec<&FunctionDeclaration> {
 	let mut functions = Vec::new();
 
@@ -1648,28 +1783,35 @@ fn collect_function_declaration<'a>(function: &'a FunctionDeclaration, functions
 fn collect_functions_from_statement<'a>(statement: &'a Statement, functions: &mut Vec<&'a FunctionDeclaration>) {
 	match statement {
 		Statement::Block(block) => collect_functions_from_statements(block.statements.as_slice(), functions),
+		Statement::Break(_) => {}
+		Statement::Continue(_) => {}
+		Statement::Create(_) => {}
+		Statement::Delete(_) => {}
 		Statement::EnumDeclaration(_) => {}
+		Statement::Expression(_) => {}
+		Statement::Fail { .. } => {}
 		Statement::For(statement) => collect_functions_from_statements(statement.body.statements.as_slice(), functions),
 		Statement::ForRecord(statement) => collect_functions_from_statements(statement.body.statements.as_slice(), functions),
 		Statement::FunctionDeclaration(function) => collect_function_declaration(function, functions),
 		Statement::If(statement) => {
 			collect_functions_from_statements(statement.then_branch.statements.as_slice(), functions);
+
 			if let Some(else_branch) = &statement.else_branch {
 				collect_functions_from_statement(else_branch, functions);
 			}
 		}
+		Statement::RecordPointerDeclaration(_) => {}
+		Statement::Return(_) => {}
 		Statement::Transaction(statement) => collect_functions_from_statements(statement.body.statements.as_slice(), functions),
+		Statement::Try(statement) => {
+			for arm in statement.arms() {
+				collect_functions_from_statement(arm, functions);
+			}
+		}
+		Statement::Update(_) => {}
+		Statement::Use(_) => {}
+		Statement::VariableDeclaration(_) => {}
 		Statement::While(statement) => collect_functions_from_statements(statement.body.statements.as_slice(), functions),
-		Statement::Break(_)
-		| Statement::Continue(_)
-		| Statement::Create(_)
-		| Statement::Delete(_)
-		| Statement::Expression(_)
-		| Statement::RecordPointerDeclaration(_)
-		| Statement::Return(_)
-		| Statement::Update(_)
-		| Statement::Use(_)
-		| Statement::VariableDeclaration(_) => {}
 	}
 }
 
@@ -1695,6 +1837,7 @@ fn statement_position(statement: &Statement) -> usize {
 		Statement::Delete(statement) => statement.position,
 		Statement::EnumDeclaration(statement) => statement.position,
 		Statement::Expression(expression) => expression.position(),
+		Statement::Fail { position, .. } => *position,
 		Statement::For(statement) => statement.position,
 		Statement::ForRecord(statement) => statement.position,
 		Statement::FunctionDeclaration(statement) => statement.position,
@@ -1702,6 +1845,7 @@ fn statement_position(statement: &Statement) -> usize {
 		Statement::RecordPointerDeclaration(statement) => statement.position,
 		Statement::Return(statement) => statement.position,
 		Statement::Transaction(statement) => statement.position,
+		Statement::Try(statement) => statement.position,
 		Statement::Update(statement) => statement.position,
 		Statement::Use(statement) => statement.position,
 		Statement::VariableDeclaration(statement) => statement.position,
@@ -2960,7 +3104,8 @@ mod tests {
 			.compile_program_with_existing_semantics(&program, &semantic_program)
 			.unwrap();
 
-		assert_eq!(bytecode.object_type_descriptors().len(), 2);
+		assert_eq!(bytecode.object_type_descriptors().len(), 3);
+		assert!(bytecode.object_type_descriptor(ObjectTypeId::RUNTIME_ERROR).is_some());
 		assert_eq!(
 			bytecode.object_type_descriptor(model_id),
 			semantic_program.object_type_descriptor(model_id),

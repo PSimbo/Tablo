@@ -30,17 +30,46 @@ enum ComparisonKind {
 	LessThanOrEqual,
 }
 
+enum FinallyContinuation {
+	Continue { instruction: usize, operands: Vec<Value> },
+	Propagate(RaisedFailure),
+}
+
+#[derive(Clone, Copy)]
+enum HandlerAction {
+	CatchAll(usize),
+	// The dispatch table remains in the protected frame's code body.
+	CatchTable(usize),
+	Finally(usize),
+}
+
 enum ExecutionOutcome {
 	Call(u32, Vec<Value>),
 	Continue(Option<usize>),
+	Raise(RaisedFailure),
 	Return(Option<Value>),
 }
 
 struct CallFrame {
+	handlers: Vec<ErrorHandler>,
+	continuations: Vec<FinallyContinuation>,
 	base_stack_len: usize,
 	function_index: Option<usize>,
 	instruction_index: usize,
 	locals: Vec<Value>,
+}
+
+struct ErrorHandler {
+	action: HandlerAction,
+	continuation_depth: usize,
+	first_local: usize,
+	stack_depth: usize,
+	transaction_depth: usize,
+}
+
+struct RaisedFailure {
+	value: Value,
+	error: VmError,
 }
 
 pub struct VirtualMachine {
@@ -284,13 +313,14 @@ impl VirtualMachine {
 			return self.complete_frame(program, result);
 		}
 
-		let instruction = code_body.instructions[instruction_index].clone();
+		let instruction = &code_body.instructions[instruction_index];
 		let mut locals = std::mem::take(&mut self.frames[frame_index].locals);
-		let outcome = self.execute_instruction(program, frame_index, &instruction, instruction_index, &mut locals);
+		let outcome = self.execute_instruction(program, frame_index, instruction, instruction_index, &mut locals);
 		self.frames[frame_index].locals = locals;
+
 		let outcome = match outcome {
 			Ok(outcome) => outcome,
-			Err(error) => return Err(self.execution_error(program, error)),
+			Err(error) => return self.handle_failure(program, error),
 		};
 
 		match outcome {
@@ -311,6 +341,7 @@ impl VirtualMachine {
 				self.frames[frame_index].instruction_index = next_instruction_index.unwrap_or(instruction_index + 1);
 				Ok(VmExecutionState::Running)
 			}
+			ExecutionOutcome::Raise(failure) => self.propagate_failure(program, failure),
 			ExecutionOutcome::Return(result) => self.complete_frame(program, result),
 		}
 	}
@@ -349,11 +380,14 @@ impl VirtualMachine {
 		let frame = self.frames.last_mut().expect("A frame must exist while completing execution.");
 		let instruction_index = frame.instruction_index;
 		let mut locals = std::mem::take(&mut frame.locals);
+		
 		while let Some(value) = locals.pop() {
 			if let Err(error) = self.release_record_if_unreferenced(value, &locals, instruction_index) {
-				return Err(self.execution_error(program, error));
+				self.frames.last_mut().expect("Returning frame").handlers.clear();
+				return self.handle_failure(program, error);
 			}
 		}
+
 		Ok(self.finish_current_frame(result))
 	}
 
@@ -440,9 +474,80 @@ impl VirtualMachine {
 		Ok(Value::RecordPointer(record))
 	}
 
-	fn execution_error(&mut self, program: &Program, error: VmError) -> VmError {
+	fn install_handler(&mut self, index: usize, first_local: u32, action: HandlerAction) {
+		let frame = &mut self.frames[index];
+
+		frame.handlers.push(ErrorHandler {
+			action,
+			first_local: first_local as usize,
+			stack_depth: self.stack.len(),
+			transaction_depth: self.database_runtime.transaction_depth(),
+			continuation_depth: frame.continuations.len(),
+		});
+	}
+
+	fn handle_failure(&mut self, program: &Program, error: VmError) -> Result<VmExecutionState, VmError> {
+		let fields = BTreeMap::from([("message".into(), Value::Text(error.message.clone()))]);
+		let value = Value::Object(ObjectValue::new(ObjectTypeId::RUNTIME_ERROR, fields));
+		self.propagate_failure(program, RaisedFailure { value, error })
+	}
+
+	fn propagate_failure(&mut self, program: &Program, mut failure: RaisedFailure) -> Result<VmExecutionState, VmError> {
+		if failure.error.stack_trace.is_empty() {
+			failure.error = self.enrich_vm_error(program, failure.error);
+		}
+
+		for index in (0..self.frames.len()).rev() {
+			while let Some(handler) = self.frames[index].handlers.pop() {
+				let (target, binding) = match handler.action {
+					HandlerAction::CatchAll(target) | HandlerAction::Finally(target) => (target, None),
+					HandlerAction::CatchTable(site) => {
+						let body = self.current_code_body(program, &self.frames[index]);
+
+						let Instruction::BeginCatch { clauses, .. } = &body.instructions[site] else {
+							unreachable!("Catch table belongs to its installing instruction");
+						};
+
+						let Some(clause) = clauses.iter().find(|clause| clause.binding.as_ref()
+							.is_none_or(|(ty, _)| failure_matches(&failure.value, ty))) else {
+							continue;
+						};
+
+						(clause.target as usize, clause.binding.as_ref())
+					}
+				};
+
+				if let Err(error) = self.database_runtime.rollback_to_depth(handler.transaction_depth) {
+					failure.error.message.push_str(&format!(" Also failed to roll back transaction: {error}"));
+					return Err(self.execution_error(failure.error));
+				}
+
+				self.frames.truncate(index + 1);
+				self.stack.truncate(handler.stack_depth);
+				let frame = &mut self.frames[index];
+				frame.locals.truncate(handler.first_local);
+				frame.continuations.truncate(handler.continuation_depth);
+				frame.instruction_index = target;
+
+				if matches!(handler.action, HandlerAction::Finally(_)) {
+					frame.continuations.push(FinallyContinuation::Propagate(failure));
+				} else if let Some((ty, slot)) = binding {
+					let slot = *slot as usize;
+					frame.locals.resize(slot + 1, Value::Null);
+					frame.locals[slot] = match failure.value {
+						Value::DynamicArray { values, .. } if binds_native_array(ty) => Value::Array(values),
+						value => value,
+					};
+				}
+
+				return Ok(VmExecutionState::Running);
+			}
+		}
+		Err(self.execution_error(failure.error))
+	}
+
+	fn execution_error(&mut self, mut error: VmError) -> VmError {
 		let rollback_result = self.rollback_active_transactions(error.instruction_index);
-		let mut error = self.enrich_vm_error(program, error);
 		if let Err(rollback_error) = rollback_result {
 			error.message = format!("{} Also failed to roll back active transaction(s): {}", error.message, rollback_error.message);
 		}
@@ -491,8 +596,21 @@ impl VirtualMachine {
 				self.stack.push(Value::Boolean(lhs && rhs));
 				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::BeginCatch { first_local, .. } => {
+				self.install_handler(frame_index, *first_local, HandlerAction::CatchTable(instruction_index));
+				Ok(ExecutionOutcome::Continue(None))
+			}
 			Instruction::BeginTransaction => {
 				self.begin_transaction(instruction_index)?;
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::BeginTry { first_local, target } | Instruction::BeginFinally { first_local, target } => {
+				let action = if matches!(instruction, Instruction::BeginFinally { .. }) {
+					HandlerAction::Finally(*target as usize)
+				} else {
+					HandlerAction::CatchAll(*target as usize)
+				};
+				self.install_handler(frame_index, *first_local, action);
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::Call(function_index, argument_count) => {
@@ -564,6 +682,22 @@ impl VirtualMachine {
 				self.stack.push(record);
 				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::DiscardFinally | Instruction::ResumeFinally => {
+				let continuation = self.frames[frame_index].continuations.pop()
+					.ok_or_else(|| vm_error(instruction_index, "Expected a finally continuation.".into()))?;
+
+				if matches!(instruction, Instruction::DiscardFinally) {
+					return Ok(ExecutionOutcome::Continue(None));
+				}
+
+				match continuation {
+					FinallyContinuation::Continue { instruction, operands } => {
+						self.stack.extend(operands);
+						Ok(ExecutionOutcome::Continue(Some(instruction)))
+					}
+					FinallyContinuation::Propagate(failure) => Ok(ExecutionOutcome::Raise(failure)),
+				}
+			}
 			Instruction::Dup2 => {
 				if self.stack.len() < 2 {
 					return Err(VmError {
@@ -584,6 +718,13 @@ impl VirtualMachine {
 				let rhs = self.pop_numeric(instruction_index)?;
 				let lhs = self.pop_numeric(instruction_index)?;
 				self.stack.push(divide_values(lhs, rhs, instruction_index)?);
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::EndTry => {
+				self.frames[frame_index].handlers.pop().ok_or_else(|| {
+					vm_error(instruction_index, String::from("EndTry requires an active error handler."))
+				})?;
+
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::Equal => {
@@ -611,6 +752,17 @@ impl VirtualMachine {
 				};
 				self.stack.push(Value::Boolean(record.buffer().exists));
 				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::Fail => {
+				let value = self.pop_value(instruction_index)?;
+
+				if value == Value::Null {
+					return Err(vm_error(instruction_index, "Cannot raise null.".into()));
+				}
+
+				let error = vm_error(instruction_index, value.to_string());
+
+				Ok(ExecutionOutcome::Raise(RaisedFailure { value, error }))
 			}
 			Instruction::FieldPathExists(field_path) => {
 				let value = self.pop_value(instruction_index)?;
@@ -903,6 +1055,12 @@ impl VirtualMachine {
 				self.pop_value(instruction_index)?;
 				Ok(ExecutionOutcome::Continue(None))
 			}
+			Instruction::PreserveDynamicType(ty) => {
+				let value = self.pop_value(instruction_index)?;
+				self.stack.push(value.preserve_dynamic_type(ty));
+
+				Ok(ExecutionOutcome::Continue(None))
+			}
 			Instruction::PushBoolean(value) => {
 				self.stack.push(Value::Boolean(*value));
 				Ok(ExecutionOutcome::Continue(None))
@@ -1006,6 +1164,21 @@ impl VirtualMachine {
 			}
 			Instruction::Return => Ok(ExecutionOutcome::Return(Some(self.pop_value(instruction_index)?))),
 			Instruction::ReturnNoValue => Ok(ExecutionOutcome::Return(None)),
+			Instruction::RunFinally => {
+				let frame = &mut self.frames[frame_index];
+				let Some(ErrorHandler { action: HandlerAction::Finally(target), stack_depth, .. }) = frame.handlers.pop() else {
+					return Err(vm_error(instruction_index, "Expected an active finally block.".into()));
+				};
+
+				if self.stack.len() < stack_depth {
+					return Err(vm_error(instruction_index, "Invalid operand stack entering finally.".into()));
+				}
+
+				let operands = self.stack.split_off(stack_depth);
+				frame.continuations.push(FinallyContinuation::Continue { instruction: instruction_index + 1, operands });
+
+				Ok(ExecutionOutcome::Continue(Some(target)))
+			}
 			Instruction::Subtract => {
 				let rhs = self.pop_numeric(instruction_index)?;
 				let lhs = self.pop_numeric(instruction_index)?;
@@ -1833,6 +2006,8 @@ impl VirtualMachine {
 impl CallFrame {
 	fn new(function_index: Option<usize>, base_stack_len: usize, locals: Vec<Value>) -> Self {
 		Self {
+			handlers: Vec::new(),
+			continuations: Vec::new(),
 			base_stack_len,
 			function_index,
 			instruction_index: 0,
@@ -3035,7 +3210,7 @@ fn multiply_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<V
 
 fn negate_value(value: Value) -> Value {
 	match value {
-		Value::Array(_) => unreachable!("Array values are rejected before numeric negation."),
+		Value::Array(_) | Value::DynamicArray { .. } => unreachable!("Array values are rejected before numeric negation."),
 		Value::Boolean(_) => unreachable!("Boolean values are rejected before numeric negation."),
 		Value::Date(_) => unreachable!("Date values are rejected before numeric negation."),
 		Value::Decimal(mut decimal) => {
@@ -3251,7 +3426,7 @@ fn store_index_value(array: Value, index: Value, value: Value, instruction_index
 
 fn stringify_value(value: &Value) -> String {
 	match value {
-		Value::Array(values) => {
+		Value::Array(values) | Value::DynamicArray { values, .. } => {
 			let mut result = String::from("[");
 
 			for (index, value) in values.iter().enumerate() {
@@ -3327,6 +3502,38 @@ fn subtract_values(lhs: Value, rhs: Value, instruction_index: usize) -> Result<V
 	}
 }
 
+fn binds_native_array(ty: &ObjectValueTypeDescriptor) -> bool {
+	match ty {
+		ObjectValueTypeDescriptor::Array(_) | ObjectValueTypeDescriptor::Object(_) => true,
+		ObjectValueTypeDescriptor::Nullable(inner) => binds_native_array(inner),
+		_ => false,
+	}
+}
+
+fn failure_matches(value: &Value, ty: &ObjectValueTypeDescriptor) -> bool {
+	use ObjectValueTypeDescriptor as Type;
+
+	match (ty, value) {
+		(Type::Any, value) => !matches!(value, Value::Null),
+		(Type::Nullable(_), Value::Null) => true,
+		(Type::Nullable(inner), value) => failure_matches(value, inner),
+		(Type::Union(members), value) => members.iter().any(|member| failure_matches(value, member)),
+		(_, Value::DynamicArray { data_type, .. }) => ty == data_type.as_ref(),
+		// Untyped empty literals and arrays materialised from dynamic JSON have no
+		// more specific element type. Inspecting elements would misclassify them.
+		(Type::Array(inner), Value::Array(_)) => matches!(inner.as_ref(), Type::Nullable(item) if **item == Type::Any),
+		(Type::Object(id), Value::Object(object)) => *id == object.object_type_id,
+		(Type::Enum { name, .. }, Value::Enum(value)) => *name == value.enum_name,
+		(Type::Range(inner), Value::IntegerRange(_)) => matches!(inner.as_ref(), Type::Int),
+		(Type::Range(inner), Value::DecimalRange(_)) => matches!(inner.as_ref(), Type::Dec),
+		(Type::Bool, Value::Boolean(_)) | (Type::Date, Value::Date(_)) | (Type::Dec, Value::Decimal(_))
+		| (Type::Float, Value::Float(_)) | (Type::Int, Value::Integer(_)) | (Type::Json, Value::Json(_))
+		| (Type::Text, Value::Text(_)) | (Type::Time, Value::Time(_)) | (Type::TimeTz, Value::TimeTz(_))
+		| (Type::Timestamp, Value::Timestamp(_)) | (Type::TimestampTz, Value::TimestampTz(_)) => true,
+		_ => false,
+	}
+}
+
 fn type_name(value: &Value) -> &'static str {
 	match value {
 		Value::Array(_) => "array",
@@ -3334,6 +3541,7 @@ fn type_name(value: &Value) -> &'static str {
 		Value::Date(_) => "date",
 		Value::Decimal(_) => "dec",
 		Value::DecimalRange(_) => "range",
+		Value::DynamicArray { .. } => "array",
 		Value::Enum(_) => "enum",
 		Value::Float(_) => "float",
 		Value::Integer(_) => "int",
@@ -3354,7 +3562,8 @@ fn type_name(value: &Value) -> &'static str {
 
 fn values_equal(lhs: &Value, rhs: &Value, instruction_index: usize) -> Result<bool, VmError> {
 	match (lhs, rhs) {
-		(Value::Array(lhs), Value::Array(rhs)) => {
+		(Value::Array(lhs) | Value::DynamicArray { values: lhs, .. },
+		 Value::Array(rhs) | Value::DynamicArray { values: rhs, .. }) => {
 			if lhs.len() != rhs.len() {
 				return Ok(false);
 			}

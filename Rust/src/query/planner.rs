@@ -575,7 +575,7 @@ impl QueryPlanBuilder {
 	fn visit_statement(&mut self, statement: &Statement, enclosing_query: Option<PlannedQueryId>) {
 		match statement {
 			Statement::Block(block) => self.visit_block(block, enclosing_query),
-			Statement::Expression(expression) => self.visit_expression(expression, enclosing_query),
+			Statement::Expression(expression) | Statement::Fail { value: expression, .. } => self.visit_expression(expression, enclosing_query),
 			Statement::For(statement) => {
 				self.visit_expression(&statement.iterable, enclosing_query);
 				let previous_control_flow = self.control_flow;
@@ -602,6 +602,7 @@ impl QueryPlanBuilder {
 				if let Some(else_branch) = &statement.else_branch {
 					self.visit_statement(else_branch, enclosing_query);
 				}
+
 				self.control_flow = previous_control_flow;
 			}
 			Statement::RecordPointerDeclaration(declaration) => {
@@ -618,6 +619,11 @@ impl QueryPlanBuilder {
 				self.transaction_scopes.push(transaction_scope);
 				self.visit_block(&statement.body, enclosing_query);
 				self.transaction_scopes.pop();
+			}
+			Statement::Try(statement) => {
+				for arm in statement.arms() {
+					self.visit_statement(arm, enclosing_query);
+				}
 			}
 			Statement::VariableDeclaration(declaration) => {
 				if let Some(initial_value) = &declaration.initial_value {
@@ -719,6 +725,13 @@ fn statement_may_exit_early(statement: &Statement) -> bool {
 		Statement::Block(block) | Statement::Transaction(TransactionStatement { body: block, .. }) => {
 			block_may_exit_early(block)
 		}
+		Statement::Break(_) => true,
+		Statement::Continue(_) => true,
+		Statement::Create(_) => false,
+		Statement::Delete(_) => false,
+		Statement::EnumDeclaration(_) => false,
+		Statement::Expression(_) => false,
+		Statement::Fail { .. } => true,
 		Statement::For(statement) => block_may_exit_early(&statement.body),
 		Statement::ForRecord(statement) => block_may_exit_early(&statement.body),
 		Statement::FunctionDeclaration(_) => false,
@@ -727,16 +740,13 @@ fn statement_may_exit_early(statement: &Statement) -> bool {
 				|| statement.else_branch.as_ref()
 					.is_some_and(|branch| statement_may_exit_early(branch))
 		}
+		Statement::RecordPointerDeclaration(_) => false,
+		Statement::Return(_) => true,
+		Statement::Try(statement) => statement.arms().any(statement_may_exit_early),
+		Statement::Update(_) => false,
+		Statement::Use(_) => false,
 		Statement::While(statement) => block_may_exit_early(&statement.body),
-		Statement::Break(_) | Statement::Continue(_) | Statement::Return(_) => true,
-		Statement::Create(_)
-		| Statement::Delete(_)
-		| Statement::EnumDeclaration(_)
-		| Statement::Expression(_)
-		| Statement::RecordPointerDeclaration(_)
-		| Statement::Update(_)
-		| Statement::Use(_)
-		| Statement::VariableDeclaration(_) => false,
+		Statement::VariableDeclaration(_) => false,
 	}
 }
 
@@ -745,8 +755,13 @@ fn statement_may_have_side_effects(statement: &Statement) -> bool {
 		Statement::Block(block) | Statement::Transaction(TransactionStatement { body: block, .. }) => {
 			block_may_have_side_effects(block)
 		}
-		Statement::Create(_) | Statement::Delete(_) | Statement::Update(_) => true,
+		Statement::Break(_) => false,
+		Statement::Continue(_) => false,
+		Statement::Create(_) => true,
+		Statement::Delete(_) => true,
+		Statement::EnumDeclaration(_) => false,
 		Statement::Expression(expression) => expression_may_have_side_effects(expression),
+		Statement::Fail { .. } => true,
 		Statement::For(statement) => {
 			expression_may_have_side_effects(&statement.iterable)
 				|| block_may_have_side_effects(&statement.body)
@@ -772,16 +787,15 @@ fn statement_may_have_side_effects(statement: &Statement) -> bool {
 			|| expression_may_have_side_effects(&declaration.initial_value),
 		Statement::Return(statement) => statement.value.as_ref()
 			.is_some_and(expression_may_have_side_effects),
+		Statement::Try(_) => true,
+		Statement::Update(_) => true,
+		Statement::Use(_) => false,
 		Statement::VariableDeclaration(declaration) => declaration.initial_value.as_ref()
 			.is_some_and(expression_may_have_side_effects),
 		Statement::While(statement) => {
 			expression_may_have_side_effects(&statement.condition)
 				|| block_may_have_side_effects(&statement.body)
 		}
-		Statement::Break(_)
-		| Statement::Continue(_)
-		| Statement::EnumDeclaration(_)
-		| Statement::Use(_) => false,
 	}
 }
 

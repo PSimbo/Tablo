@@ -400,7 +400,7 @@ impl<'a> JsonConversion<'a> {
 		use crate::bytecode::ObjectTypeDescriptorShape;
 		use crate::ast::Visibility;
 		match value {
-			Value::Array(values) => Ok(JsonValue(JsonNode::Array(values.into_iter().enumerate()
+			Value::Array(values) | Value::DynamicArray { values, .. } => Ok(JsonValue(JsonNode::Array(values.into_iter().enumerate()
 				.map(|(index, value)| self.export(value).map(|value| value.0).map_err(|error| error.at(format!("[{}]", index + 1))))
 				.collect::<Result<Vec<_>, _>>()?))),
 			Value::Object(object) => {
@@ -460,15 +460,25 @@ impl<'a> JsonConversion<'a> {
 		use crate::bytecode::{ObjectValueTypeDescriptor as T, Constant};
 		use crate::ast::DataType;
 		use crate::value::{Date, Time, TimeTz, Timestamp, TimestampTz, EnumValue};
+
 		if let T::Nullable(inner) = target {
 			return if value.is_null() { Ok(Value::Null) } else { self.import(value, inner) };
 		}
+
 		if let T::Union(members) = target {
-			let mut matches = members.iter().filter_map(|member| self.import(value, member).ok());
+			let mut matches = members.iter().filter_map(|member| {
+				self.import(value, member).ok().map(|value| value.preserve_dynamic_type(member))
+			});
+
 			let first = matches.next().ok_or_else(|| Self::error("JSON value matches no union member."))?;
+
 			return if matches.next().is_some() { Err(Self::error("JSON value matches multiple union members.")) } else { Ok(first) };
 		}
-		if value.is_null() { return Err(Self::error("JSON null requires a nullable target.")); }
+
+		if value.is_null() {
+			return Err(Self::error("JSON null requires a nullable target."));
+		}
+
 		let primitive = match target {
 			T::Any => return value.native_contents(),
 			T::Array(element) => {

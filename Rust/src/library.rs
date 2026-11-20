@@ -68,38 +68,49 @@ impl Library {
 
 	fn validate(&self) -> Result<(), String> {
 		let ast = crate::frontend::parse_source_text(&SourceText::new(self.interface.clone())).map_err(|error| error.to_string())?;
+
 		validate_interface(&ast)?;
+
 		if self.exports.len() != ast.functions.len() {
 			return Err(String::from("Library export count does not match its interface."));
 		}
+
 		if self.program.entry_code().is_none_or(|body| !body.instructions.is_empty()) {
 			return Err(String::from("A Tablo library cannot contain an executable entry point."));
 		}
-		if !self.program.object_type_descriptors().is_empty() {
+
+		if self.program.object_type_descriptors().iter().any(|object| object.id() != crate::bytecode::ObjectTypeId::RUNTIME_ERROR) {
 			return Err(String::from("Object types in compiled libraries are not supported yet."));
 		}
+
 		for function in self.program.functions() {
 			for instruction in &function.body().instructions {
 				match instruction {
 					Instruction::Call(index, _) if *index as usize >= self.program.functions().len() => return Err(String::from("Invalid library function reference.")),
 					Instruction::ExecuteQuery(index) if *index as usize >= self.program.queries().len() => return Err(String::from("Invalid library query reference.")),
-					Instruction::MakeObject { .. } | Instruction::ConvertObject { .. } => return Err(String::from("Object types in compiled libraries are not supported yet.")),
+					Instruction::MakeObject { object_type_id, .. } | Instruction::ConvertObject { object_type_id, .. }
+						if *object_type_id != crate::bytecode::ObjectTypeId::RUNTIME_ERROR => return Err(String::from("Object types in compiled libraries are not supported yet.")),
 					_ => {},
 				}
 			}
 		}
+
 		for body in self.program.debug_info().code_bodies() {
 			if body.source_file_index().is_some_and(|index| index as usize >= self.program.debug_info().source_files().len()) {
 				return Err(String::from("Invalid library debug source reference."));
 			}
 		}
+
 		let mut seen = std::collections::BTreeSet::new();
+
 		for (declaration, index) in ast.functions.iter().zip(&self.exports) {
 			let function = self.program.functions().get(*index as usize).ok_or("Invalid library export index.")?;
+
 			if !seen.insert(index) || function.name() != Some(declaration.name.as_str()) || function.return_type() != declaration.return_type.as_ref() {
 				return Err(String::from("Library export does not match its compiled function."));
 			}
 		}
+
 		Ok(())
 	}
 }

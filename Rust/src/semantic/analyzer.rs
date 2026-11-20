@@ -307,9 +307,10 @@ impl SemanticAnalyzer {
 		self.declaration_kinds.enter_scope();
 		self.object_type_bindings.enter_scope();
 		self.collect_object_declarations(&program.objects)?;
+		self.register_runtime_error_type()?;
 		self.current_source_name = self.root_source_name.clone();
 		self.enums.enter_scope();
-		self.collect_scope_enum_declarations(&program.statements)?;
+		self.collect_scope_enum_declarations(&program.statements, true)?;
 		self.functions.enter_scope();
 		self.collect_scope_function_signatures(&program.functions, &program.statements)?;
 		self.collect_function_overload_aliases()?;
@@ -1212,6 +1213,49 @@ impl SemanticAnalyzer {
 		Ok(())
 	}
 
+	fn register_runtime_error_type(&mut self) -> Result<(), CompileError> {
+		let name = "RuntimeError";
+
+		if let Some(existing) = self.lookup_object_type(name) {
+			return Err(self.compile_error(existing.declaration().position, "RuntimeError is a built-in object type."));
+		}
+
+		let declaration = ObjectDeclaration {
+			name: name.into(),
+			position: 0,
+			visibility: Visibility::Public,
+			containing_object_name: None,
+			has_explicit_name: true,
+			shape: ObjectDeclarationShape::Fields(vec![ObjectFieldDeclaration {
+				name: "message".into(),
+				data_type: DataType::Text,
+				default_value: None,
+				is_quoted: false,
+				position: 0,
+				visibility: Visibility::Public,
+			}]),
+		};
+
+		let id = ObjectTypeId::RUNTIME_ERROR;
+		self.semantic_program.object_type_ids_by_name.insert(name.into(), id);
+
+		self.semantic_program.object_types.insert(id, ResolvedObjectType {
+			containing_object_id: None,
+			declaration,
+			display_name: name.into(),
+			has_named_constructor: true,
+			id,
+			scope_id: DeclarationScopeId::MODULE,
+			source_name: None,
+			visibility: Visibility::Public,
+		});
+
+		self.declaration_kinds.declare(name.into(), LexicalDeclarationKind::Object);
+		self.object_type_bindings.declare(name.into(), id);
+
+		Ok(())
+	}
+
 	fn collect_object_declarations(&mut self, objects: &[ObjectDeclaration]) -> Result<(), CompileError> {
 		for (index, object) in objects.iter().enumerate() {
 			self.current_source_name = self.top_level_object_source_names.get(index)
@@ -1306,10 +1350,10 @@ impl SemanticAnalyzer {
 		}
 	}
 
-	fn collect_scope_enum_declarations(&mut self, statements: &[Statement]) -> Result<(), CompileError> {
+	fn collect_scope_enum_declarations(&mut self, statements: &[Statement], module_scope: bool) -> Result<(), CompileError> {
 		for statement in statements {
 			if let Statement::EnumDeclaration(enum_declaration) = statement {
-				self.declare_enum_signature(enum_declaration)?;
+				self.declare_enum_signature(enum_declaration, module_scope)?;
 			}
 		}
 
@@ -1453,7 +1497,7 @@ impl SemanticAnalyzer {
 		)
 	}
 
-	fn declare_enum_signature(&mut self, enum_declaration: &EnumDeclaration) -> Result<(), CompileError> {
+	fn declare_enum_signature(&mut self, enum_declaration: &EnumDeclaration, module_scope: bool) -> Result<(), CompileError> {
 		if let Some(existing) = self.current_scope_declaration_kind(&enum_declaration.name) {
 			if existing == LexicalDeclarationKind::Enum {
 				return Err(self.compile_error(
@@ -1461,6 +1505,7 @@ impl SemanticAnalyzer {
 					format!("Enum `{}` is already declared in this scope.", enum_declaration.name),
 				));
 			}
+
 			return Err(self.declaration_conflict_error(
 				"Enum",
 				&enum_declaration.name,
@@ -1471,12 +1516,22 @@ impl SemanticAnalyzer {
 
 		let variants = self.resolve_enum_variants(enum_declaration)?;
 		self.declaration_kinds.declare(enum_declaration.name.clone(), LexicalDeclarationKind::Enum);
+
+		let runtime_name = if !module_scope || self.current_source_name.is_some() {
+			format!("{}@{}:{}", enum_declaration.name, self.current_source_name.as_deref().unwrap_or(""), enum_declaration.position)
+		} else {
+			enum_declaration.name.clone()
+		};
+
 		self.enums.declare(enum_declaration.name.clone(), EnumBinding {
+			runtime_name: runtime_name.clone(),
 			backing_type: enum_declaration.backing_type.clone(),
 			variants: variants.clone(),
 		});
-		self.semantic_program.enum_declarations.insert(enum_declaration.name.clone(), enum_declaration.clone());
-		self.semantic_program.enum_variants.insert(enum_declaration.name.clone(), variants);
+
+		self.semantic_program.enum_names.insert(enum_declaration.name.clone(), runtime_name.clone());
+		self.semantic_program.enum_declarations.insert(runtime_name.clone(), enum_declaration.clone());
+		self.semantic_program.enum_variants.insert(runtime_name, variants);
 		Ok(())
 	}
 
@@ -1717,9 +1772,11 @@ impl SemanticAnalyzer {
 					ObjectValueTypeDescriptor::Object(object_type_id)
 				}
 				else {
+					let name = &self.lookup_enum(name).expect("Resolved enum binding.").runtime_name;
 					let declaration = self.semantic_program.enum_declaration(name).expect("Resolved enum declaration.");
 					let variant = declaration.variants.first().expect("Validated enum has a default variant.");
 					let EnumValue::Constant(default_value) = self.semantic_program.enum_variant(name, &variant.name).expect("Resolved enum variant.").clone();
+
 					ObjectValueTypeDescriptor::Enum {
 						name: name.to_string(), default_variant: variant.name.clone(), default_value,
 						variants: declaration.variants.iter().map(|variant| {
@@ -1768,7 +1825,39 @@ impl SemanticAnalyzer {
 		}
 	}
 
+	fn dynamic_array_type(&self, ty: &DataType) -> Option<ObjectValueTypeDescriptor> {
+		match ty {
+			DataType::Array(inner) => Some(ObjectValueTypeDescriptor::Array(Box::new(self.dynamic_array_type(inner)?))),
+			DataType::EmptyArray => None,
+			DataType::JsonMember => None,
+			DataType::Null => None,
+			DataType::Nullable(inner) => Some(ObjectValueTypeDescriptor::Nullable(Box::new(self.dynamic_array_type(inner)?))),
+			DataType::RecordPointer(_) => None,
+			DataType::Union(members) => Some(ObjectValueTypeDescriptor::Union(
+				members.iter().map(|member| self.dynamic_array_type(member)).collect::<Option<_>>()?,
+			)),
+			_ => Some(self.describe_object_value_type(ty)),
+		}
+	}
+
 	fn record_json_conversion(&mut self, target: &DataType, value: &DataType, position: usize) {
+		if matches!(target.without_nullability(), DataType::Any | DataType::Union(_)) {
+			let source = value.without_nullability();
+
+			let descriptor = match source {
+				DataType::Array(_) => self.dynamic_array_type(source),
+				DataType::Dec => Some(ObjectValueTypeDescriptor::Dec),
+				DataType::Object(_) if self.effective_object_data_type(source).is_some() => {
+					Some(self.describe_object_value_type(source))
+				}
+				_ => None,
+			};
+
+			if let Some(descriptor) = descriptor {
+				self.semantic_program.dynamic_types.insert(position, descriptor);
+			}
+		}
+
 		fn float_target(analyzer: &SemanticAnalyzer, target: &DataType, value: &DataType) -> bool {
 			match (target.without_nullability(), value.without_nullability()) {
 				(DataType::Float, DataType::Int) => true,
@@ -3027,7 +3116,12 @@ impl SemanticAnalyzer {
 				if let Expr::Identifier(identifier) = object.as_ref()
 					&& self.lookup_local(&identifier.name).is_none()
 					&& let Some(enum_value) = self.enum_variant_binding(&identifier.name, &field.name) {
-					self.semantic_program.enum_variant_values.insert(expression.position(), enum_value.clone());
+					let value = enum_value.clone();
+					let runtime_name = self.lookup_enum(&identifier.name).expect("Resolved enum binding").runtime_name.clone();
+
+					self.semantic_program.enum_runtime_names.insert(expression.position(), runtime_name);
+					self.semantic_program.enum_variant_values.insert(expression.position(), value);
+
 					return Ok(DataType::Object(identifier.name.clone().into()));
 				}
 
@@ -5826,6 +5920,10 @@ impl SemanticAnalyzer {
 			Statement::Create(_) => false,
 			Statement::Delete(_) => false,
 			Statement::EnumDeclaration(_) => false,
+			Statement::Expression(_) => false,
+			Statement::Fail { .. } => true,
+			Statement::For(_) => false,
+			Statement::ForRecord(_) => false,
 			Statement::FunctionDeclaration(_) => false,
 			Statement::If(if_statement) => {
 				self.block_guarantees_return(&if_statement.then_branch)
@@ -5833,14 +5931,16 @@ impl SemanticAnalyzer {
 			}
 			Statement::RecordPointerDeclaration(_) => false,
 			Statement::Return(_) => true,
+			Statement::Try(statement) => {
+				statement.finally.as_ref().is_some_and(|arm| self.statement_guarantees_return(arm))
+					|| (self.statement_guarantees_return(&statement.body)
+						&& statement.catches.iter().all(|clause| self.statement_guarantees_return(&clause.body)))
+			}
 			Statement::Transaction(transaction_statement) => self.block_guarantees_return(&transaction_statement.body),
-			Statement::Expression(_)
-			| Statement::For(_)
-			| Statement::ForRecord(_)
-			| Statement::Update(_)
-			| Statement::Use(_)
-			| Statement::VariableDeclaration(_)
-			| Statement::While(_) => false,
+			Statement::Update(_) => false,
+			Statement::Use(_) => false,
+			Statement::VariableDeclaration(_) => false,
+			Statement::While(_) => false,
 		}
 	}
 
@@ -5948,9 +6048,15 @@ impl SemanticAnalyzer {
 
 	fn validate_block(&mut self, statements: &[Statement]) -> Result<(), CompileError> {
 		self.enter_scope();
+		self.validate_block_in_current_scope(statements)?;
+		self.exit_scope();
+		Ok(())
+	}
+
+	fn validate_block_in_current_scope(&mut self, statements: &[Statement]) -> Result<(), CompileError> {
 		self.enums.enter_scope();
 		self.functions.enter_scope();
-		self.collect_scope_enum_declarations(statements)?;
+		self.collect_scope_enum_declarations(statements, false)?;
 		self.collect_scope_function_signatures(&[], statements)?;
 
 		for statement in statements {
@@ -5959,7 +6065,6 @@ impl SemanticAnalyzer {
 
 		self.functions.exit_scope();
 		self.enums.exit_scope();
-		self.exit_scope();
 		Ok(())
 	}
 
@@ -5970,12 +6075,20 @@ impl SemanticAnalyzer {
 		message: String,
 	) -> Result<(), CompileError> {
 		self.validate_declared_data_type_structure(data_type, position, &message)?;
+
+		if let DataType::Object(name) = data_type
+			&& let Some(binding) = self.lookup_enum(name) {
+			self.semantic_program.enum_runtime_names.insert(position, binding.runtime_name.clone());
+		}
+
 		let mut references = Vec::new();
+
 		self.resolve_declared_object_type_references(
 			data_type,
 			&mut Vec::new(),
 			&mut references,
 		)?;
+
 		if !references.is_empty() {
 			self.semantic_program.object_type_reference_occurrences.extend(
 				references.iter().map(|reference| ResolvedObjectTypeReferenceOccurrence {
@@ -5984,8 +6097,10 @@ impl SemanticAnalyzer {
 					source_name: self.current_source_name.clone(),
 				}),
 			);
+
 			self.semantic_program.object_type_references.insert(position, references);
 		}
+
 		Ok(())
 	}
 
@@ -6784,10 +6899,18 @@ impl SemanticAnalyzer {
 				}
 				Ok(())
 			}
-			Statement::FunctionDeclaration(function) => self.validate_function_declaration(function),
+			Statement::Fail { value, position } => {
+				if self.function_depth == 0 {
+					return Err(self.compile_error(*position, String::from("`fail` requires a function body.")));
+				}
+
+				let value_type = self.infer_expression_for_target(value, &DataType::Any)?;
+				self.ensure_assignable(&DataType::Any, &value_type, value.position())
+			}
 			Statement::For(ForStatement { body, iterable, position, variable }) => {
 				let iterable_type = self.infer_expression_type(iterable)?;
 				let iterable_type = iterable_type.without_nullability().clone();
+
 				let variable_type = match iterable_type {
 					DataType::Array(element_type) => *element_type,
 					DataType::Range(element_type) => *element_type,
@@ -6982,6 +7105,7 @@ impl SemanticAnalyzer {
 				self.exit_scope();
 				validation_result
 			}
+			Statement::FunctionDeclaration(function) => self.validate_function_declaration(function),
 			Statement::If(IfStatement { condition, else_branch, position, then_branch }) => {
 				match condition {
 					IfCondition::Expression(condition) => {
@@ -7134,6 +7258,41 @@ impl SemanticAnalyzer {
 			Statement::Transaction(TransactionStatement { body, .. }) => {
 				self.validate_statement(&Statement::Block(body.clone()))
 			}
+			Statement::Try(statement) => {
+				self.semantic_program.try_local_boundaries.insert(statement.position, self.next_local_slot);
+				self.validate_statement(&statement.body)?;
+
+				for clause in &statement.catches {
+					self.enter_scope();
+
+					if let Some((name, ty)) = &clause.binding {
+						self.validate_declared_data_type(ty, name.position, "Invalid catch binding type.".into())?;
+						let descriptor = self.describe_object_value_type(ty);
+						self.semantic_program.catch_types.insert(name.position, descriptor);
+						let slot = self.next_local_slot;
+						self.next_local_slot += 1;
+						self.semantic_program.declaration_slots.insert(name.position, slot);
+						self.semantic_program.declaration_types.insert(name.position, ty.clone());
+
+						self.declare_local(name.name.clone(), LocalBinding {
+							declaration_position: name.position, data_type: ty.clone(), is_const: true, slot,
+						});
+					}
+
+					let Statement::Block(block) = &clause.body else {
+						unreachable!("Catch handlers have block bodies");
+					};
+
+					self.validate_block_in_current_scope(&block.statements)?;
+					self.exit_scope();
+				}
+
+				if let Some(arm) = &statement.finally {
+					self.validate_statement(arm)?;
+				}
+
+				Ok(())
+			}
 			Statement::Update(UpdateStatement { target, .. }) => {
 				let local = self.lookup_local(&target.name).ok_or(self.compile_error(
 					target.position,
@@ -7282,6 +7441,10 @@ pub struct SemanticProgram {
 	pub(crate) json_literal_numbers: BTreeMap<usize, String>,
 	pub(crate) float_literals: BTreeMap<usize, crate::float::FloatLiteral>,
 	pub(crate) float_conversions: BTreeSet<usize>,
+	pub(crate) dynamic_types: BTreeMap<usize, ObjectValueTypeDescriptor>,
+	pub(crate) catch_types: BTreeMap<usize, ObjectValueTypeDescriptor>,
+	pub(crate) try_local_boundaries: BTreeMap<usize, u32>,
+	pub(crate) enum_runtime_names: BTreeMap<usize, String>,
 	json_assignments: BTreeSet<usize>,
 	active_databases: Vec<String>,
 	built_in_call_targets: BTreeMap<usize, BuiltInFunction>,
@@ -7298,6 +7461,7 @@ pub struct SemanticProgram {
 	declaration_types: BTreeMap<usize, DataType>,
 	entry_point_function_index: Option<u32>,
 	entry_point_position: Option<usize>,
+	enum_names: BTreeMap<String, String>,
 	enum_declarations: BTreeMap<String, EnumDeclaration>,
 	enum_variant_values: BTreeMap<usize, EnumValue>,
 	enum_variants: BTreeMap<String, BTreeMap<String, EnumValue>>,
@@ -7414,11 +7578,11 @@ impl SemanticProgram {
 	}
 
 	pub fn enum_declaration(&self, name: &str) -> Option<&EnumDeclaration> {
-		self.enum_declarations.get(name)
+		self.enum_declarations.get(name).or_else(|| self.enum_declarations.get(self.enum_names.get(name)?))
 	}
 
 	pub fn enum_variant(&self, enum_name: &str, variant_name: &str) -> Option<&EnumValue> {
-		self.enum_variants.get(enum_name)?.get(variant_name)
+		self.enum_variants.get(enum_name).or_else(|| self.enum_variants.get(self.enum_names.get(enum_name)?))?.get(variant_name)
 	}
 
 	pub fn enum_variant_value(&self, position: usize) -> Option<&EnumValue> {
@@ -7592,6 +7756,7 @@ pub(crate) struct FunctionOverloadAlias {
 
 #[derive(Clone)]
 struct EnumBinding {
+	runtime_name: String,
 	backing_type: DataType,
 	variants: BTreeMap<String, EnumValue>,
 }
@@ -7742,6 +7907,7 @@ fn statement_position(statement: &Statement) -> usize {
 		Statement::Delete(statement) => statement.position,
 		Statement::EnumDeclaration(statement) => statement.position,
 		Statement::Expression(expression) => expression.position(),
+		Statement::Fail { position, .. } => *position,
 		Statement::For(statement) => statement.position,
 		Statement::ForRecord(statement) => statement.position,
 		Statement::FunctionDeclaration(statement) => statement.position,
@@ -7749,6 +7915,7 @@ fn statement_position(statement: &Statement) -> usize {
 		Statement::RecordPointerDeclaration(statement) => statement.position,
 		Statement::Return(statement) => statement.position,
 		Statement::Transaction(statement) => statement.position,
+		Statement::Try(statement) => statement.position,
 		Statement::Update(statement) => statement.position,
 		Statement::Use(statement) => statement.position,
 		Statement::VariableDeclaration(statement) => statement.position,
@@ -8477,7 +8644,7 @@ mod tests {
 		assert_eq!(descriptor.id(), model_id);
 		assert_eq!(descriptor.display_name(), "Model");
 		assert_eq!(
-			semantic_program.object_type_descriptor(ObjectTypeId(u32::MAX)),
+			semantic_program.object_type_descriptor(ObjectTypeId(u32::MAX - 1)),
 			None,
 		);
 	}

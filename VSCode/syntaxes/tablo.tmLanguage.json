@@ -115,7 +115,7 @@
       "patterns": [
         {
           "name": "keyword.control.tablo",
-          "match": "\\b(?:if|else|while|for|in|break|continue|return)\\b"
+          "match": "\\b(?:if|else|while|for|in|break|continue|return|try|catch|fail|finally)\\b"
         },
         {
           "name": "keyword.control.database.tablo",

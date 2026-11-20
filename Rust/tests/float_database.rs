@@ -124,6 +124,24 @@ impl Fixture {
 
 		self.sql(&format!("DELETE FROM {table}"));
 
+		// Seed the binary64 value on the server so a 32-bit client cannot round
+		// it before storage. The original value participates in both predicates.
+		self.sql(&format!("INSERT INTO {table} VALUES (8, 0, 0.1, NULL)"));
+		self.succeeds(r#"
+			rec mut row = find first Numbers where Id == 8;
+
+			if row.Wide != float('0.1') {
+				return 0;
+			}
+
+			row.Id = 9;
+			update row;
+			delete row;
+
+			var remaining: int = count Numbers;
+			return remaining == 0 ? 1 : 0;
+		"#);
+
 		// Create rounds once; both subsequent writes use the rounded identity (no primary key).
 		self.succeeds(r#"
 			rec mut row = new Numbers;

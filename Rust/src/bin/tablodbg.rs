@@ -586,7 +586,7 @@ impl DapServer {
 		declared_type: Option<&ObjectValueTypeDescriptor>,
 	) -> Result<Vec<JsonValue>, String> {
 		match value {
-			Value::Array(values) => Ok(values.iter().enumerate().map(|(index, value)| {
+			Value::Array(values) | Value::DynamicArray { values, .. } => Ok(values.iter().enumerate().map(|(index, value)| {
 				let element_type = array_element_type(declared_type).cloned();
 				let child_reference = self.variables_reference_for_value(value.clone(), element_type.clone());
 				json!({
@@ -695,7 +695,7 @@ impl DapServer {
 		declared_type: Option<ObjectValueTypeDescriptor>,
 	) -> i64 {
 		match value {
-			Value::Array(_) | Value::Object(_) | Value::Json(_) | Value::RecordPointer(_) => {
+			Value::Array(_) | Value::DynamicArray { .. } | Value::Object(_) | Value::Json(_) | Value::RecordPointer(_) => {
 				self.register_container(VariableContainer::Value(value, declared_type))
 			}
 			_ => 0,
@@ -1235,6 +1235,7 @@ fn runtime_variable_type_name(value: &Value) -> &'static str {
 		Value::Date(_) => "date",
 		Value::Decimal(_) => "dec",
 		Value::DecimalRange(_) => "range",
+		Value::DynamicArray { .. } => "array",
 		Value::Enum(_) => "enum",
 		Value::Float(_) => "float",
 		Value::Integer(_) => "int",
