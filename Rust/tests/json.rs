@@ -664,3 +664,49 @@ fn json_literal_watches_reject_invalid_values_and_side_effects() {
 		Value::Array(vec![Value::Integer(1), Value::Integer(2)]));
 	assert!(tablo::vm::VirtualMachine::evaluate_watch_expression(r#"{ "value": 1 }"#, &frame).is_err());
 }
+
+#[test]
+fn reassigning_a_converted_number_preserves_oversized_siblings_after_serialization() {
+	assert_program(r#"
+		fn Main(args: [text]): int {
+			var data: json = { "fraction": 3.75, "nested": [123456789012345678901234567890123456789012345678901] };
+			data.fraction = int(data.fraction);
+			var restored: json = json(text(data));
+			if restored == json('{"fraction":3,"nested":[123456789012345678901234567890123456789012345678901]}') {
+				return 1;
+			}
+			return 0;
+		}
+	"#, Value::Integer(1));
+}
+
+
+#[test]
+fn json_null_is_a_distinct_scalar() {
+	assert_program("
+		fn Main(args: [text]): int {
+			var nested: json = [JsonNull];
+			var value: any = json(' null ');
+			if value == JsonNull and JsonNull != null and nested[1] == JsonNull { return 1; }
+			return 0;
+		}
+	", Value::Integer(1));
+
+	for target in ["json", "json?"] {
+		let source = format!("fn Main(args: [text]): int {{ var value: {target} = JsonNull; return 0; }}");
+		assert!(matches!(tablo::run(&source), Err(tablo::TabloError::Compile(_))));
+	}
+
+	for declaration in ["var value: json?", "var value: json"] {
+		let source = format!("fn Main(args: [text]): int {{ {declaration} = json('null'); return 0; }}");
+		assert_runtime_failure(&source);
+	}
+
+	assert_runtime_failure("
+		fn Take(value: json): int { return 1; }
+		fn Main(args: [text]): int { return Take(json('null')); }
+	");
+	assert_runtime_failure("
+		fn Main(args: [text]): int { var values: [json] = [json('null')]; return 0; }
+	");
+}

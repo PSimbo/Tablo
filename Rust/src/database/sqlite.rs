@@ -325,6 +325,8 @@ fn runtime_value_to_sqlite(value: Value) -> Result<SqlValue, String> {
 		Value::Float(value) if value.0.is_nan() => Err("SQLite cannot store NaN as a floating-point value.".into()),
 		Value::Float(value) => Ok(SqlValue::Real(value.0 as f64)),
 		Value::Integer(value) => Ok(SqlValue::Integer(value)),
+		Value::Json(value) if value.is_document() => Ok(SqlValue::Text(value.to_text())),
+		Value::Json(_) => Err(String::from("SQLite JSON columns require an object or array root.")),
 		Value::Null => Ok(SqlValue::Null),
 		Value::Text(value) => Ok(SqlValue::Text(value)),
 		Value::Time(value) => Ok(SqlValue::Text(value.to_string())),

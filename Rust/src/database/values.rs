@@ -14,6 +14,7 @@ pub(super) fn runtime_type_name(value: &Value) -> &'static str {
 		Value::IntegerRange(_) => "range",
 		Value::Iterator(_) => "iterator",
 		Value::Json(_) => "json",
+		Value::JsonNull => "JsonNull",
 		Value::Null => "null",
 		Value::Object(_) => "object",
 		Value::RecordPointer(_) => "record pointer",

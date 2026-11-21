@@ -361,6 +361,7 @@ fn runtime_value_to_postgresql(value: Value) -> Result<Option<String>, String> {
 		Value::Decimal(value) => Ok(Some(value.to_string())),
 		Value::Float(value) => Ok(Some(super::values::float_parameter_text(value))),
 		Value::Integer(value) => Ok(Some(value.to_string())),
+		Value::Json(value) => Ok(Some(value.to_text())),
 		Value::Null => Ok(None),
 		Value::Text(value) => Ok(Some(value)),
 		Value::Time(value) => Ok(Some(value.to_string())),
@@ -389,6 +390,7 @@ fn text_database_value(
 	let value = row.try_get::<_, Option<String>>(index)
 		.map_err(|error| format!("Failed to read PostgreSQL {description}: {error}"))?;
 	Ok(match value {
+		Some(value) if data_type.without_nullability() == &DataType::Json => DatabaseValue::NativeJson(value),
 		Some(value) => DatabaseValue::Text(normalize_temporal_text(value, data_type)),
 		None => DatabaseValue::Null,
 	})

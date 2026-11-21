@@ -315,7 +315,7 @@ impl BuiltInFunction {
 				Self::signature(&[("str", Text), ("arr", ArrayText)], Some(DataType::Int.into_nullable())),
 				Self::signature(&[("sub", Text), ("str", Text)], Some(DataType::Int.into_nullable())),
 			],
-			Self::JsonCast => vec![Self::signature(&[("v", Text)], Some(DataType::Json))],
+			Self::JsonCast => vec![Self::signature(&[("v", Text)], Some(DataType::ParsedJson))],
 			Self::IntCast => vec![
 				Self::signature(&[("v", Bool)], Some(DataType::Int)),
 				Self::signature(&[("v", Dec)], Some(DataType::Int)),
@@ -508,7 +508,8 @@ impl BuiltInFunction {
 				_ => None,
 			},
 			Self::JsonCast => match argument_types {
-				[arg] if matches!(arg, DataType::Text | DataType::Any | DataType::Array(_) | DataType::EmptyArray | DataType::Object(_) | DataType::Json | DataType::JsonMember) => Some(DataType::Json),
+				[DataType::Text | DataType::Any] => Some(DataType::ParsedJson),
+				[arg] if matches!(arg, DataType::Array(_) | DataType::EmptyArray | DataType::Object(_) | DataType::Json | DataType::ParsedJson | DataType::JsonMember) => Some(DataType::Json),
 				_ => None,
 			},
 			Self::Len => match argument_types {
@@ -547,7 +548,7 @@ impl BuiltInFunction {
 				_ => None,
 			},
 			Self::TextCast => match argument_types {
-				[DataType::Json | DataType::Float] => Some(DataType::Text),
+				[DataType::Json | DataType::ParsedJson | DataType::Float] => Some(DataType::Text),
 				_ => None,
 			},
 		}

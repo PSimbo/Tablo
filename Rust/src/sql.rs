@@ -15,6 +15,7 @@ pub(crate) fn postgresql_type_name(data_type: &DataType) -> Option<&'static str>
 		DataType::Dec => Some("NUMERIC"),
 		DataType::Float => Some("DOUBLE PRECISION"),
 		DataType::Int => Some("BIGINT"),
+		DataType::Json => Some("JSON"),
 		DataType::Text => Some("TEXT"),
 		DataType::Time => Some("TIME"),
 		DataType::TimeTz => Some("TIME WITH TIME ZONE"),

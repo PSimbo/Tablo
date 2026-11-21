@@ -68,7 +68,7 @@ pub(super) fn create_record_write(record: &RecordBuffer, dialect: WriteDialect) 
 
 	for column_name in &record.column_names {
 		let field = record_field(&record.fields, column_name)?;
-		parameters.push(field.materialize()?);
+		parameters.push(write_parameter(field)?);
 		placeholders.push(parameter(dialect, parameters.len(), field.data_type())?);
 	}
 
@@ -94,7 +94,7 @@ pub(super) fn delete_record_write(record: &RecordBuffer, dialect: WriteDialect) 
 		let field = record_field(&record.original_fields, column_name)?;
 		parameters.push(identity_parameter(field)?);
 		let parameter = parameter(dialect, parameters.len(), field.data_type())?;
-		predicates.push(null_safe_predicate(dialect, column_name, &parameter));
+		predicates.push(null_safe_predicate(dialect, column_name, &parameter, field.data_type()));
 	}
 
 	Ok(RecordWrite {
@@ -148,7 +148,8 @@ pub(super) fn update_record_write(record: &RecordBuffer, dialect: WriteDialect) 
 
 	for column_name in assignment_columns {
 		let field = record_field(&record.fields, column_name)?;
-		parameters.push(field.materialize()?);
+
+		parameters.push(write_parameter(field)?);
 		assignments.push(format!(
 			"{} = {}",
 			quoted_identifier(dialect, column_name),
@@ -162,7 +163,7 @@ pub(super) fn update_record_write(record: &RecordBuffer, dialect: WriteDialect) 
 		let field = record_field(&record.original_fields, column_name)?;
 		parameters.push(identity_parameter(field)?);
 		let parameter = parameter(dialect, parameters.len(), field.data_type())?;
-		predicates.push(null_safe_predicate(dialect, column_name, &parameter));
+		predicates.push(null_safe_predicate(dialect, column_name, &parameter, field.data_type()));
 	}
 
 	Ok(RecordWrite {
@@ -174,6 +175,28 @@ pub(super) fn update_record_write(record: &RecordBuffer, dialect: WriteDialect) 
 			predicates.join(" AND "),
 		),
 	})
+}
+
+// Keep the stored spelling for an unchanged document. Text storage can distinguish
+// whitespace and property order when locating a row without a primary key.
+fn write_parameter(field: &crate::value::RecordFieldValue) -> Result<Value, String> {
+	use crate::value::{DatabaseValue, RecordFieldValue};
+
+	if let RecordFieldValue::Deferred {
+		data_type,
+		value: DatabaseValue::Text(text) | DatabaseValue::NativeJson(text),
+		..
+	} = field && data_type.without_nullability() == &DataType::Json {
+		return Ok(Value::Text(text.clone()));
+	}
+
+	let value = field.materialize()?;
+
+	if field.data_type().without_nullability() == &DataType::Json && value != Value::Null {
+		return crate::json::JsonValue::from_value(value).map(Value::Json);
+	}
+
+	Ok(value)
 }
 
 // A 32-bit runtime may round a fetched binary64 value for Tablo arithmetic.
@@ -199,15 +222,20 @@ fn identity_parameter(field: &crate::value::RecordFieldValue) -> Result<Value, S
 		}
 	}
 
-	field.materialize()
+	write_parameter(field)
 }
 
 fn identity_column_names(record: &RecordBuffer) -> &[String] {
 	if record.primary_key_column_names.is_empty() { &record.column_names } else { &record.primary_key_column_names }
 }
 
-fn null_safe_predicate(dialect: WriteDialect, column_name: &str, parameter: &str) -> String {
+fn null_safe_predicate(dialect: WriteDialect, column_name: &str, parameter: &str, ty: &DataType) -> String {
 	let column_name = quoted_identifier(dialect, column_name);
+
+	if dialect == WriteDialect::PostgreSql && ty.without_nullability() == &DataType::Json {
+		// json preserves its input text. jsonb supplies its own output spelling.
+		return format!("CAST({column_name} AS TEXT) IS NOT DISTINCT FROM CASE WHEN pg_typeof({column_name}) = 'jsonb'::regtype THEN CAST(CAST({parameter} AS JSONB) AS TEXT) ELSE CAST({parameter} AS TEXT) END");
+	}
 
 	match dialect {
 		WriteDialect::MySql => format!("{column_name} <=> {parameter}"),
@@ -218,6 +246,7 @@ fn null_safe_predicate(dialect: WriteDialect, column_name: &str, parameter: &str
 
 fn parameter(dialect: WriteDialect, index: usize, data_type: &DataType) -> Result<String, String> {
 	match dialect {
+		WriteDialect::MySql if data_type.without_nullability() == &DataType::Json => Ok(String::from("CAST(CONVERT(? USING utf8mb4) AS JSON)")),
 		WriteDialect::MySql | WriteDialect::Sqlite => Ok(String::from("?")),
 		WriteDialect::PostgreSql => Ok(format!(
 			"CAST(CAST(${index} AS TEXT) AS {})",

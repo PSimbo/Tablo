@@ -39,6 +39,16 @@ For a cross-build, point `I686_UNKNOWN_LINUX_GNU_OPENSSL_INCLUDE_DIR` and `I686_
 
 Replace the example connection strings with those for your test servers. The MySQL socket path in the URL is percent-encoded.
 
+## JSON database tests
+
+The default suite exercises JSON record storage on SQLite. With the dedicated test connection strings above exported, run the live tests for PostgreSQL (`json` and `jsonb`) and MySQL (`JSON`).
+
+```sh
+cargo test --manifest-path Rust/Cargo.toml --test json_database -- --ignored
+```
+
+The tests create and drop isolated schemas and exercise keyless record creation, updates, query loops, deletion, and scalar reads and writes on the native JSON backends. They distinguish SQL NULL from `JsonNull` and check that a fractional JSON number cannot implicitly supply an `int`. The MySQL test also checks that a write which would round a JSON number leaves the table unchanged.
+
 ## 32-bit float verification
 
 On a Linux x86-64 host with a 32-bit linker and libc installed, the i686 executables can run directly in 32-bit compatibility mode:

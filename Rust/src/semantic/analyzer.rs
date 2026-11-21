@@ -599,7 +599,7 @@ impl SemanticAnalyzer {
 
 		let value_type = self.infer_expression_for_target(value, &DataType::Json)?;
 
-		if !matches!(value_type.without_nullability(), DataType::Json | DataType::JsonMember | DataType::Text | DataType::Bool | DataType::Int | DataType::Dec | DataType::Float | DataType::Null)
+		if !value_type.can_supply_json_value()
 			&& !matches!(value_type.without_nullability(), DataType::Object(name) if self.lookup_enum(name).is_some()) {
 			return Err(self.compile_error(value.position(), format!("Cannot store `{}` in JSON without explicit conversion.", value_type.name())));
 		}
@@ -1443,6 +1443,7 @@ impl SemanticAnalyzer {
 			SchemaDataType::Dec => Ok(DataType::Dec),
 			SchemaDataType::Float => Ok(DataType::Float),
 			SchemaDataType::Int => Ok(DataType::Int),
+			SchemaDataType::Json => Ok(DataType::Json),
 			SchemaDataType::Text => Ok(DataType::Text),
 			SchemaDataType::Time => Ok(DataType::Time),
 			SchemaDataType::TimeTz => Ok(DataType::TimeTz),
@@ -1457,27 +1458,29 @@ impl SemanticAnalyzer {
 
 	fn data_type_has_implicit_default(&self, data_type: &DataType) -> bool {
 		match data_type {
-			DataType::Array(_)
-			| DataType::Json
-			| DataType::Bool
-			| DataType::Date
-			| DataType::Dec
-			| DataType::Float
-			| DataType::Int
-			| DataType::Object(_)
-			| DataType::Text
-			| DataType::Time
-			| DataType::TimeTz
-			| DataType::Timestamp
-			| DataType::TimestampTz
-			| DataType::Union(_) => true,
+			DataType::Any => false,
+			DataType::Array(_) => true,
+			DataType::Bool => true,
+			DataType::Date => true,
+			DataType::Dec => true,
+			DataType::EmptyArray => false,
+			DataType::Float => true,
+			DataType::Int => true,
+			DataType::Json => true,
+			DataType::JsonMember => false,
+			DataType::JsonNull => false,
+			DataType::Null => false,
 			DataType::Nullable(_) => true,
-			DataType::Any
-			| DataType::JsonMember
-			| DataType::EmptyArray
-			| DataType::Null
-			| DataType::Range(_)
-			| DataType::RecordPointer(_) => false,
+			DataType::Object(_) => true,
+			DataType::ParsedJson => false,
+			DataType::Range(_) => false,
+			DataType::RecordPointer(_) => false,
+			DataType::Text => true,
+			DataType::Time => true,
+			DataType::TimeTz => true,
+			DataType::Timestamp => true,
+			DataType::TimestampTz => true,
+			DataType::Union(_) => true,
 		}
 	}
 
@@ -1799,7 +1802,12 @@ impl SemanticAnalyzer {
 					.map(|member| self.describe_object_value_type(member))
 					.collect(),
 			),
-			DataType::JsonMember | DataType::EmptyArray | DataType::Null | DataType::RecordPointer(_) => {
+			DataType::EmptyArray
+			| DataType::JsonMember
+			| DataType::JsonNull
+			| DataType::Null
+			| DataType::ParsedJson
+			| DataType::RecordPointer(_) => {
 				unreachable!("Validated object declarations contain only declarable value types.")
 			}
 		}
@@ -1830,8 +1838,10 @@ impl SemanticAnalyzer {
 			DataType::Array(inner) => Some(ObjectValueTypeDescriptor::Array(Box::new(self.dynamic_array_type(inner)?))),
 			DataType::EmptyArray => None,
 			DataType::JsonMember => None,
+			DataType::JsonNull => None,
 			DataType::Null => None,
 			DataType::Nullable(inner) => Some(ObjectValueTypeDescriptor::Nullable(Box::new(self.dynamic_array_type(inner)?))),
+			DataType::ParsedJson => None,
 			DataType::RecordPointer(_) => None,
 			DataType::Union(members) => Some(ObjectValueTypeDescriptor::Union(
 				members.iter().map(|member| self.dynamic_array_type(member)).collect::<Option<_>>()?,
@@ -1880,7 +1890,34 @@ impl SemanticAnalyzer {
 			}
 		}
 
-		if contains_content(value) && target != value {
+		if self.semantic_program.database_json_reads.contains(&position) && target.without_nullability() == &DataType::Any {
+			// A whole database document keeps its JSON identity when boxed in any.
+			self.semantic_program.dynamic_types.insert(position, self.describe_object_value_type(target));
+			return;
+		}
+
+		// The parser can produce JsonNull. Validate at a document destination,
+		// including an array of documents, while leaving dynamic values intact.
+		fn parsed_as(source: &DataType, leaf: DataType) -> Option<DataType> {
+			match source {
+				DataType::Array(element) => Some(DataType::Array(Box::new(parsed_as(element, leaf)?))),
+				DataType::Nullable(inner) => Some(parsed_as(inner, leaf)?.into_nullable()),
+				DataType::ParsedJson => Some(leaf),
+				_ => None,
+			}
+		}
+
+		if contains_content(target) {
+			// This is an intermediate expression. Its consuming context selects the conversion.
+			return;
+		}
+
+		if let Some(null_type) = parsed_as(value, DataType::JsonNull) {
+			if !self.is_assignable(target, &null_type) {
+				let document_type = parsed_as(value, DataType::Json).unwrap();
+				self.semantic_program.json_conversions.insert(position, document_type);
+			}
+		} else if contains_content(value) && target != value {
 			self.semantic_program.json_conversions.insert(position, target.clone());
 		}
 	}
@@ -2218,7 +2255,7 @@ impl SemanticAnalyzer {
 
 		let data_type = self.infer_expression_type(expression)?;
 
-		if !matches!(data_type.without_nullability(), DataType::Json | DataType::JsonMember | DataType::Text | DataType::Bool | DataType::Int | DataType::Dec | DataType::Float | DataType::Null)
+		if !data_type.can_supply_json_value()
 			&& !matches!(data_type.without_nullability(), DataType::Object(name) if self.lookup_enum(name).is_some()) {
 			return Err(self.compile_error(expression.position(), format!("Cannot store `{}` in a JSON literal without explicit conversion.", data_type.name())));
 		}
@@ -2382,7 +2419,13 @@ impl SemanticAnalyzer {
 
 		if built_in == BuiltInFunction::JsonCast && argument_types.len() == 1 {
 			let target = &argument_types[0];
-			if matches!(target, DataType::Any | DataType::Array(_) | DataType::EmptyArray | DataType::Object(_) | DataType::Json | DataType::JsonMember) {
+			if matches!(target, DataType::Any
+				| DataType::Array(_)
+				| DataType::EmptyArray
+				| DataType::Json
+				| DataType::JsonMember
+				| DataType::Object(_)
+				| DataType::ParsedJson) {
 				signatures[0].parameters[0].data_type = target.clone();
 			}
 		}
@@ -2576,7 +2619,7 @@ impl SemanticAnalyzer {
 			}
 			let argument = arguments[0].expression().unwrap();
 			let source_type = self.infer_expression_for_target(argument, &DataType::Json)?;
-			if !matches!(source_type, DataType::Json | DataType::JsonMember) {
+			if !matches!(source_type, DataType::Json | DataType::ParsedJson | DataType::JsonMember) {
 				return Err(self.compile_error(argument.position(), "Object conversion requires JSON contents."));
 			}
 			let private_types = self.semantic_program.object_types().filter(|object| object.source_name() == self.current_source_name.as_deref())
@@ -3056,6 +3099,20 @@ impl SemanticAnalyzer {
 							}
 						}
 
+						if current_type.without_nullability() == &DataType::JsonMember && *operator == AssignmentOperator::Assign {
+							let ty = self.infer_expression_for_target(value, &DataType::Json)?;
+
+							if (ty == DataType::Null || ty.is_nullable()) && !current_type.is_nullable() {
+								return Err(self.compile_error(value.position(), "SQL NULL requires a nullable JSON column."));
+							}
+
+							if !ty.can_supply_json_value() {
+								return Err(self.compile_error(value.position(), format!("Cannot store `{}` in a JSON column.", ty.name())));
+							}
+
+							return Ok(ty);
+						}
+
 						let value_type = self.infer_expression_for_target(value, &current_type)?;
 
 						self.assignment_result_type(*operator, &current_type, &value_type, expression.position(), value.position())
@@ -3064,7 +3121,7 @@ impl SemanticAnalyzer {
 			}
 			Expr::Binary(BinaryExpr { left, operator, right, .. }) => {
 				let mut left_type;
-				let right_type;
+				let mut right_type;
 
 				if left.can_adopt_float_context() && !right.can_adopt_float_context() {
 					right_type = self.infer_expression_type(right)?;
@@ -3076,6 +3133,19 @@ impl SemanticAnalyzer {
 
 				if right_type.without_nullability() == &DataType::Float && left.can_adopt_float_context() {
 					left_type = self.infer_expression_for_target(left, &right_type)?;
+				}
+
+				// A primitive operand supplies the target type for a scalar column read.
+				let scalar_type = |ty: &DataType| matches!(ty.without_nullability(), DataType::Text | DataType::Bool | DataType::Int | DataType::Dec | DataType::Float);
+
+				if self.semantic_program.database_json_reads.contains(&left.position()) && scalar_type(&right_type) {
+					let target = if left_type.is_nullable() { right_type.clone().into_nullable() } else { right_type.clone() };
+					self.record_json_conversion(&target, &left_type, left.position());
+					left_type = target;
+				} else if self.semantic_program.database_json_reads.contains(&right.position()) && scalar_type(&left_type) {
+					let target = if right_type.is_nullable() { left_type.clone().into_nullable() } else { left_type.clone() };
+					self.record_json_conversion(&target, &right_type, right.position());
+					right_type = target;
 				}
 
 				let result = self.binary_result_type(*operator, &left_type, &right_type, expression.position())?;
@@ -3136,7 +3206,7 @@ impl SemanticAnalyzer {
 				let object_type = object_type.without_nullability().clone();
 
 				match object_type {
-					DataType::Json | DataType::JsonMember => Ok(DataType::JsonMember),
+					DataType::Json | DataType::ParsedJson | DataType::JsonMember => Ok(DataType::JsonMember),
 					DataType::Object(name) => {
 						if self.lookup_enum(&name).is_some() {
 							return Err(self.compile_error(
@@ -3162,11 +3232,14 @@ impl SemanticAnalyzer {
 						self.ensure_object_field_accessible(&name, object_field, field.position, "accessed")?;
 						Ok(object_field.data_type.clone())
 					}
-					DataType::RecordPointer(record_pointer) => self.infer_record_pointer_field_access_type(
-						&record_pointer,
-						field.position,
-						&field.name,
-					),
+					DataType::RecordPointer(record_pointer) => {
+						let ty = self.infer_record_pointer_field_access_type(&record_pointer, field.position, &field.name)?;
+						if ty.without_nullability() == &DataType::JsonMember {
+							self.semantic_program.database_json_reads.insert(expression.position());
+						}
+
+						Ok(ty)
+					}
 					other => Err(self.compile_error(
 						object.position(),
 						format!("Field access requires an object operand, found `{}`.", other.name()),
@@ -3182,6 +3255,9 @@ impl SemanticAnalyzer {
 				else if let Some(local) = self.lookup_local(name) {
 					self.semantic_program.identifier_slots.insert(expression.position(), local.slot);
 					Ok(local.data_type)
+				}
+				else if name.eq_ignore_ascii_case("JsonNull") {
+					Ok(DataType::JsonNull)
 				}
 				else if let Some(resolved_sequence) = self.try_resolve_unqualified_sequence(name, expression.position())? {
 					self.record_resolved_sequence(expression.position(), &resolved_sequence);
@@ -3204,7 +3280,7 @@ impl SemanticAnalyzer {
 				let array_type = array_type.without_nullability().clone();
 
 				match array_type {
-					DataType::Json | DataType::JsonMember => match index_type {
+					DataType::Json | DataType::ParsedJson | DataType::JsonMember => match index_type {
 						DataType::Int => Ok(DataType::JsonMember),
 						other => Err(self.compile_error(
 							index.position(),
@@ -3515,7 +3591,7 @@ impl SemanticAnalyzer {
 		}
 
 		for order_by in &find.order_by {
-			self.infer_query_expression_type(&order_by.expression, &find.table)?;
+			self.check_query_sort_key(&order_by.expression, &find.table)?;
 		}
 
 		let compiled_query = lower_find_query(&lowered_query).map_err(|error| self.compile_error(
@@ -3695,6 +3771,16 @@ impl SemanticAnalyzer {
 		Ok(DataType::RecordPointer(record_type))
 	}
 
+	fn check_query_sort_key(&mut self, expression: &Expr, table: &TableReference) -> Result<(), CompileError> {
+		let ty = self.infer_query_expression_type(expression, table)?;
+
+		if ty.without_nullability() == &DataType::Json {
+			return Err(self.compile_error(expression.position(), String::from("Database queries cannot order or group JSON documents.")));
+		}
+
+		Ok(())
+	}
+
 	fn infer_query_expression_type(
 		&mut self,
 		expression: &Expr,
@@ -3732,6 +3818,14 @@ impl SemanticAnalyzer {
 
 					(left_type, right_type)
 				};
+
+				let uses_json = left_type.without_nullability() == &DataType::Json || right_type.without_nullability() == &DataType::Json;
+				let tests_null = matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual)
+					&& (left_type == DataType::Null || right_type == DataType::Null);
+
+				if uses_json && !tests_null {
+					return Err(self.compile_error(expression.position(), String::from("Database queries cannot compare JSON documents.")));
+				}
 
 				let result = self.binary_result_type(*operator, &left_type, &right_type, expression.position())?;
 
@@ -4010,6 +4104,10 @@ impl SemanticAnalyzer {
 			),
 		))?;
 
+		if column.data_type() == &SchemaDataType::Json && database.backend() != crate::schema::DatabaseBackend::Sqlite {
+			return Ok(if column.is_nullable() { DataType::JsonMember.into_nullable() } else { DataType::JsonMember });
+		}
+
 		self.data_type_from_schema_column(column.data_type(), column.is_nullable())
 	}
 
@@ -4019,6 +4117,12 @@ impl SemanticAnalyzer {
 		false_type: &DataType,
 		position: usize,
 	) -> Result<DataType, CompileError> {
+		if matches!(true_type, DataType::Json | DataType::JsonNull | DataType::ParsedJson)
+			&& matches!(false_type, DataType::Json | DataType::JsonNull | DataType::ParsedJson)
+			&& true_type != false_type {
+			return Ok(DataType::ParsedJson);
+		}
+
 		if self.is_assignable(true_type, false_type) {
 			return Ok(true_type.clone());
 		}
@@ -4067,6 +4171,14 @@ impl SemanticAnalyzer {
 				DataType::Union(members) => members.iter().all(|member| self.is_assignable_with_numeric_conversion(target, member, allow_numeric_conversion)),
 				_ => true,
 			};
+		}
+
+		if target == &DataType::ParsedJson {
+			return matches!(value, DataType::Json | DataType::JsonNull | DataType::ParsedJson);
+		}
+
+		if value == &DataType::ParsedJson {
+			return self.is_assignable_with_numeric_conversion(target, &DataType::Json, allow_numeric_conversion);
 		}
 
 		if value == &DataType::JsonMember {
@@ -5235,7 +5347,7 @@ impl SemanticAnalyzer {
 		let lhs = lhs.without_nullability();
 		let rhs = rhs.without_nullability();
 
-		if matches!(lhs, DataType::Json | DataType::JsonMember) && matches!(rhs, DataType::Json | DataType::JsonMember) {
+		if lhs.is_json_content() && rhs.is_json_content() {
 			return Ok(());
 		}
 
@@ -7035,11 +7147,11 @@ impl SemanticAnalyzer {
 				}
 
 				for group_by in group_by {
-					self.infer_query_expression_type(&group_by.expression, table)?;
+					self.check_query_sort_key(&group_by.expression, table)?;
 				}
 
 				for order_by in order_by {
-					self.infer_query_expression_type(&order_by.expression, table)?;
+					self.check_query_sort_key(&order_by.expression, table)?;
 				}
 
 				let compiled_query = lower_for_query(&lowered_query).map_err(|error| self.compile_error(
@@ -7049,6 +7161,7 @@ impl SemanticAnalyzer {
 				let group_boundary_keys = lowered_query.group_by.iter()
 					.map(|item| item.key_names.clone())
 					.collect::<Vec<_>>();
+
 				self.semantic_program.compiled_for_record_queries.insert(*position, compiled_query);
 				self.semantic_program.lowered_for_record_queries.insert(*position, lowered_query);
 
@@ -7446,6 +7559,7 @@ pub struct SemanticProgram {
 	pub(crate) try_local_boundaries: BTreeMap<usize, u32>,
 	pub(crate) enum_runtime_names: BTreeMap<usize, String>,
 	json_assignments: BTreeSet<usize>,
+	database_json_reads: BTreeSet<usize>,
 	active_databases: Vec<String>,
 	built_in_call_targets: BTreeMap<usize, BuiltInFunction>,
 	call_argument_bindings: BTreeMap<usize, Vec<CallArgumentBinding>>,

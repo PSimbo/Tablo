@@ -227,8 +227,15 @@ fn connection_url<'a>(database_name: &str, connection_string: &'a str) -> Result
 
 fn database_value(value: &MySqlValue, data_type: &DataType) -> Result<DatabaseValue, String> {
 	match value {
-		MySqlValue::Bytes(value) => Ok(DatabaseValue::Text(String::from_utf8(value.clone())
-			.map_err(|_| String::from("MySQL returned text data that is not valid UTF-8."))?)),
+		MySqlValue::Bytes(value) => {
+			let text = String::from_utf8(value.clone()).map_err(|_| String::from("MySQL returned text data that is not valid UTF-8."))?;
+
+			if data_type.without_nullability() == &DataType::Json {
+				Ok(DatabaseValue::NativeJson(text))
+			} else {
+				Ok(DatabaseValue::Text(text))
+			}
+		}
 		MySqlValue::Date(year, month, day, hour, minute, second, microsecond) => {
 			match data_type.without_nullability() {
 				DataType::Date => Ok(DatabaseValue::Text(format!("{year:04}-{month:02}-{day:02}"))),
@@ -266,6 +273,23 @@ fn database_value(value: &MySqlValue, data_type: &DataType) -> Result<DatabaseVa
 }
 
 fn execute_record_write(connection: &mut Conn, operation: &str, write: RecordWrite) -> Result<u64, String> {
+	// MySQL's native JSON representation can round a number on input.
+	// Check its serialized value before issuing the modifying statement.
+	for value in &write.parameters {
+		if let Value::Json(document) = value {
+			let stored: Option<String> = connection.exec_first(
+				"SELECT CAST(CAST(CONVERT(? USING utf8mb4) AS JSON) AS CHAR CHARACTER SET utf8mb4)",
+				(document.to_text(),),
+			).map_err(|error| format!("Cannot encode JSON for MySQL: {error}"))?;
+
+			let stored = stored.ok_or("MySQL returned no JSON document.")?;
+
+			if crate::json::JsonValue::parse_content(&stored)? != *document {
+				return Err(String::from("MySQL cannot store this JSON document without losing precision."));
+			}
+		}
+	}
+
 	let parameters = write.parameters.into_iter()
 		.map(runtime_value_to_mysql)
 		.collect::<Result<Vec<_>, _>>()?;
@@ -379,6 +403,7 @@ fn runtime_value_to_mysql(value: Value) -> Result<MySqlValue, String> {
 		Value::Float(value) if !value.0.is_finite() => Err("MySQL cannot store a non-finite floating-point value.".into()),
 		Value::Float(value) => Ok(MySqlValue::Double(value.0 as f64)),
 		Value::Integer(value) => Ok(MySqlValue::Int(value)),
+		Value::Json(value) => Ok(MySqlValue::Bytes(value.to_text().into_bytes())),
 		Value::Null => Ok(MySqlValue::NULL),
 		Value::Text(value) => Ok(MySqlValue::Bytes(value.into_bytes())),
 		Value::Time(value) => Ok(MySqlValue::Bytes(value.to_string().into_bytes())),

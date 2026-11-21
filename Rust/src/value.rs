@@ -8,6 +8,7 @@ use crate::bytecode::{ObjectTypeId, ObjectValueTypeDescriptor};
 pub enum DatabaseValue {
 	Blob(Vec<u8>),
 	Integer(i64),
+	NativeJson(String),
 	Null,
 	Real(String),
 	Text(String),
@@ -67,6 +68,7 @@ pub enum Value {
 	IntegerRange(IntegerRange),
 	Iterator(IteratorState),
 	Json(crate::json::JsonValue),
+	JsonNull,
 	Null,
 	Object(ObjectValue),
 	RecordPointer(RecordPointerValue),
@@ -121,6 +123,7 @@ impl Display for Value {
 			Value::IntegerRange(range) => write!(f, "{range}"),
 			Value::Iterator(_) => write!(f, "<iterator>"),
 			Value::Json(value) => write!(f, "{value}"),
+			Value::JsonNull => f.write_str("JsonNull"),
 			Value::Null => write!(f, "null"),
 			Value::Object(object) => {
 				write!(f, "{{")?;
@@ -950,6 +953,11 @@ pub fn database_record_field_runtime_value(
 				database_value_name(other),
 			)),
 		},
+		DataType::Json => match value {
+			DatabaseValue::NativeJson(text) => crate::json::JsonValue::parse_content(text).map(|value| value.database_value()),
+			DatabaseValue::Text(text) => crate::json::JsonValue::parse(text).map(Value::Json),
+			other => Err(format!("Cannot convert database value `{}` to `json`.", database_value_name(other))),
+		},
 		DataType::Nullable(inner) => database_record_field_runtime_value(value, inner, true),
 		DataType::Text => match value {
 			DatabaseValue::Text(value) => Ok(Value::Text(value.clone())),
@@ -1020,9 +1028,11 @@ fn data_type_name_for_database_runtime(data_type: &DataType) -> &'static str {
 		DataType::Int => "int",
 		DataType::Json => "json",
 		DataType::JsonMember => "JSON content",
+		DataType::JsonNull => "JsonNull",
 		DataType::Null => "null",
 		DataType::Nullable(inner) => data_type_name_for_database_runtime(inner),
 		DataType::Object(_) => "object",
+		DataType::ParsedJson => "json or JsonNull",
 		DataType::Range(_) => "range",
 		DataType::RecordPointer(_) => "record pointer",
 		DataType::Text => "text",
@@ -1038,6 +1048,7 @@ fn database_value_name(value: &DatabaseValue) -> &'static str {
 	match value {
 		DatabaseValue::Blob(_) => "blob",
 		DatabaseValue::Integer(_) => "integer",
+		DatabaseValue::NativeJson(_) => "JSON",
 		DatabaseValue::Null => "null",
 		DatabaseValue::Real(_) => "real",
 		DatabaseValue::Text(_) => "text",

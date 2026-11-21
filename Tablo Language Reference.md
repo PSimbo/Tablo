@@ -211,6 +211,24 @@ If an unquoted name matches an existing property, the write updates that propert
 
 JSON array writes may replace an existing element or append at exactly one past the current length. Other out-of-bounds writes fail; arrays cannot become sparse. Assigning null stores a present JSON null rather than deleting a property or element. JSON contents may be copied directly, preserving exact numeric values. Tablo `text`, `bool`, `int`, `dec`, and finite `float` values are stored as the corresponding JSON kinds. Floats use a decimal spelling that round-trips to the same float on the same runtime architecture, preserving signed zero; this need not be the exact decimal expansion of the binary value. NaN and infinities cause a runtime error because JSON cannot represent them. Enum variants are stored as strings containing their declared names, as specified under "JSON and Object Conversion". Native objects and arrays require explicit conversion. Mutation of a JSON value does not modify separately assigned copies or the caller's value when passed by value.
 
+A database JSON column can hold an object or array, which reads as a Tablo `json` value. PostgreSQL supports `json` and `jsonb` columns, MySQL supports native `JSON` columns, and SQLite stores documents as UTF-8 text.
+
+Some database backends also support a JSON scalar as the entire column value. On these backends a stored string or Boolean reads as Tablo `text` or `bool`. A stored number supplies a Tablo numeric value under the rules in "Automatic Type Conversions". On write, Tablo text supplies a JSON string, a Boolean supplies a JSON Boolean, and a numeric value supplies a JSON number. A floating-point value must be finite.
+
+The built-in constant `JsonNull` represents the JSON scalar null and equals the result of parsing `json('null')`. In a record buffer, `row.Payload == JsonNull` tests for a stored JSON null and `row.Payload == null` tests for SQL `NULL`. A database column that supports scalar JSON can store `JsonNull` even when declared `NOT NULL`. Assigning `JsonNull` to a Tablo variable of type `json` or `json?` is invalid. A `json?` variable can hold Tablo `null` to represent absence.
+
+~~~tablo
+row.Payload = null;     // Write SQL NULL (nullable column only).
+row.Payload = JsonNull; // Write the JSON literal null.
+row.Payload = '42';     // Write the JSON string "42".
+row.Payload = 42;       // Write the JSON number 42.
+var n: int = row.Payload;
+~~~
+
+Writes preserve JSON numeric values. If MySQL would round a number during storage, the write fails.
+
+A database query can test a nullable JSON column for SQL `NULL`. Read the document into a record buffer to access its contents or compare it with another document. JSON columns cannot serve as ordering or grouping keys.
+
 Beyond the primitive data types listed in this section, custom data types may be defined as objects (see the "Objects" section).
 
 Technically, Tablo supports two more primitive data types: record pointers and sequences. However, the semantics for these are quite different compared to other variables. A record pointer is declared using the `rec` keyword rather than the `var` keyword and is immutable unless the `mut` keyword is also specified. Record pointers are described further in the "Database Queries" section. Sequences cannot be defined in code; only referenced. They are described in the "Sequences" section.
@@ -523,13 +541,13 @@ Decimal values may be compared with other decimal values. Decimal values may als
 
 Arrays may be compared for equality using `==` and `!=`. Two arrays are equal if and only if they have the same length and each element is equal to the corresponding element in the other array.
 
-The `null` literal may be compared for equality with a nullable or non-nullable value of any type for which equality is defined. A JSON field or element containing null compares equal to the `null` literal. A non-nullable `json` value itself contains an object or array and is unequal to `null`. Every other non-nullable value is also unequal to `null`. Such comparisons are valid even when the compiler can determine their result statically.
+The `null` literal may be compared for equality with a nullable or non-nullable value of any type for which equality is defined. A JSON object property or array element containing null compares equal to the `null` literal. For a database JSON column, SQL `NULL` compares equal to Tablo `null`, and a stored JSON null compares equal to `JsonNull` and unequal to Tablo `null`. A non-nullable `json` value itself contains an object or array and is unequal to `null`. Every other non-nullable value is also unequal to `null`. Such comparisons are valid even when the compiler can determine their result statically.
 
 Objects may be compared for equality using `==` and `!=`. Ordinary statically typed object operands must have the same nominal object type, subject to the usual nullable and non-nullable compatibility. Two non-null object values are equal if and only if every field is equal, including private fields and fields within nested objects. Root-array-shaped objects are compared using array equality. Structurally identical values of different nominal object types are not equal.
 
 Object comparison is recursive and terminates as soon as inequality is established without comparing the remaining fields or elements. The compiler is free to compare fields in any order.
 
-JSON values may be compared for equality using `==` and `!=`. JSON values of different kinds are not equal. JSON strings and Boolean values use their ordinary scalar equality, JSON `null` uses the ordinary `null` equality rules, and JSON numbers are equal when they represent the same numeric value; differences in numeric spelling such as `1`, `1.0`, and `1e0` do not affect equality. JSON arrays are equal when they have the same length and corresponding elements are equal in the same order. JSON objects are equal when they contain the same case-sensitive property names and the corresponding values are equal; property order does not affect equality.
+JSON values may be compared for equality using `==` and `!=`. JSON values of different kinds are not equal. JSON strings and Boolean values use their ordinary scalar equality, two JSON nulls are equal, and JSON numbers are equal when they represent the same numeric value; differences in numeric spelling such as `1`, `1.0`, and `1e0` do not affect equality. JSON arrays are equal when they have the same length and corresponding elements are equal in the same order. JSON objects are equal when they contain the same case-sensitive property names and the corresponding values are equal; property order does not affect equality.
 
 A JSON object or array is not equal to a statically typed object or ordinary Tablo array merely because its structure matches. An explicit conversion is required before these values can compare as values of the same type. JSON scalar contents follow the target-type conversion rules in "Automatic Type Conversions".
 
@@ -2392,14 +2410,14 @@ Returns the integer obtained by parsing `v`. The text must represent an integer.
 
 ### `json(v: text): json`
 
-Parses `v` as a JSON object or array. Parsing fails if the input is malformed, its root is a scalar (including null), or any object contains duplicate property names. Duplicate names are compared exactly and case-sensitively, including names decoded from escape sequences.
+Parses an object or array as a Tablo `json` value. The JSON literal `null` is a special case: `json('null')` yields the scalar represented by `JsonNull`. Other scalar roots are invalid for this function. Parsing fails if the input is malformed or any object contains duplicate property names. Duplicate names are compared exactly and case-sensitively, including names decoded from escape sequences.
 
 ### `json(v: <object>): json`
 ### `json(v: [any?]): json`
 ### `json(v: json): json`
 ### `json(v: any): json`
 
-Converts supported native objects and arrays into JSON using the rules under "JSON and Object Conversion". Object export includes public fields only. Existing JSON retains its contents and exact numbers. For `any`, conversion inspects the actual runtime value; text uses the JSON parsing overload. A scalar or null document root is rejected.
+Converts supported native objects and arrays into JSON using the rules under "JSON and Object Conversion". Object export includes public fields only. Existing JSON retains its contents and exact numbers. For `any`, conversion inspects the actual runtime value. Text follows the parsing rules above. Other inputs must produce an object or array.
 
 
 ### `max(a: int, b: int): int`

@@ -256,6 +256,7 @@ pub fn default_completion_items() -> Vec<CompletionItem> {
 		CompletionItem { label: String::from("int"), kind: CompletionItemKind::Type, detail: String::from("Type") },
 		CompletionItem { label: String::from("float"), kind: CompletionItemKind::Type, detail: String::from("Type") },
 		CompletionItem { label: String::from("json"), kind: CompletionItemKind::Type, detail: String::from("Type") },
+		CompletionItem { label: String::from("JsonNull"), kind: CompletionItemKind::Literal, detail: String::from("Built-in constant for a stored JSON null") },
 		CompletionItem { label: String::from("last"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("limit"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("locked"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
@@ -607,7 +608,7 @@ fn built_in_callable_signatures(built_in: BuiltInFunction) -> Vec<CallableSignat
 		// static types before overload checking; display their categories here.
 		for input in ["<object>", "[any?]", "json", "any"] {
 			signatures.push(CallableSignature {
-				label: format!("json(v: {input}): json"),
+				label: format!("json(v: {input}): {}", if input == "any" { "json or JsonNull" } else { "json" }),
 				parameters: vec![format!("v: {input}")],
 			});
 		}
@@ -1785,6 +1786,7 @@ fn schema_data_type_name(data_type: &SchemaDataType) -> Option<String> {
 		SchemaDataType::Date => Some(String::from("date")),
 		SchemaDataType::Dec | SchemaDataType::Float => Some(String::from("dec")),
 		SchemaDataType::Int => Some(String::from("int")),
+		SchemaDataType::Json => Some(String::from("json")),
 		SchemaDataType::Text => Some(String::from("text")),
 		SchemaDataType::Time => Some(String::from("time")),
 		SchemaDataType::TimeTz => Some(String::from("timetz")),
@@ -2178,12 +2180,15 @@ fn Main(args: [text]): int {
 	fn json_conversion_signatures_describe_supported_inputs() {
 		let signatures = callable_signatures("", "json");
 		let labels = signatures.iter().map(|signature| signature.label.as_str()).collect::<Vec<_>>();
-		assert!(labels.contains(&"json(v: text): json"));
+
+		assert!(labels.contains(&"json(v: text): json or JsonNull"));
 		assert!(labels.contains(&"json(v: <object>): json"));
 		assert!(labels.contains(&"json(v: [any?]): json"));
-		assert!(labels.contains(&"json(v: any): json"));
+		assert!(labels.contains(&"json(v: any): json or JsonNull"));
+
 		let items = default_completion_items();
 		let json = items.iter().find(|item| item.label == "json").unwrap();
+
 		assert!(json.detail.contains("json(v: <object>): json"));
 	}
 

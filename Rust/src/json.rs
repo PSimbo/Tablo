@@ -114,11 +114,28 @@ impl Default for JsonValue {
 
 impl JsonValue {
 	pub fn parse(text: &str) -> Result<Self, String> {
-		let raw: Box<RawValue> = serde_json::from_str(text).map_err(|error| format!("Invalid JSON: {error}"))?;
-		if !matches!(raw.get().as_bytes()[0], b'{' | b'[') {
+		let value = Self::parse_content(text)?;
+
+		if !value.is_document() {
 			return Err(String::from("A JSON document must have an object or array root."));
 		}
-		Ok(Self(JsonNode::parse(&raw, 0)?))
+
+		Ok(value)
+	}
+
+	pub(crate) fn parse_content(text: &str) -> Result<Self, String> {
+		let raw: Box<RawValue> = serde_json::from_str(text).map_err(|error| format!("Invalid JSON: {error}"))?;
+		JsonNode::parse(&raw, 0).map(Self)
+	}
+
+	pub(crate) fn database_value(self) -> Value {
+		match self.0 {
+			JsonNode::Boolean(value) => Value::Boolean(value),
+			JsonNode::Null => Value::JsonNull,
+			JsonNode::String(text) => Value::Text(text),
+			// Keep the exact number until the destination selects its numeric type.
+			_ => Value::Json(self),
+		}
 	}
 
 	pub(crate) fn field(&self, name: &str, quoted: bool) -> Result<Option<Self>, String> {
@@ -156,7 +173,7 @@ impl JsonValue {
 			}
 			Value::Integer(value) => Self(JsonNode::Number(JsonNumber::new(&value.to_string()))),
 			Value::Json(value) => value,
-			Value::Null => Self(JsonNode::Null),
+			Value::JsonNull | Value::Null => Self(JsonNode::Null),
 			Value::Text(value) => Self(JsonNode::String(value)),
 			_ => return Err(String::from("Value cannot be stored in JSON without explicit conversion.")),
 		})
@@ -388,34 +405,57 @@ impl<'a> JsonConversion<'a> {
 			.ok_or_else(|| Self::error(format!("Unknown object type ID {}.", id.raw())))
 	}
 
+	pub(crate) fn cast(&self, value: Value) -> Result<Value, crate::object_construction::ObjectConstructionError> {
+		if let Value::Text(text) = value {
+			let parsed = JsonValue::parse_content(&text).map_err(Self::error)?;
+
+			if parsed.is_null() {
+				return Ok(Value::JsonNull);
+			}
+
+			if !parsed.is_document() {
+				return Err(Self::error("A JSON document must have an object or array root."));
+			}
+
+			return Ok(Value::Json(parsed));
+		}
+
+		self.export_document(value).map(Value::Json)
+	}
+
 	pub(crate) fn export_document(&self, value: Value) -> Result<JsonValue, crate::object_construction::ObjectConstructionError> {
-		// The existing text overload remains a parser, not a scalar encoder.
-		if let Value::Text(text) = value { return JsonValue::parse(&text).map_err(Self::error); }
 		let result = self.export(value)?;
-		if !result.is_document() { return Err(Self::error("JSON conversion requires an object or array root.")); }
+
+		if !result.is_document() {
+			return Err(Self::error("JSON conversion requires an object or array root."));
+		}
+
 		Ok(result)
 	}
 
 	fn export(&self, value: Value) -> Result<JsonValue, crate::object_construction::ObjectConstructionError> {
 		use crate::bytecode::ObjectTypeDescriptorShape;
 		use crate::ast::Visibility;
+
 		match value {
 			Value::Array(values) | Value::DynamicArray { values, .. } => Ok(JsonValue(JsonNode::Array(values.into_iter().enumerate()
 				.map(|(index, value)| self.export(value).map(|value| value.0).map_err(|error| error.at(format!("[{}]", index + 1))))
 				.collect::<Result<Vec<_>, _>>()?))),
+			Value::Date(value) => Ok(JsonValue(JsonNode::String(value.to_string()))),
+			Value::Enum(value) => Ok(JsonValue(JsonNode::String(value.variant_name))),
 			Value::Object(object) => {
 				let ObjectTypeDescriptorShape::Fields(fields) = self.descriptor(object.object_type_id)?.shape() else {
 					return Err(Self::error("Expected a field-shaped object."));
 				};
 				let mut result = BTreeMap::new();
+
 				for field in fields.iter().filter(|field| field.visibility() == Visibility::Public) {
 					let value = object.fields.get(field.name()).ok_or_else(|| Self::error("Incomplete native object.").at(field.name()))?;
 					result.insert(field.name().to_owned(), self.export(value.clone()).map_err(|error| error.at(field.name()))?.0);
 				}
+
 				Ok(JsonValue(JsonNode::Object(result)))
 			}
-			Value::Enum(value) => Ok(JsonValue(JsonNode::String(value.variant_name))),
-			Value::Date(value) => Ok(JsonValue(JsonNode::String(value.to_string()))),
 			Value::Time(value) => Ok(JsonValue(JsonNode::String(value.to_string()))),
 			Value::TimeTz(value) => Ok(JsonValue(JsonNode::String(value.to_string()))),
 			Value::Timestamp(value) => Ok(JsonValue(JsonNode::String(value.to_string()))),

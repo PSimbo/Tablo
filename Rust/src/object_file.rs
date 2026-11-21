@@ -1604,7 +1604,9 @@ fn write_data_type(bytes: &mut Vec<u8>, data_type: &DataType) {
 		}
 		DataType::Text => bytes.push(DATA_TYPE_TAG_TEXT),
 		DataType::Json => bytes.push(DATA_TYPE_TAG_JSON),
-		DataType::JsonMember => panic!("JSON field content is an expression type, not a declared type."),
+		DataType::JsonMember
+		| DataType::JsonNull
+		| DataType::ParsedJson => panic!("JSON field content is an expression type, not a declared type."),
 		DataType::Time => bytes.push(DATA_TYPE_TAG_TIME),
 		DataType::TimeTz => bytes.push(DATA_TYPE_TAG_TIME_TZ),
 		DataType::Timestamp => bytes.push(DATA_TYPE_TAG_TIMESTAMP),

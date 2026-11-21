@@ -371,7 +371,7 @@ fn parse_schema_data_type(input: &str) -> Result<SchemaDataType, SchemaFixtureEr
 		"dec" | "numeric" => Ok(SchemaDataType::Dec),
 		"float" => Ok(SchemaDataType::Float),
 		"int" | "integer" => Ok(SchemaDataType::Int),
-		"json" => Ok(SchemaDataType::Json),
+		"json" | "jsonb" => Ok(SchemaDataType::Json),
 		"text" => Ok(SchemaDataType::Text),
 		"time" => Ok(SchemaDataType::Time),
 		"timestamp" => Ok(SchemaDataType::Timestamp),

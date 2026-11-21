@@ -62,11 +62,12 @@ pub enum DataType {
 	Float,
 	Int,
 	Json,
-	// Field and element contents remain in the JSON domain until a destination supplies a type.
 	JsonMember,
+	JsonNull,
 	Null,
 	Nullable(Box<DataType>),
 	Object(ObjectTypeName),
+	ParsedJson,
 	Range(Box<DataType>),
 	RecordPointer(RecordPointerType),
 	Text,
@@ -78,6 +79,17 @@ pub enum DataType {
 }
 
 impl DataType {
+	#[cfg(feature = "compiler")]
+	pub(crate) fn is_json_content(&self) -> bool {
+		matches!(self.without_nullability(), Self::Json | Self::JsonMember | Self::ParsedJson | Self::JsonNull)
+	}
+
+	#[cfg(feature = "compiler")]
+	pub(crate) fn can_supply_json_value(&self) -> bool {
+		self.is_json_content() || matches!(self.without_nullability(),
+			Self::Text | Self::Bool | Self::Int | Self::Dec | Self::Float | Self::Null)
+	}
+
 	pub fn into_nullable(self) -> Self {
 		match self {
 			Self::Nullable(_) => self,
@@ -105,9 +117,11 @@ impl DataType {
 			Self::Int => String::from("int"),
 			Self::Json => String::from("json"),
 			Self::JsonMember => String::from("JSON content"),
+			Self::JsonNull => String::from("JsonNull"),
 			Self::Null => String::from("null"),
 			Self::Nullable(inner) => format!("{}?", inner.name()),
 			Self::Object(name) => name.name.clone(),
+			Self::ParsedJson => String::from("json or JsonNull"),
 			Self::Range(element_type) => format!("range<{}>", element_type.name()),
 			Self::RecordPointer(_) => String::from("record pointer"),
 			Self::Text => String::from("text"),

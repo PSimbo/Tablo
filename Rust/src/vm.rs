@@ -620,12 +620,17 @@ impl VirtualMachine {
 			Instruction::CallBuiltIn(built_in, argument_count) => {
 				let arguments = self.pop_call_arguments(*argument_count as usize, instruction_index)?;
 				let result = if *built_in == BuiltInFunction::JsonCast && arguments.len() == 1 {
-					Some(Value::Json(crate::json::JsonConversion::new(_program.object_type_descriptors(), &[])
-						.export_document(arguments.into_iter().next().unwrap()).map_err(|error| vm_error(instruction_index, error.to_string()))?))
-				} else { self.run_built_in_function(*built_in, arguments, instruction_index)? };
+					Some(crate::json::JsonConversion::new(_program.object_type_descriptors(), &[])
+						.cast(arguments.into_iter().next().unwrap()).map_err(|error| vm_error(instruction_index, error.to_string()))?)
+				}
+				else {
+					self.run_built_in_function(*built_in, arguments, instruction_index)?
+				};
+
 				if let Some(result) = result {
 					self.stack.push(result);
 				}
+
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::CommitTransaction => {
@@ -1057,7 +1062,16 @@ impl VirtualMachine {
 			}
 			Instruction::PreserveDynamicType(ty) => {
 				let value = self.pop_value(instruction_index)?;
-				self.stack.push(value.preserve_dynamic_type(ty));
+				let boxes_any = matches!(ty, ObjectValueTypeDescriptor::Any)
+					|| matches!(ty, ObjectValueTypeDescriptor::Nullable(inner) if inner.as_ref() == &ObjectValueTypeDescriptor::Any);
+				let value = match &value {
+					Value::Json(json) if boxes_any && !json.is_document() => {
+						json.convert(&crate::ast::DataType::Any).map_err(|error| vm_error(instruction_index, error))?
+					}
+					_ => value.preserve_dynamic_type(ty),
+				};
+
+				self.stack.push(value);
 
 				Ok(ExecutionOutcome::Continue(None))
 			}
@@ -1786,8 +1800,8 @@ impl VirtualMachine {
 				)),
 			},
 			BuiltInFunction::JsonCast => match arguments.as_slice() {
-				[value] => crate::json::JsonConversion::new(&[], &[]).export_document(value.clone())
-					.map(|value| Some(Value::Json(value))).map_err(|error| vm_error(instruction_index, error.to_string())),
+				[value] => crate::json::JsonConversion::new(&[], &[]).cast(value.clone())
+					.map(Some).map_err(|error| vm_error(instruction_index, error.to_string())),
 				_ => Err(vm_error(instruction_index, String::from("Built-in function `json` expects one argument."))),
 			},
 			BuiltInFunction::LastOf => group_boundary_built_in_value(
@@ -2471,7 +2485,7 @@ fn evaluate_debug_call(call: &crate::ast::CallExpr, frame: &WatchContext<'_>) ->
 
 	if built_in == BuiltInFunction::JsonCast {
 		let mut arguments: Vec<Value> = arguments;
-		return frame.conversion().export_document(arguments.remove(0)).map(Value::Json)
+		return frame.conversion().cast(arguments.remove(0))
 			.map_err(|error| vm_error(call.position, error.to_string()));
 	}
 
@@ -2624,6 +2638,7 @@ fn evaluate_debug_expression(expression: &Expr, frame: &WatchContext<'_>) -> Res
 		)),
 		Expr::Identifier(identifier) => frame.frame.local(&identifier.name)
 			.map(|local| local.value().clone())
+			.or_else(|| identifier.name.eq_ignore_ascii_case("JsonNull").then_some(Value::JsonNull))
 			.ok_or(vm_error(
 				identifier.position,
 				format!("Variable `{}` is not available in the current stack frame.", identifier.name),
@@ -2909,7 +2924,14 @@ fn load_array_index_value(values: Vec<Value>, index: Value, instruction_index: u
 
 fn convert_json_content(value: Value, target: &crate::ast::DataType) -> Result<Value, String> {
 	match (value, target.without_nullability()) {
+		(Value::Json(value), crate::ast::DataType::Json) if value.is_document() => Ok(Value::Json(value)),
 		(Value::Json(value), _) => value.convert(target),
+		(Value::JsonNull, crate::ast::DataType::Any) => Ok(Value::JsonNull),
+		(Value::JsonNull, _) => Err(format!("JsonNull cannot be assigned to `{}`.", target.name())),
+		(Value::Null, _) if !target.is_nullable() => Err(format!("Cannot assign null to `{}`.", target.name())),
+		(value @ (Value::Text(_) | Value::Boolean(_)), _) => {
+			crate::json::JsonValue::from_value(value)?.convert(target)
+		}
 		(Value::Array(values), crate::ast::DataType::Array(element)) => values.into_iter()
 			.map(|value| convert_json_content(value, element)).collect::<Result<Vec<_>, _>>().map(Value::Array),
 		(value, _) => Ok(value),
@@ -3223,7 +3245,7 @@ fn negate_value(value: Value) -> Value {
 		Value::Integer(integer) => Value::Integer(integer.saturating_neg()),
 		Value::IntegerRange(_) => unreachable!("Range values are rejected before numeric negation."),
 		Value::Iterator(_) => unreachable!("Iterator values are rejected before numeric negation."),
-		Value::Json(_) => unreachable!("JSON values are rejected before numeric negation."),
+		Value::Json(_) | Value::JsonNull => unreachable!("JSON values are rejected before numeric negation."),
 		Value::Null => unreachable!("Null values are rejected before numeric negation."),
 		Value::Object(_) => unreachable!("Object values are rejected before numeric negation."),
 		Value::RecordPointer(_) => unreachable!("Record pointer values are rejected before numeric negation."),
@@ -3326,21 +3348,31 @@ fn store_field_path_into_record_pointer(
 ) -> Result<Value, VmError> {
 	{
 		let mut buffer = record.buffer_mut();
+
 		if !buffer.exists {
 			return Err(vm_error(instruction_index, String::from("Cannot assign fields on a record pointer that does not reference a record.")));
 		}
+
 		if buffer.locked {
 			return Err(vm_error(instruction_index, String::from("Cannot assign fields on a locked record pointer.")));
 		}
+
 		let Some((field_name, remaining_path)) = field_path.split_first() else {
 			return Err(vm_error(instruction_index, String::from("Field assignment requires at least one field name.")));
 		};
+
 		let normalized_field_name = normalize_record_field_name(field_name);
-		let field = buffer.fields.get(&normalized_field_name).ok_or_else(|| vm_error(
+		let field = buffer.fields
+			.get(&normalized_field_name)
+			.ok_or_else(|| vm_error(
 			instruction_index, format!("Record pointer does not contain a field named `{field_name}`."),
 		))?;
+
 		let data_type = field.data_type().clone();
-		let value = if remaining_path.is_empty() {
+		let value = if remaining_path.is_empty() && data_type.without_nullability() == &crate::ast::DataType::Json && value != Value::Null {
+			crate::json::JsonValue::from_value(value).map_err(|error| vm_error(instruction_index, error))?.database_value()
+		}
+		else if remaining_path.is_empty() {
 			value
 		}
 		else {
@@ -3349,6 +3381,7 @@ fn store_field_path_into_record_pointer(
 		buffer.fields.insert(normalized_field_name, RecordFieldValue::Materialized { data_type, value });
 		buffer.is_dirty = true;
 	}
+
 	Ok(Value::RecordPointer(record))
 }
 
@@ -3450,6 +3483,7 @@ fn stringify_value(value: &Value) -> String {
 		Value::IntegerRange(value) => value.to_string(),
 		Value::Iterator(_) => String::from("<iterator>"),
 		Value::Json(value) => value.to_text(),
+		Value::JsonNull => String::from("JsonNull"),
 		Value::Null => String::from("null"),
 		Value::Object(object) => {
 			let mut result = String::from("{");
@@ -3548,6 +3582,7 @@ fn type_name(value: &Value) -> &'static str {
 		Value::IntegerRange(_) => "range",
 		Value::Iterator(_) => "iterator",
 		Value::Json(_) => "json",
+		Value::JsonNull => "JsonNull",
 		Value::Null => "null",
 		Value::Object(_) => "object",
 		Value::RecordPointer(_) => "record pointer",
@@ -3606,8 +3641,9 @@ fn values_equal(lhs: &Value, rhs: &Value, instruction_index: usize) -> Result<bo
 		(Value::IntegerRange(lhs), Value::IntegerRange(rhs)) => Ok(lhs == rhs),
 		(Value::Iterator(lhs), Value::Iterator(rhs)) => Ok(lhs == rhs),
 		(Value::Json(lhs), Value::Json(rhs)) => Ok(lhs == rhs),
+		(Value::Json(value), Value::JsonNull) | (Value::JsonNull, Value::Json(value)) => Ok(value.is_null()),
 		(Value::Json(value), Value::Null) | (Value::Null, Value::Json(value)) => Ok(value.is_null()),
-		(Value::Null, Value::Null) => Ok(true),
+		(Value::JsonNull, Value::JsonNull) | (Value::Null, Value::Null) => Ok(true),
 		(Value::Object(lhs), Value::Object(rhs)) => {
 			if lhs.object_type_id != rhs.object_type_id || lhs.fields.len() != rhs.fields.len() {
 				return Ok(false);

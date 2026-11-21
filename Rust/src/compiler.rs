@@ -682,6 +682,10 @@ impl Compiler {
 						sequence_name: resolved_sequence.sequence_name.clone(),
 					}, expression_position);
 				}
+				else if name.eq_ignore_ascii_case("JsonNull") && semantic_program.identifier_slot(expression.position()).is_none() {
+					self.emit(emission, Instruction::PushText(String::from("null")), expression_position);
+					self.emit(emission, Instruction::CallBuiltIn(crate::builtins::BuiltInFunction::JsonCast, 1), expression_position);
+				}
 				else {
 					let slot = semantic_program.identifier_slot(expression.position())
 						.unwrap_or_else(|| panic!("Missing slot for identifier `{name}`."));
@@ -1473,7 +1477,9 @@ impl Compiler {
 			}
 			crate::ast::DataType::JsonMember
 			| crate::ast::DataType::EmptyArray
+			| crate::ast::DataType::JsonNull
 			| crate::ast::DataType::Null
+			| crate::ast::DataType::ParsedJson
 			| crate::ast::DataType::Range(_)
 			| crate::ast::DataType::RecordPointer(_)
 			| crate::ast::DataType::Union(_) => {
