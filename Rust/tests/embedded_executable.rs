@@ -11,12 +11,17 @@ use tablo::executable::{ExecutableBuildOptions, compile_executable};
 fn links_a_tablo_library_into_an_executable() {
 	let directory = tempfile::tempdir().unwrap();
 	let root = directory.path();
-	let library_source = "pub fn Answer(): int { return 42; }";
-	let library_path = root.join("Answer.tablo");
-	fs::write(&library_path, library_source).unwrap();
-	tablo::executable::compile_library(library_source, &library_path, &root.join("Answer.tlib"), None, tablo::bytecode::DebugInfoLevel::None).unwrap();
-	fs::remove_file(&library_path).unwrap();
-	let source = "use './Answer'; fn Main(args: [text]): int { return Answer(); }";
+	for (name, source) in [
+		("Models", "pub obj Customer { code: int = 42 }; pub fn Code(c: Customer): int { return c.code; }"),
+		("Orders", "use Customer from './Models'; pub fn FindCustomer(): Customer { return Customer {}; }"),
+	] {
+		let path = root.join(format!("{name}.tablo"));
+		fs::write(&path, source).unwrap();
+		tablo::executable::compile_library(source, &path, &root.join(format!("{name}.tlib")), None, tablo::bytecode::DebugInfoLevel::None).unwrap();
+		fs::remove_file(path).unwrap();
+	}
+
+	let source = "use FindCustomer from './Orders'; use Code from './Models'; fn Main(args: [text]): int { return Code(FindCustomer()); }";
 	let source_path = root.join("main.tablo");
 	fs::write(&source_path, source).unwrap();
 	let runtime_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -26,7 +31,8 @@ fn links_a_tablo_library_into_an_executable() {
 	};
 	let output = root.join("application");
 	compile_executable(source, &source_path, &output, None, &options).unwrap();
-	fs::remove_file(root.join("Answer.tlib")).unwrap();
+	fs::remove_file(root.join("Models.tlib")).unwrap();
+	fs::remove_file(root.join("Orders.tlib")).unwrap();
 	fs::remove_file(source_path).unwrap();
 	let result = Command::new(output).current_dir(root).env_remove("TABLO_CONFIG").output().unwrap();
 	assert_eq!(result.status.code(), Some(42), "{}", String::from_utf8_lossy(&result.stderr));

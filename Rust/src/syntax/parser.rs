@@ -4,6 +4,7 @@ use crate::value::Decimal;
 use super::token::{ Token, TokenKind };
 
 pub struct Parser {
+	pub(crate) object_declaration_ranges: Vec<std::ops::Range<usize>>,
 	allow_object_construction_infix: bool,
 	literal_depth: usize,
 	position: usize,
@@ -35,6 +36,7 @@ pub struct ParseError {
 impl Parser {
 	pub fn new(tokens: Vec<Token>) -> Self {
 		Self {
+			object_declaration_ranges: Vec::new(),
 			allow_object_construction_infix: true,
 			literal_depth: 0,
 			position: 0,
@@ -62,7 +64,9 @@ impl Parser {
 					functions.push(self.parse_function_declaration()?);
 				}
 				Some(_) if self.current_starts_object_declaration() => {
+					let start = self.current().unwrap().start;
 					objects.extend(self.parse_object_declaration()?);
+					self.object_declaration_ranges.push(start..self.tokens[self.position - 1].end);
 				}
 				Some(token) if token.kind == TokenKind::WithKeyword => {
 					with_declarations.push(self.parse_with_declaration()?);
@@ -873,8 +877,11 @@ impl Parser {
 		else {
 			false
 		};
+
 		let name = self.expect_token(TokenKind::Identifier, "Expected parameter name.")?;
+
 		self.expect_token(TokenKind::Colon, "Expected `:` after parameter name.")?;
+
 		let is_by_ref = if self.current().is_some_and(|token| token.kind == TokenKind::Ampersand) {
 			self.next();
 			true
@@ -882,27 +889,40 @@ impl Parser {
 		else {
 			false
 		};
+
 		let data_type = if self.current().is_some_and(|token| token.kind == TokenKind::RecKeyword) {
 			self.next();
+
 			if !is_by_ref {
 				return Err(ParseError {
 					message: String::from("Record pointer parameters must be passed by reference using `&rec`."),
 					position: name.start,
 				});
 			}
+
 			let is_mut = self.current().is_some_and(|token| token.kind == TokenKind::MutKeyword);
+
 			if is_mut {
 				self.next();
 			}
-			FunctionParameterType::RecordPointer { table: self.parse_table_reference()?, is_mut }
+
+			FunctionParameterType::RecordPointer {
+				table: self.parse_table_reference()?,
+				is_mut, compiled_table: None,
+			}
 		}
 		else if self.current().is_some_and(|token| token.kind == TokenKind::SeqKeyword) {
 			self.next();
-			FunctionParameterType::Sequence(self.parse_sequence_reference()?)
+
+			FunctionParameterType::Sequence {
+				sequence: self.parse_sequence_reference()?,
+				compiled_sequence: None,
+			}
 		}
 		else {
 			FunctionParameterType::Value(self.parse_data_type()?)
 		};
+
 		let default_value = if self.current().is_some_and(|token| token.kind == TokenKind::Equal) {
 			self.next();
 			Some(self.parse_assignment_expression()?)
@@ -2757,12 +2777,17 @@ mod tests {
 	fn normalize_function_parameter(parameter: FunctionParameter) -> FunctionParameter {
 		FunctionParameter {
 			data_type: match parameter.data_type {
-				FunctionParameterType::RecordPointer { table, is_mut } => {
-					FunctionParameterType::RecordPointer { table: normalize_table_reference(table), is_mut }
+				FunctionParameterType::RecordPointer { table, is_mut, compiled_table } => {
+					FunctionParameterType::RecordPointer {
+						table: normalize_table_reference(table),
+						is_mut,
+						compiled_table,
+					}
 				}
-				FunctionParameterType::Sequence(sequence) => {
-					FunctionParameterType::Sequence(normalize_sequence_reference(sequence))
-				}
+				FunctionParameterType::Sequence { sequence, compiled_sequence } => FunctionParameterType::Sequence {
+					sequence: normalize_sequence_reference(sequence),
+					compiled_sequence,
+				},
 				FunctionParameterType::Value(data_type) => FunctionParameterType::Value(data_type),
 			},
 			default_value: parameter.default_value.map(normalize_expr),
@@ -5755,15 +5780,19 @@ mod tests {
 						name: String::from("touch"),
 						parameters: vec![
 							FunctionParameter {
-								data_type: FunctionParameterType::RecordPointer { table: TableReference {
-									components: vec![
-										IdentifierExpr {
-											name: String::from("customers"),
-											position: 0,
-										},
-									],
-									position: 0,
-								}, is_mut: false },
+								data_type: FunctionParameterType::RecordPointer {
+									table: TableReference {
+										components: vec![
+											IdentifierExpr {
+												name: String::from("customers"),
+												position: 0,
+											},
+										],
+										position: 0,
+									},
+									is_mut: false,
+									compiled_table: None,
+								},
 								default_value: None,
 								is_by_ref: true,
 								is_variadic: false,
@@ -5771,23 +5800,27 @@ mod tests {
 								position: 0,
 							},
 							FunctionParameter {
-								data_type: FunctionParameterType::RecordPointer { table: TableReference {
-									components: vec![
-										IdentifierExpr {
-											name: String::from("ExampleDb"),
-											position: 0,
-										},
-										IdentifierExpr {
-											name: String::from("Main"),
-											position: 0,
-										},
-										IdentifierExpr {
-											name: String::from("Customers"),
-											position: 0,
-										},
-									],
-									position: 0,
-								}, is_mut: true },
+								data_type: FunctionParameterType::RecordPointer {
+									table: TableReference {
+										components: vec![
+											IdentifierExpr {
+												name: String::from("ExampleDb"),
+												position: 0,
+											},
+											IdentifierExpr {
+												name: String::from("Main"),
+												position: 0,
+											},
+											IdentifierExpr {
+												name: String::from("Customers"),
+												position: 0,
+											},
+										],
+										position: 0,
+									},
+									is_mut: true,
+									compiled_table: None,
+								},
 								default_value: None,
 								is_by_ref: true,
 								is_variadic: false,

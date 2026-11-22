@@ -120,6 +120,90 @@ fn links_relocated_libraries_and_transitive_dependencies_without_sources() {
 }
 
 #[test]
+fn compiled_library_customers_share_identity_and_preserve_private_defaults() {
+	let directory = tempfile::tempdir().unwrap();
+	let root = directory.path();
+	fs::write(root.join("Customers.tablo"), "
+		pub obj Customer { pub name: text, code: int = 41 };
+		pub fn Code(customer: Customer): int { return customer.code; }
+		pub fn Make(label: text): Customer { return Customer { name: label }; }
+		pub fn Reject(customer: Customer) { fail customer; }
+	").unwrap();
+	assert_success(&compiler(root, &["--emit", "library", "--debug-info", "none", "Customers.tablo"]));
+	fs::remove_file(root.join("Customers.tablo")).unwrap();
+
+	fs::write(root.join("Aardvark.tablo"), "pub obj Marker { pub value: int };").unwrap();
+	assert_success(&compiler(root, &["--emit", "library", "Aardvark.tablo"]));
+	fs::remove_file(root.join("Aardvark.tablo")).unwrap();
+
+	let imports = "use Marker from './Aardvark'; use Make, Code, Reject from './Customers';";
+	fs::write(root.join("main.tablo"), format!("{imports}
+		fn Main(args: [text]): int {{
+			var customer: Customer = Customer {{ name: 'Ada' }};
+			var other: Customer = Make('Ada');
+			if customer.name != 'Ada' or other != customer {{ return 0; }}
+			try {{ Reject(other); }}
+			catch marker: Marker {{ return 0; }}
+			catch caught: Customer {{ return Code(caught) + 1; }}
+			return 0;
+		}}")).unwrap();
+	assert_success(&compiler(root, &["--emit", "object", "main.tablo"]));
+	let program = read_program_from_path(root.join("main.tobj")).unwrap();
+	assert_eq!(tablo::run_program_with_arguments(&program, &[]).unwrap(), Some(tablo::value::Value::Integer(42)));
+
+	fs::write(root.join("main.tablo"), format!("{imports} fn Main(args: [text]): int {{ return Make('Ada').code; }}")).unwrap();
+	let denied = compiler(root, &["--emit", "object", "main.tablo"]);
+	assert!(!denied.status.success());
+	assert!(String::from_utf8_lossy(&denied.stderr).contains("private"), "{}", String::from_utf8_lossy(&denied.stderr));
+
+	// A changed interface default must not override the compiled layout.
+	let path = root.join("Customers.tlib");
+	let mut bytes = fs::read(&path).unwrap();
+	let manifest_len = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+	let default = b"code: int = 41";
+	let offset = bytes[8..8 + manifest_len].windows(default.len()).position(|text| text == default).unwrap();
+	bytes[8 + offset + default.len() - 1] = b'2';
+	fs::write(path, bytes).unwrap();
+	let mismatch = compiler(root, &["--emit", "object", "main.tablo"]);
+	assert!(!mismatch.status.success());
+	assert!(String::from_utf8_lossy(&mismatch.stderr).contains("compiled descriptor"));
+
+}
+
+#[test]
+fn library_object_dependencies_survive_a_second_link() {
+	let directory = tempfile::tempdir().unwrap();
+	let root = directory.path();
+	fs::write(root.join("Model.tablo"), r#"
+		obj Details { level: int = 7 };
+		pub obj Customer { pub name: text, details: Details = Details { level: 19 } };
+		pub fn Read(): int {
+			var c: Customer = Customer(json('{"name":"Ada"}'));
+			try { fail c; }
+			catch value: Customer { return value.details.level; }
+			return 0;
+		}
+	"#).unwrap();
+	assert_success(&compiler(root, &["--emit", "library", "Model.tablo"]));
+	fs::remove_file(root.join("Model.tablo")).unwrap();
+
+	fs::write(root.join("Facade.tablo"), "use Read from './Model'; pub fn Result(): int { return Read(); }").unwrap();
+	assert_success(&compiler(root, &["--emit", "library", "--debug-info", "none", "Facade.tablo"]));
+	fs::remove_file(root.join("Model.tlib")).unwrap();
+	fs::remove_file(root.join("Facade.tablo")).unwrap();
+
+	fs::write(root.join("main.tablo"), "
+		use Result from './Facade';
+		obj Customer { unrelated: text };
+		fn Main(args: [text]): int { return Result(); }
+	").unwrap();
+	assert_success(&compiler(root, &["--emit", "object", "main.tablo"]));
+	fs::remove_file(root.join("Facade.tlib")).unwrap();
+	let program = read_program_from_path(root.join("main.tobj")).unwrap();
+	assert_eq!(tablo::run_program_with_arguments(&program, &[]).unwrap(), Some(tablo::value::Value::Integer(19)));
+}
+
+#[test]
 fn library_interfaces_enforce_visibility_types_and_preserve_outputs() {
 	let directory = tempfile::tempdir().unwrap();
 	let root = directory.path();
@@ -197,7 +281,7 @@ fn links_library_queries_alongside_consumer_queries() {
 fn rejects_unsupported_library_interfaces_and_top_level_execution() {
 	let directory = tempfile::tempdir().unwrap();
 	for source in [
-		"pub obj Item { value: int } pub fn Make(): Item { return Item { value: 1 }; }",
+		"obj Hidden { value: int }; pub fn Value(item: Hidden): int { return item.value; }",
 		"pub fn Value(): int { return 1; } var value: int = Value();",
 		"fn Private(): int { return 1; }",
 		"fn Private(): int { return 1; } pub fn Value(value: int = Private()): int { return value; }",
@@ -207,4 +291,193 @@ fn rejects_unsupported_library_interfaces_and_top_level_execution() {
 		assert_eq!(output.status.code(), Some(1), "{}", String::from_utf8_lossy(&output.stderr));
 		assert!(!directory.path().join("library.tlib").exists());
 	}
+}
+
+#[test]
+fn compiled_signatures_share_the_declaring_librarys_object() {
+	let directory = tempfile::tempdir().unwrap();
+	let root = directory.path();
+	fs::write(root.join("Models.tablo"), "
+		pub obj Address { pub city: text };
+		pub obj Customer { pub name: text, pub address: Address, code: int = 41 };
+		pub fn Code(c: Customer): int { return c.code; }
+	").unwrap();
+	assert_success(&compiler(root, &["--emit", "library", "--debug-info", "none", "Models.tablo"]));
+	fs::remove_file(root.join("Models.tablo")).unwrap();
+	fs::write(root.join("Orders.tablo"), "
+		use Customer from './Models';
+		pub fn FindCustomer(): Customer { return Customer { name: 'Ada', address: Address { city: 'Bath' } }; }
+		pub fn Echo(c: Customer): Customer { return c; }
+		pub fn Echo(value: text): text { return value; }
+	").unwrap();
+	assert_success(&compiler(root, &["--emit", "library", "--debug-info", "none", "Orders.tablo"]));
+	fs::remove_file(root.join("Orders.tablo")).unwrap();
+	for imports in [
+		"use FindCustomer, Echo from './Orders'; use Code from './Models';",
+		"use Code from './Models'; use FindCustomer, Echo from './Orders';",
+	] {
+		fs::write(root.join("main.tablo"), format!("{imports} fn Main(args: [text]): int {{
+			var c: Customer = Echo(FindCustomer());
+			if c.name != 'Ada' {{ return 0; }}
+			return Code(c) + 1;
+		}}")).unwrap();
+		assert_success(&compiler(root, &["--emit", "object", "main.tablo"]));
+		let program = read_program_from_path(root.join("main.tobj")).unwrap();
+		assert_eq!(tablo::run_program_with_arguments(&program, &[]).unwrap(), Some(tablo::value::Value::Integer(42)));
+	}
+
+	fs::write(root.join("main.tablo"), "use Echo from './Orders';
+		fn Main(args: [text]): int {
+			var c: Customer = Customer { name: 'Ada', address: Address { city: 'Bath' } };
+			return Echo(c).name == Echo('Ada') ? 1 : 0;
+		}").unwrap();
+	assert_success(&compiler(root, &["--emit", "object", "main.tablo"]));
+	let program = read_program_from_path(root.join("main.tobj")).unwrap();
+	assert_eq!(tablo::run_program_with_arguments(&program, &[]).unwrap(), Some(tablo::value::Value::Integer(1)));
+
+	fs::write(root.join("Other.tablo"), "pub obj Customer { pub name: text };").unwrap();
+	assert_success(&compiler(root, &["--emit", "library", "Other.tablo"]));
+	fs::remove_file(root.join("Other.tablo")).unwrap();
+	fs::write(root.join("main.tablo"), "use Customer from './Other'; use FindCustomer from './Orders';
+		fn Main(args: [text]): int { return 0; }").unwrap();
+	let conflict = compiler(root, &["--emit", "object", "main.tablo"]);
+	assert!(!conflict.status.success());
+	assert!(String::from_utf8_lossy(&conflict.stderr).contains("conflicts"), "{}", String::from_utf8_lossy(&conflict.stderr));
+
+	fs::write(root.join("Relay.tablo"), "use FindCustomer from './Orders'; pub fn Fetch(): Customer { return FindCustomer(); }").unwrap();
+	assert_success(&compiler(root, &["--emit", "library", "Relay.tablo"]));
+	fs::remove_file(root.join("Relay.tablo")).unwrap();
+	fs::remove_file(root.join("Orders.tlib")).unwrap();
+
+	fs::write(root.join("main.tablo"), "use Fetch from './Relay'; use Code from './Models';
+		fn Main(args: [text]): int { return Code(Fetch()); }").unwrap();
+	assert_success(&compiler(root, &["--emit", "object", "main.tablo"]));
+	let program = read_program_from_path(root.join("main.tobj")).unwrap();
+	assert_eq!(tablo::run_program_with_arguments(&program, &[]).unwrap(), Some(tablo::value::Value::Integer(41)));
+
+	fs::remove_file(root.join("Models.tlib")).unwrap();
+	fs::write(root.join("main.tablo"), "use Fetch from './Relay';
+		fn Main(args: [text]): int { var c: Customer = Fetch(); return c.code; }").unwrap();
+	let denied = compiler(root, &["--emit", "object", "main.tablo"]);
+	assert!(!denied.status.success());
+	assert!(String::from_utf8_lossy(&denied.stderr).contains("private"), "{}", String::from_utf8_lossy(&denied.stderr));
+	fs::write(root.join("main.tablo"), "use Fetch from './Relay'; fn Main(args: [text]): int {
+		var a: Address = Fetch().address; return a.city == 'Bath' ? 1 : 0;
+	}").unwrap();
+	assert_success(&compiler(root, &["--emit", "object", "main.tablo"]));
+	fs::remove_file(root.join("Relay.tlib")).unwrap();
+	let program = read_program_from_path(root.join("main.tobj")).unwrap();
+	assert_eq!(tablo::run_program_with_arguments(&program, &[]).unwrap(), Some(tablo::value::Value::Integer(1)));
+}
+
+#[test]
+fn compiled_record_parameters_share_the_callers_buffer_and_require_the_declaring_table() {
+	let directory = tempfile::tempdir().unwrap();
+	let root = directory.path();
+	let schema = "schema Main implicit; create table Customers (Id int primary key, Name text not null);";
+
+	for name in ["Sales", "Archive"] {
+		fs::write(root.join(format!("{name}.sql")), format!("database {name}; {schema}")).unwrap();
+	}
+	fs::write(root.join("tablo.toml"), "[databases]\nSales = 'sqlite:sales.sqlite'\nArchive = 'sqlite:archive.sqlite'\n[schemas]\nSales = 'Sales.sql'\nArchive = 'Archive.sql'\n").unwrap();
+	let database_path = root.join("sales.sqlite");
+	let database = rusqlite::Connection::open(&database_path).unwrap();
+	database.execute_batch("CREATE TABLE Customers (Id INTEGER PRIMARY KEY, Name TEXT NOT NULL);
+		INSERT INTO Customers VALUES (1, 'Ada'), (2, 'Grace');").unwrap();
+
+	fs::write(root.join("Customers.tablo"), "with Sales;
+		pub fn CustomerName(c: &rec Customers): text { return c.Name; }
+		pub fn RenameCustomer(c: &rec mut Customers, name: text) { c.Name = name; }
+		pub fn SelectSecond(c: &rec mut Customers) { c = find first Customers where Id == 2; }").unwrap();
+	assert_success(&compiler(root, &["--emit", "library", "--debug-info", "none", "Customers.tablo"]));
+	fs::remove_file(root.join("Customers.tablo")).unwrap();
+
+	let imports = "use './Customers.tlib'; with Sales; with Archive;";
+	fs::write(root.join("main.tablo"), format!("{imports}
+		fn Main(args: [text]): int {{
+			if rec existing = find first Sales.Main.Customers where Id == 1 {{
+				if CustomerName(&existing) != 'Ada' {{ return 0; }}
+			}}
+			{{
+				rec mut c = find first Sales.Main.Customers where Id == 1;
+				if CustomerName(&c) != 'Ada' {{ return 0; }}
+				RenameCustomer(&c, 'Mina');
+				if c.Name != 'Mina' {{ return 0; }}
+				if (count Sales.Main.Customers where Name == 'Ada') != 1 {{ return 0; }}
+				SelectSecond(&c);
+				if CustomerName(&c) != 'Grace' {{ return 0; }}
+				RenameCustomer(&c, 'Noor');
+			}}
+			return count Sales.Main.Customers where Name == 'Mina' or Name == 'Noor';
+		}}")).unwrap();
+	assert_success(&compiler(root, &["--emit", "object", "main.tablo"]));
+	let program = read_program_from_path(root.join("main.tobj")).unwrap();
+	let config = tablo::database::RuntimeDatabaseConfig::new().with_sqlite_database("Sales", &database_path);
+	assert_eq!(tablo::run_program_with_database_config(&program, config).unwrap(), Some(tablo::value::Value::Integer(2)));
+
+	for (active, call, message) in [
+		("Archive", "rec mut c = find first Archive.Main.Customers; return len(CustomerName(&c));", "requires table `Sales.Main.Customers`, found `Archive.Main.Customers`"),
+		("Sales", "if rec c = find first Sales.Main.Customers { RenameCustomer(&c, 'X'); } return 0;", "mutable"),
+		("Sales", "rec mut c = find first Sales.Main.Customers; return len(CustomerName(c));", "reference"),
+	] {
+		fs::write(root.join("main.tablo"), format!("use './Customers'; with {active}; fn Main(args: [text]): int {{ {call} }}")).unwrap();
+		let result = compiler(root, &["--emit", "object", "main.tablo"]);
+		assert!(!result.status.success());
+		assert!(String::from_utf8_lossy(&result.stderr).contains(message), "{}", String::from_utf8_lossy(&result.stderr));
+	}
+}
+
+#[test]
+fn compiled_sequence_parameters_preserve_the_declaring_sequence() {
+	let directory = tempfile::tempdir().unwrap();
+	let root = directory.path();
+	for name in ["Sales", "Archive"] {
+		fs::write(root.join(format!("{name}.sql")), format!("database {name}; schema Main implicit; create sequence InvoiceNumber;")).unwrap();
+	}
+	fs::write(root.join("tablo.toml"), "[databases]\nSales = 'sqlite:sales.sqlite'\nArchive = 'sqlite:archive.sqlite'\n[schemas]\nSales = 'Sales.sql'\nArchive = 'Archive.sql'\n").unwrap();
+
+	fs::write(root.join("Counters.tablo"), "with Sales;
+		fn Next(s: seq InvoiceNumber): int { return seqnext(s); }
+		pub fn Advance(s: seq InvoiceNumber): int { return Next(s); }").unwrap();
+	assert_success(&compiler(root, &["--emit", "library", "--debug-info", "none", "Counters.tablo"]));
+	fs::remove_file(root.join("Counters.tablo")).unwrap();
+
+	for (active, argument, expected) in [
+		("Archive", "InvoiceNumber", "Sales.Main.InvoiceNumber"),
+		("Sales", "4", "Sales.Main.InvoiceNumber"),
+		("Sales", "&InvoiceNumber", "without `&`"),
+	] {
+		fs::write(root.join("main.tablo"), format!("use Advance from './Counters'; with {active};
+			fn Main(args: [text]): int {{ return Advance({argument}); }}")).unwrap();
+		let output = compiler(root, &["--emit", "object", "main.tablo"]);
+		assert!(!output.status.success());
+		assert!(String::from_utf8_lossy(&output.stderr).contains(expected), "{}", String::from_utf8_lossy(&output.stderr));
+	}
+
+	fs::write(root.join("Invoices.tablo"), "use Advance from './Counters'; with Sales;
+		pub fn Issue(s: seq Sales.Main.InvoiceNumber): int { return Advance(s); }").unwrap();
+	assert_success(&compiler(root, &["--emit", "library", "Invoices.tablo"]));
+	fs::remove_file(root.join("Invoices.tablo")).unwrap();
+	fs::remove_file(root.join("Counters.tlib")).unwrap();
+
+	fs::write(root.join("main.tablo"), "use Issue from './Invoices'; with Sales;
+		fn Main(args: [text]): int {
+			InvoiceNumber = 4;
+			if Issue(InvoiceNumber) != 5 { return 0; }
+			return InvoiceNumber;
+		}").unwrap();
+	assert_success(&compiler(root, &["--emit", "object", "main.tablo"]));
+	fs::write(root.join("Sales.sql"), "database Sales; schema Main; create sequence InvoiceNumber;").unwrap();
+	let mismatch = compiler(root, &["--emit", "object", "main.tablo"]);
+	assert!(!mismatch.status.success());
+	assert!(String::from_utf8_lossy(&mismatch.stderr).contains("different schema qualification"), "{}", String::from_utf8_lossy(&mismatch.stderr));
+	fs::remove_file(root.join("Invoices.tlib")).unwrap();
+
+	let path = root.join("sales.sqlite");
+	let database = rusqlite::Connection::open(&path).unwrap();
+	database.execute_batch("CREATE TABLE InvoiceNumber (Id INTEGER PRIMARY KEY AUTOINCREMENT);
+		INSERT INTO InvoiceNumber DEFAULT VALUES;").unwrap();
+	let config = tablo::database::RuntimeDatabaseConfig::new().with_sqlite_database("Sales", &path);
+	let program = read_program_from_path(root.join("main.tobj")).unwrap();
+	assert_eq!(tablo::run_program_with_database_config(&program, config).unwrap(), Some(tablo::value::Value::Integer(5)));
 }

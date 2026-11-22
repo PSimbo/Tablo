@@ -3,6 +3,8 @@ use crate::*;
 use std::collections::{ BTreeMap, BTreeSet };
 use std::path::{ Path, PathBuf };
 
+use sha2::{Digest, Sha256};
+
 use bytecode::*;
 use compiler::{ CompileError , Compiler };
 use database::RuntimeDatabaseConfig;
@@ -63,6 +65,8 @@ struct ImportedObjectBinding {
 
 #[derive(Clone)]
 struct LinkedModule {
+	function_owner: String,
+	object_sources: Vec<String>,
 	exports: ModuleExports,
 	functions: Vec<ast::FunctionDeclaration>,
 	object_display_names: Vec<String>,
@@ -103,6 +107,7 @@ struct ModuleImportBindings {
 
 #[derive(Default)]
 struct ModuleLinker {
+	type_modules: BTreeMap<String, crate::library::TypeModule>,
 	debug_object_imports: BTreeMap<String, BTreeMap<String, String>>,
 	libraries: Vec<crate::library::LibraryImport>,
 	declared_modules: BTreeMap<PathBuf, ModuleExports>,
@@ -461,10 +466,10 @@ impl ModuleLinker {
 			.sum()
 	}
 
-	fn linked_function_groups(&self) -> Vec<(u32, &[ast::FunctionDeclaration])> {
+	fn linked_function_groups(&self) -> Vec<(u32, &str, &[ast::FunctionDeclaration])> {
 		self.loaded_modules.values()
 			.enumerate()
-			.map(|(index, module)| (index as u32 + 1, module.functions.as_slice()))
+			.map(|(index, module)| (index as u32 + 1, module.function_owner.as_str(), module.functions.as_slice()))
 			.collect()
 	}
 
@@ -486,11 +491,8 @@ impl ModuleLinker {
 			.collect()
 	}
 
-	fn linked_object_groups(&self) -> Vec<(u32, &[ast::ObjectDeclaration])> {
-		self.loaded_modules.values()
-			.enumerate()
-			.map(|(index, module)| (index as u32 + 1, module.objects.as_slice()))
-			.collect()
+	fn linked_object_sources(&self) -> Vec<String> {
+		self.loaded_modules.values().flat_map(|module| module.object_sources.iter().cloned()).collect()
 	}
 
 	fn linked_objects(&self) -> Vec<ast::ObjectDeclaration> {
@@ -533,6 +535,7 @@ impl ModuleLinker {
 			})?)
 		}
 		else { None };
+
 		let source = library.as_ref().map(|library| Ok(library.interface.clone()))
 			.unwrap_or_else(|| std::fs::read_to_string(module_path)).map_err(|error| CompileError {
 			message: format!(
@@ -543,8 +546,10 @@ impl ModuleLinker {
 			),
 			position: use_declaration.position,
 		})?;
+
 		let source_text = SourceText::new(source);
-		let mut program = parse_source_text(&source_text).map_err(|error| match error {
+
+		let (mut program, ranges) = parse_source_with_object_ranges(&source_text).map_err(|error| match error {
 			TabloError::Lex(error) => CompileError {
 				message: encode_external_source_diagnostic(
 					"Lex error",
@@ -574,22 +579,33 @@ impl ModuleLinker {
 			},
 		})?;
 
+		if let Some(library) = &library {
+			library.bind_database_parameters(&mut program).map_err(|message| CompileError {
+				message, position: use_declaration.position,
+			})?;
+		}
+
 		let module_id = self.next_module_id;
 		self.next_module_id += 1;
-		let object_renames = build_top_level_object_renames(&program, module_id);
+
+		let object_renames = match &library {
+			Some(library) => program.objects.iter().map(|object| {
+				(object.name.clone(), crate::library::object_name(&library.owner, &object.name))
+			}).collect(),
+			None => build_top_level_object_renames(&program, module_id),
+		};
+
 		let top_level_renames = build_top_level_function_renames(&program, module_id);
 
 		for target_name in object_renames.values() {
-			self.object_target_source_names.insert(
-				target_name.clone(),
-				module_key.display().to_string(),
-			);
+			self.object_target_source_names.entry(target_name.clone()).or_insert_with(|| module_key.display().to_string());
 		}
 
 		self.declared_modules.insert(
 			module_key.clone(),
 			build_declared_module_exports(&program, &object_renames, &top_level_renames),
 		);
+
 		let base_directory = module_path.parent().unwrap_or_else(|| Path::new("."));
 		let import_bindings = self.collect_import_bindings(
 			&program,
@@ -597,12 +613,15 @@ impl ModuleLinker {
 			&object_renames,
 			&module_key.display().to_string(),
 		)?;
+
 		self.debug_object_imports.insert(module_key.display().to_string(), import_bindings.objects.clone());
 		self.include_local_function_overloads(&import_bindings.functions, &top_level_renames);
 		let source_file = SourceFileDebugInfo::from_source(module_key.display().to_string(), &source_text);
-		let object_display_names = program.objects.iter()
+
+		let mut object_display_names: Vec<_> = program.objects.iter()
 			.map(|object| object.name.clone())
 			.collect();
+
 		let exported_objects = program.objects.iter()
 			.filter(|object| {
 				object.containing_object_name.is_none()
@@ -618,8 +637,12 @@ impl ModuleLinker {
 			})
 			.collect::<BTreeMap<_, _>>();
 
-		let imported_object_dependency_groups = import_bindings.object_dependency_groups;
+		let mut imported_object_dependency_groups = import_bindings.object_dependency_groups;
 		let mut object_reference_renames = import_bindings.objects;
+
+		if let Some(library) = &library {
+			object_reference_renames.extend(library.dependencies.imports.clone());
+		}
 		object_reference_renames.extend(object_renames.clone());
 
 		rewrite_object_declaration_type_names(&mut program.objects, &object_reference_renames, true);
@@ -637,10 +660,56 @@ impl ModuleLinker {
 			);
 		}
 
+		let mut function_owner = module_key.display().to_string();
+		let mut object_sources = vec![function_owner.clone(); program.objects.len()];
+		let mut already_linked = BTreeSet::new();
+		let mut bundled = Vec::new();
+		let mut bundled_display = Vec::new();
+		let mut bundled_sources = Vec::new();
+
 		if let Some(library) = library {
 			let bindings = program.functions.iter().zip(&library.exports)
 				.map(|(function, index)| (function.name.clone(), function.position, *index)).collect();
-			self.libraries.push(crate::library::LibraryImport { library, bindings });
+			let declarations = ranges.iter().map(|range| &library.interface[range.clone()]).collect::<Vec<_>>().join("\n");
+			let own_module = crate::library::TypeModule {
+				label: Path::new(&library.module).file_name()
+					.map(|name| name.to_string_lossy().into_owned())
+					.unwrap_or_else(|| String::from("library")),
+				declarations,
+				imports: library.dependencies.imports.clone(),
+			};
+
+			for (owner, module) in library.dependencies.modules.iter().chain(std::iter::once((&library.owner, &own_module))) {
+				if let Some(previous) = self.type_modules.get(owner) {
+					if previous != module {
+						return Err(CompileError {
+							message: format!("Inconsistent bundled declarations for library `{}`.", module.label),
+							position: use_declaration.position,
+						});
+					}
+
+					already_linked.insert(module.source_name(owner));
+				} else {
+					self.type_modules.insert(owner.clone(), module.clone());
+				}
+			}
+
+			function_owner = own_module.source_name(&library.owner);
+			object_sources.fill(function_owner.clone());
+
+			for (owner, module) in &library.dependencies.modules {
+				for object in module.objects(owner).map_err(|message| CompileError { message, position: use_declaration.position })? {
+					let prefix = crate::library::object_name(owner, "");
+
+					self.object_target_source_names.entry(object.name.clone()).or_insert_with(|| module.label.clone());
+					bundled_display.push(object.name[prefix.len()..].to_owned());
+					bundled_sources.push(module.source_name(owner));
+					bundled.push(object);
+				}
+			}
+			self.libraries.push(crate::library::LibraryImport {
+				library, bindings, object_names: object_renames.clone(), own_module,
+			});
 		}
 
 		let exported_functions = program.functions.iter()
@@ -651,12 +720,26 @@ impl ModuleLinker {
 				(original_name, function.name.clone())
 			})
 			.collect::<BTreeMap<_, _>>();
+
 		let object_source_names_by_target = object_reference_renames.iter()
 			.map(|(source_name, target_name)| (target_name.as_str(), source_name.as_str()))
 			.collect::<BTreeMap<_, _>>();
-		let objects_by_target = program.objects.iter()
+		let objects_by_target = program.objects.iter().chain(&bundled)
 			.map(|object| (object.name.as_str(), object))
 			.collect::<BTreeMap<_, _>>();
+
+		for object in &bundled {
+			let mut targets = BTreeSet::new();
+
+			collect_public_object_dependency_targets(&object.name, &objects_by_target, &mut targets);
+
+			let names = targets.into_iter().filter_map(|target| {
+				object_source_names_by_target.get(target.as_str()).map(|name| ((*name).to_owned(), target))
+			}).collect();
+
+			imported_object_dependency_groups.insert(object.name.clone(), names);
+		}
+
 		let exported_object_dependencies = exported_objects.iter()
 			.map(|(exported_name, target_name)| {
 				let mut dependency_targets = BTreeSet::new();
@@ -708,9 +791,13 @@ impl ModuleLinker {
 						dependencies.extend(imported_dependencies.clone());
 					}
 				}
+
 				(original_name, dependencies)
 			})
-			.collect();
+			.fold(BTreeMap::<_, BTreeMap<_, _>>::new(), |mut groups, (name, dependencies)| {
+				groups.entry(name).or_default().extend(dependencies);
+				groups
+			});
 
 		let mut object_dependency_groups = imported_object_dependency_groups;
 
@@ -735,16 +822,37 @@ impl ModuleLinker {
 			exported_objects,
 			object_dependency_groups,
 		};
+
+		program.objects.extend(bundled);
+		object_display_names.extend(bundled_display);
+		object_sources.extend(bundled_sources);
+
+		let mut objects = Vec::new();
+		let mut displays = Vec::new();
+		let mut sources = Vec::new();
+
+		for ((object, display), source) in program.objects.into_iter().zip(object_display_names).zip(object_sources) {
+			if !already_linked.contains(&source) {
+				objects.push(object);
+				displays.push(display);
+				sources.push(source);
+			}
+		}
+
 		let linked_module = LinkedModule {
+			function_owner,
 			exports: exports.clone(),
 			functions: program.functions,
-			object_display_names,
-			objects: program.objects,
+			object_display_names: displays,
+			object_sources: sources,
+			objects,
 			source_file,
 			with_declarations: program.with_declarations,
 		};
+
 		self.declared_modules.insert(module_key.clone(), exports.clone());
 		self.loaded_modules.insert(module_key, linked_module.clone());
+
 		Ok(exports)
 	}
 
@@ -1135,7 +1243,10 @@ fn build_declared_module_exports(
 			}
 			(function.name.clone(), dependencies)
 		})
-		.collect();
+		.fold(BTreeMap::<_, BTreeMap<_, _>>::new(), |mut groups, (name, dependencies)| {
+			groups.entry(name).or_default().extend(dependencies);
+			groups
+		});
 
 	let mut object_dependency_groups = BTreeMap::new();
 
@@ -1272,40 +1383,6 @@ fn collect_public_object_dependency_targets(
 	}
 }
 
-fn compile_ast_program_with_schema_and_analyzer(
-	program: &ast::AstProgram,
-	target: CompilationTarget,
-	schema_catalog: Option<&SchemaCatalog>,
-	mut analyzer: SemanticAnalyzer,
-	debug_object_imports: &BTreeMap<String, BTreeMap<String, String>>,
-) -> Result<(Program, Vec<SemanticWarning>), TabloError> {
-	let semantic_program = match target {
-		CompilationTarget::Snippet => analyzer.analyze_program_with_schema(program, schema_catalog),
-		CompilationTarget::Standalone => analyzer.analyze_standalone_program_with_schema(program, schema_catalog),
-	}.map_err(TabloError::Compile)?;
-	let warnings = semantic_program.warnings().to_vec();
-
-	let mut compiler = Compiler::new();
-	let mut program = compiler.compile_program_with_existing_semantics(program, &semantic_program)
-		.map_err(TabloError::Compile)?;
-
-	for (source_name, imports) in debug_object_imports {
-		let scopes = &mut program.debug_info_mut().object_scopes;
-		let index = scopes.iter().position(|scope| scope.source_name.as_ref() == Some(source_name)).unwrap_or_else(|| {
-			scopes.push(ObjectScopeDebugInfo { source_name: Some(source_name.clone()), ..Default::default() });
-			scopes.len() - 1
-		});
-
-		for (name, target) in imports {
-			if let Some(id) = semantic_program.object_type_id(target) {
-				scopes[index].bindings.push((name.clone(), id));
-			}
-		}
-	}
-
-	Ok((program, warnings))
-}
-
 fn compile_source_to_program_with_name_and_schema(
 	source: impl Into<String>,
 	source_name: Option<&str>,
@@ -1328,9 +1405,12 @@ pub(crate) fn compile_source_to_program_with_name_and_schema_and_warnings(
 ) -> Result<(Program, Vec<SemanticWarning>), TabloError> {
 	let source = SourceText::new(source);
 	let program = parse_source_text(&source)?;
+
 	validate_module_graph(&program, source_name).map_err(TabloError::Compile)?;
+
 	let linked_program = link_program_modules(&program, &source, source_name).map_err(TabloError::Compile)?;
-	compile_linked_program(&linked_program, target, schema_catalog)
+
+	compile_linked_program(&linked_program, target, schema_catalog).map(|(program, semantics)| (program, semantics.warnings().to_vec()))
 }
 
 fn external_function_names(program: &LinkedProgram) -> BTreeSet<String> {
@@ -1341,24 +1421,44 @@ fn compile_linked_program(
 	linked_program: &LinkedProgram,
 	target: CompilationTarget,
 	schema_catalog: Option<&SchemaCatalog>,
-) -> Result<(Program, Vec<SemanticWarning>), TabloError> {
+) -> Result<(Program, SemanticProgram), TabloError> {
 	let mut analyzer = SemanticAnalyzer::new();
+
 	analyzer.set_external_functions(external_function_names(linked_program));
 	analyzer.set_function_overload_aliases(linked_program.function_overload_aliases.clone());
 	analyzer.set_root_source_name(Some(linked_program.root_source_file.display_name().to_string()));
 	analyzer.set_top_level_function_source_names(linked_program.top_level_function_source_names.clone());
 	analyzer.set_top_level_object_display_names(linked_program.top_level_object_display_names.clone());
 	analyzer.set_top_level_object_source_names(linked_program.top_level_object_source_names.clone());
-	let (mut program, warnings) = compile_ast_program_with_schema_and_analyzer(
-		&linked_program.program,
-		target,
-		schema_catalog,
-		analyzer,
-		&linked_program.debug_object_imports,
-	)?;
+
+	let semantic_program = match target {
+		CompilationTarget::Snippet => analyzer.analyze_program_with_schema(&linked_program.program, schema_catalog),
+		CompilationTarget::Standalone => analyzer.analyze_standalone_program_with_schema(&linked_program.program, schema_catalog),
+	}.map_err(TabloError::Compile)?;
+
+	let mut compiler = Compiler::new();
+	let mut program = compiler.compile_program_with_existing_semantics(&linked_program.program, &semantic_program)
+		.map_err(TabloError::Compile)?;
+
+	for (source_name, imports) in &linked_program.debug_object_imports {
+		let scopes = &mut program.debug_info_mut().object_scopes;
+		let index = scopes.iter().position(|scope| scope.source_name.as_ref() == Some(source_name)).unwrap_or_else(|| {
+			scopes.push(ObjectScopeDebugInfo { source_name: Some(source_name.clone()), ..Default::default() });
+			scopes.len() - 1
+		});
+
+		for (name, target) in imports {
+			if let Some(id) = semantic_program.object_type_id(target) {
+				scopes[index].bindings.push((name.clone(), id));
+			}
+		}
+	}
+
 	attach_source_debug_info(&mut program, linked_program);
-	let program = crate::library::link(program, &linked_program.program, &linked_program.libraries).map_err(TabloError::Compile)?;
-	Ok((program, warnings))
+
+	let program = crate::library::link(program, &linked_program.program, &linked_program.libraries, &semantic_program).map_err(TabloError::Compile)?;
+
+	Ok((program, semantic_program))
 }
 
 pub(crate) fn compile_library_source(
@@ -1367,29 +1467,98 @@ pub(crate) fn compile_library_source(
 	schema: Option<&SchemaCatalog>,
 ) -> Result<(crate::library::Library, Vec<SemanticWarning>), TabloError> {
 	let source_text = SourceText::new(source);
-	let ast = parse_source_text(&source_text)?;
+	let (ast, ranges) = parse_source_with_object_ranges(&source_text)?;
 	let fail = |message: String| TabloError::Compile(CompileError { message, position: 0 });
+
 	if ast.result.is_some() || ast.statements.iter().any(|statement| !matches!(statement, ast::Statement::Use(_) | ast::Statement::EnumDeclaration(_))) {
 		return Err(fail(String::from("Top-level executable statements are not permitted in libraries.")));
 	}
+
 	validate_module_graph(&ast, Some(source_name)).map_err(TabloError::Compile)?;
+
 	let linked = link_program_modules(&ast, &source_text, Some(source_name)).map_err(TabloError::Compile)?;
 	let root_functions = compiler::collect_all_function_declarations(&ast);
 	let root_offset = compiler::collect_all_function_declarations(&linked.program).len() - root_functions.len();
 	let mut interface = String::new();
+
+	for range in ranges {
+		interface.push_str(&source[range]);
+		interface.push('\n');
+	}
+
+	let (program, semantics) = compile_linked_program(&linked, CompilationTarget::Snippet, schema)?;
 	let mut exports = Vec::new();
+	let mut record_tables = Vec::new();
+	let mut parameter_sequences = Vec::new();
+
 	for function in ast.functions.iter().filter(|function| function.visibility == ast::Visibility::Public) {
+		for parameter in &function.parameters {
+			if matches!(parameter.data_type, ast::FunctionParameterType::RecordPointer { .. }) {
+				let Some(ast::DataType::RecordPointer(record)) = semantics.declaration_type(parameter.position) else {
+					return Err(fail(format!("Missing resolved table for record parameter `{}`.", parameter.name)));
+				};
+
+				record_tables.push(record.clone());
+			}
+		}
+
 		interface.push_str("pub ");
 		interface.push_str(&source[function.position..function.body.position]);
 		interface.push_str("{}\n");
+
 		let index = root_functions.iter().position(|candidate| std::ptr::eq(*candidate, function)).unwrap();
-		exports.push(u32::try_from(root_offset + index).map_err(|_| fail(String::from("Too many library functions.")))?);
+		let index = u32::try_from(root_offset + index).map_err(|_| fail(String::from("Too many library functions.")))?;
+
+		parameter_sequences.extend_from_slice(semantics.parameter_sequences(index));
+		exports.push(index);
 	}
-	let interface_ast = parse_source_text(&SourceText::new(interface.clone()))?;
-	crate::library::validate_interface(&interface_ast).map_err(fail)?;
-	let (program, warnings) = compile_linked_program(&linked, CompilationTarget::Snippet, schema)?;
-	let library = crate::library::Library { interface, exports, program };
-	Ok((library, warnings))
+
+	let objects = semantics.object_types()
+		.filter(|object| object.source_name() == Some(linked.root_source_file.display_name()))
+		.map(|object| (object.display_name().to_owned(), object.id().raw()))
+		.collect();
+	let mut dependencies = crate::library::TypeDependencies::default();
+
+	for import in &linked.libraries {
+		if !import.library.objects.is_empty() {
+			dependencies.modules.insert(import.library.owner.clone(), import.own_module.clone());
+		}
+
+		dependencies.modules.extend(import.library.dependencies.modules.clone());
+
+		for name in import.object_names.values().chain(import.library.dependencies.ids.keys()) {
+			let id = semantics.object_type_id(name).ok_or_else(|| fail(format!("Missing compiled library object `{name}`.")))?;
+			dependencies.ids.insert(name.clone(), id.raw());
+		}
+	}
+
+	for (name, target) in &linked.object_import_bindings {
+		if dependencies.ids.contains_key(target) {
+			dependencies.imports.insert(name.clone(), target.clone());
+		}
+	}
+
+	let module = if ast.objects.is_empty() {
+		String::new()
+	} else {
+		let path = canonical_module_key(Path::new(source_name));
+		let key = Sha256::digest(path.as_os_str().as_encoded_bytes());
+		format!("{key:x}/{}", path.file_name().unwrap_or_default().to_string_lossy())
+	};
+
+	let library = crate::library::Library {
+		interface,
+		exports,
+		record_tables,
+		parameter_sequences,
+		objects,
+		program,
+		dependencies,
+		module,
+		owner: String::new(),
+	};
+
+	Ok((library, semantics.warnings().to_vec()))
 }
 
 pub(crate) fn decode_external_source_diagnostic(message: &str) -> Option<(&str, String, usize, String)> {
@@ -1729,21 +1898,15 @@ fn link_program_modules(
 	let imported_source_files = linker.linked_source_files();
 	let mut top_level_function_source_names = Vec::new();
 	let mut top_level_object_display_names = linker.linked_object_display_names();
-	let mut top_level_object_source_names = Vec::new();
+	let mut top_level_object_source_names = linker.linked_object_sources();
 	let mut function_source_indices = Vec::new();
 
-	for (source_file_index, functions) in linker.linked_function_groups() {
-		let display_name = imported_source_files[(source_file_index - 1) as usize].display_name().to_string();
-		top_level_function_source_names.extend(functions.iter().map(|_| display_name.clone()));
+	for (source_file_index, owner, functions) in linker.linked_function_groups() {
+		top_level_function_source_names.extend(functions.iter().map(|_| owner.to_owned()));
 
 		for function in functions {
 			extend_function_source_indices(function, source_file_index, &mut function_source_indices);
 		}
-	}
-
-	for (source_file_index, objects) in linker.linked_object_groups() {
-		let display_name = imported_source_files[(source_file_index - 1) as usize].display_name().to_string();
-		top_level_object_source_names.extend(objects.iter().map(|_| display_name.clone()));
 	}
 
 	top_level_function_source_names.extend(
@@ -1809,10 +1972,16 @@ fn merge_with_declarations(
 }
 
 pub(crate) fn parse_source_text(source: &SourceText) -> Result<ast::AstProgram, TabloError> {
+	parse_source_with_object_ranges(source).map(|(program, _)| program)
+}
+
+fn parse_source_with_object_ranges(source: &SourceText) -> Result<(ast::AstProgram, Vec<std::ops::Range<usize>>), TabloError> {
 	let mut lexer = Lexer::new(source.clone());
 	let tokens = lexer.tokenize().map_err(TabloError::Lex)?;
 	let mut parser = Parser::new(tokens);
-	parser.parse_program().map_err(TabloError::Parse)
+	let program = parser.parse_program().map_err(TabloError::Parse)?;
+
+	Ok((program, parser.object_declaration_ranges))
 }
 
 fn resolve_module_path(base_directory: &Path, module_path: &str) -> PathBuf {
@@ -1961,7 +2130,7 @@ fn rewrite_expression_calls(
 	}
 }
 
-fn rewrite_function_declaration_calls(
+pub(crate) fn rewrite_function_declaration_calls(
 	function: &mut ast::FunctionDeclaration,
 	top_level_renames: &BTreeMap<String, String>,
 	import_bindings: &BTreeMap<String, String>,
@@ -1982,7 +2151,7 @@ fn rewrite_function_declaration_calls(
 	rewrite_statements_calls(&mut function.body.statements, top_level_renames, import_bindings, object_renames, &[]);
 }
 
-fn rewrite_object_declaration_type_names(
+pub(crate) fn rewrite_object_declaration_type_names(
 	objects: &mut [ast::ObjectDeclaration],
 	object_renames: &BTreeMap<String, String>,
 	rename_declarations: bool,
@@ -5154,7 +5323,7 @@ mod tests {
 		};
 		assert_eq!(
 			error.message,
-			"Argument for sequence parameter `sequence` must refer to sequence `Main.InvoiceNumber`.",
+			"Argument for sequence parameter `sequence` must refer to sequence `ExampleDb.Main.InvoiceNumber`.",
 		);
 	}
 
@@ -5785,7 +5954,7 @@ mod tests {
 		};
 		assert_eq!(
 			error.message,
-			"Argument for sequence parameter `sequence` must refer to sequence `Main.InvoiceNumber`.",
+			"Argument for sequence parameter `sequence` must refer to sequence `ExampleDb.Main.InvoiceNumber`.",
 		);
 	}
 
@@ -7552,7 +7721,7 @@ mod tests {
 			("rec cust = find first Customers; Write(&cust);", "requires a mutable record pointer, but `cust` is immutable"),
 			("if rec cust = find first Customers { Write(&cust); }", "requires a mutable record pointer, but `cust` is immutable"),
 			("rec cust = find first Customers; Read(cust);", "must be passed by reference"),
-			("rec cust = find first Suppliers; Read(&cust);", "must have type"),
+			("rec cust = find first Suppliers; Read(&cust);", "requires table `ExampleDb.Main.Customers`, found `ExampleDb.Main.Suppliers`"),
 		] {
 			let source = format!("with ExampleDb; fn Write(cust: &rec mut Customers) {{}} fn Read(cust: &rec Customers) {{}} {body}");
 			let error = compile_snippet_with_schema_fixture(

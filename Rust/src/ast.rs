@@ -179,20 +179,27 @@ pub enum FindKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FunctionParameterType {
-	RecordPointer { table: TableReference, is_mut: bool },
-	Sequence(SequenceReference),
+	RecordPointer {
+		table: TableReference,
+		is_mut: bool,
+		compiled_table: Option<RecordPointerType>,
+	},
+	Sequence {
+		sequence: SequenceReference,
+		compiled_sequence: Option<ResolvedSequenceReference>,
+	},
 	Value(DataType),
 }
 
 impl FunctionParameterType {
 	pub fn name(&self) -> String {
 		match self {
-			Self::RecordPointer { table, is_mut } => format!(
+			Self::RecordPointer { table, is_mut, .. } => format!(
 				"rec {}{}",
 				if *is_mut { "mut " } else { "" },
 				table.components.iter().map(|component| component.name.as_str()).collect::<Vec<_>>().join(".")
 			),
-			Self::Sequence(sequence) => format!(
+			Self::Sequence { sequence, .. } => format!(
 				"seq {}",
 				sequence.components.iter().map(|component| component.name.as_str()).collect::<Vec<_>>().join(".")
 			),
@@ -642,7 +649,8 @@ pub struct RecordPointerDeclaration {
 	pub position: usize,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecordPointerType {
 	pub database_name: String,
 	pub schema_name: String,
@@ -653,6 +661,15 @@ pub struct RecordPointerType {
 pub struct ReturnStatement {
 	pub position: usize,
 	pub value: Option<Expr>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedSequenceReference {
+	pub database_name: String,
+	pub schema_is_implicit: bool,
+	pub schema_name: String,
+	pub sequence_name: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

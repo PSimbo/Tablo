@@ -2,6 +2,7 @@ use std::collections::{ BTreeMap, BTreeSet };
 use std::path::Path;
 
 use crate::ast::*;
+pub use crate::ast::ResolvedSequenceReference;
 use crate::builtins::{ BuiltInFunction, BuiltInParameterType };
 use crate::bytecode::*;
 use crate::compiler::CompileError;
@@ -219,14 +220,6 @@ pub struct ResolvedObjectTypeReferenceOccurrence {
 	pub object_type_id: ObjectTypeId,
 	pub position: usize,
 	pub source_name: Option<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ResolvedSequenceReference {
-	pub database_name: String,
-	pub schema_is_implicit: bool,
-	pub schema_name: String,
-	pub sequence_name: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1096,8 +1089,9 @@ impl SemanticAnalyzer {
 					}
 					else {
 						Some(format!(
-							"rejected argument for parameter `{}`: expected sequence `{}.{}`",
+							"rejected argument for parameter `{}`: expected sequence `{}.{}.{}`",
 							parameter.name,
+							expected_sequence.database_name,
 							expected_sequence.schema_name,
 							expected_sequence.sequence_name,
 						))
@@ -1563,7 +1557,7 @@ impl SemanticAnalyzer {
 					format!("By-reference parameter `{}` cannot define a default value.", parameter.name),
 				));
 			}
-			if matches!(&parameter.data_type, FunctionParameterType::Sequence(_)) {
+			if matches!(&parameter.data_type, FunctionParameterType::Sequence { .. }) {
 				if parameter.is_by_ref {
 					return Err(self.compile_error(
 						parameter.position,
@@ -1628,6 +1622,12 @@ impl SemanticAnalyzer {
 			parameters,
 			return_type: function.return_type.clone(),
 		};
+
+		if function.visibility == Visibility::Public {
+			for sequence in signature.parameters.iter().filter_map(|parameter| parameter.sequence.as_ref()) {
+				self.semantic_program.parameter_sequences.entry(function_index).or_default().push(sequence.clone());
+			}
+		}
 
 		if self.functions.contains_in_current_scope(&function.name) {
 			let mut overloads = self.functions.lookup(&function.name).unwrap().clone();
@@ -2698,21 +2698,33 @@ impl SemanticAnalyzer {
 						.expect("Supplied call argument bindings must refer to expressions.");
 					let expression = argument.expression()
 						.expect("Supplied call argument bindings must refer to expressions.");
+
 					if let Some(expected_sequence) = &parameter.sequence {
+						if argument.is_by_ref {
+							return Err(self.compile_error(argument.position, format!(
+								"Sequence parameter `{}` already refers to its sequence. Pass the argument without `&`.",
+								parameter.name,
+							)));
+						}
+
 						let actual_sequence = self.semantic_program.resolved_sequence(expression.position());
+
 						if actual_sequence != Some(expected_sequence) {
 							return Err(self.compile_error(
 								expression.position(),
 								format!(
-									"Argument for sequence parameter `{}` must refer to sequence `{}.{}`.",
+									"Argument for sequence parameter `{}` must refer to sequence `{}.{}.{}`.",
 									parameter.name,
+									expected_sequence.database_name,
 									expected_sequence.schema_name,
 									expected_sequence.sequence_name,
 								),
 							));
 						}
+
 						continue;
 					}
+
 					if parameter.is_by_ref {
 						if !argument.is_by_ref {
 							return Err(self.compile_error(
@@ -2746,6 +2758,14 @@ impl SemanticAnalyzer {
 						}
 
 						if argument_type != &parameter.data_type {
+							if let (DataType::RecordPointer(expected), DataType::RecordPointer(actual)) = (&parameter.data_type, argument_type) {
+								return Err(self.compile_error(argument.position, format!(
+									"Record parameter `{}` requires table `{}.{}.{}`, found `{}.{}.{}`.",
+									parameter.name, expected.database_name, expected.schema_name, expected.table_name,
+									actual.database_name, actual.schema_name, actual.table_name,
+								)));
+							}
+
 							return Err(self.compile_error(
 								argument.position,
 								format!(
@@ -5564,16 +5584,50 @@ impl SemanticAnalyzer {
 		parameter: &FunctionParameter,
 	) -> Result<(DataType, Option<ResolvedSequenceReference>), CompileError> {
 		match &parameter.data_type {
-			FunctionParameterType::RecordPointer { table, .. } => {
-				let resolved_table = self.resolve_table_reference(table)?;
+			FunctionParameterType::RecordPointer { table, compiled_table, .. } => {
+				let resolved_table = if let Some(record) = compiled_table {
+					// The producer's table binding is independent of the consumer's active databases.
+					let Some(catalog) = &self.current_schema_catalog else {
+						return Ok((DataType::RecordPointer(record.clone()), None));
+					};
+
+					catalog.resolve_database_schema_table(
+						&[&record.database_name], &record.database_name, &record.schema_name, &record.table_name,
+					).map_err(|error| self.schema_error_to_compile_error(parameter.position, error))?
+				} else {
+					self.resolve_table_reference(table)?
+				};
+
 				Ok((DataType::RecordPointer(RecordPointerType {
 					database_name: resolved_table.database().name().to_string(),
 					schema_name: resolved_table.schema().name().to_string(),
 					table_name: resolved_table.table().name().to_string(),
 				}), None))
 			}
-			FunctionParameterType::Sequence(sequence) => {
-				let resolved = self.resolve_sequence_reference(sequence)?;
+			FunctionParameterType::Sequence { sequence, compiled_sequence } => {
+				let resolved = if let Some(binding) = compiled_sequence {
+					let Some(catalog) = &self.current_schema_catalog else {
+						return Ok((DataType::Int, Some(binding.clone())));
+					};
+
+					let resolved = catalog.resolve_database_schema_sequence(
+						&[&binding.database_name], &binding.database_name, &binding.schema_name, &binding.sequence_name,
+					).map_err(|error| self.schema_error_to_compile_error(parameter.position, error))?;
+
+					self.validate_sequence_backend(parameter.position, &resolved)?;
+
+					if resolved.schema().is_implicit() != binding.schema_is_implicit {
+						return Err(self.compile_error(parameter.position, format!(
+							"Sequence `{}.{}.{}` has different schema qualification in the library and consumer.",
+							binding.database_name, binding.schema_name, binding.sequence_name,
+						)));
+					}
+
+					resolved
+				} else {
+					self.resolve_sequence_reference(sequence)?
+				};
+
 				Ok((DataType::Int, Some(ResolvedSequenceReference {
 					database_name: resolved.database().name().to_string(),
 					schema_is_implicit: resolved.schema().is_implicit(),
@@ -7599,6 +7653,7 @@ pub struct SemanticProgram {
 	query_for_shapes: BTreeMap<usize, QueryForShape>,
 	query_projected_value_bindings: BTreeMap<usize, QueryProjectedValueBinding>,
 	record_pointer_bindings: BTreeMap<usize, RecordPointerBindingInfo>,
+	parameter_sequences: BTreeMap<u32, Vec<ResolvedSequenceReference>>,
 	resolved_sequences: BTreeMap<usize, ResolvedSequenceReference>,
 	resolved_tables: BTreeMap<usize, ResolvedTableReference>,
 	sequence_call_targets: BTreeMap<usize, ResolvedSequenceReference>,
@@ -7808,6 +7863,10 @@ impl SemanticProgram {
 
 	pub fn record_pointer_binding(&self, position: usize) -> Option<&RecordPointerBindingInfo> {
 		self.record_pointer_bindings.get(&position)
+	}
+
+	pub(crate) fn parameter_sequences(&self, function_index: u32) -> &[ResolvedSequenceReference] {
+		self.parameter_sequences.get(&function_index).map_or(&[], Vec::as_slice)
 	}
 
 	pub fn resolved_sequence(&self, position: usize) -> Option<&ResolvedSequenceReference> {
