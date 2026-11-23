@@ -254,7 +254,7 @@ impl Library {
 			}
 		}
 		if object_ids.len() != self.objects.len() + self.dependencies.ids.len()
-			|| object_ids.values().any(|id| *id == ObjectTypeId::RUNTIME_ERROR.raw())
+			|| object_ids.values().any(|id| ObjectTypeId::BUILTINS.contains(&ObjectTypeId::from_raw(*id)))
 			|| object_ids.values().collect::<BTreeSet<_>>().len() != object_ids.len()
 			|| self.dependencies.imports.values().any(|target| !self.dependencies.ids.contains_key(target)) {
 			return Err("Invalid bundled object bindings.".into());
@@ -272,7 +272,7 @@ impl Library {
 			return Err(String::from("A Tablo library cannot contain an executable entry point."));
 		}
 
-		let mut ids = BTreeMap::from([(ObjectTypeId::RUNTIME_ERROR, ObjectTypeId::RUNTIME_ERROR)]);
+		let mut ids = BTreeMap::from(ObjectTypeId::BUILTINS.map(|id| (id, id)));
 
 		for object in &ast.objects {
 			let id = object_ids.get(&object.name).ok_or("Missing library object binding.")?;
@@ -280,7 +280,7 @@ impl Library {
 		}
 
 		for descriptor in semantics.object_type_descriptors() {
-			if descriptor.id() == ObjectTypeId::RUNTIME_ERROR {
+			if ObjectTypeId::BUILTINS.contains(&descriptor.id()) {
 				continue;
 			}
 
@@ -294,7 +294,9 @@ impl Library {
 		for function in self.program.functions() {
 			for instruction in &function.body().instructions {
 				match instruction {
-					Instruction::Call(index, _) if *index as usize >= self.program.functions().len() => return Err(String::from("Invalid library function reference.")),
+					Instruction::Call(index, _)
+					| Instruction::SpawnCall(index, _)
+					| Instruction::AwaitCall(index, _) if *index as usize >= self.program.functions().len() => return Err(String::from("Invalid library function reference.")),
 					Instruction::ExecuteQuery(index) if *index as usize >= self.program.queries().len() => return Err(String::from("Invalid library query reference.")),
 					_ => {},
 				}
@@ -450,8 +452,8 @@ fn link_object_types(
 ) -> Result<ObjectIds, String> {
 	let library = &import.library.program;
 	let mut next_id = descriptors.iter().map(|descriptor| descriptor.id().raw())
-		.filter(|id| *id != ObjectTypeId::RUNTIME_ERROR.raw()).max().unwrap_or(0);
-	let mut ids = ObjectIds::from([(ObjectTypeId::RUNTIME_ERROR, ObjectTypeId::RUNTIME_ERROR)]);
+		.filter(|id| !ObjectTypeId::BUILTINS.contains(&ObjectTypeId::from_raw(*id))).max().unwrap_or(0);
+	let mut ids = ObjectIds::from(ObjectTypeId::BUILTINS.map(|id| (id, id)));
 
 	for (name, original) in &import.library.objects {
 		let linked = import.object_names.get(name)
@@ -473,7 +475,7 @@ fn link_object_types(
 		if let std::collections::btree_map::Entry::Vacant(entry) = ids.entry(descriptor.id()) {
 			next_id = next_id
 				.checked_add(1)
-				.filter(|id| *id != ObjectTypeId::RUNTIME_ERROR.raw())
+				.filter(|id| !ObjectTypeId::BUILTINS.contains(&ObjectTypeId::from_raw(*id)))
 				.ok_or_else(|| String::from("Too many linked object types."))?;
 			entry.insert(ObjectTypeId::from_raw(next_id));
 			private_descriptors.push(descriptor);
@@ -549,7 +551,9 @@ pub(crate) fn link(
 
 			for instruction in &mut body.instructions {
 				match instruction {
-					Instruction::Call(target, _) => *target = targets[*target as usize],
+					Instruction::AwaitCall(target, _)
+					| Instruction::Call(target, _)
+					| Instruction::SpawnCall(target, _) => *target = targets[*target as usize],
 					Instruction::ExecuteQuery(target) => *target = target.checked_add(query_offset).ok_or_else(|| error("Too many linked queries."))?,
 					_ => relocate_instruction(instruction, &ids).map_err(|message| error(&message))?,
 				}

@@ -40,6 +40,8 @@ const FIND_TABLE_PATTERN = /^find(?:\s+(?:first|last))?\s+((?:"(?:[^"]|"")*"|[A-
 const KEYWORD_ITEMS = [
 	keyword("and"),
 	keyword("asc"),
+	keyword("async"),
+	keyword("block"),
 	keyword("break"),
 	keyword("by"),
 	keyword("const"),
@@ -65,6 +67,7 @@ const KEYWORD_ITEMS = [
 	keyword("order"),
 	keyword("rec"),
 	keyword("return"),
+	keyword("suspend"),
 	keyword("where"),
 	keyword("while"),
 	keyword("with"),
@@ -82,6 +85,7 @@ const TYPE_ITEMS = [
 	typeItem("float"),
 	typeItem("int"),
 	typeItem("json"),
+	typeItem("task", "Task handle type"),
 	typeItem("text"),
 ];
 
@@ -144,6 +148,7 @@ export function registerCompletionProvider(): vscode.Disposable {
 					...TYPE_ITEMS,
 					...BUILT_IN_ITEMS,
 					...completionContext.symbols,
+					...visibleTaskItems(document, position, completionContext),
 				];
 			},
 		},
@@ -206,6 +211,9 @@ function collectDocumentSymbols(
 
 		const item = new vscode.CompletionItem(name, kind);
 		item.detail = keywordName === "obj" ? `${name}(json): ${name}` : detail;
+		if (keywordName === "fn" && /\basync\s*$/u.test(text.slice(0, match.index))) {
+			item.detail = "Async function";
+		}
 		items.set(name, item);
 	}
 
@@ -234,11 +242,26 @@ function collectObjectDeclarations(text: string): Map<string, ObjectFieldInfo[]>
 	return objects;
 }
 
+function visibleTaskItems(document: vscode.TextDocument, position: vscode.Position, context: CompletionContextData): vscode.CompletionItem[] {
+	const items: vscode.CompletionItem[] = [];
+	for (const [name, type] of collectVisibleBindings(document.getText(), document.offsetAt(position), context)) {
+		if (/^task\s*</u.test(type)) {
+			const item = new vscode.CompletionItem(name, vscode.CompletionItemKind.Variable);
+			item.detail = type;
+			items.push(item);
+		}
+	}
+	return items;
+}
+
 function collectVariableSymbols(text: string): vscode.CompletionItem[] {
 	const items = new Map<string, vscode.CompletionItem>();
 	const regex = /\b(?:const|rec(?:\s+mut)?|var)\s+("(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_]*)/g;
 
 	for (const match of text.matchAll(regex)) {
+		if (/^\s*:\s*task\s*</u.test(text.slice(match.index! + match[0].length))) {
+			continue;
+		}
 		const name = decodeIdentifier(match[1]);
 		if (items.has(name)) {
 			continue;
@@ -699,10 +722,10 @@ function findTypeEnd(text: string, start: number): number {
 			continue;
 		}
 
-		if (char === "[") {
+		if (char === "[" || char === "<") {
 			bracketDepth += 1;
 		}
-		else if (char === "]") {
+		else if (char === "]" || char === ">") {
 			bracketDepth = Math.max(0, bracketDepth - 1);
 		}
 		else if (bracketDepth === 0 && (char === "=" || char === ";" || char === "\n" || char === "\r")) {
@@ -1127,6 +1150,9 @@ function decodeIdentifier(identifier: string): string {
 
 function extractReferenceTypeName(source: string): string | undefined {
 	const trimmed = source.trim().replace(/\?+$/u, "").trim();
+	if (/^task\s*</u.test(trimmed)) {
+		return trimmed;
+	}
 	if (!trimmed || trimmed.startsWith("[") || trimmed.includes("|") || trimmed.startsWith("&")) {
 		return undefined;
 	}
@@ -1404,9 +1430,9 @@ function snippet(
 	return item;
 }
 
-function typeItem(label: string): vscode.CompletionItem {
+function typeItem(label: string, detail = "Primitive type"): vscode.CompletionItem {
 	const item = new vscode.CompletionItem(label, vscode.CompletionItemKind.TypeParameter);
-	item.detail = "Primitive type";
+	item.detail = detail;
 	return item;
 }
 

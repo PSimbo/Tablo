@@ -230,6 +230,12 @@ pub struct ResolvedTableReference {
 	pub table_name: String,
 }
 
+#[derive(Default)]
+struct AsyncBlockResult {
+	expected: Option<DataType>,
+	observed: Option<Option<DataType>>,
+}
+
 // This pass is responsible for name resolution and type checking. It does not
 // emit bytecode directly, but it resolves locals and function targets so code
 // generation can remain simple.
@@ -238,6 +244,8 @@ pub struct SemanticAnalyzer {
 	external_functions: BTreeSet<String>,
 	current_non_null_assumptions: Vec<Expr>,
 	current_return_type: Option<DataType>,
+	in_async_function: bool,
+	async_block_results: Vec<AsyncBlockResult>,
 	current_schema_catalog: Option<SchemaCatalog>,
 	current_source_name: Option<String>,
 	declaration_kinds: ScopeStack<LexicalDeclarationKind>,
@@ -274,6 +282,8 @@ impl SemanticAnalyzer {
 	) -> Result<SemanticProgram, CompileError> {
 		self.current_non_null_assumptions.clear();
 		self.current_return_type = None;
+		self.in_async_function = false;
+		self.async_block_results.clear();
 		self.declaration_kinds = ScopeStack::default();
 		self.functions = ScopeStack::default();
 		self.enums = ScopeStack::default();
@@ -300,7 +310,10 @@ impl SemanticAnalyzer {
 		self.declaration_kinds.enter_scope();
 		self.object_type_bindings.enter_scope();
 		self.collect_object_declarations(&program.objects)?;
-		self.register_runtime_error_type()?;
+		self.register_error_type("RuntimeError", ObjectTypeId::RUNTIME_ERROR, vec![("message", DataType::Text)])?;
+		self.register_error_type("SuppressedFailure", ObjectTypeId::SUPPRESSED_FAILURE, vec![
+			("value", DataType::Any), ("stackTrace", DataType::Array(Box::new(DataType::Text))),
+		])?;
 		self.current_source_name = self.root_source_name.clone();
 		self.enums.enter_scope();
 		self.collect_scope_enum_declarations(&program.statements, true)?;
@@ -431,6 +444,8 @@ impl SemanticAnalyzer {
 			external_functions: BTreeSet::new(),
 			current_non_null_assumptions: Vec::new(),
 			current_return_type: None,
+			in_async_function: false,
+			async_block_results: Vec::new(),
 			current_schema_catalog: None,
 			current_source_name: None,
 			declaration_kinds: ScopeStack::default(),
@@ -902,6 +917,7 @@ impl SemanticAnalyzer {
 					.collect::<Option<Vec<_>>>()?;
 
 				Some(FunctionSignature {
+					is_async: false,
 					function_index: function_index as u32,
 					parameter_defaults: vec![None; parameters.len()],
 					parameters,
@@ -1207,11 +1223,14 @@ impl SemanticAnalyzer {
 		Ok(())
 	}
 
-	fn register_runtime_error_type(&mut self) -> Result<(), CompileError> {
-		let name = "RuntimeError";
-
+	fn register_error_type(
+		&mut self,
+		name: &str,
+		id: ObjectTypeId,
+		fields: Vec<(&str, DataType)>,
+	) -> Result<(), CompileError> {
 		if let Some(existing) = self.lookup_object_type(name) {
-			return Err(self.compile_error(existing.declaration().position, "RuntimeError is a built-in object type."));
+			return Err(self.compile_error(existing.declaration().position, format!("{name} is a built-in object type.")));
 		}
 
 		let declaration = ObjectDeclaration {
@@ -1220,17 +1239,16 @@ impl SemanticAnalyzer {
 			visibility: Visibility::Public,
 			containing_object_name: None,
 			has_explicit_name: true,
-			shape: ObjectDeclarationShape::Fields(vec![ObjectFieldDeclaration {
-				name: "message".into(),
-				data_type: DataType::Text,
+			shape: ObjectDeclarationShape::Fields(fields.into_iter().map(|(field, data_type)| ObjectFieldDeclaration {
+				name: field.into(),
+				data_type,
 				default_value: None,
 				is_quoted: false,
 				position: 0,
 				visibility: Visibility::Public,
-			}]),
+			}).collect()),
 		};
 
-		let id = ObjectTypeId::RUNTIME_ERROR;
 		self.semantic_program.object_type_ids_by_name.insert(name.into(), id);
 
 		self.semantic_program.object_types.insert(id, ResolvedObjectType {
@@ -1411,6 +1429,7 @@ impl SemanticAnalyzer {
 				.map(|object_type| object_type.display_name().to_string())
 				.unwrap_or_else(|| name.name.clone()),
 			DataType::Range(element_type) => format!("range<{}>", self.data_type_display_name(element_type)),
+			DataType::Task(result) => format!("task<{}>", self.data_type_display_name(result)),
 			DataType::Union(members) => members.iter()
 				.map(|member| self.data_type_display_name(member))
 				.collect::<Vec<_>>()
@@ -1469,6 +1488,7 @@ impl SemanticAnalyzer {
 			DataType::ParsedJson => false,
 			DataType::Range(_) => false,
 			DataType::RecordPointer(_) => false,
+			DataType::Task(_) => false,
 			DataType::Text => true,
 			DataType::Time => true,
 			DataType::TimeTz => true,
@@ -1615,6 +1635,7 @@ impl SemanticAnalyzer {
 		let function_index = *self.function_indices.get(&(function as *const FunctionDeclaration as usize))
 			.ok_or_else(|| self.compile_error(function.position, "Missing function declaration index."))?;
 		let signature = FunctionSignature {
+			is_async: function.is_async,
 			function_index,
 			parameter_defaults: function.parameters.iter()
 				.map(|parameter| parameter.default_value.clone())
@@ -1631,6 +1652,7 @@ impl SemanticAnalyzer {
 
 		if self.functions.contains_in_current_scope(&function.name) {
 			let mut overloads = self.functions.lookup(&function.name).unwrap().clone();
+
 			if overloads.iter().any(|existing| existing.parameters == signature.parameters) {
 				return Err(self.compile_error(
 					function.position,
@@ -1792,6 +1814,7 @@ impl SemanticAnalyzer {
 			DataType::Range(element_type) => ObjectValueTypeDescriptor::Range(Box::new(
 				self.describe_object_value_type(element_type),
 			)),
+			DataType::Task(_) => unreachable!("Task handles cannot be stored in object descriptors"),
 			DataType::Text => ObjectValueTypeDescriptor::Text,
 			DataType::Time => ObjectValueTypeDescriptor::Time,
 			DataType::TimeTz => ObjectValueTypeDescriptor::TimeTz,
@@ -2268,6 +2291,12 @@ impl SemanticAnalyzer {
 			return self.infer_expression_for_target(expression, &effective);
 		}
 
+		if let Expr::AsyncBlock { block, .. } = expression {
+			return self.validate_async_block(block, Some(target))?.ok_or_else(|| {
+				self.compile_error(block.position, "This async block does not return a value.")
+			});
+		}
+
 		if target.without_nullability() == &DataType::Float {
 			if let Some(text) = expression.json_literal_number() {
 				let value = crate::float::FloatLiteral::parse(&text).map_err(|message| self.compile_error(expression.position(), message))?;
@@ -2608,7 +2637,36 @@ impl SemanticAnalyzer {
 	}
 
 	fn infer_call_type(&mut self, call: &CallExpr) -> Result<Option<DataType>, CompileError> {
-		let CallExpr { arguments, callee, position } = call;
+		let CallExpr { arguments, callee, position, mode } = call;
+
+		if *mode == CallMode::WaitHandle {
+			if !self.in_async_function {
+				return Err(self.compile_error(*position, "`suspend` requires an async context."));
+			}
+
+			let Some(local) = self.lookup_local(&callee.name) else {
+				return Err(self.compile_error(callee.position, format!("Unknown task handle `{}`.", callee.name)));
+			};
+
+			let DataType::Task(result) = &local.data_type else {
+				return Err(self.compile_error(callee.position, "`suspend` requires a task handle."));
+			};
+
+			let result = result.as_ref().clone();
+
+			self.semantic_program.identifier_slots.insert(*position, local.slot);
+			self.semantic_program.call_return_types.insert(*position, result.clone());
+
+			return Ok(Some(result));
+		}
+
+		if *mode == CallMode::Suspend && !self.in_async_function {
+			return Err(self.compile_error(*position, "`suspend` requires an async context."));
+		}
+
+		if *mode != CallMode::Plain && self.lookup_functions(&callee.name).is_none() {
+			return Err(self.compile_error(*position, "Expected a call to an async function."));
+		}
 
 		if let Some(id) = self.lookup_object_type_id(&callee.name) {
 			if arguments.len() != 1 || arguments[0].is_by_ref || arguments[0].expression().is_none() {
@@ -2651,6 +2709,14 @@ impl SemanticAnalyzer {
 				&argument_types,
 				*position,
 			)?;
+
+			match (signature.is_async, mode) {
+				(true, CallMode::Plain) if !self.in_async_function => return Err(self.compile_error(*position,
+					"An async call requires `block` in synchronous code or `suspend` for a directly awaited child.")),
+				(false, CallMode::Block | CallMode::Suspend) => return Err(self.compile_error(*position,
+					"This function is synchronous and cannot be called with `block` or `suspend`.")),
+				_ => {}
+			}
 
 			for (parameter, binding) in signature.parameters.iter().zip(&argument_bindings) {
 				let (indices, target) = match binding {
@@ -2810,9 +2876,23 @@ impl SemanticAnalyzer {
 			self.semantic_program.call_targets.insert(*position, signature.function_index);
 			self.semantic_program.call_argument_bindings.insert(*position, argument_bindings);
 			self.semantic_program.call_argument_reference_slots.insert(*position, reference_slots);
+
+			if signature.is_async && *mode == CallMode::Plain {
+				if signature.parameters.iter().any(|param| param.is_by_ref) {
+					return Err(self.compile_error(*position, "A spawned child cannot borrow a caller variable."));
+				}
+
+				let result = DataType::Task(Box::new(signature.return_type.unwrap_or(DataType::Null)));
+
+				self.semantic_program.call_return_types.insert(*position, result.clone());
+
+				return Ok(Some(result));
+			}
+
 			if let Some(return_type) = &signature.return_type {
 				self.semantic_program.call_return_types.insert(*position, return_type.clone());
 			}
+
 			Ok(signature.return_type)
 		}
 		else if let Some(declaration_kind) = self.declaration_kinds.lookup(&callee.name).copied() {
@@ -2900,6 +2980,30 @@ impl SemanticAnalyzer {
 		}
 
 		Ok(Some(target_type))
+	}
+
+	fn validate_async_block(&mut self, block: &BlockStatement, expected: Option<&DataType>) -> Result<Option<DataType>, CompileError> {
+		let saved_async = self.in_async_function;
+		let saved_loop = self.loop_depth;
+
+		self.loop_depth = 0;
+		self.in_async_function = true;
+		self.async_block_results.push(AsyncBlockResult { expected: expected.cloned(), observed: None });
+
+		let checked = self.validate_block(&block.statements);
+		let observed = self.async_block_results.pop().unwrap().observed;
+
+		self.in_async_function = saved_async;
+		self.loop_depth = saved_loop;
+		checked?;
+
+		let result = observed.unwrap_or_else(|| expected.cloned());
+
+		if result.is_some() && !self.block_guarantees_return(block) {
+			return Err(self.compile_error(block.position, "A value-producing async block must return on every path."));
+		}
+
+		Ok(result)
 	}
 
 	fn infer_expression_type(&mut self, expression: &Expr) -> Result<DataType, CompileError> {
@@ -3139,6 +3243,7 @@ impl SemanticAnalyzer {
 					}
 				}
 			}
+			Expr::AsyncBlock { block, .. } => self.validate_async_block(block, None)?.ok_or_else(|| self.compile_error(block.position, "This async block does not return a value.")),
 			Expr::Binary(BinaryExpr { left, operator, right, .. }) => {
 				let mut left_type;
 				let mut right_type;
@@ -3545,6 +3650,10 @@ impl SemanticAnalyzer {
 			}
 		}?;
 
+		if matches!(data_type, DataType::Task(_)) {
+			return Err(self.compile_error(expression.position(), "Use a task handle in a local task declaration or with `suspend`."));
+		}
+
 		Ok(self.refine_expression_type_from_assumptions(expression, data_type))
 	}
 
@@ -3816,6 +3925,7 @@ impl SemanticAnalyzer {
 				expression.position(),
 				String::from("Assignments are not permitted in `where` clauses."),
 			)),
+			Expr::AsyncBlock { .. } => Err(self.compile_error(expression.position(), "Async blocks cannot be used in database query expressions.")),
 			Expr::Binary(BinaryExpr { left, operator, right, .. }) => {
 				let (left_type, right_type) = if left.can_adopt_float_context() && !right.can_adopt_float_context() {
 					let right_type = self.infer_query_expression_type(right, table)?;
@@ -3861,7 +3971,11 @@ impl SemanticAnalyzer {
 				Ok(result)
 			}
 			Expr::Boolean(_) => Ok(DataType::Bool),
-			Expr::Call(CallExpr { arguments, callee, .. }) => {
+			Expr::Call(CallExpr { arguments, callee, mode, .. }) => {
+				if *mode != CallMode::Plain {
+					return Err(self.compile_error(expression.position(), "Database query expressions cannot wait for async work."));
+				}
+
 				if let Some(signatures) = self.lookup_functions(&callee.name).map(<[FunctionSignature]>::to_vec) {
 					let mut argument_types = Vec::with_capacity(arguments.len());
 					for argument in arguments {
@@ -3885,6 +3999,10 @@ impl SemanticAnalyzer {
 						&argument_types,
 						expression.position(),
 					)?;
+
+					if signature.is_async {
+						return Err(self.compile_error(expression.position(), "Database query expressions cannot start child tasks."));
+					}
 
 					for (parameter_index, binding) in argument_bindings.iter().enumerate() {
 						let argument_indices = match binding {
@@ -4580,7 +4698,7 @@ impl SemanticAnalyzer {
 				}))
 			}
 			Expr::Boolean(boolean) => Ok(QueryExpr::Literal(QueryLiteral::Boolean(boolean.value))),
-			Expr::Call(CallExpr { arguments, callee, position }) => {
+			Expr::Call(CallExpr { arguments, callee, position, .. }) => {
 				let Some(built_in) = BuiltInFunction::from_name(&callee.name) else {
 					return Err(self.compile_error(
 						callee.position,
@@ -6277,10 +6395,11 @@ impl SemanticAnalyzer {
 		message: &str,
 	) -> Result<(), CompileError> {
 		match data_type {
-			DataType::EmptyArray | DataType::Null => Err(self.compile_error(position, message)),
 			DataType::Array(element_type) => {
 				self.validate_declared_data_type_structure(element_type, position, message)
 			}
+			DataType::EmptyArray => Err(self.compile_error(position, message)),
+			DataType::Null => Err(self.compile_error(position, message)),
 			DataType::Nullable(inner) => {
 				match inner.as_ref() {
 					DataType::Union(_) => Err(self.compile_error(
@@ -6290,6 +6409,9 @@ impl SemanticAnalyzer {
 					_ => self.validate_declared_data_type_structure(inner, position, message),
 				}
 			}
+			DataType::Object(_) => Ok(()),
+			DataType::RecordPointer(_) => Err(self.compile_error(position, message)),
+			DataType::Task(_) => Err(self.compile_error(position, message)),
 			DataType::Union(members) => {
 				for member in members {
 					self.validate_declared_data_type_structure(member, position, message)?;
@@ -6297,8 +6419,6 @@ impl SemanticAnalyzer {
 
 				Ok(())
 			}
-			DataType::Object(_) => Ok(()),
-			DataType::RecordPointer(_) => Err(self.compile_error(position, message)),
 			_ => Ok(()),
 		}
 	}
@@ -6495,6 +6615,11 @@ impl SemanticAnalyzer {
 		let saved_loop_depth = self.loop_depth;
 		let saved_next_local_slot = self.next_local_slot;
 		let saved_return_type = self.current_return_type.clone();
+		let saved_blocks = std::mem::take(&mut self.async_block_results);
+		let saved_async = self.in_async_function;
+
+		self.in_async_function = function.is_async;
+
 		let saved_source_name = self.current_source_name.clone();
 
 		if function.visibility == Visibility::Public && self.function_depth > 0 {
@@ -6538,12 +6663,15 @@ impl SemanticAnalyzer {
 		}
 
 		self.exit_scope();
+
 		self.locals = saved_locals;
 		self.sequence_aliases = saved_sequence_aliases;
 		self.function_depth = saved_function_depth;
 		self.loop_depth = saved_loop_depth;
 		self.next_local_slot = saved_next_local_slot;
 		self.current_return_type = saved_return_type;
+		self.in_async_function = saved_async;
+		self.async_block_results = saved_blocks;
 		self.current_source_name = saved_source_name;
 
 		Ok(())
@@ -6608,6 +6736,7 @@ impl SemanticAnalyzer {
 					self.validate_function_parameter_default_expression(element)?;
 				}
 			}
+			Expr::AsyncBlock { .. } => return Err(self.compile_error(expression.position(), "Async blocks cannot supply parameter defaults.")),
 			Expr::Binary(binary) => {
 				self.validate_function_parameter_default_expression(&binary.left)?;
 				self.validate_function_parameter_default_expression(&binary.right)?;
@@ -6815,7 +6944,7 @@ impl SemanticAnalyzer {
 			));
 		}
 
-		if main_function.parameters.len() != 1
+		if main_function.is_async || main_function.parameters.len() != 1
 			|| main_function.parameters[0].name != "args"
 			|| main_function.parameters[0].is_by_ref
 			|| main_function.parameters[0].data_type != FunctionParameterType::Value(DataType::Array(Box::new(DataType::Text)))
@@ -7057,12 +7186,20 @@ impl SemanticAnalyzer {
 			}
 			Statement::EnumDeclaration(enum_declaration) => self.validate_enum_declaration(enum_declaration),
 			Statement::Expression(expression) => {
-				if let Expr::Call(call) = expression {
+				if let Expr::AsyncBlock { block, .. } = expression {
+					let result = self.validate_async_block(block, None)?;
+
+					if result.is_some() {
+						self.semantic_program.value_blocks.insert(block.position);
+					}
+				}
+				else if let Expr::Call(call) = expression {
 					self.infer_call_type(call)?;
 				}
 				else {
 					self.infer_expression_type(expression)?;
 				}
+
 				Ok(())
 			}
 			Statement::Fail { value, position } => {
@@ -7398,6 +7535,30 @@ impl SemanticAnalyzer {
 				Ok(())
 			}
 			Statement::Return(ReturnStatement { position, value }) => {
+				if !self.async_block_results.is_empty() {
+					let expected = self.async_block_results.last().unwrap().expected.clone();
+
+					let ty = match (value, expected) {
+						(Some(expr), Some(target)) => {
+							let actual = self.infer_expression_for_target(expr, &target)?;
+							self.ensure_assignable(&target, &actual, expr.position())?;
+							Some(target)
+						}
+						(Some(expr), None) => Some(self.infer_expression_type(expr)?),
+						(None, _) => None,
+					};
+
+					let previous = &mut self.async_block_results.last_mut().unwrap().observed;
+
+					if previous.as_ref().is_some_and(|result| result != &ty) {
+						return Err(self.compile_error(*position, "Conflicting return types in async block."));
+					}
+
+					*previous = Some(ty);
+
+					return Ok(());
+				}
+
 				if self.function_depth == 0 {
 					return Err(self.compile_error(
 						*position,
@@ -7436,6 +7597,19 @@ impl SemanticAnalyzer {
 						self.validate_declared_data_type(ty, name.position, "Invalid catch binding type.".into())?;
 						let descriptor = self.describe_object_value_type(ty);
 						self.semantic_program.catch_types.insert(name.position, descriptor);
+					}
+
+					let suppressed_type = DataType::Array(Box::new(DataType::Object(ObjectTypeName::new("SuppressedFailure".into(), statement.position))));
+					let bindings = clause.binding.iter().map(|(name, ty)| (name, ty))
+						.chain(clause.suppressed.iter().map(|name| (name, &suppressed_type)));
+
+					for (name, ty) in bindings {
+						if let Some(error) = self.local_declaration_error(
+							"Catch binding", &name.name, name.position, format!("Catch binding `{}` is already declared.", name.name),
+						) {
+							return Err(error);
+						}
+
 						let slot = self.next_local_slot;
 						self.next_local_slot += 1;
 						self.semantic_program.declaration_slots.insert(name.position, slot);
@@ -7485,16 +7659,6 @@ impl SemanticAnalyzer {
 			}
 			Statement::Use(UseDeclaration { .. }) => Ok(()),
 			Statement::VariableDeclaration(VariableDeclaration { data_type, initial_value, is_const, name, position }) => {
-				self.validate_declared_data_type(
-					data_type,
-					*position,
-					format!(
-						"{} `{name}` cannot have type `{}`.",
-						if *is_const { "Constant" } else { "Variable" },
-						data_type.name(),
-					),
-				)?;
-
 				if let Some(error) = self.local_declaration_error(
 					"Variable",
 					name,
@@ -7504,21 +7668,54 @@ impl SemanticAnalyzer {
 					return Err(error);
 				}
 
-				if let Some(initial_value) = initial_value.as_ref() {
-					let initial_type = self.infer_expression_for_target(initial_value, data_type)?;
-					self.ensure_assignable(data_type, &initial_type, initial_value.position())?;
+				if let DataType::Task(result) = data_type {
+					if !self.in_async_function {
+						return Err(self.compile_error(*position, "Task locals require an async context."));
+					}
+
+					self.validate_declared_data_type(result, *position, "Invalid task result type.".into())?;
+
+					let actual = match initial_value.as_ref() {
+						Some(Expr::Call(call)) => self.infer_call_type(call)?,
+						Some(Expr::Identifier(id)) => self.lookup_local(&id.name).map(|local| {
+							self.semantic_program.identifier_slots.insert(id.position, local.slot);
+							local.data_type
+						}),
+						_ => None,
+					};
+
+					if actual.as_ref() != Some(data_type) {
+						return Err(self.compile_error(*position, format!("Expected a child task of type `{}`.", self.data_type_display_name(data_type))));
+					}
 				}
-				else if *is_const {
-					return Err(self.compile_error(
+				else {
+					self.validate_declared_data_type(
+						data_type,
 						*position,
-						format!("Constant `{name}` must currently have an initializer."),
-					));
+						format!(
+							"{} `{name}` cannot have type `{}`.",
+							if *is_const { "Constant" } else { "Variable" },
+							data_type.name(),
+						),
+					)?;
+
+					if let Some(initial_value) = initial_value.as_ref() {
+						let initial_type = self.infer_expression_for_target(initial_value, data_type)?;
+						self.ensure_assignable(data_type, &initial_type, initial_value.position())?;
+					}
+					else if *is_const {
+						return Err(self.compile_error(
+							*position,
+							format!("Constant `{name}` must currently have an initializer."),
+						));
+					}
 				}
 
 				if initial_value.is_none() {
 					if data_type == &DataType::Any {
 						return Err(self.compile_error(*position, "Non-nullable `any` requires an initializer; use `any?` for absence."));
 					}
+
 					if let DataType::Object(name) = data_type
 						&& let Some(id) = self.lookup_object_type_id(name) {
 						crate::object_construction::ObjectConstructor::new(self.semantic_program.object_type_descriptors())
@@ -7527,9 +7724,11 @@ impl SemanticAnalyzer {
 				}
 
 				let slot = self.next_local_slot;
+
 				self.next_local_slot += 1;
 				self.semantic_program.declaration_slots.insert(*position, slot);
 				self.semantic_program.declaration_types.insert(*position, data_type.clone());
+
 				self.declare_local(name.clone(), LocalBinding {
 					declaration_position: *position,
 					data_type: data_type.clone(),
@@ -7603,6 +7802,7 @@ impl SemanticAnalyzer {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SemanticProgram {
+	pub(crate) value_blocks: BTreeSet<usize>,
 	pub(crate) object_conversions: BTreeMap<usize, (ObjectTypeId, Vec<ObjectTypeId>)>,
 	pub(crate) json_literals: BTreeSet<usize>,
 	pub(crate) json_literal_numbers: BTreeMap<usize, String>,
@@ -7730,6 +7930,7 @@ impl SemanticProgram {
 				.map(|descriptor| descriptor.display_name().to_string())
 				.unwrap_or_else(|| name.name.clone()),
 			DataType::Range(element_type) => format!("range<{}>", self.display_data_type_name(element_type)),
+			DataType::Task(result) => format!("task<{}>", self.display_data_type_name(result)),
 			DataType::Union(members) => members.iter()
 				.map(|member| self.display_data_type_name(member))
 				.collect::<Vec<_>>()
@@ -7954,6 +8155,7 @@ struct FunctionParameterSignature {
 
 #[derive(Clone)]
 struct FunctionSignature {
+	is_async: bool,
 	function_index: u32,
 	parameter_defaults: Vec<Option<Expr>>,
 	parameters: Vec<FunctionParameterSignature>,
@@ -8817,7 +9019,7 @@ mod tests {
 		assert_eq!(descriptor.id(), model_id);
 		assert_eq!(descriptor.display_name(), "Model");
 		assert_eq!(
-			semantic_program.object_type_descriptor(ObjectTypeId(u32::MAX - 1)),
+			semantic_program.object_type_descriptor(ObjectTypeId(u32::MAX - 2)),
 			None,
 		);
 	}
@@ -10301,7 +10503,9 @@ mod tests {
 		let Expr::Call(call) = parse_expression("Collect(values: default)") else {
 			panic!("Expected call expression.");
 		};
+
 		let signature = FunctionSignature {
+			is_async: false,
 			function_index: 0,
 			parameter_defaults: vec![None],
 			parameters: vec![FunctionParameterSignature {
@@ -10315,10 +10519,13 @@ mod tests {
 			}],
 			return_type: None,
 		};
+
 		let analyzer = SemanticAnalyzer::new();
 
 		assert!(analyzer.bind_call_arguments(&signature, &call.arguments).is_err());
+
 		let error = analyzer.requested_default_error(&[signature], &call.arguments).unwrap();
+
 		assert_eq!(error.message, "`default` cannot be used for variadic parameter `values`.");
 		assert_eq!(error.position, 16);
 	}

@@ -481,3 +481,221 @@ fn compiled_sequence_parameters_preserve_the_declaring_sequence() {
 	let program = read_program_from_path(root.join("main.tobj")).unwrap();
 	assert_eq!(tablo::run_program_with_database_config(&program, config).unwrap(), Some(tablo::value::Value::Integer(5)));
 }
+
+#[test]
+fn links_async_exports_and_their_children_without_library_sources() {
+	let directory = tempfile::tempdir().unwrap();
+	let root = directory.path();
+	fs::write(root.join("Answers.tablo"), "async fn Twice(n: int): int { if n < 0 { fail 'negative'; } return 2 * n; }
+		pub async fn Answer(n: int = 20): int {
+			var child: task<int> = Twice(n);
+			return suspend child;
+		}
+		pub async fn Check(n: &int) { if n != 40 { fail 'bad value'; } }
+		pub fn ReadAnswer(): int { return block Answer(); }").unwrap();
+	assert_success(&compiler(root, &["--emit", "library", "Answers.tablo"]));
+	fs::remove_file(root.join("Answers.tablo")).unwrap();
+
+	for (body, diagnostic) in [
+		("return Answer();", "requires `block`"),
+		("return block ReadAnswer();", "synchronous"),
+		("var n: int = 40; async { Check(&n); } return n;", "cannot borrow"),
+	] {
+		fs::write(root.join("main.tablo"), format!("use './Answers';
+			fn Main(args: [text]): int {{ {body} }}")).unwrap();
+		let output = compiler(root, &["--emit", "object", "main.tablo"]);
+		assert!(!output.status.success());
+		assert!(String::from_utf8_lossy(&output.stderr).contains(diagnostic), "{}", String::from_utf8_lossy(&output.stderr));
+	}
+
+	fs::write(root.join("main.tablo"), "use Answer from './Answers';
+		fn Main(args: [text]): int { return block Answer(-1); }").unwrap();
+	assert_success(&compiler(root, &["--emit", "object", "main.tablo"]));
+	let program = read_program_from_path(root.join("main.tobj")).unwrap();
+	let Err(tablo::TabloError::Runtime(error)) = tablo::run_program(&program) else {
+		panic!("Expected the library child to fail");
+	};
+	let sites: Vec<_> = error.stack_frames().iter().map(|frame| {
+		let site = frame.source_location().unwrap();
+		let file = std::path::Path::new(site.display_name().unwrap()).file_name().unwrap().to_str().unwrap();
+		(file, site.body_name().unwrap(), site.line())
+	}).collect();
+	assert_eq!(sites, [("Answers.tablo", "Twice", 1), ("Answers.tablo", "Answer", 3), ("main.tablo", "Main", 2)]);
+	assert_eq!(error.stack_frames()[1].awaited_at.as_ref().unwrap().line(), 4);
+
+	fs::write(root.join("Relay.tablo"), "use './Answers';
+		pub async fn Relay(): int {
+			var child: task<int> = Answer();
+			var n: int = suspend child;
+			suspend Check(&n);
+			return n + suspend Answer(n: 1);
+		}").unwrap();
+	assert_success(&compiler(root, &["--emit", "library", "Relay.tablo"]));
+	fs::remove_file(root.join("Relay.tablo")).unwrap();
+	fs::remove_file(root.join("Answers.tlib")).unwrap();
+
+	fs::write(root.join("main.tablo"), "use Relay from './Relay';
+		fn Main(args: [text]): int { return block Relay(); }").unwrap();
+	assert_success(&compiler(root, &["--emit", "object", "main.tablo"]));
+	fs::remove_file(root.join("Relay.tlib")).unwrap();
+	let program = read_program_from_path(root.join("main.tobj")).unwrap();
+	assert_eq!(tablo::run_program(&program).unwrap(), Some(tablo::value::Value::Integer(42)));
+}
+
+#[test]
+fn scoped_tasks_share_the_transaction_and_join_before_commit() {
+	let directory = tempfile::tempdir().unwrap();
+	let root = directory.path();
+	fs::write(root.join("Sales.sql"), "database Sales; schema Main implicit; create sequence InvoiceNumber;").unwrap();
+	fs::write(root.join("tablo.toml"), "[databases]\nSales = 'sqlite:sales.sqlite'\n[schemas]\nSales = 'Sales.sql'\n").unwrap();
+	fs::write(root.join("main.tablo"), "with Sales;
+		async fn Next(): int { return seqnext(InvoiceNumber); }
+		async fn Bad(): int { Next(); fail 'rollback'; }
+		async fn UndoNested() {
+			try { transaction { suspend Next(); fail 'savepoint'; } }
+			catch err: text { if err != 'savepoint' { fail err; } }
+		}
+		fn Main(args: [text]): int {
+			InvoiceNumber = 4;
+			async {
+				transaction {
+					var earlier: task<int> = Next();
+					var later: task<int> = Next();
+					var alias: task<int> = earlier;
+					var laterValue: int = suspend later;
+					if laterValue != 6 or suspend alias != 5 or suspend earlier != 5 { fail 'order'; }
+					Next();
+				}
+				try { transaction { Next(); Bad(); Next(); } }
+				catch err: text { if err != 'rollback' { fail err; } }
+				transaction { UndoNested(); Next(); }
+			}
+			return InvoiceNumber;
+		}").unwrap();
+	assert_success(&compiler(root, &["--emit", "object", "main.tablo"]));
+	let path = root.join("sales.sqlite");
+	let database = rusqlite::Connection::open(&path).unwrap();
+	database.execute_batch("CREATE TABLE InvoiceNumber (Id INTEGER PRIMARY KEY AUTOINCREMENT);
+		INSERT INTO InvoiceNumber DEFAULT VALUES;").unwrap();
+	let config = tablo::database::RuntimeDatabaseConfig::new().with_sqlite_database("Sales", &path);
+	let program = read_program_from_path(root.join("main.tobj")).unwrap();
+	assert_eq!(tablo::run_program_with_database_config(&program, config).unwrap(), Some(tablo::value::Value::Integer(8)));
+}
+
+#[test]
+fn cancellation_finishes_cleanup_and_discards_the_parked_record_buffer() {
+	let dir = tempfile::tempdir().unwrap();
+	let root = dir.path();
+	fs::write(root.join("Sales.sql"), "database Sales; schema Main implicit;
+		create table Customers (Id int primary key, Name text not null);
+		create sequence Counter;").unwrap();
+	fs::write(root.join("tablo.toml"), "[databases]\nSales = 'sqlite:sales.sqlite'\n[schemas]\nSales = 'Sales.sql'\n").unwrap();
+	let path = root.join("sales.sqlite");
+	let db = rusqlite::Connection::open(&path).unwrap();
+	db.execute_batch("CREATE TABLE Customers (Id INTEGER PRIMARY KEY, Name TEXT NOT NULL);
+		INSERT INTO Customers VALUES (1, 'Ada');
+		CREATE TABLE Counter (Id INTEGER PRIMARY KEY AUTOINCREMENT);
+		INSERT INTO Counter DEFAULT VALUES;").unwrap();
+	fs::write(root.join("main.tablo"), "with Sales;
+		async fn Leaf(): int { return 1; }
+		async fn Fault(): int { fail 'original'; }
+		async fn Working(): int {
+			rec mut c = find first Customers where Id == 1;
+			c.Name = 'dirty';
+			try { return 0; }
+			finally {
+				seqnext(Counter);
+				suspend Leaf();
+				seqnext(Counter);
+			}
+		}
+		fn Main(args: [text]): int {
+			Counter = 10;
+			try {
+				async { Working(); Fault(); }
+			} catch e: text { if e != 'original' { return 0; } }
+			return Counter;
+		}").unwrap();
+	assert_success(&compiler(root, &["--emit", "object", "main.tablo"]));
+	let config = tablo::database::RuntimeDatabaseConfig::new().with_sqlite_database("Sales", &path);
+	let program = read_program_from_path(root.join("main.tobj")).unwrap();
+	assert_eq!(tablo::run_program_with_database_config(&program, config).unwrap(), Some(tablo::value::Value::Integer(12)));
+	let name: String = db.query_row("SELECT Name FROM Customers WHERE Id = 1", [], |row| row.get(0)).unwrap();
+	assert_eq!(name, "Ada");
+}
+
+#[test]
+fn cancelled_child_cleanup_writes_roll_back_to_the_enclosing_savepoint() {
+	let directory = tempfile::tempdir().unwrap();
+	let root = directory.path();
+	fs::write(root.join("Sales.sql"), "database Sales; schema Main implicit;
+		create table Ledger (Id int primary key, Amount int not null);").unwrap();
+	fs::write(root.join("tablo.toml"), "[databases]\nSales = 'sqlite:sales.sqlite'\n[schemas]\nSales = 'Sales.sql'\n").unwrap();
+	fs::write(root.join("main.tablo"), "with Sales;
+		fn AddAmount(n: int) {
+			rec mut entry = find first Ledger where Id == 1;
+			entry.Amount += n;
+			update entry;
+		}
+		fn Balance(): int {
+			rec entry = find first Ledger where Id == 1;
+			return entry.Amount;
+		}
+		async fn Leaf() {}
+		async fn Worker() {
+			AddAmount(100);
+			try { suspend Leaf(); fail 'worker resumed after cancellation'; }
+			finally { AddAmount(10000); }
+		}
+		async fn Fault() {
+			AddAmount(1000);
+			fail 'child failed';
+		}
+		fn Main(args: [text]): int {
+			var inspected: bool = false;
+			var caught: bool = false;
+			try {
+				transaction {
+					AddAmount(10);
+					try {
+						transaction {
+							try { async { Worker(); Fault(); } }
+							catch reason: text {
+								if reason != 'child failed' { fail reason; }
+								inspected = true;
+							}
+							finally {
+								if Balance() != 11111 { fail 'missing writes before rollback'; }
+							}
+						}
+					} catch reason: text {
+						if reason != 'child failed' { fail reason; }
+						if Balance() != 11 { fail 'wrong balance after savepoint rollback'; }
+						caught = true;
+					}
+					if not inspected or not caught { fail 'expected both handlers to run'; }
+					transaction { AddAmount(20); }
+					if len(args) > 0 { fail 'undo outer transaction'; }
+				}
+			} catch reason: text {
+				if reason != 'undo outer transaction' { fail reason; }
+			}
+			return Balance();
+		}").unwrap();
+
+	assert_success(&compiler(root, &["--emit", "object", "main.tablo"]));
+	let program = read_program_from_path(root.join("main.tobj")).unwrap();
+	let path = root.join("sales.sqlite");
+	let db = rusqlite::Connection::open(&path).unwrap();
+	db.execute_batch("CREATE TABLE Ledger (Id INTEGER PRIMARY KEY, Amount INTEGER NOT NULL);
+		INSERT INTO Ledger VALUES (1, 1);").unwrap();
+
+	// The rollback run leaves the initial balance for the commit run.
+	for (arguments, expected) in [(vec![String::from("rollback")], 1), (vec![], 31)] {
+		let config = tablo::database::RuntimeDatabaseConfig::new().with_sqlite_database("Sales", &path);
+		let result = tablo::run_program_with_database_config_and_arguments(&program, config, &arguments).unwrap();
+		assert_eq!(result, Some(tablo::value::Value::Integer(expected)));
+		let persisted: i64 = db.query_row("SELECT Amount FROM Ledger WHERE Id = 1", [], |row| row.get(0)).unwrap();
+		assert_eq!(persisted, expected);
+	}
+}

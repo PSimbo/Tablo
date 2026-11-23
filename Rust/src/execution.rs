@@ -74,24 +74,35 @@ impl Display for TabloError {
 			TabloError::Runtime(error) => {
 				write!(f, "Runtime error: {}", error.message)?;
 
-				if !error.stack_trace.is_empty() {
-					write!(f, "\nStack trace:")?;
+				write_failure_trace(f, error)?;
 
-					for frame in &error.stack_trace {
-						write!(f, "\n  at {}", format_stack_frame(frame))?;
-					}
-				}
-				else if let Some(location) = &error.source_location {
-					write!(f, "\nStack trace:\n  at {}", format_source_location(location, true))?;
-				}
-				else {
-					write!(f, "\nStack trace:\n  at instruction {}", error.instruction_index)?;
+				for secondary in &error.suppressed {
+					write!(f, "\nDuring cancellation cleanup: {}", secondary.message)?;
+					write_failure_trace(f, secondary)?;
 				}
 
 				Ok(())
 			}
 		}
 	}
+}
+
+fn write_failure_trace(f: &mut std::fmt::Formatter<'_>, error: &vm::VmError) -> std::fmt::Result {
+	write!(f, "\nStack trace:")?;
+
+	if error.stack_trace.is_empty() {
+		if let Some(location) = &error.source_location {
+			return write!(f, "\n  at {}", format_source_location(location, true));
+		}
+
+		return write!(f, "\n  at instruction {}", error.instruction_index);
+	}
+
+	for frame in &error.stack_trace {
+		write!(f, "\n  at {}", format_stack_frame(frame))?;
+	}
+
+	Ok(())
 }
 
 pub fn run_file(path: impl AsRef<Path>) -> Result<Option<Value>, TabloError> {
@@ -150,11 +161,17 @@ pub fn run_program_with_database_config_and_arguments(
 	vm.run_with_arguments(program, arguments).map_err(TabloError::Runtime)
 }
 
-fn format_stack_frame(frame: &vm::VmStackFrame) -> String {
-	match &frame.source_location {
+pub(crate) fn format_stack_frame(frame: &vm::VmStackFrame) -> String {
+	let mut site = match &frame.source_location {
 		Some(location) => format_source_location(location, true),
 		None => format!("instruction {}", frame.instruction_index),
+	};
+
+	if let Some(wait) = &frame.awaited_at {
+		site.push_str(&format!(" (awaited at {})", format_source_location(wait, false)));
 	}
+
+	site
 }
 
 fn format_source_location(location: &bytecode::SourceLocation, include_body_name: bool) -> String {

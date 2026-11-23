@@ -28,6 +28,7 @@ pub enum Instruction {
 		sequence_name: String,
 	},
 	And,
+	AwaitCall(u32, u32),
 	BeginCatch {
 		first_local: u32,
 		clauses: Vec<CatchTarget>,
@@ -54,6 +55,7 @@ pub enum Instruction {
 	Divide,
 	Dup2,
 	EndTry,
+	EnterTaskScope,
 	Equal,
 	ExecuteQuery(u32),
 	Exists,
@@ -66,6 +68,7 @@ pub enum Instruction {
 	IterNext,
 	Jump(u32),
 	JumpIfFalse(u32),
+	LeaveTaskScope,
 	LessThan,
 	LessThanOrEqual,
 	LoadField(String),
@@ -134,6 +137,7 @@ pub enum Instruction {
 	Return,
 	ReturnNoValue,
 	RunFinally,
+	SpawnCall(u32, u32),
 	StoreFieldPath(Vec<String>),
 	StoreIndex,
 	StoreJsonPath(Vec<JsonMutationPart>),
@@ -147,6 +151,7 @@ pub enum Instruction {
 	Subtract,
 	UpdateRecord,
 	UpdateRecordIfChanged,
+	WaitTask,
 	Xor,
 }
 
@@ -218,6 +223,7 @@ pub enum ObjectValueTypeDescriptor {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CatchTarget {
+	pub suppressed_slot: Option<u32>,
 	pub binding: Option<(ObjectValueTypeDescriptor, u32)>,
 	pub target: u32,
 }
@@ -364,6 +370,8 @@ impl ObjectTypeDescriptor {
 pub struct ObjectTypeId(pub(crate) u32);
 
 impl ObjectTypeId {
+	pub(crate) const SUPPRESSED_FAILURE: Self = Self(u32::MAX - 1);
+	pub(crate) const BUILTINS: [Self; 2] = [Self::RUNTIME_ERROR, Self::SUPPRESSED_FAILURE];
 	pub(crate) const RUNTIME_ERROR: Self = Self(u32::MAX);
 
 	pub(crate) const fn from_raw(value: u32) -> Self {

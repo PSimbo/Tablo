@@ -440,6 +440,7 @@ impl QueryPlanBuilder {
 				}
 				self.visit_expression(&assignment.value, enclosing_query);
 			}
+			Expr::AsyncBlock { block, .. } => self.visit_block(block, enclosing_query),
 			Expr::Binary(binary) => {
 				self.visit_expression(&binary.left, enclosing_query);
 				let previous_control_flow = self.control_flow;
@@ -680,6 +681,7 @@ fn expression_may_have_side_effects(expression: &Expr) -> bool {
 	match expression {
 		Expr::Array(array) => array.elements.iter().any(expression_may_have_side_effects),
 		Expr::Assignment(_) | Expr::Call(_) => true,
+		Expr::AsyncBlock { .. } => true,
 		Expr::Binary(binary) => {
 			expression_may_have_side_effects(&binary.left)
 				|| expression_may_have_side_effects(&binary.right)

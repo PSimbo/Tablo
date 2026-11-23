@@ -108,6 +108,12 @@ impl LspServer {
 		let analysis = analyze(&document.text).or_else(|_| {
 			let prepared_source = source_for_completion_analysis(&document.text, cursor_offset);
 			analyze(&prepared_source)
+		}).or_else(|error| {
+			let imports = completion_imports(&document.text);
+			if imports.is_empty() {
+				return Err(error);
+			}
+			analyze(&imports)
 		}).ok()?;
 		Some((analysis, source_name))
 	}
@@ -161,6 +167,7 @@ impl LspServer {
 		items.extend(function_completion_items(&document.text));
 
 		if let Some((analysis, source_name)) = self.completion_analysis(uri, cursor_offset) {
+			items.extend(imported_function_completion_items(&analysis));
 			items.extend(object_type_completion_items(&analysis, &source_name));
 		}
 
@@ -1143,6 +1150,58 @@ fn Read(config: Config): int {
 			let items = object_type_completion_items(&analysis, &source_name);
 			assert!(items.iter().any(|item| item.label == name && item.detail.contains("(json)")));
 			assert!(!items.iter().any(|item| item.label == "Hidden"));
+		}
+	}
+
+	#[test]
+	fn async_editor_features_work_with_source_and_compiled_imports() {
+		let directory = tempfile::tempdir().unwrap();
+		let root = directory.path();
+		let module = root.join("Jobs.tablo");
+		let library = root.join("Jobs.tlib");
+		let declarations = "pub async fn Fetch(amount: int): int { return amount; }
+			pub fn Fetch(value: text): text { return value; }
+			async fn Hidden(): int { return 0; }";
+		std::fs::write(&module, declarations).unwrap();
+		let uri = format!("file://{}", root.join("main.tablo").display());
+		let main = "use Fetch from './Jobs';
+async fn Local(): int {
+	var pending: task<int> = Fetch(42);
+	return suspend pending;
+}
+fn Main(args: [text]): int { return block Local(); }";
+
+		for compiled in [false, true] {
+			if compiled {
+				tablo::executable::compile_library(declarations, &module, &library, None, tablo::bytecode::DebugInfoLevel::None).unwrap();
+				std::fs::remove_file(&module).unwrap();
+			}
+			let mut server = LspServer::new();
+			server.open_documents.insert(uri.clone(), OpenDocument { text: main.into(), version: 1 });
+			let diagnostics = server.document_diagnostics(&uri, main).unwrap();
+			assert!(diagnostics.iter().all(|item| item.severity != 1), "{diagnostics:?}");
+			let offset = main.find("suspend pending").unwrap() + "suspend pen".len();
+			let items = server.completion_items(&uri, position_at_offset(main, offset));
+			assert!(items.iter().any(|item| item["label"] == "pending" && item["detail"] == "task<int>"));
+			let outside = server.document_completion_items(&uri, position_at_offset(main, main.len()));
+			assert!(!outside.iter().any(|item| item.label == "pending" || item.label == "Hidden"));
+			assert!(outside.iter().any(|item| item.detail == "async Local(): int"));
+
+			let invalid = main.replace("block Local()", "Fetch(1)");
+			assert!(server.document_diagnostics(&uri, &invalid).unwrap().iter().any(|item| {
+				item.severity == 1 && item.range.start.line == 5 && item.message.contains("requires `block`")
+			}));
+
+			let partial = main.replace("Fetch(42)", "Fetch()");
+			server.open_documents.get_mut(&uri).unwrap().text = partial.clone();
+			let offset = partial.find("Fetch()").unwrap();
+			let items = server.completion_items(&uri, position_at_offset(&partial, offset + 2));
+			let detail = items.iter().find(|item| item["label"] == "Fetch").unwrap()["detail"].as_str().unwrap();
+			assert!(detail.lines().any(|line| line == "async Fetch(amount: int): int"));
+			assert!(detail.lines().any(|line| line == "Fetch(value: text): text"));
+			let help = server.signature_help(&uri, position_at_offset(&partial, offset + "Fetch(".len())).unwrap();
+			assert_eq!(help["signatures"].as_array().unwrap().len(), 2);
+			assert_eq!(help["signatures"][0]["label"], "async Fetch(amount: int): int");
 		}
 	}
 

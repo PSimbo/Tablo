@@ -58,18 +58,8 @@ pub fn callable_signatures_with_analysis(
 	let mut signatures = callable_signatures(source, name);
 
 	if let Some(analysis) = analysis {
-		if let Some(source_names) = analysis.imported_function_sources.get(name) {
-			for source_name in source_names {
-				let Ok(imported_source) = std::fs::read_to_string(source_name) else {
-					continue;
-				};
-				signatures.extend(
-					collect_document_callable_signatures_with_visibility(&imported_source).into_iter()
-						.filter_map(|(function_name, signature, is_public)| {
-							(is_public && function_name == name).then_some(signature)
-						}),
-				);
-			}
+		if let Some(imported) = analysis.imported_function_signatures.get(name) {
+			signatures.extend(imported.iter().cloned());
 		}
 
 		let object = analysis.object_import_bindings.get(name)
@@ -77,6 +67,7 @@ pub fn callable_signatures_with_analysis(
 			.filter(|object| object.visibility() == Visibility::Public)
 			.or_else(|| analysis.semantic_program.object_type_by_name(name)
 				.filter(|object| object.source_name() == Some(analysis.source_name.as_str())));
+
 		if object.is_some_and(|object| object.declaration().has_explicit_name) {
 			signatures.push(object_conversion_signature(name));
 		}
@@ -85,12 +76,12 @@ pub fn callable_signatures_with_analysis(
 			*signature = qualify_callable_signature(signature, analysis);
 		}
 	}
-
 	else if local_object_conversion_names(source).iter().any(|candidate| candidate == name) {
 		signatures.push(object_conversion_signature(name));
 	}
 
 	let mut seen = std::collections::BTreeSet::new();
+
 	signatures.retain(|signature| seen.insert(signature.label.clone()));
 	signatures
 }
@@ -114,6 +105,7 @@ fn object_conversion_signature(name: &str) -> CallableSignature {
 
 pub fn collect_document_completion_items(source: &str) -> Vec<CompletionItem> {
 	let mut items = Vec::new();
+	let mut local_scopes = vec![std::collections::BTreeMap::new()];
 	let mut index = 0;
 
 	while index < source.len() {
@@ -128,6 +120,14 @@ pub fn collect_document_completion_items(source: &str) -> Vec<CompletionItem> {
 		}
 
 		let Some(identifier) = read_identifier(source, index) else {
+			match source.as_bytes()[index] {
+				b'{' => local_scopes.push(std::collections::BTreeMap::new()),
+				b'}' if local_scopes.len() > 1 => {
+					local_scopes.pop();
+				}
+				_ => {}
+			}
+
 			index += source[index..].chars().next().map(char::len_utf8).unwrap_or(1);
 			continue;
 		};
@@ -140,11 +140,19 @@ pub fn collect_document_completion_items(source: &str) -> Vec<CompletionItem> {
 		match identifier.value.as_str() {
 			"const" | "var" => {
 				if let Some((name, next_index)) = parse_variable_completion_item(source, identifier.end) {
-					items.push(CompletionItem {
-						label: name,
-						kind: CompletionItemKind::LocalSymbol,
-						detail: String::from("Local symbol"),
-					});
+					let task_type = task_local_type(source, next_index);
+					let is_task = task_type.is_some();
+
+					local_scopes.last_mut().unwrap().insert(name.clone(), task_type);
+
+					if !is_task {
+						items.push(CompletionItem {
+							label: name,
+							kind: CompletionItemKind::LocalSymbol,
+							detail: String::from("Local symbol"),
+						});
+					}
+
 					index = next_index;
 					continue;
 				}
@@ -160,8 +168,9 @@ pub fn collect_document_completion_items(source: &str) -> Vec<CompletionItem> {
 					continue;
 				}
 			}
-			"fn" => {
-				if let Some((name, signature, next_index)) = parse_function_completion_items(source, identifier.end, &mut items) {
+			"async" | "fn" => {
+				if let Some(start) = function_header_start(source, &identifier)
+					&& let Some((name, signature, next_index)) = parse_function_completion_items(source, start, identifier.value == "async", &mut items) {
 					items.push(CompletionItem {
 						label: name,
 						kind: CompletionItemKind::Function,
@@ -199,6 +208,15 @@ pub fn collect_document_completion_items(source: &str) -> Vec<CompletionItem> {
 		index = identifier.end;
 	}
 
+	let visible: std::collections::BTreeMap<_, _> = local_scopes.into_iter().flatten().collect();
+
+	for (label, detail) in visible {
+		if let Some(detail) = detail {
+			items.retain(|item| item.label != label || item.kind != CompletionItemKind::LocalSymbol);
+			items.push(CompletionItem { label, detail, kind: CompletionItemKind::LocalSymbol });
+		}
+	}
+
 	items
 }
 
@@ -225,6 +243,8 @@ pub fn default_completion_items() -> Vec<CompletionItem> {
 		CompletionItem { label: String::from("any"), kind: CompletionItemKind::Type, detail: String::from("Type") },
 		CompletionItem { label: String::from("as"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("asc"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("async"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("block"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("bool"), kind: CompletionItemKind::Type, detail: String::from("Type") },
 		CompletionItem { label: String::from("break"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("by"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
@@ -272,6 +292,9 @@ pub fn default_completion_items() -> Vec<CompletionItem> {
 		CompletionItem { label: String::from("return"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
 		CompletionItem { label: String::from("RuntimeError"), kind: CompletionItemKind::Type, detail: String::from("Runtime failure with a public message field") },
 		CompletionItem { label: String::from("seq"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("SuppressedFailure"), kind: CompletionItemKind::Type, detail: String::from("Cancellation cleanup failure with its value and logical stack trace") },
+		CompletionItem { label: String::from("suspend"), kind: CompletionItemKind::Keyword, detail: String::from("Keyword") },
+		CompletionItem { label: String::from("task"), kind: CompletionItemKind::Type, detail: String::from("Type") },
 		CompletionItem { label: String::from("text"), kind: CompletionItemKind::Type, detail: String::from("Type") },
 		CompletionItem { label: String::from("time"), kind: CompletionItemKind::Type, detail: String::from("Type") },
 		CompletionItem { label: String::from("timestamp"), kind: CompletionItemKind::Type, detail: String::from("Type") },
@@ -299,6 +322,16 @@ pub fn default_completion_items() -> Vec<CompletionItem> {
 	}
 	dedupe_completion_items(&mut items);
 	items
+}
+
+pub fn imported_function_completion_items(analysis: &SourceAnalysis) -> Vec<CompletionItem> {
+	analysis.imported_function_signatures.iter().flat_map(|(name, signatures)| {
+		signatures.iter().map(|signature| CompletionItem {
+			detail: qualify_callable_signature(signature, analysis).label,
+			kind: CompletionItemKind::Function,
+			label: name.clone(),
+		})
+	}).collect()
 }
 
 pub fn function_completion_items(source: &str) -> Vec<CompletionItem> {
@@ -446,6 +479,37 @@ pub fn signature_help_with_analysis(
 		active_parameter,
 		signatures,
 	})
+}
+
+// Incomplete calls can prevent type checking the body. Completed file-scope
+// imports still identify the exact interfaces available at the cursor.
+pub fn completion_imports(source: &str) -> String {
+	use crate::syntax::{lexer::Lexer, token::TokenKind};
+	let mut imports = String::new();
+	let mut lexer = Lexer::new(SourceText::new(source));
+	let mut depth = 0usize;
+	let mut start = None;
+
+	while let Ok(Some(token)) = lexer.next_token() {
+		match token.kind {
+			TokenKind::EndOfFile => break,
+			TokenKind::LeftBrace => {
+				depth += 1;
+				start = None;
+			}
+			TokenKind::RightBrace => depth = depth.saturating_sub(1),
+			TokenKind::UseKeyword if depth == 0 => start = Some(token.start),
+			TokenKind::Semicolon => {
+				if let Some(begin) = start.take() {
+					imports.push_str(&source[begin..token.end]);
+					imports.push('\n');
+				}
+			}
+			_ => {}
+		}
+	}
+
+	imports
 }
 
 pub fn source_for_completion_analysis(source: &str, cursor_offset: usize) -> String {
@@ -681,14 +745,6 @@ fn collect_active_databases(source: &str) -> Vec<String> {
 }
 
 fn collect_document_callable_signatures(source: &str) -> Vec<(String, CallableSignature)> {
-	collect_document_callable_signatures_with_visibility(source).into_iter()
-		.map(|(name, signature, _)| (name, signature))
-		.collect()
-}
-
-fn collect_document_callable_signatures_with_visibility(
-	source: &str,
-) -> Vec<(String, CallableSignature, bool)> {
 	let mut signatures = Vec::new();
 	let mut index = 0;
 
@@ -697,6 +753,7 @@ fn collect_document_callable_signatures_with_visibility(
 			index = comment_end;
 			continue;
 		}
+
 		if let Some(string_end) = skip_string_literal(source, index) {
 			index = string_end;
 			continue;
@@ -706,12 +763,10 @@ fn collect_document_callable_signatures_with_visibility(
 			index += source[index..].chars().next().map(char::len_utf8).unwrap_or(1);
 			continue;
 		};
-		if !identifier.quoted
-			&& identifier.value == "fn"
-			&& let Some((name, signature, next_index)) = parse_function_signature(source, identifier.end) {
-			let is_public = identifier_before(source, index)
-				.is_some_and(|(previous, _)| previous == "pub");
-			signatures.push((name, signature, is_public));
+
+		if let Some(start) = function_header_start(source, &identifier)
+			&& let Some((name, signature, next_index)) = parse_function_signature(source, start, identifier.value == "async") {
+			signatures.push((name, signature));
 			index = next_index;
 			continue;
 		}
@@ -1184,8 +1239,8 @@ fn find_type_end(source: &str, start: usize) -> usize {
 		};
 
 		match ch {
-			'[' => bracket_depth += 1,
-			']' => bracket_depth = bracket_depth.saturating_sub(1),
+			'[' | '<' => bracket_depth += 1,
+			']' | '>' => bracket_depth = bracket_depth.saturating_sub(1),
 			'=' | ';' | '\n' | '\r' if bracket_depth == 0 => break,
 			_ => {}
 		}
@@ -1343,26 +1398,54 @@ fn parse_function_bindings(
 	Some((bindings, index))
 }
 
+fn skip_declaration_trivia(source: &str, start: usize) -> usize {
+	let mut index = skip_whitespace(source, start);
+
+	while let Some(end) = skip_comment(source, index) {
+		index = skip_whitespace(source, end);
+	}
+
+	index
+}
+
+fn function_header_start(source: &str, identifier: &ParsedIdentifier) -> Option<usize> {
+	if identifier.quoted {
+		return None;
+	}
+
+	match identifier.value.as_str() {
+		"fn" => Some(identifier.end),
+		"async" => {
+			let keyword = read_identifier(source, skip_declaration_trivia(source, identifier.end))?;
+			(!keyword.quoted && keyword.value == "fn").then_some(keyword.end)
+		}
+		_ => None,
+	}
+}
+
 fn parse_function_completion_items(
 	source: &str,
 	start: usize,
+	is_async: bool,
 	items: &mut Vec<CompletionItem>,
 ) -> Option<(String, CallableSignature, usize)> {
-	let (name, signature, next_index) = parse_function_signature(source, start)?;
+	let (name, signature, next_index) = parse_function_signature(source, start, is_async)?;
 	let parameter_start = source[start..].find('(')? + start;
 	let parameter_end = find_matching_paren(source, parameter_start)?;
+
 	collect_parameter_completion_items(&source[parameter_start + 1..parameter_end], items);
 
 	Some((name, signature, next_index))
 }
 
-fn parse_function_signature(
+pub(crate) fn parse_function_signature(
 	source: &str,
 	start: usize,
+	is_async: bool,
 ) -> Option<(String, CallableSignature, usize)> {
-	let index = skip_whitespace(source, start);
+	let index = skip_declaration_trivia(source, start);
 	let name = read_identifier(source, index)?;
-	let mut index = skip_whitespace(source, name.end);
+	let mut index = skip_declaration_trivia(source, name.end);
 
 	if source[index..].chars().next()? != '(' {
 		return None;
@@ -1371,19 +1454,26 @@ fn parse_function_signature(
 	let end_index = find_matching_paren(source, index)?;
 	let parameters = &source[index + 1..end_index];
 	let parameter_labels = split_parameter_labels(parameters);
-	index = skip_whitespace(source, end_index + 1);
+
+	index = skip_declaration_trivia(source, end_index + 1);
+
 	let return_type = if source[index..].chars().next() == Some(':') {
 		let type_start = skip_whitespace(source, index + 1);
 		let type_end = skip_expression(source, type_start, &["{"]);
+
 		index = type_end;
+
 		let return_type = source[type_start..type_end].trim();
+
 		(!return_type.is_empty()).then_some(return_type)
 	}
 	else {
 		None
 	};
+
 	let return_suffix = return_type.map(|return_type| format!(": {return_type}")).unwrap_or_default();
-	let label = format!("{}({}){return_suffix}", name.value, parameter_labels.join(", "));
+	let modifier = if is_async { "async " } else { "" };
+	let label = format!("{modifier}{}({}){return_suffix}", name.value, parameter_labels.join(", "));
 
 	Some((
 		name.value,
@@ -1491,6 +1581,21 @@ fn parse_record_completion_item(source: &str, start: usize) -> Option<(String, u
 
 	let name = read_identifier(source, index)?;
 	Some((name.value, name.end))
+}
+
+fn task_local_type(source: &str, after_name: usize) -> Option<String> {
+	let colon = skip_declaration_trivia(source, after_name);
+	source[colon..].strip_prefix(':')?;
+
+	let start = skip_declaration_trivia(source, colon + 1);
+	source[start..].strip_prefix("task")?;
+
+	let open = skip_declaration_trivia(source, start + "task".len());
+	source[open..].strip_prefix('<')?;
+
+	let end = find_type_end(source, open);
+
+	Some(source[start..end].trim_end().to_string())
 }
 
 fn parse_variable_completion_item(source: &str, start: usize) -> Option<(String, usize)> {

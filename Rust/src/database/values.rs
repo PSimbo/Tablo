@@ -19,6 +19,7 @@ pub(super) fn runtime_type_name(value: &Value) -> &'static str {
 		Value::Object(_) => "object",
 		Value::RecordPointer(_) => "record pointer",
 		Value::Reference(_) => "reference",
+		Value::Task(_) => "task",
 		Value::Text(_) => "text",
 		Value::Time(_) => "time",
 		Value::TimeTz(_) => "timetz",

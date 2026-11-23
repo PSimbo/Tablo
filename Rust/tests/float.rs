@@ -60,7 +60,7 @@ fn library_float_defaults_survive_without_library_source() {
 #[test]
 fn float_watch_arithmetic_and_conversions_match_compiled_code() {
 	use tablo::vm::{VirtualMachine, VmStackFrame, VmVisibleLocal};
-	let frame = VmStackFrame { instruction_index: 0, source_location: None, locals: vec![VmVisibleLocal {
+	let frame = VmStackFrame { awaited_at: None, instruction_index: 0, source_location: None, locals: vec![VmVisibleLocal {
 		name: "value".into(), slot: 0, declared_type: "float".into(), is_const: false,
 		value: Value::Float(tablo::float::Float(1.25)),
 	}] };

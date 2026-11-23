@@ -23,6 +23,8 @@ Tablo library container
 
 `tabloc --emit library` writes a separate `.tlib` container. Its layout is four magic bytes `TLB1`, a little-endian `u32` JSON manifest byte length, the UTF-8 JSON manifest, and one object payload using the encoding below. The manifest records the exact compiler package version in `compiler`. The `interface` string contains module object declarations and public function signatures with empty bodies. The `exports` array gives function indices in interface declaration order. The optional `objects` map binds each interface object name, including nested types, to its descriptor ID in the payload. An omitted map is empty. The object payload contains the compiled implementations and their dependencies, with an empty code entry point. Libraries do not require `Main`.
 
+A public async function retains its `pub async fn` declaration in the interface. Its declared return type is the result obtained when the child completes. The consumer uses the declaration to check `block` and `suspend` calls and to infer the handle type for a queued call. At each link, the linker remaps function indices in `Call`, `AwaitCall`, and `SpawnCall` to the destination program’s function table.
+
 For each record-pointer parameter in the public interface, the `record_tables` array stores the resolved `database_name`, `schema_name` and `table_name`. Entries follow function declaration order and, within each function, parameter order, counting only record pointers. An omitted array is empty. The interface declaration supplies the parameter name and the `&rec` or `&rec mut` access mode. The compiler uses the stored identity even when the importing module has a different set of active databases.
 
 The optional `parameter_sequences` array stores one entry per public `seq` parameter in the same declaration order, counting only sequence parameters. Each entry contains `database_name`, `schema_name`, `sequence_name` and the Boolean `schema_is_implicit`. The compiler checks the binding against the consumer's schema catalog when available. The implicit-schema flag determines whether compiled sequence operations use the schema name and must agree with that catalog. An omitted array is empty.
@@ -206,6 +208,7 @@ Data types are encoded recursively:
 | `17` | `timestamptz`      | none                                               |
 | `18` | `timetz`           | none                                               |
 | `19` | union              | `u32` member count followed by member types        |
+| `20` | task               | result `type`                                      |
 
 The internal null-literal type is not serializable. Nullability is represented by tag `10`; a runtime null value is produced by `PushNull`.
 
@@ -224,97 +227,106 @@ The following payload abbreviations are used:
 | `1`    | `Add`                    | none                                                                              |
 | `2`    | `AdvanceSequence`        | `sequence`                                                                        |
 | `3`    | `And`                    | none                                                                              |
-| `4`    | `BeginTransaction`       | none                                                                              |
-| `5`    | `BeginTry`               | catch instruction index `u32`, first local slot in the protected scope `u32`      |
-| `6`    | `Call`                   | function index `u32`, argument count `u32`                                        |
-| `7`    | `CallBuiltIn`            | built-in ID `u8`, argument count `u32`                                            |
-| `8`    | `CommitTransaction`      | none                                                                              |
-| `9`    | `ConvertFloat`           | none                                                                              |
-| `10`   | `ConvertJson`            | destination `type`                                                                |
-| `11`   | `ConvertObject`          | target object ID `u32`, private-access object IDs as `u32[]`                      |
-| `12`   | `CreateRecord`           | none                                                                              |
-| `13`   | `CreateRecordIfPending`  | none                                                                              |
-| `14`   | `DeleteRecord`           | none                                                                              |
-| `15`   | `Divide`                 | none                                                                              |
-| `16`   | `Dup2`                   | none                                                                              |
-| `17`   | `EndTry`                 | none                                                                              |
-| `18`   | `Equal`                  | none                                                                              |
-| `19`   | `ExecuteQuery`           | query index `u32`                                                                 |
-| `20`   | `Exists`                 | none                                                                              |
-| `21`   | `Fail`                   | none                                                                              |
-| `22`   | `FieldPathExists`        | `text[]`                                                                          |
-| `23`   | `GreaterThan`            | none                                                                              |
-| `24`   | `GreaterThanOrEqual`     | none                                                                              |
-| `25`   | `IterHasNext`            | none                                                                              |
-| `26`   | `IterInit`               | none                                                                              |
-| `27`   | `IterNext`               | none                                                                              |
-| `28`   | `Jump`                   | target instruction index `u32`                                                    |
-| `29`   | `JumpIfFalse`            | target instruction index `u32`                                                    |
-| `30`   | `LessThan`               | none                                                                              |
-| `31`   | `LessThanOrEqual`        | none                                                                              |
-| `32`   | `LoadField`              | field name `text`                                                                 |
-| `33`   | `LoadFieldPath`          | `text[]`                                                                          |
-| `34`   | `LoadIndex`              | none                                                                              |
-| `35`   | `LoadLocal`              | slot `u32`                                                                        |
-| `36`   | `LoadProjectedValue`     | projected-value ID `u32`                                                          |
-| `37`   | `LoadQuotedField`        | field name `text`                                                                 |
-| `38`   | `LoadReference`          | slot `u32`                                                                        |
-| `39`   | `LoadSequenceCurrent`    | `sequence`                                                                        |
-| `40`   | `Locked`                 | none                                                                              |
-| `41`   | `MakeArray`              | element count `u32`                                                               |
-| `42`   | `MakeJsonArray`          | element count `u32`                                                               |
-| `43`   | `MakeJsonObject`         | property names as `text[]`                                                        |
-| `44`   | `MakeObject`             | object type ID `u32`, field names as `text[]`                                     |
-| `45`   | `MakeRange`              | none                                                                              |
-| `46`   | `MakeRecordPointer`      | field names `text[]`, field types `type[]`, `record type`, schema-implicit `bool` |
-| `47`   | `MakeSteppedRange`       | none                                                                              |
-| `48`   | `MemberPathExists`       | `u32` count, then field name `text` and quoted `bool` for each member             |
-| `49`   | `Modulo`                 | none                                                                              |
-| `50`   | `Multiply`               | none                                                                              |
-| `51`   | `Negate`                 | none                                                                              |
-| `52`   | `Not`                    | none                                                                              |
-| `53`   | `NotEqual`               | none                                                                              |
-| `54`   | `Or`                     | none                                                                              |
-| `55`   | `Pop`                    | none                                                                              |
-| `56`   | `PushBoolean`            | `bool`                                                                            |
-| `57`   | `PushCurrentDate`        | none                                                                              |
-| `58`   | `PushCurrentTime`        | none                                                                              |
-| `59`   | `PushCurrentTimestamp`   | none                                                                              |
-| `60`   | `PushCurrentTimestampTz` | none                                                                              |
-| `61`   | `PushCurrentTimeTz`      | none                                                                              |
-| `62`   | `PushDate`               | date value                                                                        |
-| `63`   | `PushDecimal`            | decimal value                                                                     |
-| `64`   | `PushEnumValue`          | inline constant, enum name `text`, variant name `text`                            |
-| `65`   | `PushFloat`              | floating-point runtime value                                                      |
-| `66`   | `PushFloatLiteral`       | unrounded literal `text`                                                          |
-| `67`   | `PushInteger`            | `i64`                                                                             |
-| `68`   | `PushJsonNumber`         | exact JSON number as `text`                                                       |
-| `69`   | `PushNull`               | none                                                                              |
-| `70`   | `PushText`               | `text`                                                                            |
-| `71`   | `PushTime`               | canonical `text`                                                                  |
-| `72`   | `PushTimestamp`          | canonical `text`                                                                  |
-| `73`   | `PushTimestampTz`        | canonical `text`                                                                  |
-| `74`   | `PushTimeTz`             | canonical `text`                                                                  |
-| `75`   | `ReorderCallArguments`   | argument indices as `u32[]`                                                       |
-| `76`   | `Return`                 | none                                                                              |
-| `77`   | `ReturnNoValue`          | none                                                                              |
-| `78`   | `StoreFieldPath`         | `text[]`                                                                          |
-| `79`   | `StoreIndex`             | none                                                                              |
-| `80`   | `StoreJsonPath`          | tagged mutation path (see below)                                                  |
-| `81`   | `StoreLocal`             | slot `u32`                                                                        |
-| `82`   | `StoreSequenceCurrent`   | `sequence`                                                                        |
-| `83`   | `Subtract`               | none                                                                              |
-| `84`   | `UpdateRecord`           | none                                                                              |
-| `85`   | `UpdateRecordIfChanged`  | none                                                                              |
-| `86`   | `Xor`                    | none                                                                              |
-| `87`   | `BeginCatch`             | first local slot `u32`, clause count `u32`, catch clauses in source order         |
-| `88`   | `BeginFinally`           | first local slot `u32`, cleanup instruction index `u32`                           |
-| `89`   | `RunFinally`             | none                                                                              |
-| `90`   | `ResumeFinally`          | none                                                                              |
-| `91`   | `DiscardFinally`         | none                                                                              |
-| `92`   | `PreserveDynamicType`    | object value type descriptor                                                      |
+| `4`    | `AwaitCall`              | function index `u32`, argument count `u32`                                        |
+| `5`    | `BeginCatch`             | first local slot `u32`, clause count `u32`, catch clauses in source order         |
+| `6`    | `BeginFinally`           | first local slot `u32`, cleanup instruction index `u32`                           |
+| `7`    | `BeginTransaction`       | none                                                                              |
+| `8`    | `BeginTry`               | catch instruction index `u32`, first local slot in the protected scope `u32`      |
+| `9`    | `Call`                   | function index `u32`, argument count `u32`                                        |
+| `10`   | `CallBuiltIn`            | built-in ID `u8`, argument count `u32`                                            |
+| `11`   | `CommitTransaction`      | none                                                                              |
+| `12`   | `ConvertFloat`           | none                                                                              |
+| `13`   | `ConvertJson`            | destination `type`                                                                |
+| `14`   | `ConvertObject`          | target object ID `u32`, private-access object IDs as `u32[]`                      |
+| `15`   | `CreateRecord`           | none                                                                              |
+| `16`   | `CreateRecordIfPending`  | none                                                                              |
+| `17`   | `DeleteRecord`           | none                                                                              |
+| `18`   | `DiscardFinally`         | none                                                                              |
+| `19`   | `Divide`                 | none                                                                              |
+| `20`   | `Dup2`                   | none                                                                              |
+| `21`   | `EndTry`                 | none                                                                              |
+| `22`   | `Equal`                  | none                                                                              |
+| `23`   | `ExecuteQuery`           | query index `u32`                                                                 |
+| `24`   | `Exists`                 | none                                                                              |
+| `25`   | `Fail`                   | none                                                                              |
+| `26`   | `FieldPathExists`        | `text[]`                                                                          |
+| `27`   | `GreaterThan`            | none                                                                              |
+| `28`   | `GreaterThanOrEqual`     | none                                                                              |
+| `29`   | `IterHasNext`            | none                                                                              |
+| `30`   | `IterInit`               | none                                                                              |
+| `31`   | `IterNext`               | none                                                                              |
+| `32`   | `Jump`                   | target instruction index `u32`                                                    |
+| `33`   | `JumpIfFalse`            | target instruction index `u32`                                                    |
+| `34`   | `LessThan`               | none                                                                              |
+| `35`   | `LessThanOrEqual`        | none                                                                              |
+| `36`   | `LoadField`              | field name `text`                                                                 |
+| `37`   | `LoadFieldPath`          | `text[]`                                                                          |
+| `38`   | `LoadIndex`              | none                                                                              |
+| `39`   | `LoadLocal`              | slot `u32`                                                                        |
+| `40`   | `LoadProjectedValue`     | projected-value ID `u32`                                                          |
+| `41`   | `LoadQuotedField`        | field name `text`                                                                 |
+| `42`   | `LoadReference`          | slot `u32`                                                                        |
+| `43`   | `LoadSequenceCurrent`    | `sequence`                                                                        |
+| `44`   | `Locked`                 | none                                                                              |
+| `45`   | `MakeArray`              | element count `u32`                                                               |
+| `46`   | `MakeJsonArray`          | element count `u32`                                                               |
+| `47`   | `MakeJsonObject`         | property names as `text[]`                                                        |
+| `48`   | `MakeObject`             | object type ID `u32`, field names as `text[]`                                     |
+| `49`   | `MakeRange`              | none                                                                              |
+| `50`   | `MakeRecordPointer`      | field names `text[]`, field types `type[]`, `record type`, schema-implicit `bool` |
+| `51`   | `MakeSteppedRange`       | none                                                                              |
+| `52`   | `MemberPathExists`       | `u32` count, then field name `text` and quoted `bool` for each member             |
+| `53`   | `Modulo`                 | none                                                                              |
+| `54`   | `Multiply`               | none                                                                              |
+| `55`   | `Negate`                 | none                                                                              |
+| `56`   | `Not`                    | none                                                                              |
+| `57`   | `NotEqual`               | none                                                                              |
+| `58`   | `Or`                     | none                                                                              |
+| `59`   | `Pop`                    | none                                                                              |
+| `60`   | `PreserveDynamicType`    | object value type descriptor                                                      |
+| `61`   | `PushBoolean`            | `bool`                                                                            |
+| `62`   | `PushCurrentDate`        | none                                                                              |
+| `63`   | `PushCurrentTime`        | none                                                                              |
+| `64`   | `PushCurrentTimestamp`   | none                                                                              |
+| `65`   | `PushCurrentTimestampTz` | none                                                                              |
+| `66`   | `PushCurrentTimeTz`      | none                                                                              |
+| `67`   | `PushDate`               | date value                                                                        |
+| `68`   | `PushDecimal`            | decimal value                                                                     |
+| `69`   | `PushEnumValue`          | inline constant, enum name `text`, variant name `text`                            |
+| `70`   | `PushFloat`              | floating-point runtime value                                                      |
+| `71`   | `PushFloatLiteral`       | unrounded literal `text`                                                          |
+| `72`   | `PushInteger`            | `i64`                                                                             |
+| `73`   | `PushJsonNumber`         | exact JSON number as `text`                                                       |
+| `74`   | `PushNull`               | none                                                                              |
+| `75`   | `PushText`               | `text`                                                                            |
+| `76`   | `PushTime`               | canonical `text`                                                                  |
+| `77`   | `PushTimestamp`          | canonical `text`                                                                  |
+| `78`   | `PushTimestampTz`        | canonical `text`                                                                  |
+| `79`   | `PushTimeTz`             | canonical `text`                                                                  |
+| `80`   | `ReorderCallArguments`   | argument indices as `u32[]`                                                       |
+| `81`   | `ResumeFinally`          | none                                                                              |
+| `82`   | `Return`                 | none                                                                              |
+| `83`   | `ReturnNoValue`          | none                                                                              |
+| `84`   | `RunFinally`             | none                                                                              |
+| `85`   | `StoreFieldPath`         | `text[]`                                                                          |
+| `86`   | `StoreIndex`             | none                                                                              |
+| `87`   | `StoreJsonPath`          | tagged mutation path (see below)                                                  |
+| `88`   | `StoreLocal`             | slot `u32`                                                                        |
+| `89`   | `StoreSequenceCurrent`   | `sequence`                                                                        |
+| `90`   | `Subtract`               | none                                                                              |
+| `91`   | `UpdateRecord`           | none                                                                              |
+| `92`   | `UpdateRecordIfChanged`  | none                                                                              |
+| `93`   | `Xor`                    | none                                                                              |
+| `94`   | `SpawnCall`              | function index `u32`, argument count `u32`                                        |
+| `95`   | `WaitTask`               | none                                                                              |
+| `96`   | `EnterTaskScope`         | none                                                                              |
+| `97`   | `LeaveTaskScope`         | none                                                                              |
 
-`BeginTry` installs a single unconditional handler. `BeginCatch` installs a list of handlers. Each clause contains a target instruction index (`u32`) and a binding-present flag (`bool`). A bound clause also contains an object value type descriptor and its local slot (`u32`). An unbound clause is the unconditional fallback. `EndTry` retires the active catch list on normal exit.
+`AwaitCall` starts a directly awaited child and parks the caller at the call site. The child receives the supplied arguments and begins with an empty operand stack. On return, the caller resumes with its saved operands and the child's result, if any. The same encoding is used for `block F(...)` and `suspend F(...)`.
+
+`SpawnCall` consumes the arguments and pushes a handle to a child owned by the current task scope. `WaitTask` consumes a handle and pushes the child’s result, if any. Repeated waits observe the same completion. `EnterTaskScope` opens a nested scope. `LeaveTaskScope` joins its children and releases its handles. Function exit also joins outstanding children. Readers without scoped task support reject opcodes 94 through 97.
+
+`BeginTry` installs a single unconditional handler. `BeginCatch` installs a list of handlers. Each clause contains a target instruction index (`u32`) and a binding kind (`u8`). Kind `0` is the unconditional fallback. Kinds `1` and `2` store an object value type descriptor and its local slot (`u32`). Kind `2` also stores the slot (`u32`) for the suppressed-failure array. This slot follows the primary binding slot. Each entry is a built-in `SuppressedFailure` object (ID `0xFFFFFFFE`) with fields `value: any` and `stackTrace: [text]`. `EndTry` retires the active catch list on normal exit.
 
 `Fail` pops and raises one non-null value. Runtime-generated failures carry a `RuntimeError` object with type ID `0xFFFFFFFF` and a public `message` field of type `text`. The VM selects the first matching clause, unwinds intervening frames and protected locals, rolls back transactions exited by the failure, and enters the handler with the value in its binding slot. `PreserveDynamicType` retains an array's declared type or materialises a decimal when a value enters a dynamic context. This preserves type identity for handler selection even for empty arrays.
 

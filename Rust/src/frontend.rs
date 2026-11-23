@@ -45,6 +45,7 @@ pub struct CompilationReport {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SourceAnalysis {
+	pub imported_function_signatures: BTreeMap<String, Vec<completion::CallableSignature>>,
 	pub imported_function_sources: BTreeMap<String, Vec<String>>,
 	pub local_usage: ProgramLocalUsage,
 	pub object_import_bindings: BTreeMap<String, ObjectTypeId>,
@@ -76,6 +77,7 @@ struct LinkedModule {
 }
 
 struct LinkedProgram {
+	imported_function_signatures: BTreeMap<String, Vec<completion::CallableSignature>>,
 	debug_object_imports: BTreeMap<String, BTreeMap<String, String>>,
 	libraries: Vec<crate::library::LibraryImport>,
 	function_overload_aliases: Vec<FunctionOverloadAlias>,
@@ -107,6 +109,8 @@ struct ModuleImportBindings {
 
 #[derive(Default)]
 struct ModuleLinker {
+	collect_signatures: bool,
+	public_signatures: BTreeMap<String, Vec<completion::CallableSignature>>,
 	type_modules: BTreeMap<String, crate::library::TypeModule>,
 	debug_object_imports: BTreeMap<String, BTreeMap<String, String>>,
 	libraries: Vec<crate::library::LibraryImport>,
@@ -596,6 +600,16 @@ impl ModuleLinker {
 		};
 
 		let top_level_renames = build_top_level_function_renames(&program, module_id);
+
+		if self.collect_signatures {
+			for function in program.functions.iter().filter(|function| function.visibility == ast::Visibility::Public) {
+				let start = function.position + "fn".len();
+
+				if let Some((_, signature, _)) = completion::parse_function_signature(source_text.as_str(), start, function.is_async) {
+					self.public_signatures.entry(top_level_renames[&function.name].clone()).or_default().push(signature);
+				}
+			}
+		}
 
 		for target_name in object_renames.values() {
 			self.object_target_source_names.entry(target_name.clone()).or_insert_with(|| module_key.display().to_string());
@@ -1101,7 +1115,7 @@ fn analyze_source_local_usage_with_name_and_schema(
 
 	validate_module_graph(&program, source_name).map_err(TabloError::Compile)?;
 
-	let linked_program = link_program_modules(&program, &source, source_name).map_err(TabloError::Compile)?;
+	let linked_program = link_program_modules(&program, &source, source_name, true).map_err(TabloError::Compile)?;
 	let mut analyzer = SemanticAnalyzer::new();
 
 	analyzer.set_function_overload_aliases(linked_program.function_overload_aliases.clone());
@@ -1142,8 +1156,9 @@ fn analyze_source_local_usage_with_name_and_schema(
 		.collect();
 
 	Ok(SourceAnalysis {
-		imported_function_sources,
 		local_usage: filter_root_source_local_usage(local_usage, &linked_program),
+		imported_function_signatures: linked_program.imported_function_signatures,
+		imported_function_sources,
 		object_import_bindings,
 		semantic_program,
 		source_name: root_source_name.to_string(),
@@ -1408,7 +1423,7 @@ pub(crate) fn compile_source_to_program_with_name_and_schema_and_warnings(
 
 	validate_module_graph(&program, source_name).map_err(TabloError::Compile)?;
 
-	let linked_program = link_program_modules(&program, &source, source_name).map_err(TabloError::Compile)?;
+	let linked_program = link_program_modules(&program, &source, source_name, false).map_err(TabloError::Compile)?;
 
 	compile_linked_program(&linked_program, target, schema_catalog).map(|(program, semantics)| (program, semantics.warnings().to_vec()))
 }
@@ -1476,7 +1491,7 @@ pub(crate) fn compile_library_source(
 
 	validate_module_graph(&ast, Some(source_name)).map_err(TabloError::Compile)?;
 
-	let linked = link_program_modules(&ast, &source_text, Some(source_name)).map_err(TabloError::Compile)?;
+	let linked = link_program_modules(&ast, &source_text, Some(source_name), false).map_err(TabloError::Compile)?;
 	let root_functions = compiler::collect_all_function_declarations(&ast);
 	let root_offset = compiler::collect_all_function_declarations(&linked.program).len() - root_functions.len();
 	let mut interface = String::new();
@@ -1487,6 +1502,7 @@ pub(crate) fn compile_library_source(
 	}
 
 	let (program, semantics) = compile_linked_program(&linked, CompilationTarget::Snippet, schema)?;
+
 	let mut exports = Vec::new();
 	let mut record_tables = Vec::new();
 	let mut parameter_sequences = Vec::new();
@@ -1503,6 +1519,11 @@ pub(crate) fn compile_library_source(
 		}
 
 		interface.push_str("pub ");
+
+		if function.is_async {
+			interface.push_str("async ");
+		}
+
 		interface.push_str(&source[function.position..function.body.position]);
 		interface.push_str("{}\n");
 
@@ -1577,74 +1598,10 @@ fn extend_function_source_indices(
 	source_file_index: u32,
 	source_indices: &mut Vec<u32>,
 ) {
-	source_indices.push(source_file_index);
+	let mut declarations = Vec::new();
 
-	for statement in &function.body.statements {
-		extend_function_source_indices_from_statement(statement, source_file_index, source_indices);
-	}
-}
-
-fn extend_function_source_indices_from_statement(
-	statement: &ast::Statement,
-	source_file_index: u32,
-	source_indices: &mut Vec<u32>,
-) {
-	match statement {
-		ast::Statement::Block(block) => {
-			for statement in &block.statements {
-				extend_function_source_indices_from_statement(statement, source_file_index, source_indices);
-			}
-		}
-		ast::Statement::Break(_) => {}
-		ast::Statement::Continue(_) => {}
-		ast::Statement::Create(_) => {}
-		ast::Statement::Delete(_) => {}
-		ast::Statement::EnumDeclaration(_) => {}
-		ast::Statement::Expression(_) => {}
-		ast::Statement::Fail { .. } => {}
-		ast::Statement::For(for_statement) => {
-			for statement in &for_statement.body.statements {
-				extend_function_source_indices_from_statement(statement, source_file_index, source_indices);
-			}
-		}
-		ast::Statement::ForRecord(for_statement) => {
-			for statement in &for_statement.body.statements {
-				extend_function_source_indices_from_statement(statement, source_file_index, source_indices);
-			}
-		}
-		ast::Statement::FunctionDeclaration(function) => {
-			extend_function_source_indices(function, source_file_index, source_indices);
-		}
-		ast::Statement::If(if_statement) => {
-			for statement in &if_statement.then_branch.statements {
-				extend_function_source_indices_from_statement(statement, source_file_index, source_indices);
-			}
-
-			if let Some(else_branch) = &if_statement.else_branch {
-				extend_function_source_indices_from_statement(else_branch, source_file_index, source_indices);
-			}
-		}
-		ast::Statement::RecordPointerDeclaration(_) => {}
-		ast::Statement::Return(_) => {}
-		ast::Statement::Transaction(transaction_statement) => {
-			for statement in &transaction_statement.body.statements {
-				extend_function_source_indices_from_statement(statement, source_file_index, source_indices);
-			}
-		}
-		ast::Statement::Try(statement) => {
-			for arm in statement.arms() {
-				extend_function_source_indices_from_statement(arm, source_file_index, source_indices);
-			}
-		}
-		ast::Statement::Update(_) => {}
-		ast::Statement::Use(_) => {}
-		ast::Statement::While(while_statement) => {
-			for statement in &while_statement.body.statements {
-				extend_function_source_indices_from_statement(statement, source_file_index, source_indices);
-			}
-		}
-		ast::Statement::VariableDeclaration(_) => {}
-	}
+	compiler::collect_function_declaration(function, &mut declarations);
+	source_indices.extend(std::iter::repeat_n(source_file_index, declarations.len()));
 }
 
 fn filter_root_source_local_usage(local_usage: ProgramLocalUsage, linked_program: &LinkedProgram) -> ProgramLocalUsage {
@@ -1766,12 +1723,14 @@ fn link_program_modules(
 	program: &ast::AstProgram,
 	source: &SourceText,
 	source_name: Option<&str>,
+	collect_signatures: bool,
 ) -> Result<LinkedProgram, CompileError> {
 	let root_source_file = SourceFileDebugInfo::from_source(source_name.unwrap_or("<source>"), source);
 	let root_display_name = root_source_file.display_name().to_string();
 
 	let Some(source_name) = source_name else {
 		return Ok(LinkedProgram {
+			imported_function_signatures: BTreeMap::new(),
 			debug_object_imports: BTreeMap::new(),
 			libraries: Vec::new(),
 			function_overload_aliases: Vec::new(),
@@ -1794,6 +1753,7 @@ fn link_program_modules(
 
 	if first_use_statement(program).is_none() {
 		return Ok(LinkedProgram {
+			imported_function_signatures: BTreeMap::new(),
 			debug_object_imports: BTreeMap::new(),
 			libraries: Vec::new(),
 			function_overload_aliases: Vec::new(),
@@ -1816,7 +1776,7 @@ fn link_program_modules(
 
 	let root_path = Path::new(source_name);
 	let root_directory = root_path.parent().unwrap_or_else(|| Path::new("."));
-	let mut linker = ModuleLinker::default();
+	let mut linker = ModuleLinker { collect_signatures, ..Default::default() };
 	let root_module_key = canonical_module_key(root_path);
 	let root_object_names = program.objects.iter()
 		.map(|object| (object.name.clone(), object.name.clone()))
@@ -1928,7 +1888,16 @@ fn link_program_modules(
 
 	linker.debug_object_imports.insert(root_display_name.clone(), import_bindings.objects.clone());
 
+	let imported_function_signatures = linker.function_overload_aliases.iter()
+		.filter(|alias| alias.source_name == root_display_name)
+		.map(|alias| {
+			let signatures = alias.target_names.iter().filter_map(|name| linker.public_signatures.get(name))
+				.flatten().cloned().collect();
+			(alias.display_name.clone(), signatures)
+		}).collect();
+
 	Ok(LinkedProgram {
+		imported_function_signatures,
 		debug_object_imports: linker.debug_object_imports,
 		libraries: linker.libraries,
 		function_overload_aliases: linker.function_overload_aliases,
@@ -2004,7 +1973,8 @@ fn rewrite_data_type_object_names(
 	match data_type {
 		ast::DataType::Array(element_type)
 		| ast::DataType::Nullable(element_type)
-		| ast::DataType::Range(element_type) => {
+		| ast::DataType::Range(element_type)
+		| ast::DataType::Task(element_type) => {
 			rewrite_data_type_object_names(element_type, object_renames);
 		}
 		ast::DataType::Object(name) => {
@@ -2036,7 +2006,6 @@ fn rewrite_expression_calls(
 		}
 		ast::Expr::Assignment(assignment) => {
 			match &mut assignment.target {
-				ast::AssignmentTarget::Path(path) => rewrite_expression_calls(path, top_level_renames, import_bindings, object_renames, shadowed_function_names),
 				ast::AssignmentTarget::Field(target) => {
 					let _ = target;
 				}
@@ -2044,10 +2013,12 @@ fn rewrite_expression_calls(
 				ast::AssignmentTarget::Index(target) => {
 					rewrite_expression_calls(&mut target.index, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 				}
+				ast::AssignmentTarget::Path(path) => rewrite_expression_calls(path, top_level_renames, import_bindings, object_renames, shadowed_function_names),
 			}
 
 			rewrite_expression_calls(&mut assignment.value, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 		}
+		ast::Expr::AsyncBlock { block, .. } => rewrite_statements_calls(&mut block.statements, top_level_renames, import_bindings, object_renames, shadowed_function_names),
 		ast::Expr::Binary(binary) => {
 			rewrite_expression_calls(&mut binary.left, top_level_renames, import_bindings, object_renames, shadowed_function_names);
 			rewrite_expression_calls(&mut binary.right, top_level_renames, import_bindings, object_renames, shadowed_function_names);
@@ -2070,7 +2041,7 @@ fn rewrite_expression_calls(
 				}
 			}
 
-			if !shadowed_function_names.iter().any(|name| name == &call.callee.name) {
+			if call.mode != ast::CallMode::WaitHandle && !shadowed_function_names.iter().any(|name| name == &call.callee.name) {
 				if let Some(renamed) = import_bindings.get(&call.callee.name) {
 					call.callee.name = renamed.clone();
 				}
@@ -5998,8 +5969,10 @@ mod tests {
 				Some(String::from("<source>")),
 				2,
 			)),
+			suppressed: Vec::new(),
 			stack_trace: vec![
 				crate::vm::VmStackFrame {
+					awaited_at: None,
 					instruction_index: 6,
 					locals: vec![
 						crate::vm::VmVisibleLocal {

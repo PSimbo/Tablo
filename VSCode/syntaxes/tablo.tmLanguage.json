@@ -115,7 +115,7 @@
       "patterns": [
         {
           "name": "keyword.control.tablo",
-          "match": "\\b(?:if|else|while|for|in|break|continue|return|try|catch|fail|finally)\\b"
+          "match": "\\b(?:if|else|while|for|in|break|continue|return|try|catch|fail|finally|block|suspend)\\b"
         },
         {
           "name": "keyword.control.database.tablo",
@@ -123,7 +123,7 @@
         },
         {
           "name": "keyword.declaration.tablo",
-          "match": "\\b(?:var|const|rec|mut|obj|pub)\\b"
+          "match": "\\b(?:var|const|rec|mut|obj|pub|async)\\b"
         },
         {
           "name": "keyword.other.default.tablo",
@@ -219,6 +219,10 @@
     },
     "types": {
       "patterns": [
+        {
+          "name": "storage.type.generic.tablo",
+          "match": "\\btask(?=\\s*<)"
+        },
         {
           "name": "storage.type.primitive.tablo",
           "match": "\\b(?:int|dec|float|text|bool|json)\\b"

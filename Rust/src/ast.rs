@@ -70,6 +70,7 @@ pub enum DataType {
 	ParsedJson,
 	Range(Box<DataType>),
 	RecordPointer(RecordPointerType),
+	Task(Box<DataType>),
 	Text,
 	Time,
 	TimeTz,
@@ -124,6 +125,7 @@ impl DataType {
 			Self::ParsedJson => String::from("json or JsonNull"),
 			Self::Range(element_type) => format!("range<{}>", element_type.name()),
 			Self::RecordPointer(_) => String::from("record pointer"),
+			Self::Task(result) => format!("task<{}>", result.name()),
 			Self::Text => String::from("text"),
 			Self::Time => String::from("time"),
 			Self::TimeTz => String::from("timetz"),
@@ -145,6 +147,7 @@ impl DataType {
 pub enum Expr {
 	Array(ArrayLiteral),
 	Assignment(AssignmentExpr),
+	AsyncBlock { block: BlockStatement, end_position: usize },
 	Binary(BinaryExpr),
 	Boolean(BooleanLiteral),
 	Call(CallExpr),
@@ -330,8 +333,17 @@ pub struct CallArgument {
 	pub value: CallArgumentValue,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CallMode {
+	Block,
+	Plain,
+	Suspend,
+	WaitHandle,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallExpr {
+	pub mode: CallMode,
 	pub arguments: Vec<CallArgument>,
 	pub callee: IdentifierExpr,
 	pub position: usize,
@@ -339,6 +351,7 @@ pub struct CallExpr {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CatchClause {
+	pub suppressed: Option<IdentifierExpr>,
 	pub binding: Option<(IdentifierExpr, DataType)>,
 	pub body: Statement,
 }
@@ -462,6 +475,7 @@ pub struct ForStatement {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FunctionDeclaration {
+	pub is_async: bool,
 	pub body: BlockStatement,
 	pub name: String,
 	pub parameters: Vec<FunctionParameter>,
@@ -786,7 +800,117 @@ pub struct WithDeclaration {
 	pub position: usize,
 }
 
+#[cfg(feature = "compiler")]
+impl Statement {
+	// Statement walkers also need scopes nested in expression operands.
+	pub(crate) fn visit_expression_blocks<'a>(&'a self, visit: &mut impl FnMut(&'a BlockStatement)) {
+		match self {
+			Self::Expression(expr) | Self::Fail { value: expr, .. } => expr.visit_blocks(visit),
+			Self::For(stmt) => stmt.iterable.visit_blocks(visit),
+			Self::ForRecord(stmt) => {
+				for expr in stmt.where_clause.iter().chain(&stmt.limit) {
+					expr.visit_blocks(visit);
+				}
+
+				for item in &stmt.order_by {
+					item.expression.visit_blocks(visit);
+				}
+
+				for item in &stmt.group_by {
+					item.expression.visit_blocks(visit);
+				}
+			}
+			Self::If(stmt) => match &stmt.condition {
+				IfCondition::Expression(expr) => expr.visit_blocks(visit),
+				IfCondition::RecordPointerBinding(binding) => binding.initial_value.visit_blocks(visit),
+			},
+			Self::RecordPointerDeclaration(stmt) => stmt.initial_value.visit_blocks(visit),
+			Self::Return(stmt) => {
+				if let Some(expr) = &stmt.value {
+					expr.visit_blocks(visit);
+				}
+			}
+			Self::VariableDeclaration(stmt) => {
+				if let Some(expr) = &stmt.initial_value {
+					expr.visit_blocks(visit);
+				}
+			}
+			Self::While(stmt) => stmt.condition.visit_blocks(visit),
+			_ => {}
+		}
+	}
+}
+
 impl Expr {
+	#[cfg(feature = "compiler")]
+	fn visit_blocks<'a>(&'a self, visit: &mut impl FnMut(&'a BlockStatement)) {
+		match self {
+			Self::Array(array) => {
+				for item in &array.elements {
+					item.visit_blocks(visit);
+				}
+			}
+			Self::Assignment(expr) => {
+				match &expr.target {
+					AssignmentTarget::Index(index) => index.index.visit_blocks(visit),
+					AssignmentTarget::Path(path) => path.visit_blocks(visit),
+					_ => {}
+				}
+
+				expr.value.visit_blocks(visit);
+			}
+			Self::AsyncBlock { block, .. } => visit(block),
+			Self::Binary(expr) => {
+				expr.left.visit_blocks(visit);
+				expr.right.visit_blocks(visit);
+			}
+			Self::Call(call) => {
+				for expr in call.arguments.iter().filter_map(CallArgument::expression) {
+					expr.visit_blocks(visit);
+				}
+			}
+			Self::Count(count) => {
+				if let Some(expr) = &count.where_clause {
+					expr.visit_blocks(visit);
+				}
+			}
+			Self::Find(find) => {
+				if let Some(expr) = &find.where_clause {
+					expr.visit_blocks(visit);
+				}
+
+				for item in &find.order_by {
+					item.expression.visit_blocks(visit);
+				}
+			}
+			Self::FieldAccess(expr) => expr.object.visit_blocks(visit),
+			Self::Index(expr) => {
+				expr.array.visit_blocks(visit);
+				expr.index.visit_blocks(visit);
+			}
+			Self::ObjectConstruction(object) => {
+				for field in &object.fields {
+					field.value.visit_blocks(visit);
+				}
+			}
+			Self::Range(expr) => {
+				expr.start.visit_blocks(visit);
+				expr.end.visit_blocks(visit);
+
+				if let Some(step) = &expr.step {
+					step.visit_blocks(visit);
+				}
+			}
+			Self::Ternary(expr) => {
+				expr.condition.visit_blocks(visit);
+				expr.true_branch.visit_blocks(visit);
+				expr.false_branch.visit_blocks(visit);
+			}
+			Self::Unary(expr) => expr.operand.visit_blocks(visit),
+			_ => {}
+		}
+	}
+
 	#[cfg(feature = "compiler")]
 	pub(crate) fn is_contextual_literal(&self) -> bool {
 		matches!(self, Expr::Array(_))
@@ -832,6 +956,7 @@ impl Expr {
 		match self {
 			Expr::Array(expression) => expression.position,
 			Expr::Assignment(expression) => expression.position,
+			Expr::AsyncBlock { block, .. } => block.position,
 			Expr::Binary(expression) => expression.position,
 			Expr::Boolean(expression) => expression.position,
 			Expr::Call(expression) => expression.position,

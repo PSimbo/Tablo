@@ -1,4 +1,14 @@
+mod pending;
+#[cfg(all(test, feature = "compiler"))]
+mod pending_tests;
+
+use pending::{OperationResult, PendingOperation, WakeQueue};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::rc::Rc;
+use std::future::Future;
+use std::sync::Arc;
+use std::task::{Context, Poll, Waker};
 
 #[cfg(feature = "compiler")]
 use crate::ast::*;
@@ -50,7 +60,41 @@ enum ExecutionOutcome {
 	Return(Option<Value>),
 }
 
+// Indices in local references and saved caller stacks stay valid because a
+// parked branch always resumes on the same owning frame.
+struct ParkedBranch {
+	owner_id: u64,
+	frames: Vec<CallFrame>,
+	callers: Vec<SuspendedCaller>,
+	operands: Vec<Value>,
+}
+
+enum ChildState {
+	Completed(Option<Value>),
+	Failed(RaisedFailure),
+	Parked(ParkedBranch),
+	Ready(u32, Vec<Value>),
+	Running,
+}
+
+struct ChildTask {
+	transaction_depth: usize,
+	cancellation: Option<RaisedFailure>,
+	id: u64,
+	spawn_site: usize,
+	state: ChildState,
+}
+
 struct CallFrame {
+	// Nonzero only on the entry frame of a task participating in a transaction.
+	task_transaction_depth: usize,
+	pending: Option<PendingOperation>,
+	id: u64,
+	pending_failure: Option<RaisedFailure>,
+	children: Vec<ChildTask>,
+	task_scopes: Vec<usize>,
+	running_child: Option<usize>,
+	parked_children: Vec<usize>,
 	handlers: Vec<ErrorHandler>,
 	continuations: Vec<FinallyContinuation>,
 	base_stack_len: usize,
@@ -60,6 +104,7 @@ struct CallFrame {
 }
 
 struct ErrorHandler {
+	task_scope_depth: usize,
 	action: HandlerAction,
 	continuation_depth: usize,
 	first_local: usize,
@@ -67,12 +112,58 @@ struct ErrorHandler {
 	transaction_depth: usize,
 }
 
+#[derive(Clone)]
 struct RaisedFailure {
+	// Task handles and invalidated savepoints can retain the same failure before siblings finish.
+	suppressed: Rc<RefCell<Vec<(Value, VmError)>>>,
+	cancelling: bool,
 	value: Value,
 	error: VmError,
 }
 
+impl RaisedFailure {
+	fn suppress(&self, other: Self) {
+		if !Rc::ptr_eq(&self.suppressed, &other.suppressed) {
+			let mut suppressed = self.suppressed.borrow_mut();
+
+			suppressed.push((other.value, other.error));
+			suppressed.extend(other.suppressed.borrow().iter().cloned());
+		}
+	}
+
+	fn into_error(mut self) -> VmError {
+		self.error.suppressed = self.suppressed.borrow().iter().map(|(_, error)| error.clone()).collect();
+		self.error
+	}
+
+	fn suppressed_values(&self) -> Value {
+		let entries = self.suppressed.borrow().iter().map(|(value, error)| {
+			let frames = error.stack_trace.iter().map(|frame| Value::Text(crate::execution::format_stack_frame(frame))).collect();
+			let fields = BTreeMap::from([
+				("value".into(), value.clone()),
+				("stackTrace".into(), Value::Array(frames)),
+			]);
+
+			Value::Object(ObjectValue::new(ObjectTypeId::SUPPRESSED_FAILURE, fields))
+		}).collect();
+
+		Value::Array(entries)
+	}
+}
+
+// Directly awaited tasks form a single chain. Keep all logical frames addressable
+// (including reference targets), but switch operand stacks at each task boundary.
+struct SuspendedCaller {
+	frame_depth: usize,
+	operands: Vec<Value>,
+}
+
 pub struct VirtualMachine {
+	failed_transactions: BTreeMap<usize, RaisedFailure>,
+	wake_queue: Arc<WakeQueue>,
+	next_frame: u64,
+	next_task: u64,
+	suspended_callers: Vec<SuspendedCaller>,
 	database_runtime: DatabaseRuntime,
 	finished_result: Option<Option<Value>>,
 	frames: Vec<CallFrame>,
@@ -87,6 +178,7 @@ impl Default for VirtualMachine {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VmError {
+	pub suppressed: Vec<VmError>,
 	pub instruction_index: usize,
 	pub message: String,
 	pub source_location: Option<SourceLocation>,
@@ -95,6 +187,7 @@ pub struct VmError {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VmStackFrame {
+	pub awaited_at: Option<SourceLocation>,
 	pub instruction_index: usize,
 	pub locals: Vec<VmVisibleLocal>,
 	pub source_location: Option<SourceLocation>,
@@ -202,6 +295,11 @@ impl VirtualMachine {
 
 	pub fn new() -> Self {
 		Self {
+			failed_transactions: BTreeMap::new(),
+			next_task: 0,
+			next_frame: 0,
+			wake_queue: Arc::default(),
+			suspended_callers: Vec::new(),
 			database_runtime: DatabaseRuntime::new(RuntimeDatabaseConfig::default()),
 			finished_result: None,
 			frames: Vec::new(),
@@ -247,21 +345,24 @@ impl VirtualMachine {
 	) {
 		self.finished_result = None;
 		self.database_runtime.reset();
+		self.failed_transactions.clear();
+		self.suspended_callers.clear();
 		self.frames.clear();
 		self.stack.clear();
 
 		match program.entry_point() {
 			crate::bytecode::EntryPoint::Code(_) => {
-				self.frames.push(CallFrame::new(None, 0, Vec::new()));
+				self.push_frame(None, 0, Vec::new(), 0);
 			}
 			crate::bytecode::EntryPoint::Function(function_index) => {
-				self.frames.push(CallFrame::new(
+				self.push_frame(
 					Some(*function_index as usize),
 					0,
 					vec![Value::Array(
 						arguments.iter().cloned().map(Value::Text).collect(),
 					)],
-				));
+					0,
+				);
 			}
 		}
 	}
@@ -272,8 +373,45 @@ impl VirtualMachine {
 	}
 
 	#[cfg(feature = "compiler")]
-	pub(crate) fn current_stack_depth(&self) -> usize {
-		self.frames.len()
+	pub(crate) fn caller_location(&self, program: &Program) -> Option<SourceLocation> {
+		let caller = self.frames.iter().rev().nth(1)?;
+		program.debug_location(self.frame_debug_body_index(program, caller), caller.instruction_index)
+	}
+
+	fn push_frame(&mut self, function: Option<usize>, base: usize, locals: Vec<Value>, task_transaction_depth: usize) {
+		let id = self.next_frame;
+		self.next_frame += 1;
+		self.frames.push(CallFrame::new(id, function, base, locals, task_transaction_depth));
+	}
+
+	#[cfg(feature = "compiler")]
+	pub(crate) fn frame_ids(&self) -> impl DoubleEndedIterator<Item = u64> + '_ {
+		self.frames.iter().map(|frame| frame.id)
+	}
+
+	#[cfg(feature = "compiler")]
+	pub(crate) fn is_stepping_into_dependency(&self, program: &Program, selected: u64) -> bool {
+		let Some(start) = self.frames.iter().position(|frame| frame.id == selected) else {
+			return false;
+		};
+
+		for (index, frame) in self.frames.iter().enumerate().skip(start) {
+			let Some(active) = frame.running_child else {
+				continue;
+			};
+
+			let instruction = self.current_code_body(program, frame).instructions.get(frame.instruction_index);
+
+			if matches!(instruction, Some(Instruction::WaitTask)) {
+				let caller = self.suspended_callers.iter().find(|caller| caller.frame_depth == index + 1);
+
+				if caller.and_then(|caller| caller.operands.last()) != Some(&Value::Task(frame.children[active].id)) {
+					return false;
+				}
+			}
+		}
+
+		true
 	}
 
 	#[cfg(all(test, feature = "compiler"))]
@@ -290,6 +428,7 @@ impl VirtualMachine {
 				let frame_index = self.frames.len() - 1 - reverse_index;
 				let debug_body_index = self.frame_debug_body_index(program, frame);
 				VmStackFrame {
+					awaited_at: None,
 					instruction_index: frame.instruction_index,
 					locals: self.resolve_visible_locals(program, frame_index, debug_body_index, frame.instruction_index),
 					source_location: program.debug_location(debug_body_index, frame.instruction_index),
@@ -299,14 +438,69 @@ impl VirtualMachine {
 	}
 
 	pub(crate) fn step(&mut self, program: &Program) -> Result<VmExecutionState, VmError> {
-		if self.frames.is_empty() {
+		loop {
+			match self.poll_step(program) {
+				Poll::Pending => self.wake_queue.wait(),
+				Poll::Ready(result) => return result,
+			}
+		}
+	}
+
+	fn poll_step(&mut self, program: &Program) -> Poll<Result<VmExecutionState, VmError>> {
+		let Some(frame) = self.frames.last_mut() else {
 			let result = self.finished_result.take().unwrap_or(None);
-			return Ok(VmExecutionState::Completed(result));
+			return Poll::Ready(Ok(VmExecutionState::Completed(result)));
+		};
+
+		if let Some(failure) = frame.pending_failure.take() {
+			return Poll::Ready(self.propagate_failure(program, failure));
 		}
 
+		if let Some(operation) = &mut frame.pending {
+			match operation.poll() {
+				Poll::Ready(result) => {
+					frame.pending = None;
+
+					match result {
+						Ok(value) => {
+							self.stack.extend(value);
+							frame.instruction_index += 1;
+						}
+						Err(error) => return Poll::Ready(self.handle_failure(program, error)),
+					}
+				}
+				Poll::Pending => {
+					if !self.schedule_sibling(self.frames.len() - 1, true) {
+						return Poll::Pending;
+					}
+				}
+			}
+
+			return Poll::Ready(Ok(VmExecutionState::Running));
+		}
+
+		Poll::Ready(self.step_instruction(program))
+	}
+
+	fn step_instruction(&mut self, program: &Program) -> Result<VmExecutionState, VmError> {
 		let frame_index = self.frames.len() - 1;
 		let instruction_index = self.frames[frame_index].instruction_index;
 		let code_body = self.current_code_body(program, &self.frames[frame_index]);
+
+		let instruction = code_body.instructions.get(instruction_index);
+		let frame = &self.frames[frame_index];
+		let child_index = frame.next_child(instruction, self.stack.last());
+
+		if let Some(index) = child_index {
+			if let ChildState::Failed(failure) = &self.frames[frame_index].children[index].state {
+				return self.propagate_failure(program, failure.clone());
+			}
+
+			self.activate_child(index);
+			self.schedule_sibling(self.frames.len() - 2, false);
+
+			return Ok(VmExecutionState::Running);
+		}
 
 		if instruction_index >= code_body.instructions.len() {
 			let result = self.stack.pop();
@@ -330,11 +524,25 @@ impl VirtualMachine {
 						instruction_index,
 						message: format!("Function index {} does not exist.", function_index),
 						source_location: None,
+						suppressed: Vec::new(),
 						stack_trace: Vec::new(),
 					}));
 				}
 
-				self.frames.push(CallFrame::new(Some(function_index as usize), self.stack.len(), arguments));
+				let target = Some(function_index as usize);
+
+				if matches!(instruction, Instruction::AwaitCall(_, _)) {
+					self.suspended_callers.push(SuspendedCaller {
+						frame_depth: self.frames.len(),
+						operands: std::mem::take(&mut self.stack),
+					});
+					self.push_frame(target, 0, arguments, self.database_runtime.transaction_depth());
+					self.schedule_sibling(self.frames.len() - 2, false);
+				}
+				else {
+					self.push_frame(target, self.stack.len(), arguments, 0);
+				}
+
 				Ok(VmExecutionState::Running)
 			}
 			ExecutionOutcome::Continue(next_instruction_index) => {
@@ -478,6 +686,7 @@ impl VirtualMachine {
 		let frame = &mut self.frames[index];
 
 		frame.handlers.push(ErrorHandler {
+			task_scope_depth: frame.task_scopes.len(),
 			action,
 			first_local: first_local as usize,
 			stack_depth: self.stack.len(),
@@ -489,7 +698,13 @@ impl VirtualMachine {
 	fn handle_failure(&mut self, program: &Program, error: VmError) -> Result<VmExecutionState, VmError> {
 		let fields = BTreeMap::from([("message".into(), Value::Text(error.message.clone()))]);
 		let value = Value::Object(ObjectValue::new(ObjectTypeId::RUNTIME_ERROR, fields));
-		self.propagate_failure(program, RaisedFailure { value, error })
+
+		self.propagate_failure(program, RaisedFailure {
+			value,
+			error,
+			cancelling: false,
+			suppressed: Default::default(),
+		})
 	}
 
 	fn propagate_failure(&mut self, program: &Program, mut failure: RaisedFailure) -> Result<VmExecutionState, VmError> {
@@ -497,10 +712,93 @@ impl VirtualMachine {
 			failure.error = self.enrich_vm_error(program, failure.error);
 		}
 
-		for index in (0..self.frames.len()).rev() {
-			while let Some(handler) = self.frames[index].handlers.pop() {
-				let (target, binding) = match handler.action {
-					HandlerAction::CatchAll(target) | HandlerAction::Finally(target) => (target, None),
+		let mut remaining = self.frames.len();
+
+		while remaining > 0 {
+			remaining -= 1;
+			let index = remaining;
+
+			if let Some(child) = self.frames[index].running_child.take() {
+				let frame = &mut self.frames[index];
+
+				if let Some(original) = frame.children[child].cancellation.take() {
+					original.suppress(failure);
+					failure = original;
+				}
+
+				frame.children[child].state = ChildState::Failed(failure.clone());
+
+				let mut parked = None;
+
+				for sibling in frame.child_scope(child) {
+					match frame.children[sibling].state {
+						ChildState::Parked(_) => parked = Some(sibling),
+						ChildState::Ready(_, _) => frame.children[sibling].state = ChildState::Failed(failure.clone()),
+						_ => {}
+					}
+				}
+
+				if let Some(sibling) = parked {
+					frame.children[sibling].cancellation = Some(failure.clone());
+					failure.cancelling = true;
+
+					let depth = frame.children[sibling].transaction_depth;
+
+					if let Err(error) = self.rollback_to_depth(depth) {
+						failure.error.message.push_str(&format!(" Also failed to roll back transaction: {error}"));
+						return Err(self.execution_error(failure.into_error()));
+					}
+
+					self.restore_suspended_callers(index + 1);
+					self.frames.truncate(index + 1);
+					self.activate_child(sibling);
+
+					// A cleanup that was already running resumes at its wait.
+					// Otherwise cancel the pending operation and start unwinding.
+					let branch = &mut self.frames[index + 1..];
+
+					if let Some(cleanup) = branch.iter_mut().find_map(|frame| frame.continuations.first_mut()) {
+						if let FinallyContinuation::Propagate(previous) = std::mem::replace(cleanup, FinallyContinuation::Propagate(failure.clone())) {
+							failure.suppress(previous);
+						}
+
+						return Ok(VmExecutionState::Running);
+					}
+
+					for frame in branch {
+						frame.pending = None;
+					}
+
+					remaining = self.frames.len();
+
+					continue;
+				}
+			}
+
+			loop {
+				let frame = &mut self.frames[index];
+				let handler = frame.handlers.pop();
+				let depth = handler.as_ref().map_or(0, |handler| handler.continuation_depth);
+
+				// A failure handled inside cleanup stays local. Once it escapes that
+				// finally block, resume cancellation with the original failure.
+				while frame.continuations.len() > depth {
+					if let Some(FinallyContinuation::Propagate(original)) = frame.continuations.pop() && original.cancelling {
+						original.suppress(failure);
+						failure = original;
+					}
+				}
+
+				let Some(handler) = handler else {
+					break;
+				};
+
+				if failure.cancelling && !matches!(handler.action, HandlerAction::Finally(_)) {
+					continue;
+				}
+
+				let (target, binding, suppressed_slot) = match handler.action {
+					HandlerAction::CatchAll(target) | HandlerAction::Finally(target) => (target, None, None),
 					HandlerAction::CatchTable(site) => {
 						let body = self.current_code_body(program, &self.frames[index]);
 
@@ -513,27 +811,45 @@ impl VirtualMachine {
 							continue;
 						};
 
-						(clause.target as usize, clause.binding.as_ref())
+						(clause.target as usize, clause.binding.as_ref(), clause.suppressed_slot)
 					}
 				};
 
-				if let Err(error) = self.database_runtime.rollback_to_depth(handler.transaction_depth) {
+				if let Err(error) = self.rollback_to_depth(handler.transaction_depth) {
 					failure.error.message.push_str(&format!(" Also failed to roll back transaction: {error}"));
-					return Err(self.execution_error(failure.error));
+					return Err(self.execution_error(failure.into_error()));
 				}
 
+				self.restore_suspended_callers(index + 1);
 				self.frames.truncate(index + 1);
 				self.stack.truncate(handler.stack_depth);
+
 				let frame = &mut self.frames[index];
+
+				if let Some(first) = frame.task_scopes.get(handler.task_scope_depth).copied() {
+					frame.children.truncate(first);
+					frame.task_scopes.truncate(handler.task_scope_depth);
+				}
+
 				frame.locals.truncate(handler.first_local);
 				frame.continuations.truncate(handler.continuation_depth);
 				frame.instruction_index = target;
 
 				if matches!(handler.action, HandlerAction::Finally(_)) {
 					frame.continuations.push(FinallyContinuation::Propagate(failure));
-				} else if let Some((ty, slot)) = binding {
+				}
+				else if let Some((ty, slot)) = binding {
 					let slot = *slot as usize;
+
 					frame.locals.resize(slot + 1, Value::Null);
+
+					if let Some(suppressed_slot) = suppressed_slot {
+						let suppressed_slot = suppressed_slot as usize;
+
+						frame.locals.resize(suppressed_slot + 1, Value::Null);
+						frame.locals[suppressed_slot] = failure.suppressed_values();
+					}
+
 					frame.locals[slot] = match failure.value {
 						Value::DynamicArray { values, .. } if binds_native_array(ty) => Value::Array(values),
 						value => value,
@@ -542,8 +858,17 @@ impl VirtualMachine {
 
 				return Ok(VmExecutionState::Running);
 			}
+
+			// Only a failure that escapes the task invalidates its transaction.
+			// A handler in the caller may observe it before the commit boundary.
+			let depth = self.frames[index].task_transaction_depth;
+
+			if depth > 0 && !failure.cancelling {
+				self.failed_transactions.entry(depth).or_insert_with(|| failure.clone());
+			}
 		}
-		Err(self.execution_error(failure.error))
+
+		Err(self.execution_error(failure.into_error()))
 	}
 
 	fn execution_error(&mut self, mut error: VmError) -> VmError {
@@ -561,6 +886,17 @@ impl VirtualMachine {
 		}
 
 		error.stack_trace = self.current_stack_frames(program);
+
+		for (view, frame) in error.stack_trace.iter_mut().zip(self.frames.iter().rev()) {
+			if let Some(child) = frame.running_child {
+				let spawn = frame.children[child].spawn_site;
+
+				view.awaited_at = view.source_location.take();
+				view.instruction_index = spawn;
+				view.source_location = program.debug_location(self.frame_debug_body_index(program, frame), spawn);
+			}
+		}
+
 		error
 	}
 
@@ -602,18 +938,82 @@ impl VirtualMachine {
 			}
 			Instruction::BeginTransaction => {
 				self.begin_transaction(instruction_index)?;
+				let frame = &mut self.frames[frame_index];
+
+				frame.task_scopes.push(frame.children.len());
+
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::BeginTry { first_local, target } | Instruction::BeginFinally { first_local, target } => {
 				let action = if matches!(instruction, Instruction::BeginFinally { .. }) {
 					HandlerAction::Finally(*target as usize)
-				} else {
+				}
+				else {
 					HandlerAction::CatchAll(*target as usize)
 				};
+
 				self.install_handler(frame_index, *first_local, action);
+
 				Ok(ExecutionOutcome::Continue(None))
 			}
-			Instruction::Call(function_index, argument_count) => {
+			Instruction::EnterTaskScope => {
+				let frame = &mut self.frames[frame_index];
+				frame.task_scopes.push(frame.children.len());
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::LeaveTaskScope => {
+				let frame = &mut self.frames[frame_index];
+				let first = frame.task_scopes.pop().ok_or_else(|| vm_error(instruction_index, "Missing async scope.".into()))?;
+
+				frame.children.truncate(first);
+
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::SpawnCall(target, count) => {
+				if _program.functions().get(*target as usize).is_none() {
+					return Err(vm_error(instruction_index, "Invalid async function target.".into()));
+				}
+
+				let arguments = self.pop_call_arguments(*count as usize, instruction_index)?;
+
+				if !arguments.iter().all(Value::can_pass_to_child) {
+					return Err(vm_error(instruction_index, "A spawned child requires independent argument values.".into()));
+				}
+
+				let id = self.next_task;
+				self.next_task += 1;
+
+				self.frames[frame_index].children.push(ChildTask {
+					transaction_depth: self.database_runtime.transaction_depth(),
+					cancellation: None,
+					id,
+					spawn_site: instruction_index,
+					state: ChildState::Ready(*target, arguments),
+				});
+
+				self.stack.push(Value::Task(id));
+
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::WaitTask => {
+				let Value::Task(id) = self.pop_value(instruction_index)? else {
+					return Err(vm_error(instruction_index, "Expected a task handle.".into()));
+				};
+
+				let result = self.frames[frame_index].children.iter().find(|child| child.id == id);
+
+				let Some(ChildTask { state: ChildState::Completed(result), .. }) = result else {
+					return Err(vm_error(instruction_index, "Task is outside its owning scope.".into()));
+				};
+
+				if let Some(value) = result {
+					self.stack.push(value.clone());
+				}
+
+				Ok(ExecutionOutcome::Continue(None))
+			}
+			Instruction::AwaitCall(function_index, argument_count)
+			| Instruction::Call(function_index, argument_count) => {
 				let arguments = self.pop_call_arguments(*argument_count as usize, instruction_index)?;
 				Ok(ExecutionOutcome::Call(*function_index, arguments))
 			}
@@ -627,14 +1027,21 @@ impl VirtualMachine {
 					self.run_built_in_function(*built_in, arguments, instruction_index)?
 				};
 
-				if let Some(result) = result {
-					self.stack.push(result);
-				}
-
-				Ok(ExecutionOutcome::Continue(None))
+				self.start_native_operation(std::future::ready(Ok(result)), instruction_index)
 			}
 			Instruction::CommitTransaction => {
+				if let Some(failure) = self.failed_transactions.get(&self.database_runtime.transaction_depth()) {
+					return Ok(ExecutionOutcome::Raise(failure.clone()));
+				}
+
 				self.commit_transaction(instruction_index)?;
+
+				let frame = &mut self.frames[frame_index];
+
+				if let Some(first) = frame.task_scopes.pop() {
+					frame.children.truncate(first);
+				}
+
 				Ok(ExecutionOutcome::Continue(None))
 			}
 			Instruction::ConvertFloat => {
@@ -692,6 +1099,10 @@ impl VirtualMachine {
 					.ok_or_else(|| vm_error(instruction_index, "Expected a finally continuation.".into()))?;
 
 				if matches!(instruction, Instruction::DiscardFinally) {
+					if let FinallyContinuation::Propagate(failure) = continuation && failure.cancelling {
+						return Ok(ExecutionOutcome::Raise(failure));
+					}
+
 					return Ok(ExecutionOutcome::Continue(None));
 				}
 
@@ -709,6 +1120,7 @@ impl VirtualMachine {
 						instruction_index,
 						message: String::from("Stack underflow while duplicating operands."),
 						source_location: None,
+						suppressed: Vec::new(),
 						stack_trace: Vec::new(),
 					});
 				}
@@ -767,7 +1179,12 @@ impl VirtualMachine {
 
 				let error = vm_error(instruction_index, value.to_string());
 
-				Ok(ExecutionOutcome::Raise(RaisedFailure { value, error }))
+				Ok(ExecutionOutcome::Raise(RaisedFailure {
+					value,
+					error,
+					cancelling: false,
+					suppressed: Default::default(),
+				}))
 			}
 			Instruction::FieldPathExists(field_path) => {
 				let value = self.pop_value(instruction_index)?;
@@ -864,6 +1281,7 @@ impl VirtualMachine {
 					instruction_index,
 					message: format!("Local slot {} has not been initialized.", slot),
 					source_location: None,
+					suppressed: Vec::new(),
 					stack_trace: Vec::new(),
 				})?;
 				self.stack.push(self.resolve_runtime_value(value, instruction_index)?);
@@ -889,6 +1307,7 @@ impl VirtualMachine {
 					instruction_index,
 					message: format!("Local slot {} has not been initialized.", slot),
 					source_location: None,
+					suppressed: Vec::new(),
 					stack_trace: Vec::new(),
 				})?;
 				let reference = match value {
@@ -1323,11 +1742,136 @@ impl VirtualMachine {
 			.map_err(|message| vm_error(instruction_index, message))
 	}
 
+	// Most native calls finish on their first poll. Only a pending call needs
+	// heap storage and a scheduler waker. Its arguments have already been consumed.
+	fn start_native_operation<F>(&mut self, mut future: F, instruction: usize) -> Result<ExecutionOutcome, VmError>
+	where
+		F: Future<Output = OperationResult> + Unpin + 'static,
+	{
+		match std::pin::Pin::new(&mut future).poll(&mut Context::from_waker(Waker::noop())) {
+			Poll::Pending => {
+				let operation = PendingOperation::new(future, self.wake_queue.clone());
+				self.frames.last_mut().unwrap().pending = Some(operation);
+				Ok(ExecutionOutcome::Continue(Some(instruction)))
+			}
+			Poll::Ready(result) => {
+				self.stack.extend(result?);
+				Ok(ExecutionOutcome::Continue(None))
+			}
+		}
+	}
+
+	// A queued child runs until it waits. At that point its caller and pending
+	// callee can be parked together while another child in the same scope runs.
+	fn schedule_sibling(&mut self, waiting: usize, include_parked: bool) -> bool {
+		let depth = self.database_runtime.transaction_depth();
+
+		for owner in (0..waiting).rev() {
+			let frame = &self.frames[owner];
+
+			let Some(active) = frame.running_child else {
+				continue;
+			};
+
+			let task = &frame.children[active];
+
+			if task.transaction_depth != depth || task.cancellation.is_some() {
+				return false;
+			}
+
+			let scope = frame.child_scope(active);
+			let sibling = scope.into_iter().find(|&index| match &frame.children[index].state {
+				ChildState::Ready(_, _) => true,
+				ChildState::Parked(branch) => include_parked && branch.can_progress(depth),
+				_ => false,
+			});
+
+			if let Some(sibling) = sibling {
+				self.park_child(owner, active);
+				self.activate_child(sibling);
+				return true;
+			}
+		}
+
+		false
+	}
+
+	fn park_child(&mut self, owner: usize, child: usize) {
+		let depth = owner + 1;
+		let first_caller = self.suspended_callers.partition_point(|caller| caller.frame_depth <= depth);
+
+		let branch = ParkedBranch {
+			owner_id: self.frames[owner].id,
+			frames: self.frames.split_off(depth),
+			callers: self.suspended_callers.split_off(first_caller),
+			operands: std::mem::take(&mut self.stack),
+		};
+
+		self.restore_suspended_callers(depth);
+		let frame = &mut self.frames[owner];
+
+		frame.running_child = None;
+		frame.children[child].state = ChildState::Parked(branch);
+		frame.parked_children.push(child);
+	}
+
+	fn activate_child(&mut self, child: usize) {
+		let depth = self.frames.len();
+		let owner = self.frames.last_mut().expect("A child has an owning frame");
+
+		owner.running_child = Some(child);
+
+		let state = std::mem::replace(&mut owner.children[child].state, ChildState::Running);
+		self.suspended_callers.push(SuspendedCaller {
+			frame_depth: depth,
+			operands: std::mem::take(&mut self.stack),
+		});
+
+		match state {
+			ChildState::Parked(branch) => {
+				debug_assert_eq!(owner.id, branch.owner_id);
+				owner.parked_children.retain(|index| *index != child);
+				self.frames.extend(branch.frames);
+				self.suspended_callers.extend(branch.callers);
+				self.stack = branch.operands;
+			}
+			ChildState::Ready(target, arguments) => {
+				let depth = owner.children[child].transaction_depth;
+				self.push_frame(Some(target as usize), 0, arguments, depth);
+			}
+			_ => unreachable!("Only a ready or parked child can be activated"),
+		}
+	}
+
+	fn restore_suspended_callers(&mut self, remaining_frames: usize) {
+		while self.suspended_callers.last().is_some_and(|caller| caller.frame_depth >= remaining_frames) {
+			self.stack = self.suspended_callers.pop().unwrap().operands;
+		}
+	}
+
 	fn finish_current_frame(&mut self, result: Option<Value>) -> VmExecutionState {
 		let frame = self.frames.pop().expect("A frame must exist while finishing execution.");
+
 		self.stack.truncate(frame.base_stack_len);
+		self.restore_suspended_callers(self.frames.len());
 
 		if let Some(caller) = self.frames.last_mut() {
+			if let Some(child) = caller.running_child.take() {
+				if let Some(original) = &caller.children[child].cancellation {
+					caller.pending_failure = Some(original.clone());
+					caller.running_child = Some(child);
+				}
+				else {
+					caller.children[child].state = ChildState::Completed(result);
+
+					if let Some(&parked) = caller.parked_children.last() {
+						self.activate_child(parked);
+					}
+				}
+
+				return VmExecutionState::Running;
+			}
+
 			caller.instruction_index += 1;
 
 			if let Some(result) = result {
@@ -1379,6 +1923,7 @@ impl VirtualMachine {
 			instruction_index,
 			message: String::from("Stack underflow while reading Boolean operand."),
 			source_location: None,
+			suppressed: Vec::new(),
 			stack_trace: Vec::new(),
 		})?;
 
@@ -1388,6 +1933,7 @@ impl VirtualMachine {
 				instruction_index,
 				message: String::from("Expected a Boolean operand."),
 				source_location: None,
+				suppressed: Vec::new(),
 				stack_trace: Vec::new(),
 			}),
 		}
@@ -1401,6 +1947,7 @@ impl VirtualMachine {
 				instruction_index,
 				message: String::from("Stack underflow while reading call argument."),
 				source_location: None,
+				suppressed: Vec::new(),
 				stack_trace: Vec::new(),
 			})?);
 		}
@@ -1449,6 +1996,7 @@ impl VirtualMachine {
 				instruction_index,
 				message: format!("Expected a numeric operand, found a {} value.", type_name(&value)),
 				source_location: None,
+				suppressed: Vec::new(),
 				stack_trace: Vec::new(),
 			});
 		}
@@ -1458,6 +2006,7 @@ impl VirtualMachine {
 				instruction_index,
 				message: format!("Expected a numeric operand, found a {} value.", type_name(&value)),
 				source_location: None,
+				suppressed: Vec::new(),
 				stack_trace: Vec::new(),
 			});
 		}
@@ -1470,6 +2019,7 @@ impl VirtualMachine {
 			instruction_index,
 			message: String::from("Stack underflow while reading operand."),
 			source_location: None,
+			suppressed: Vec::new(),
 			stack_trace: Vec::new(),
 		})?;
 
@@ -1529,7 +2079,13 @@ impl VirtualMachine {
 			.collect()
 	}
 
+	fn rollback_to_depth(&mut self, depth: usize) -> Result<(), String> {
+		self.failed_transactions.retain(|level, _| *level <= depth);
+		self.database_runtime.rollback_to_depth(depth)
+	}
+
 	fn rollback_active_transactions(&mut self, instruction_index: usize) -> Result<(), VmError> {
+		self.failed_transactions.clear();
 		self.database_runtime.rollback_active_transactions()
 			.map_err(|message| vm_error(instruction_index, message))
 	}
@@ -2017,9 +2573,79 @@ impl VirtualMachine {
 	}
 }
 
+impl ParkedBranch {
+	fn can_progress(&self, transaction_depth: usize) -> bool {
+		let pending = self.frames.last().and_then(|frame| frame.pending.as_ref());
+
+		if pending.is_none_or(PendingOperation::is_ready) {
+			return true;
+		}
+
+		for frame in self.frames.iter().rev() {
+			if let Some(active) = frame.running_child {
+				let task = &frame.children[active];
+
+				if task.transaction_depth != transaction_depth || task.cancellation.is_some() {
+					break;
+				}
+
+				for index in frame.child_scope(active) {
+					match &frame.children[index].state {
+						ChildState::Parked(branch) if branch.can_progress(transaction_depth) => return true,
+						ChildState::Ready(_, _) => return true,
+						_ => {}
+					}
+				}
+			}
+		}
+		false
+	}
+}
+
 impl CallFrame {
-	fn new(function_index: Option<usize>, base_stack_len: usize, locals: Vec<Value>) -> Self {
+	fn child_scope(&self, index: usize) -> std::ops::Range<usize> {
+		let start = self.task_scopes.iter().rev().copied().find(|&start| start <= index).unwrap_or(0);
+		let end = self.task_scopes.iter().copied().find(|&start| start > index).unwrap_or(self.children.len());
+		start..end
+	}
+
+	// A wait yields to ready siblings in creation order. A completed handle can
+	// be read immediately. Scope and transaction boundaries drain pending work.
+	fn next_child(&self, instruction: Option<&Instruction>, operand: Option<&Value>) -> Option<usize> {
+		let range = match instruction {
+			Some(Instruction::LeaveTaskScope | Instruction::CommitTransaction) => *self.task_scopes.last()?..self.children.len(),
+			None | Some(Instruction::Return | Instruction::ReturnNoValue | Instruction::BeginTransaction) => 0..self.children.len(),
+			Some(Instruction::WaitTask) => {
+				let Value::Task(id) = operand? else {
+					return None;
+				};
+
+				let target = self.children.iter().position(|task| task.id == *id)?;
+
+				if matches!(self.children[target].state, ChildState::Completed(_)) {
+					return None;
+				}
+
+				let first = self.task_scopes.iter().rev().copied().find(|start| *start <= target).unwrap_or(0);
+
+				first..target + 1
+			}
+			_ => return None,
+		};
+
+		range.into_iter().find(|index| !matches!(self.children[*index].state, ChildState::Completed(_)))
+	}
+
+	fn new(id: u64, function_index: Option<usize>, base_stack_len: usize, locals: Vec<Value>, task_transaction_depth: usize) -> Self {
 		Self {
+			id,
+			task_transaction_depth,
+			pending_failure: None,
+			pending: None,
+			children: Vec::new(),
+			task_scopes: Vec::new(),
+			running_child: None,
+			parked_children: Vec::new(),
 			handlers: Vec::new(),
 			continuations: Vec::new(),
 			base_stack_len,
@@ -2587,6 +3213,7 @@ fn evaluate_debug_expression(expression: &Expr, frame: &WatchContext<'_>) -> Res
 			expression.position(),
 			String::from("Watch expressions do not support assignment."),
 		)),
+		Expr::AsyncBlock { .. } => Err(vm_error(expression.position(), "Cannot execute async work in a debugger watch.".into())),
 		Expr::Binary(binary) => {
 			let (lhs, rhs) = if binary.left.can_adopt_float_context() && !binary.right.can_adopt_float_context() {
 				let rhs = evaluate_debug_expression(&binary.right, frame)?;
@@ -3250,6 +3877,7 @@ fn negate_value(value: Value) -> Value {
 		Value::Object(_) => unreachable!("Object values are rejected before numeric negation."),
 		Value::RecordPointer(_) => unreachable!("Record pointer values are rejected before numeric negation."),
 		Value::Reference(_) => unreachable!("Reference values are resolved before numeric negation."),
+		Value::Task(_) => unreachable!("Task handles are not numbers"),
 		Value::Text(_) => unreachable!("Text values are rejected before numeric negation."),
 		Value::Time(_) => unreachable!("Time values are rejected before numeric negation."),
 		Value::TimeTz(_) => unreachable!("Time-zone-aware time values are rejected before numeric negation."),
@@ -3503,6 +4131,7 @@ fn stringify_value(value: &Value) -> String {
 		}
 		Value::RecordPointer(record) => {
 			let record = record.buffer();
+
 			if !record.exists {
 				String::from("<record pointer: missing>")
 			}
@@ -3514,6 +4143,7 @@ fn stringify_value(value: &Value) -> String {
 			}
 		}
 		Value::Reference(_) => String::from("<reference>"),
+		Value::Task(_) => value.to_string(),
 		Value::Text(value) => value.clone(),
 		Value::Time(value) => value.to_string(),
 		Value::TimeTz(value) => value.to_string(),
@@ -3587,6 +4217,7 @@ fn type_name(value: &Value) -> &'static str {
 		Value::Object(_) => "object",
 		Value::RecordPointer(_) => "record pointer",
 		Value::Reference(_) => "reference",
+		Value::Task(_) => "task",
 		Value::Text(_) => "text",
 		Value::Time(_) => "time",
 		Value::TimeTz(_) => "timetz",
@@ -3677,6 +4308,7 @@ fn vm_error(instruction_index: usize, message: String) -> VmError {
 		instruction_index,
 		message,
 		source_location: None,
+		suppressed: Vec::new(),
 		stack_trace: Vec::new(),
 	}
 }
@@ -3730,6 +4362,7 @@ mod tests {
 	#[test]
 	fn evaluates_presence_and_lock_watch_expressions_for_locked_record_pointer() {
 		let frame = VmStackFrame {
+			awaited_at: None,
 			instruction_index: 0,
 			locals: vec![
 				VmVisibleLocal {
@@ -3774,6 +4407,7 @@ mod tests {
 	#[test]
 	fn evaluates_watch_expression_against_visible_locals() {
 		let frame = VmStackFrame {
+			awaited_at: None,
 			instruction_index: 0,
 			locals: vec![
 				VmVisibleLocal {
@@ -3810,6 +4444,7 @@ mod tests {
 	#[test]
 	fn evaluates_watch_expression_for_record_pointer_field_access() {
 		let frame = VmStackFrame {
+			awaited_at: None,
 			instruction_index: 0,
 			locals: vec![
 				VmVisibleLocal {
@@ -3867,8 +4502,10 @@ mod tests {
 			instruction_index: 1,
 			message: String::from("Stack underflow while reading operand."),
 			source_location: None,
+			suppressed: Vec::new(),
 			stack_trace: vec![
 				super::VmStackFrame {
+					awaited_at: None,
 					instruction_index: 1,
 					locals: vec![],
 					source_location: None,
@@ -3891,8 +4528,10 @@ mod tests {
 			instruction_index: 2,
 			message: String::from("Division by zero."),
 			source_location: None,
+			suppressed: Vec::new(),
 			stack_trace: vec![
 				super::VmStackFrame {
+					awaited_at: None,
 					instruction_index: 2,
 					locals: vec![],
 					source_location: None,
@@ -3915,8 +4554,10 @@ mod tests {
 			instruction_index: 2,
 			message: String::from("Expected a Boolean operand."),
 			source_location: None,
+			suppressed: Vec::new(),
 			stack_trace: vec![
 				super::VmStackFrame {
+					awaited_at: None,
 					instruction_index: 2,
 					locals: vec![],
 					source_location: None,
@@ -3939,8 +4580,10 @@ mod tests {
 			instruction_index: 2,
 			message: String::from("Modulo by zero."),
 			source_location: None,
+			suppressed: Vec::new(),
 			stack_trace: vec![
 				super::VmStackFrame {
+					awaited_at: None,
 					instruction_index: 2,
 					locals: vec![],
 					source_location: None,
@@ -3964,8 +4607,10 @@ mod tests {
 			instruction_index: 3,
 			message: String::from("Range step cannot be zero."),
 			source_location: None,
+			suppressed: Vec::new(),
 			stack_trace: vec![
 				super::VmStackFrame {
+					awaited_at: None,
 					instruction_index: 3,
 					locals: vec![],
 					source_location: None,
@@ -4394,6 +5039,7 @@ mod tests {
 	#[test]
 	fn safely_evaluates_field_presence_watch_expressions() {
 		let frame = VmStackFrame {
+			awaited_at: None,
 			instruction_index: 0,
 			locals: vec![
 				VmVisibleLocal {

@@ -111,7 +111,11 @@ impl<'a> DebuggerSession<'a> {
 	pub fn step_in(&mut self) -> Result<DebuggerStop, VmError> {
 		self.ensure_started();
 		self.skip_breakpoint_once = None;
-		let start_depth = self.vm.current_stack_depth();
+
+		let ancestry: Vec<_> = self.vm.frame_ids().collect();
+		let Some(&selected) = ancestry.last() else {
+			return Ok(DebuggerStop::Completed(None));
+		};
 		let start_location = self.current_source_location();
 
 		match self.vm.step(self.program)? {
@@ -124,10 +128,11 @@ impl<'a> DebuggerSession<'a> {
 		}
 
 		loop {
-			let current_depth = self.vm.current_stack_depth();
+			let current = self.vm.frame_ids().next_back().unwrap();
 			let current_location = self.current_source_location();
+			let related = ancestry.contains(&current) || self.vm.is_stepping_into_dependency(self.program, selected);
 
-			if current_depth != start_depth || !same_user_location(current_location.as_ref(), start_location.as_ref()) {
+			if related && (current != selected || !same_user_location(current_location.as_ref(), start_location.as_ref())) {
 				return Ok(DebuggerStop::Paused(self.paused_state(PauseReason::StepIn)));
 			}
 
@@ -146,8 +151,11 @@ impl<'a> DebuggerSession<'a> {
 		self.ensure_started();
 		self.skip_breakpoint_once = None;
 
-		let start_depth = self.vm.current_stack_depth();
-		let mut unwind_location: Option<SourceLocation> = None;
+		let ancestry: Vec<_> = self.vm.frame_ids().collect();
+		let Some(&selected) = ancestry.last() else {
+			return Ok(DebuggerStop::Completed(None));
+		};
+		let caller_location = self.vm.caller_location(self.program);
 
 		loop {
 			match self.vm.step(self.program)? {
@@ -159,17 +167,11 @@ impl<'a> DebuggerSession<'a> {
 				return Ok(stop);
 			}
 
-			if self.vm.current_stack_depth() < start_depth {
-				let current_location = self.current_source_location();
+			let current = self.vm.frame_ids().next_back().unwrap();
 
-				if let Some(location) = &unwind_location {
-					if !same_user_location(current_location.as_ref(), Some(location)) {
-						return Ok(DebuggerStop::Paused(self.paused_state(PauseReason::StepOut)));
-					}
-				}
-				else {
-					unwind_location = current_location;
-				}
+			if current != selected && ancestry.contains(&current)
+				&& (ancestry.iter().rev().nth(1) != Some(&current) || !same_user_location(self.current_source_location().as_ref(), caller_location.as_ref())) {
+				return Ok(DebuggerStop::Paused(self.paused_state(PauseReason::StepOut)));
 			}
 		}
 	}
@@ -178,7 +180,10 @@ impl<'a> DebuggerSession<'a> {
 		self.ensure_started();
 		self.skip_breakpoint_once = None;
 
-		let start_depth = self.vm.current_stack_depth();
+		let ancestry: Vec<_> = self.vm.frame_ids().collect();
+		let Some(&selected) = ancestry.last() else {
+			return Ok(DebuggerStop::Completed(None));
+		};
 		let start_location = self.current_source_location();
 
 		match self.vm.step(self.program)? {
@@ -191,10 +196,10 @@ impl<'a> DebuggerSession<'a> {
 		}
 
 		loop {
-			let current_depth = self.vm.current_stack_depth();
+			let current = self.vm.frame_ids().next_back().unwrap();
 			let current_location = self.current_source_location();
 
-			if current_depth < start_depth || (current_depth == start_depth && !same_user_location(current_location.as_ref(), start_location.as_ref())) {
+			if ancestry.contains(&current) && (current != selected || !same_user_location(current_location.as_ref(), start_location.as_ref())) {
 				return Ok(DebuggerStop::Paused(self.paused_state(PauseReason::StepOver)));
 			}
 

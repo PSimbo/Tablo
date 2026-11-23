@@ -118,6 +118,37 @@ export class TabloLspClient implements vscode.Disposable {
 			.map(toVsCodeCompletionItem);
 	}
 
+	async provideSignatureHelp(document: vscode.TextDocument, position: vscode.Position): Promise<vscode.SignatureHelp | undefined> {
+		if (!isTabloDocument(document) || !await this.ensureStarted()) {
+			return undefined;
+		}
+		const result = await this.sendRequest("textDocument/signatureHelp", {
+			textDocument: { uri: document.uri.toString() },
+			position: { line: position.line, character: position.character },
+		});
+		if (!result || typeof result !== "object" || !("signatures" in result) || !Array.isArray(result.signatures)) {
+			return undefined;
+		}
+
+		const help = new vscode.SignatureHelp();
+		for (const signature of result.signatures) {
+			if (typeof signature?.label !== "string" || !Array.isArray(signature.parameters)) {
+				return undefined;
+			}
+			const item = new vscode.SignatureInformation(signature.label);
+			for (const parameter of signature.parameters) {
+				if (typeof parameter?.label !== "string") {
+					return undefined;
+				}
+				item.parameters.push(new vscode.ParameterInformation(parameter.label));
+			}
+			help.signatures.push(item);
+		}
+		help.activeParameter = "activeParameter" in result && typeof result.activeParameter === "number" ? result.activeParameter : 0;
+		help.activeSignature = "activeSignature" in result && typeof result.activeSignature === "number" ? result.activeSignature : 0;
+		return help;
+	}
+
 	private async didChange(document: vscode.TextDocument): Promise<void> {
 		if (!isTabloDocument(document)) {
 			return;
@@ -459,6 +490,8 @@ function toVsCodeCompletionItemKind(kind: number | undefined): vscode.Completion
 			return vscode.CompletionItemKind.Function;
 		case 5:
 			return vscode.CompletionItemKind.Field;
+		case 6:
+			return vscode.CompletionItemKind.Variable;
 		case 14:
 			return vscode.CompletionItemKind.Keyword;
 		case 20:

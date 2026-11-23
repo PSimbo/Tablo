@@ -19,7 +19,8 @@ const MAGIC_BYTES: [u8; 4] = *b"TBO1";
 const OPCODE_ADD: u8 = 1;
 const OPCODE_ADVANCE_SEQUENCE: u8 = OPCODE_ADD + 1;
 const OPCODE_AND: u8 = OPCODE_ADVANCE_SEQUENCE + 1;
-const OPCODE_BEGIN_CATCH: u8 = OPCODE_AND + 1;
+const OPCODE_AWAIT_CALL: u8 = OPCODE_AND + 1;
+const OPCODE_BEGIN_CATCH: u8 = OPCODE_AWAIT_CALL + 1;
 const OPCODE_BEGIN_FINALLY: u8 = OPCODE_BEGIN_CATCH + 1;
 const OPCODE_BEGIN_TRANSACTION: u8 = OPCODE_BEGIN_FINALLY + 1;
 const OPCODE_BEGIN_TRY: u8 = OPCODE_BEGIN_TRANSACTION + 1;
@@ -36,7 +37,8 @@ const OPCODE_DISCARD_FINALLY: u8 = OPCODE_DELETE_RECORD + 1;
 const OPCODE_DIVIDE: u8 = OPCODE_DISCARD_FINALLY + 1;
 const OPCODE_DUP2: u8 = OPCODE_DIVIDE + 1;
 const OPCODE_END_TRY: u8 = OPCODE_DUP2 + 1;
-const OPCODE_EQUAL: u8 = OPCODE_END_TRY + 1;
+const OPCODE_ENTER_TASK_SCOPE: u8 = OPCODE_END_TRY + 1;
+const OPCODE_EQUAL: u8 = OPCODE_ENTER_TASK_SCOPE + 1;
 const OPCODE_EXECUTE_QUERY: u8 = OPCODE_EQUAL + 1;
 const OPCODE_EXISTS: u8 = OPCODE_EXECUTE_QUERY + 1;
 const OPCODE_FAIL: u8 = OPCODE_EXISTS + 1;
@@ -48,7 +50,8 @@ const OPCODE_ITER_INIT: u8 = OPCODE_ITER_HAS_NEXT + 1;
 const OPCODE_ITER_NEXT: u8 = OPCODE_ITER_INIT + 1;
 const OPCODE_JUMP: u8 = OPCODE_ITER_NEXT + 1;
 const OPCODE_JUMP_IF_FALSE: u8 = OPCODE_JUMP + 1;
-const OPCODE_LESS_THAN: u8 = OPCODE_JUMP_IF_FALSE + 1;
+const OPCODE_LEAVE_TASK_SCOPE: u8 = OPCODE_JUMP_IF_FALSE + 1;
+const OPCODE_LESS_THAN: u8 = OPCODE_LEAVE_TASK_SCOPE + 1;
 const OPCODE_LESS_THAN_OR_EQUAL: u8 = OPCODE_LESS_THAN + 1;
 const OPCODE_LOAD_FIELD: u8 = OPCODE_LESS_THAN_OR_EQUAL + 1;
 const OPCODE_LOAD_FIELD_PATH: u8 = OPCODE_LOAD_FIELD + 1;
@@ -99,7 +102,8 @@ const OPCODE_RESUME_FINALLY: u8 = OPCODE_REORDER_CALL_ARGUMENTS + 1;
 const OPCODE_RETURN: u8 = OPCODE_RESUME_FINALLY + 1;
 const OPCODE_RETURN_NO_VALUE: u8 = OPCODE_RETURN + 1;
 const OPCODE_RUN_FINALLY: u8 = OPCODE_RETURN_NO_VALUE + 1;
-const OPCODE_STORE_FIELD_PATH: u8 = OPCODE_RUN_FINALLY + 1;
+const OPCODE_SPAWN_CALL: u8 = OPCODE_RUN_FINALLY + 1;
+const OPCODE_STORE_FIELD_PATH: u8 = OPCODE_SPAWN_CALL + 1;
 const OPCODE_STORE_INDEX: u8 = OPCODE_STORE_FIELD_PATH + 1;
 const OPCODE_STORE_JSON_PATH: u8 = OPCODE_STORE_INDEX + 1;
 const OPCODE_STORE_LOCAL: u8 = OPCODE_STORE_JSON_PATH + 1;
@@ -107,7 +111,8 @@ const OPCODE_STORE_SEQUENCE_CURRENT: u8 = OPCODE_STORE_LOCAL + 1;
 const OPCODE_SUBTRACT: u8 = OPCODE_STORE_SEQUENCE_CURRENT + 1;
 const OPCODE_UPDATE_RECORD: u8 = OPCODE_SUBTRACT + 1;
 const OPCODE_UPDATE_RECORD_IF_CHANGED: u8 = OPCODE_UPDATE_RECORD + 1;
-const OPCODE_XOR: u8 = OPCODE_UPDATE_RECORD_IF_CHANGED + 1;
+const OPCODE_WAIT_TASK: u8 = OPCODE_UPDATE_RECORD_IF_CHANGED + 1;
+const OPCODE_XOR: u8 = OPCODE_WAIT_TASK + 1;
 
 const DATA_TYPE_TAG_ANY: u8 = 1;
 const DATA_TYPE_TAG_ARRAY: u8 = DATA_TYPE_TAG_ANY + 1;
@@ -122,7 +127,8 @@ const DATA_TYPE_TAG_NULLABLE: u8 = DATA_TYPE_TAG_JSON + 1;
 const DATA_TYPE_TAG_OBJECT: u8 = DATA_TYPE_TAG_NULLABLE + 1;
 const DATA_TYPE_TAG_RANGE: u8 = DATA_TYPE_TAG_OBJECT + 1;
 const DATA_TYPE_TAG_RECORD_POINTER: u8 = DATA_TYPE_TAG_RANGE + 1;
-const DATA_TYPE_TAG_TEXT: u8 = DATA_TYPE_TAG_RECORD_POINTER + 1;
+const DATA_TYPE_TAG_TASK: u8 = DATA_TYPE_TAG_RECORD_POINTER + 1;
+const DATA_TYPE_TAG_TEXT: u8 = DATA_TYPE_TAG_TASK + 1;
 const DATA_TYPE_TAG_TIME: u8 = DATA_TYPE_TAG_TEXT + 1;
 const DATA_TYPE_TAG_TIMESTAMP: u8 = DATA_TYPE_TAG_TIME + 1;
 const DATA_TYPE_TAG_TIMESTAMP_TZ: u8 = DATA_TYPE_TAG_TIMESTAMP + 1;
@@ -585,6 +591,7 @@ impl<'a> ObjectFileReader<'a> {
 			DATA_TYPE_TAG_JSON => Ok(DataType::Json),
 			DATA_TYPE_TAG_OBJECT => Ok(DataType::Object(self.read_string()?.into())),
 			DATA_TYPE_TAG_RANGE => Ok(DataType::Range(Box::new(self.read_data_type()?))),
+			DATA_TYPE_TAG_TASK => Ok(DataType::Task(Box::new(self.read_data_type()?))),
 			DATA_TYPE_TAG_TEXT => Ok(DataType::Text),
 			DATA_TYPE_TAG_RECORD_POINTER => Ok(DataType::RecordPointer(crate::ast::RecordPointerType {
 				database_name: self.read_string()?,
@@ -769,6 +776,7 @@ impl<'a> ObjectFileReader<'a> {
 				sequence_name: self.read_string()?,
 			}),
 			OPCODE_AND => Ok(Instruction::And),
+			OPCODE_AWAIT_CALL => Ok(Instruction::AwaitCall(self.read_u32()?, self.read_u32()?)),
 			OPCODE_BEGIN_CATCH => {
 				let first_local = self.read_u32()?;
 				let count = self.read_u32()?;
@@ -776,13 +784,20 @@ impl<'a> ObjectFileReader<'a> {
 
 				for _ in 0..count {
 					let target = self.read_u32()?;
-					let binding = if self.read_bool()? {
+					let kind = self.read_u8()?;
+
+					if kind > 2 {
+						return Err(ObjectFileError { offset: self.offset - 1, message: "Invalid catch binding kind.".into() });
+					}
+
+					let binding = if kind > 0 {
 						Some((self.read_object_value_type_descriptor()?, self.read_u32()?))
 					} else {
 						None
 					};
 
-					clauses.push(CatchTarget { target, binding });
+					let suppressed_slot = if kind == 2 { Some(self.read_u32()?) } else { None };
+					clauses.push(CatchTarget { target, binding, suppressed_slot });
 				}
 
 				Ok(Instruction::BeginCatch { first_local, clauses })
@@ -823,6 +838,7 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_DIVIDE => Ok(Instruction::Divide),
 			OPCODE_DUP2 => Ok(Instruction::Dup2),
 			OPCODE_END_TRY => Ok(Instruction::EndTry),
+			OPCODE_ENTER_TASK_SCOPE => Ok(Instruction::EnterTaskScope),
 			OPCODE_EQUAL => Ok(Instruction::Equal),
 			OPCODE_EXECUTE_QUERY => Ok(Instruction::ExecuteQuery(self.read_u32()?)),
 			OPCODE_EXISTS => Ok(Instruction::Exists),
@@ -835,6 +851,7 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_ITER_NEXT => Ok(Instruction::IterNext),
 			OPCODE_JUMP => Ok(Instruction::Jump(self.read_u32()?)),
 			OPCODE_JUMP_IF_FALSE => Ok(Instruction::JumpIfFalse(self.read_u32()?)),
+			OPCODE_LEAVE_TASK_SCOPE => Ok(Instruction::LeaveTaskScope),
 			OPCODE_LESS_THAN => Ok(Instruction::LessThan),
 			OPCODE_LESS_THAN_OR_EQUAL => Ok(Instruction::LessThanOrEqual),
 			OPCODE_LOAD_FIELD => Ok(Instruction::LoadField(self.read_string()?)),
@@ -954,6 +971,7 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_RETURN => Ok(Instruction::Return),
 			OPCODE_RETURN_NO_VALUE => Ok(Instruction::ReturnNoValue),
 			OPCODE_RUN_FINALLY => Ok(Instruction::RunFinally),
+			OPCODE_SPAWN_CALL => Ok(Instruction::SpawnCall(self.read_u32()?, self.read_u32()?)),
 			OPCODE_STORE_FIELD_PATH => Ok(Instruction::StoreFieldPath(self.read_string_vec()?)),
 			OPCODE_STORE_INDEX => Ok(Instruction::StoreIndex),
 			OPCODE_STORE_JSON_PATH => {
@@ -978,6 +996,7 @@ impl<'a> ObjectFileReader<'a> {
 			OPCODE_SUBTRACT => Ok(Instruction::Subtract),
 			OPCODE_UPDATE_RECORD => Ok(Instruction::UpdateRecord),
 			OPCODE_UPDATE_RECORD_IF_CHANGED => Ok(Instruction::UpdateRecordIfChanged),
+			OPCODE_WAIT_TASK => Ok(Instruction::WaitTask),
 			OPCODE_XOR => Ok(Instruction::Xor),
 			_ => Err(ObjectFileError {
 				offset: opcode_offset,
@@ -1468,7 +1487,7 @@ fn validate_handler_instructions(body: &CodeBody, ids: &BTreeSet<ObjectTypeId>) 
 					if let Some((ty, slot)) = &clause.binding {
 						validate_object_value_type_references(ty, ids)?;
 
-						if slot < first_local {
+						if slot < first_local || clause.suppressed_slot.is_some_and(|suppressed| suppressed <= *slot) {
 							return Err(ObjectFileError { offset: 0, message: "Catch binding overlaps an enclosing local.".into() });
 						}
 					} else if index + 1 != clauses.len() {
@@ -1602,6 +1621,10 @@ fn write_data_type(bytes: &mut Vec<u8>, data_type: &DataType) {
 			bytes.push(DATA_TYPE_TAG_RANGE);
 			write_data_type(bytes, element_type);
 		}
+		DataType::Task(result) => {
+			bytes.push(DATA_TYPE_TAG_TASK);
+			write_data_type(bytes, result);
+		}
 		DataType::Text => bytes.push(DATA_TYPE_TAG_TEXT),
 		DataType::Json => bytes.push(DATA_TYPE_TAG_JSON),
 		DataType::JsonMember
@@ -1643,6 +1666,11 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.extend_from_slice(sequence_name.as_bytes());
 		}
 		Instruction::And => bytes.push(OPCODE_AND),
+		Instruction::AwaitCall(function_index, argument_count) => {
+			bytes.push(OPCODE_AWAIT_CALL);
+			bytes.extend_from_slice(&function_index.to_le_bytes());
+			bytes.extend_from_slice(&argument_count.to_le_bytes());
+		}
 		Instruction::BeginCatch { first_local, clauses } => {
 			bytes.push(OPCODE_BEGIN_CATCH);
 			bytes.extend_from_slice(&first_local.to_le_bytes());
@@ -1650,11 +1678,15 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 
 			for clause in clauses {
 				bytes.extend_from_slice(&clause.target.to_le_bytes());
-				bytes.push(u8::from(clause.binding.is_some()));
+				bytes.push(if clause.suppressed_slot.is_some() { 2 } else { u8::from(clause.binding.is_some()) });
 
 				if let Some((ty, slot)) = &clause.binding {
 					write_object_value_type_descriptor(bytes, ty);
 					bytes.extend_from_slice(&slot.to_le_bytes());
+
+					if let Some(suppressed) = clause.suppressed_slot {
+						bytes.extend_from_slice(&suppressed.to_le_bytes());
+					}
 				}
 			}
 		}
@@ -1695,6 +1727,7 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 		Instruction::Divide => bytes.push(OPCODE_DIVIDE),
 		Instruction::Dup2 => bytes.push(OPCODE_DUP2),
 		Instruction::EndTry => bytes.push(OPCODE_END_TRY),
+		Instruction::EnterTaskScope => bytes.push(OPCODE_ENTER_TASK_SCOPE),
 		Instruction::Equal => bytes.push(OPCODE_EQUAL),
 		Instruction::ExecuteQuery(query_index) => {
 			bytes.push(OPCODE_EXECUTE_QUERY);
@@ -1724,6 +1757,7 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 			bytes.push(OPCODE_JUMP_IF_FALSE);
 			bytes.extend_from_slice(&target.to_le_bytes());
 		}
+		Instruction::LeaveTaskScope => bytes.push(OPCODE_LEAVE_TASK_SCOPE),
 		Instruction::LessThan => bytes.push(OPCODE_LESS_THAN),
 		Instruction::LessThanOrEqual => bytes.push(OPCODE_LESS_THAN_OR_EQUAL),
 		Instruction::LoadField(field_name) => {
@@ -1922,6 +1956,11 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 		Instruction::Return => bytes.push(OPCODE_RETURN),
 		Instruction::ReturnNoValue => bytes.push(OPCODE_RETURN_NO_VALUE),
 		Instruction::RunFinally => bytes.push(OPCODE_RUN_FINALLY),
+		Instruction::SpawnCall(function_index, argument_count) => {
+			bytes.push(OPCODE_SPAWN_CALL);
+			bytes.extend_from_slice(&function_index.to_le_bytes());
+			bytes.extend_from_slice(&argument_count.to_le_bytes());
+		}
 		Instruction::StoreFieldPath(field_path) => {
 			bytes.push(OPCODE_STORE_FIELD_PATH);
 			bytes.extend_from_slice(&(field_path.len() as u32).to_le_bytes());
@@ -1959,6 +1998,7 @@ fn write_instruction(bytes: &mut Vec<u8>, instruction: &Instruction) {
 		Instruction::Subtract => bytes.push(OPCODE_SUBTRACT),
 		Instruction::UpdateRecord => bytes.push(OPCODE_UPDATE_RECORD),
 		Instruction::UpdateRecordIfChanged => bytes.push(OPCODE_UPDATE_RECORD_IF_CHANGED),
+		Instruction::WaitTask => bytes.push(OPCODE_WAIT_TASK),
 		Instruction::Xor => bytes.push(OPCODE_XOR),
 	}
 }

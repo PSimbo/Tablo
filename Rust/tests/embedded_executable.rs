@@ -13,7 +13,7 @@ fn links_a_tablo_library_into_an_executable() {
 	let root = directory.path();
 	for (name, source) in [
 		("Models", "pub obj Customer { code: int = 42 }; pub fn Code(c: Customer): int { return c.code; }"),
-		("Orders", "use Customer from './Models'; pub fn FindCustomer(): Customer { return Customer {}; }"),
+		("Orders", "use Customer from './Models'; pub async fn FindCustomer(): Customer { return Customer {}; }"),
 	] {
 		let path = root.join(format!("{name}.tablo"));
 		fs::write(&path, source).unwrap();
@@ -21,7 +21,12 @@ fn links_a_tablo_library_into_an_executable() {
 		fs::remove_file(path).unwrap();
 	}
 
-	let source = "use FindCustomer from './Orders'; use Code from './Models'; fn Main(args: [text]): int { return Code(FindCustomer()); }";
+	let source = "use FindCustomer from './Orders'; use Code from './Models'; fn Main(args: [text]): int {
+		return async {
+			var child: task<Customer> = FindCustomer();
+			return Code(suspend child);
+		};
+	}";
 	let source_path = root.join("main.tablo");
 	fs::write(&source_path, source).unwrap();
 	let runtime_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -29,13 +34,18 @@ fn links_a_tablo_library_into_an_executable() {
 		cache_dir: runtime_dir.join("target/embedded-test-cache"), runtime_dir, offline: true,
 		debug_info: tablo::bytecode::DebugInfoLevel::None, runtime: tablo::executable::RuntimeMode::Embedded,
 	};
-	let output = root.join("application");
-	compile_executable(source, &source_path, &output, None, &options).unwrap();
+	let embedded = root.join("embedded");
+	let shared = root.join("shared");
+	compile_executable(source, &source_path, &embedded, None, &options).unwrap();
+	let options = ExecutableBuildOptions { runtime: tablo::executable::RuntimeMode::Shared, ..options };
+	compile_executable(source, &source_path, &shared, None, &options).unwrap();
 	fs::remove_file(root.join("Models.tlib")).unwrap();
 	fs::remove_file(root.join("Orders.tlib")).unwrap();
 	fs::remove_file(source_path).unwrap();
-	let result = Command::new(output).current_dir(root).env_remove("TABLO_CONFIG").output().unwrap();
-	assert_eq!(result.status.code(), Some(42), "{}", String::from_utf8_lossy(&result.stderr));
+	for output in [embedded, shared] {
+		let result = Command::new(output).current_dir(root).env_remove("TABLO_CONFIG").output().unwrap();
+		assert_eq!(result.status.code(), Some(42), "{}", String::from_utf8_lossy(&result.stderr));
+	}
 }
 
 #[test]

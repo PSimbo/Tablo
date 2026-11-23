@@ -27,7 +27,17 @@ pub struct Compiler {
 }
 
 #[derive(Default)]
+struct AsyncBlockExit {
+	record_depth: usize,
+	transaction_depth: usize,
+	try_depth: usize,
+	jumps: Vec<usize>,
+}
+
+#[derive(Default)]
 struct EmissionState {
+	async_blocks: Vec<AsyncBlockExit>,
+	error: Option<CompileError>,
 	cleanup_scope_stack: Vec<Vec<RecordPointerCleanup>>,
 	instructions: Vec<Instruction>,
 	local_scope_stack: Vec<Vec<usize>>,
@@ -251,6 +261,7 @@ impl Compiler {
 				parameter.position,
 				format!("Missing type for parameter `{}`.", parameter.name),
 			))?;
+
 			self.record_local_debug(
 				&mut emission,
 				parameter.name.clone(),
@@ -262,6 +273,11 @@ impl Compiler {
 		}
 
 		self.compile_statement(&Statement::Block(function.body.clone()), semantic_program, &mut emission)?;
+
+		if let Some(error) = emission.error.take() {
+			return Err(error);
+		}
+
 		self.close_all_debug_scopes(&mut emission);
 
 		Ok((
@@ -434,6 +450,28 @@ impl Compiler {
 					}
 				}
 			}
+			Expr::AsyncBlock { block, end_position } => {
+				self.emit(emission, Instruction::EnterTaskScope, block.position);
+
+				emission.async_blocks.push(AsyncBlockExit {
+					record_depth: emission.cleanup_scope_stack.len(),
+					transaction_depth: emission.transaction_scope_stack.len(),
+					try_depth: emission.try_scopes.len(),
+					jumps: Vec::new(),
+				});
+
+				if let Err(error) = self.compile_statement(&Statement::Block(block.clone()), semantic_program, emission) {
+					emission.error = Some(error);
+				}
+
+				let end = emission.instructions.len() as u32;
+
+				for jump in emission.async_blocks.pop().unwrap().jumps {
+					emission.instructions[jump] = Instruction::Jump(end);
+				}
+
+				self.emit(emission, Instruction::LeaveTaskScope, *end_position);
+			}
 			Expr::Binary(binary) => {
 				if let Some(value) = semantic_program.constant_boolean_expression(binary.position) {
 					let evaluated_expression = match (binary.left.as_ref(), binary.right.as_ref()) {
@@ -458,7 +496,16 @@ impl Compiler {
 			Expr::Boolean(BooleanLiteral { value, .. }) => {
 				self.emit(emission, Instruction::PushBoolean(*value), expression_position);
 			}
-			Expr::Call(CallExpr { arguments, .. }) => {
+			Expr::Call(CallExpr { arguments, mode, .. }) => {
+				if *mode == CallMode::WaitHandle {
+					let slot = semantic_program.identifier_slot(expression.position()).expect("Validated task handle");
+
+					self.emit(emission, Instruction::LoadLocal(slot), expression_position);
+					self.emit(emission, Instruction::WaitTask, expression_position);
+
+					return;
+				}
+
 				if let Some((object_type_id, private_types)) = semantic_program.object_conversions.get(&expression.position()) {
 					self.compile_into_with_debug_position(arguments[0].expression().unwrap(), semantic_program, emission, debug_position);
 					self.emit(emission, Instruction::ConvertObject { object_type_id: *object_type_id, private_types: private_types.clone() }, expression_position);
@@ -477,13 +524,17 @@ impl Compiler {
 
 				if let Some(group_boundary_call) = semantic_program.group_boundary_call(expression.position()) {
 					self.emit(emission, Instruction::LoadLocal(group_boundary_call.record_slot), expression_position);
+
 					for key_name in &group_boundary_call.key_names {
 						self.emit(emission, Instruction::PushText(key_name.clone()), expression_position);
 					}
+
 					let argument_count = group_boundary_call.key_names.len() as u32 + 1;
 					let built_in = semantic_program.built_in_call_target(expression.position())
 						.unwrap_or_else(|| panic!("Missing built-in target for group-boundary call."));
+
 					self.emit(emission, Instruction::CallBuiltIn(built_in, argument_count), expression_position);
+
 					return;
 				}
 
@@ -495,12 +546,14 @@ impl Compiler {
 					let Some(argument_expression) = argument.expression() else {
 						continue;
 					};
+
 					if let Some(Some(slot)) = reference_slots.and_then(|slots| slots.get(index)) {
 						self.emit(emission, Instruction::LoadReference(*slot), expression_position);
 					}
 					else {
 						self.compile_into_with_debug_position(argument_expression, semantic_program, emission, Some(expression_position));
 					}
+
 					materialized_argument_indices[index] = Some(materialized_argument_count);
 					materialized_argument_count += 1;
 				}
@@ -617,7 +670,16 @@ impl Compiler {
 
 					let function_index = semantic_program.call_target(expression.position())
 						.unwrap_or_else(|| panic!("Missing function target for call expression."));
-					self.emit(emission, Instruction::Call(function_index, argument_bindings.len() as u32), expression_position);
+					let arity = argument_bindings.len() as u32;
+
+					let instruction = match mode {
+						CallMode::Block | CallMode::Suspend => Instruction::AwaitCall(function_index, arity),
+						CallMode::Plain if matches!(semantic_program.call_return_type(expression.position()), Some(DataType::Task(_))) => Instruction::SpawnCall(function_index, arity),
+						CallMode::Plain => Instruction::Call(function_index, arity),
+						CallMode::WaitHandle => unreachable!("Handled above"),
+					};
+
+					self.emit(emission, instruction, expression_position);
 				}
 			}
 			Expr::Count(_) => {
@@ -631,6 +693,7 @@ impl Compiler {
 					.unwrap_or_else(|| panic!("Missing compiled database query for count expression."))
 					.clone();
 				let query_index = self.compiled_queries.len() as u32;
+
 				self.compiled_queries.push(query);
 				self.emit(emission, Instruction::ExecuteQuery(query_index), expression_position);
 			}
@@ -898,6 +961,10 @@ impl Compiler {
 		let mut emission = EmissionState::default();
 		self.enter_debug_scope(&mut emission);
 		self.compile_entry_body(program, semantic_program, &mut emission)?;
+
+		if let Some(error) = emission.error.take() {
+			return Err(error);
+		}
 
 		self.close_all_debug_scopes(&mut emission);
 		code_body_debug.push(CodeBodyDebugInfo::new(None, emission.positions, emission.locals, None));
@@ -1278,7 +1345,21 @@ impl Compiler {
 
 				Ok(())
 			}
-			Statement::Return(ReturnStatement { value, .. }) => {
+			Statement::Return(ReturnStatement { value, position }) => {
+				if !emission.async_blocks.is_empty() {
+					if let Some(value) = value {
+						self.compile_into(value, semantic_program, emission);
+					}
+
+					let exit = emission.async_blocks.last().unwrap();
+					self.emit_exit_cleanups(emission, exit.record_depth, exit.transaction_depth, exit.try_depth, None, *position);
+
+					emission.async_blocks.last_mut().unwrap().jumps.push(emission.instructions.len());
+					self.emit(emission, Instruction::Jump(0), *position);
+
+					return Ok(());
+				}
+
 				if let Some(value) = value {
 					self.compile_into(value, semantic_program, emission);
 					self.emit_exit_cleanups(emission, 0, 0, 0, None, value.position());
@@ -1408,7 +1489,7 @@ impl Compiler {
 		type_position: usize,
 	) {
 		match data_type {
-			crate::ast::DataType::Any => unreachable!("Non-nullable any requires an initializer."),
+			crate::ast::DataType::Any | crate::ast::DataType::Task(_) => unreachable!("This type requires an initializer."),
 			crate::ast::DataType::Array(_) => {
 				self.emit(emission, Instruction::MakeArray(0), debug_position);
 			}
@@ -1603,7 +1684,13 @@ impl Compiler {
 					(semantic.catch_types[&name.position].clone(), slot)
 				});
 
-				clauses.push(CatchTarget { target, binding });
+				let suppressed_slot = clause.suppressed.as_ref().map(|name| {
+					let slot = semantic.declaration_slot(name.position).expect("Validated suppressed failure binding");
+					self.record_local_debug(emission, name.name.clone(), slot, "[SuppressedFailure]".into(), true, target);
+					slot
+				});
+
+				clauses.push(CatchTarget { target, binding, suppressed_slot });
 				self.compile_statement(&clause.body, semantic, emission)?;
 				self.exit_debug_scope(emission);
 				exits.push(emission.instructions.len());
@@ -1781,12 +1868,14 @@ pub(crate) fn collect_all_function_declarations(program: &AstProgram) -> Vec<&Fu
 	functions
 }
 
-fn collect_function_declaration<'a>(function: &'a FunctionDeclaration, functions: &mut Vec<&'a FunctionDeclaration>) {
+pub(crate) fn collect_function_declaration<'a>(function: &'a FunctionDeclaration, functions: &mut Vec<&'a FunctionDeclaration>) {
 	functions.push(function);
 	collect_functions_from_statements(function.body.statements.as_slice(), functions);
 }
 
 fn collect_functions_from_statement<'a>(statement: &'a Statement, functions: &mut Vec<&'a FunctionDeclaration>) {
+	statement.visit_expression_blocks(&mut |block| collect_functions_from_statements(&block.statements, functions));
+
 	match statement {
 		Statement::Block(block) => collect_functions_from_statements(block.statements.as_slice(), functions),
 		Statement::Break(_) => {}
@@ -1829,6 +1918,7 @@ fn collect_functions_from_statements<'a>(statements: &'a [Statement], functions:
 
 fn expression_produces_runtime_value(expression: &Expr, semantic_program: &SemanticProgram) -> bool {
 	match expression {
+		Expr::AsyncBlock { block, .. } => semantic_program.value_blocks.contains(&block.position),
 		Expr::Call(call) => semantic_program.call_returns_value(call.position),
 		_ => true,
 	}
@@ -1927,6 +2017,7 @@ mod tests {
 			functions: vec![],
 			objects: vec![],
 			result: Some(Expr::Call(CallExpr {
+				mode: CallMode::Plain,
 				arguments: vec![
 					CallArgument {
 						is_by_ref: false,
@@ -3110,7 +3201,8 @@ mod tests {
 			.compile_program_with_existing_semantics(&program, &semantic_program)
 			.unwrap();
 
-		assert_eq!(bytecode.object_type_descriptors().len(), 3);
+		assert_eq!(bytecode.object_type_descriptors().len(), 4);
+		assert!(bytecode.object_type_descriptor(ObjectTypeId::SUPPRESSED_FAILURE).is_some());
 		assert!(bytecode.object_type_descriptor(ObjectTypeId::RUNTIME_ERROR).is_some());
 		assert_eq!(
 			bytecode.object_type_descriptor(model_id),

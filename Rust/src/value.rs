@@ -73,6 +73,7 @@ pub enum Value {
 	Object(ObjectValue),
 	RecordPointer(RecordPointerValue),
 	Reference(LocalReference),
+	Task(u64),
 	Text(String),
 	Time(Time),
 	TimeTz(TimeTz),
@@ -81,6 +82,16 @@ pub enum Value {
 }
 
 impl Value {
+	pub(crate) fn can_pass_to_child(&self) -> bool {
+		match self {
+			Self::Array(values) | Self::DynamicArray { values, .. } => values.iter().all(Self::can_pass_to_child),
+			Self::Enum(value) => value.backing_value.can_pass_to_child(),
+			Self::Iterator(_) | Self::RecordPointer(_) | Self::Reference(_) | Self::Task(_) => false,
+			Self::Object(object) => object.fields.values().all(Self::can_pass_to_child),
+			_ => true,
+		}
+	}
+
 	pub(crate) fn preserve_dynamic_type(self, ty: &ObjectValueTypeDescriptor) -> Self {
 		match (ty, self) {
 			(ObjectValueTypeDescriptor::Nullable(inner), value) => value.preserve_dynamic_type(inner),
@@ -140,6 +151,7 @@ impl Display for Value {
 			}
 			Value::RecordPointer(record) => {
 				let record = record.buffer();
+
 				if !record.exists {
 					write!(f, "<record pointer: missing>")
 				}
@@ -151,6 +163,7 @@ impl Display for Value {
 				}
 			}
 			Value::Reference(_) => write!(f, "<reference>"),
+			Value::Task(id) => write!(f, "task #{id}"),
 			Value::Text(value) => write!(f, "{value}"),
 			Value::Time(value) => write!(f, "{value}"),
 			Value::TimeTz(value) => write!(f, "{value}"),
@@ -1035,6 +1048,7 @@ fn data_type_name_for_database_runtime(data_type: &DataType) -> &'static str {
 		DataType::ParsedJson => "json or JsonNull",
 		DataType::Range(_) => "range",
 		DataType::RecordPointer(_) => "record pointer",
+		DataType::Task(_) => "task",
 		DataType::Text => "text",
 		DataType::Time => "time",
 		DataType::TimeTz => "timetz",

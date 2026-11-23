@@ -95,6 +95,7 @@ impl FunctionLocalUsage {
 }
 
 struct FunctionSsaBuilder<'a> {
+	async_returns: Vec<(SsaBlockId, usize)>,
 	finalizers: Vec<SsaBlockId>,
 	handler: Option<SsaBlockId>,
 	blocks: Vec<PendingBlock>,
@@ -118,6 +119,7 @@ impl<'a> FunctionSsaBuilder<'a> {
 
 	fn build(function: &'a FunctionDeclaration, semantic_program: &'a SemanticProgram) -> SsaFunction {
 		let mut builder = Self {
+			async_returns: Vec::new(),
 			finalizers: Vec::new(),
 			handler: None,
 			blocks: vec![PendingBlock::default()],
@@ -320,12 +322,13 @@ impl<'a> FunctionSsaBuilder<'a> {
 		}
 	}
 
-	fn lower_assignment_expression(&mut self, block_id: SsaBlockId, expression: &crate::ast::AssignmentExpr) {
-		self.lower_expression(block_id, &expression.value);
+	fn lower_assignment_expression(&mut self, mut block_id: SsaBlockId, expression: &crate::ast::AssignmentExpr) -> SsaBlockId {
+		block_id = self.lower_expression(block_id, &expression.value);
 
 		match &expression.target {
 			AssignmentTarget::Path(path) => {
-				self.lower_expression(block_id, path);
+				block_id = self.lower_expression(block_id, path);
+
 				if let Some((root, _)) = crate::ast::assignment_path(path)
 					&& let Some(slot) = self.semantic_program.identifier_slot(root.position) {
 					self.push_write(block_id, slot, expression.position, SsaWriteKind::Mutation);
@@ -347,7 +350,7 @@ impl<'a> FunctionSsaBuilder<'a> {
 				}
 			}
 			AssignmentTarget::Index(target) => {
-				self.lower_expression(block_id, &target.index);
+				block_id = self.lower_expression(block_id, &target.index);
 
 				if let Some(slot) = self.semantic_program.identifier_slot(target.array.position) {
 					self.push_read(block_id, slot, target.array.position);
@@ -355,6 +358,8 @@ impl<'a> FunctionSsaBuilder<'a> {
 				}
 			}
 		}
+
+		block_id
 	}
 
 	fn lower_block_statement(
@@ -366,17 +371,31 @@ impl<'a> FunctionSsaBuilder<'a> {
 		self.lower_statement_list(&block.statements, current_block, loop_targets)
 	}
 
-	fn lower_expression(&mut self, block_id: SsaBlockId, expression: &Expr) {
+	fn lower_expression(&mut self, mut block_id: SsaBlockId, expression: &Expr) -> SsaBlockId {
 		match expression {
+			Expr::AsyncBlock { block, .. } => {
+				let continuation = self.ensure_block();
+
+				self.async_returns.push((continuation, self.finalizers.len()));
+
+				if let Some(exit) = self.lower_block_statement(block, Some(block_id), None) {
+					self.blocks[exit].terminator = Some(SsaTerminator::Jump { target: continuation });
+					self.append_predecessor(continuation, exit);
+				}
+
+				self.async_returns.pop();
+
+				return continuation;
+			}
 			Expr::Array(array) => {
 				for element in &array.elements {
-					self.lower_expression(block_id, element);
+					block_id = self.lower_expression(block_id, element);
 				}
 			}
-			Expr::Assignment(assignment) => self.lower_assignment_expression(block_id, assignment),
+			Expr::Assignment(assignment) => return self.lower_assignment_expression(block_id, assignment),
 			Expr::Binary(binary) => {
-				self.lower_expression(block_id, &binary.left);
-				self.lower_expression(block_id, &binary.right);
+				block_id = self.lower_expression(block_id, &binary.left);
+				block_id = self.lower_expression(block_id, &binary.right);
 			}
 			Expr::Boolean(_)
 			| Expr::Date(_)
@@ -390,9 +409,13 @@ impl<'a> FunctionSsaBuilder<'a> {
 			| Expr::Timestamp(_)
 			| Expr::TimestampTz(_) => {}
 			Expr::Call(call) => {
+				if call.mode == crate::ast::CallMode::WaitHandle && let Some(slot) = self.semantic_program.identifier_slot(call.position) {
+					self.push_read(block_id, slot, call.position);
+				}
+
 				for argument in &call.arguments {
 					if let Some(expression) = argument.expression() {
-						self.lower_expression(block_id, expression);
+						block_id = self.lower_expression(block_id, expression);
 					}
 				}
 
@@ -404,19 +427,19 @@ impl<'a> FunctionSsaBuilder<'a> {
 			}
 			Expr::Count(count) => {
 				if let Some(where_clause) = &count.where_clause {
-					self.lower_expression(block_id, where_clause);
+					block_id = self.lower_expression(block_id, where_clause);
 				}
 			}
 			Expr::FieldAccess(field_access) => {
-				self.lower_expression(block_id, &field_access.object);
+				block_id = self.lower_expression(block_id, &field_access.object);
 			}
 			Expr::Find(find) => {
 				if let Some(where_clause) = &find.where_clause {
-					self.lower_expression(block_id, where_clause);
+					block_id = self.lower_expression(block_id, where_clause);
 				}
 
 				for item in &find.order_by {
-					self.lower_expression(block_id, &item.expression);
+					block_id = self.lower_expression(block_id, &item.expression);
 				}
 			}
 			Expr::Identifier(identifier) => {
@@ -425,32 +448,34 @@ impl<'a> FunctionSsaBuilder<'a> {
 				}
 			}
 			Expr::Index(index) => {
-				self.lower_expression(block_id, &index.array);
-				self.lower_expression(block_id, &index.index);
+				block_id = self.lower_expression(block_id, &index.array);
+				block_id = self.lower_expression(block_id, &index.index);
 			}
 			Expr::New(_) => {}
 			Expr::ObjectConstruction(construction) => {
 				for field in &construction.fields {
-					self.lower_expression(block_id, &field.value);
+					block_id = self.lower_expression(block_id, &field.value);
 				}
 			}
 			Expr::Range(range) => {
-				self.lower_expression(block_id, &range.start);
-				self.lower_expression(block_id, &range.end);
+				block_id = self.lower_expression(block_id, &range.start);
+				block_id = self.lower_expression(block_id, &range.end);
 
 				if let Some(step) = &range.step {
-					self.lower_expression(block_id, step);
+					block_id = self.lower_expression(block_id, step);
 				}
 			}
 			Expr::Ternary(ternary) => {
-				self.lower_expression(block_id, &ternary.condition);
-				self.lower_expression(block_id, &ternary.true_branch);
-				self.lower_expression(block_id, &ternary.false_branch);
+				block_id = self.lower_expression(block_id, &ternary.condition);
+				block_id = self.lower_expression(block_id, &ternary.true_branch);
+				block_id = self.lower_expression(block_id, &ternary.false_branch);
 			}
 			Expr::Unary(unary) => {
-				self.lower_expression(block_id, &unary.operand);
+				block_id = self.lower_expression(block_id, &unary.operand);
 			}
 		}
+
+		block_id
 	}
 
 	fn lower_for_record_statement(
@@ -467,29 +492,32 @@ impl<'a> FunctionSsaBuilder<'a> {
 		});
 		self.append_predecessor(loop_header, block_id);
 
+		let mut condition = loop_header;
+
 		if let Some(where_clause) = &for_statement.where_clause {
-			self.lower_expression(loop_header, where_clause);
+			condition = self.lower_expression(condition, where_clause);
 		}
 
 		for item in &for_statement.order_by {
-			self.lower_expression(loop_header, &item.expression);
+			condition = self.lower_expression(condition, &item.expression);
 		}
 
 		for item in &for_statement.group_by {
-			self.lower_expression(loop_header, &item.expression);
+			condition = self.lower_expression(condition, &item.expression);
 		}
 
 		if let Some(limit) = &for_statement.limit {
-			self.lower_expression(loop_header, limit);
+			condition = self.lower_expression(condition, limit);
 		}
 
-		self.blocks[loop_header].terminator = Some(SsaTerminator::Branch {
+		self.blocks[condition].terminator = Some(SsaTerminator::Branch {
 			else_block: exit_block,
 			position: for_statement.position,
 			then_block: body_block,
 		});
-		self.append_predecessor(body_block, loop_header);
-		self.append_predecessor(exit_block, loop_header);
+
+		self.append_predecessor(body_block, condition);
+		self.append_predecessor(exit_block, condition);
 
 		if let Some(slot) = self.semantic_program.declaration_slot(for_statement.variable.position) {
 			self.push_write(body_block, slot, for_statement.variable.position, SsaWriteKind::LoopBinding);
@@ -524,14 +552,16 @@ impl<'a> FunctionSsaBuilder<'a> {
 			target: loop_header,
 		});
 		self.append_predecessor(loop_header, block_id);
-		self.lower_expression(loop_header, &for_statement.iterable);
-		self.blocks[loop_header].terminator = Some(SsaTerminator::Branch {
+
+		let condition = self.lower_expression(loop_header, &for_statement.iterable);
+
+		self.blocks[condition].terminator = Some(SsaTerminator::Branch {
 			else_block: exit_block,
 			position: for_statement.position,
 			then_block: body_block,
 		});
-		self.append_predecessor(body_block, loop_header);
-		self.append_predecessor(exit_block, loop_header);
+		self.append_predecessor(body_block, condition);
+		self.append_predecessor(exit_block, condition);
 
 		if let Some(slot) = self.semantic_program.declaration_slot(for_statement.variable.position) {
 			self.push_write(body_block, slot, for_statement.variable.position, SsaWriteKind::LoopBinding);
@@ -557,13 +587,13 @@ impl<'a> FunctionSsaBuilder<'a> {
 		Some(exit_block)
 	}
 
-	fn lower_if_statement(&mut self, block_id: SsaBlockId, if_statement: &crate::ast::IfStatement, loop_targets: Option<LoopTargets>) -> Option<SsaBlockId> {
+	fn lower_if_statement(&mut self, mut block_id: SsaBlockId, if_statement: &crate::ast::IfStatement, loop_targets: Option<LoopTargets>) -> Option<SsaBlockId> {
 		match &if_statement.condition {
 			IfCondition::Expression(condition) => {
-				self.lower_expression(block_id, condition);
+				block_id = self.lower_expression(block_id, condition);
 			}
 			IfCondition::RecordPointerBinding(binding) => {
-				self.lower_expression(block_id, &binding.initial_value);
+				block_id = self.lower_expression(block_id, &binding.initial_value);
 			}
 		}
 
@@ -612,12 +642,14 @@ impl<'a> FunctionSsaBuilder<'a> {
 		}
 	}
 
-	fn lower_record_pointer_declaration(&mut self, block_id: SsaBlockId, declaration: &RecordPointerDeclaration) {
-		self.lower_expression(block_id, &declaration.initial_value);
+	fn lower_record_pointer_declaration(&mut self, mut block_id: SsaBlockId, declaration: &RecordPointerDeclaration) -> SsaBlockId {
+		block_id = self.lower_expression(block_id, &declaration.initial_value);
 
 		if let Some(slot) = self.semantic_program.declaration_slot(declaration.position) {
 			self.push_write(block_id, slot, declaration.position, SsaWriteKind::Declaration);
 		}
+
+		block_id
 	}
 
 	fn lower_statement(
@@ -626,7 +658,7 @@ impl<'a> FunctionSsaBuilder<'a> {
 		current_block: Option<SsaBlockId>,
 		loop_targets: Option<LoopTargets>,
 	) -> Option<SsaBlockId> {
-		let Some(block_id) = current_block else {
+		let Some(mut block_id) = current_block else {
 			return None;
 		};
 
@@ -672,15 +704,17 @@ impl<'a> FunctionSsaBuilder<'a> {
 			}
 			Statement::EnumDeclaration(_) => Some(block_id),
 			Statement::Expression(expression) => {
-				self.lower_expression(block_id, expression);
+				block_id = self.lower_expression(block_id, expression);
 				Some(block_id)
 			}
 			Statement::Fail { value, .. } => {
-				self.lower_expression(block_id, value);
+				block_id = self.lower_expression(block_id, value);
 				self.blocks[block_id].terminator = Some(SsaTerminator::Fail { handler: self.handler });
+
 				if let Some(handler) = self.handler {
 					self.append_predecessor(handler, block_id);
 				}
+
 				None
 			}
 			Statement::For(for_statement) => self.lower_for_statement(block_id, for_statement),
@@ -688,12 +722,21 @@ impl<'a> FunctionSsaBuilder<'a> {
 			Statement::FunctionDeclaration(_) => Some(block_id),
 			Statement::If(if_statement) => self.lower_if_statement(block_id, if_statement, loop_targets),
 			Statement::RecordPointerDeclaration(declaration) => {
-				self.lower_record_pointer_declaration(block_id, declaration);
+				block_id = self.lower_record_pointer_declaration(block_id, declaration);
 				Some(block_id)
 			}
 			Statement::Return(return_statement) => {
 				if let Some(value) = &return_statement.value {
-					self.lower_expression(block_id, value);
+					block_id = self.lower_expression(block_id, value);
+				}
+
+				if let Some(&(target, depth)) = self.async_returns.last() {
+					let block_id = self.finalizer_edges(block_id, depth);
+
+					self.blocks[block_id].terminator = Some(SsaTerminator::Jump { target });
+					self.append_predecessor(target, block_id);
+
+					return None;
 				}
 
 				let block_id = self.finalizer_edges(block_id, 0);
@@ -743,6 +786,10 @@ impl<'a> FunctionSsaBuilder<'a> {
 						entry
 					};
 
+					if let Some(name) = &clause.suppressed && let Some(slot) = self.semantic_program.declaration_slot(name.position) {
+						self.push_write(arm, slot, name.position, SsaWriteKind::Declaration);
+					}
+
 					let handled = self.lower_statement(&clause.body, Some(arm), loop_targets);
 					normal = self.join_exits(normal, handled);
 				}
@@ -776,7 +823,7 @@ impl<'a> FunctionSsaBuilder<'a> {
 			Statement::Use(_) => Some(block_id),
 			Statement::VariableDeclaration(declaration) => {
 				if let Some(initial_value) = &declaration.initial_value {
-					self.lower_expression(block_id, initial_value);
+					block_id = self.lower_expression(block_id, initial_value);
 				}
 
 				if let Some(slot) = self.semantic_program.declaration_slot(declaration.position) {
@@ -833,14 +880,16 @@ impl<'a> FunctionSsaBuilder<'a> {
 			target: condition_block,
 		});
 		self.append_predecessor(condition_block, block_id);
-		self.lower_expression(condition_block, &while_statement.condition);
-		self.blocks[condition_block].terminator = Some(SsaTerminator::Branch {
+
+		let condition = self.lower_expression(condition_block, &while_statement.condition);
+
+		self.blocks[condition].terminator = Some(SsaTerminator::Branch {
 			else_block: exit_block,
 			position: while_statement.position,
 			then_block: body_block,
 		});
-		self.append_predecessor(body_block, condition_block);
-		self.append_predecessor(exit_block, condition_block);
+		self.append_predecessor(body_block, condition);
+		self.append_predecessor(exit_block, condition);
 
 		let body_exit = self.lower_block_statement(
 			&while_statement.body,
@@ -1233,6 +1282,12 @@ fn collect_statement_function_local_usage(
 	ssa_program: &SsaProgram,
 	functions: &mut Vec<FunctionLocalUsage>,
 ) {
+	statement.visit_expression_blocks(&mut |block| {
+		for nested in &block.statements {
+			collect_statement_function_local_usage(nested, semantic_program, ssa_program, functions);
+		}
+	});
+
 	match statement {
 		Statement::Block(block) => {
 			for statement in &block.statements {
@@ -1292,6 +1347,12 @@ fn collect_statement_function_local_usage(
 }
 
 fn collect_statement_function_ssa(statement: &Statement, semantic_program: &SemanticProgram, functions: &mut Vec<SsaFunction>) {
+	statement.visit_expression_blocks(&mut |block| {
+		for nested in &block.statements {
+			collect_statement_function_ssa(nested, semantic_program, functions);
+		}
+	});
+
 	match statement {
 		Statement::Block(block) => {
 			for statement in &block.statements {
@@ -1363,6 +1424,12 @@ fn collect_statement_local_declarations(
 	semantic_program: &SemanticProgram,
 	locals: &mut Vec<LocalUsage>,
 ) {
+	statement.visit_expression_blocks(&mut |block| {
+		for nested in &block.statements {
+			collect_statement_local_declarations(nested, semantic_program, locals);
+		}
+	});
+
 	match statement {
 		Statement::Block(block) => {
 			collect_statement_list_local_declarations(&block.statements, semantic_program, locals);
@@ -1414,6 +1481,10 @@ fn collect_statement_local_declarations(
 		}
 		Statement::Try(statement) => {
 			for clause in &statement.catches {
+				if let Some(name) = &clause.suppressed {
+					collect_identifier_declaration(name, LocalDeclarationKind::CatchBinding, semantic_program, locals);
+				}
+
 				if let Some((name, _)) = &clause.binding {
 					collect_identifier_declaration(name, LocalDeclarationKind::CatchBinding, semantic_program, locals);
 				}

@@ -2114,7 +2114,11 @@ Cancellation propagates downward through the task tree. Cancelling a task or sco
 
 An unhandled error in a child task fails the enclosing structured asynchronous scope. When this occurs, sibling child tasks are cancelled, the scope waits for cancellation cleanup to complete, and the error then propagates to the parent scope. Runtime errors raised in concurrent code preserve a coherent logical call stack across suspension and resumption points, and runtime stack traces resemble those of synchronous code as closely as possible.
 
+The failure that initiates sibling cancellation remains the primary failure. If a failure escapes a cancelled sibling’s cleanup, the runtime retains its raised value and its own logical call stack as a suppressed failure. Ordinary cancellation adds no entry. After cleanup completes, the parent can inspect these entries in a catch handler. An unhandled diagnostic shows the primary failure first, then each suppressed failure with its stack.
+
 If child tasks are spawned within a `transaction { ... }` block, they participate in the same enclosing transaction/savepoint tree rather than creating independent transaction contexts. If a child task within a transaction fails or is cancelled, the corresponding transaction scope fails and is rolled back in accordance with the normal transaction rules. The language guarantees the transactional semantics of concurrent work within a transaction, although implementations may serialize database operations within a shared transaction if required by the backend or runtime.
+
+A child may handle a failure and complete successfully. If a failure escapes the child, catching it in the caller lets the handler inspect it, but the transaction in which the child started must still roll back. An attempt to commit that transaction raises the original failure with its logical call stack. Writes made by cancellation cleanup participate in the same rollback. When the failed transaction is a nested savepoint, a handler outside that savepoint can continue in the enclosing transaction.
 
 Concurrent child tasks must not freely share ordinary mutable in-memory state. Immutable captured values may be shared across concurrent tasks. Shared mutable access to database data is permitted, subject to the locking and transaction semantics of the underlying database backend and the corresponding rules of Tablo record pointers and transactions.
 
@@ -2150,6 +2154,25 @@ fn UpdateCustomer(customerId: int, name: text) {
 A `try` block may be followed by one or more `catch` blocks and an optional `finally` block, or by a `finally` block alone.
 
 A typed handler has the form `catch name: Type { ... }`. Both the name and the type are required. The name is an immutable binding to the raised value and is in scope only within that handler. A bare `catch { ... }` handles any remaining failure without binding its value and must be the last `catch`.
+
+A typed handler can request a second immutable binding with `catch name: Type, suppressed { ... }`. The second name is chosen by the programmer and has type `[SuppressedFailure]`. Each entry contains the public fields `value: any` (the original raised value) and `stackTrace: [text]` (logical frames starting at the failure site). The array is empty when there are no suppressed failures. Entries appear in the order the runtime observes them. When a failed transaction raises the primary failure again at commit, its suppressed failures remain available.
+
+~~~tablo
+try {
+  async {
+    ImportOrders();
+    WriteReport();
+  }
+}
+catch reason: text, cleanupErrors {
+  displn(reason);
+  for detail in cleanupErrors {
+    for frame in detail.stackTrace {
+      displn(frame);
+    }
+  }
+}
+~~~
 
 Handlers are tested in source order. The first handler that matches the concrete runtime type of the raised value executes. Matching performs no conversions. For example, `fail 1;` matches `catch err: int` and skips `catch err: float`. Object and enum types match by their declared identity.
 

@@ -106,13 +106,11 @@ impl Parser {
 	}
 
 	fn current_starts_function_declaration(&self) -> bool {
-		match self.current() {
-			Some(token) if token.kind == TokenKind::FnKeyword => true,
-			Some(token) if token.kind == TokenKind::PubKeyword => {
-				self.tokens.get(self.position + 1).is_some_and(|next| next.kind == TokenKind::FnKeyword)
-			}
-			_ => false,
-		}
+		let mut tokens = self.tokens[self.position..].iter().peekable();
+
+		tokens.next_if(|token| token.kind == TokenKind::PubKeyword);
+		tokens.next_if(|token| token.kind == TokenKind::AsyncKeyword);
+		tokens.next().is_some_and(|token| token.kind == TokenKind::FnKeyword)
 	}
 
 	fn current_starts_object_declaration(&self) -> bool {
@@ -372,7 +370,7 @@ impl Parser {
 		}))
 	}
 
-	fn parse_call_expression(&mut self, callee: Expr, start: usize) -> Result<Expr, ParseError> {
+	fn parse_call_expression(&mut self, callee: Expr, start: usize, mode: CallMode) -> Result<Expr, ParseError> {
 		let callee = match callee {
 			Expr::Identifier(identifier) => identifier,
 			callee @ Expr::FieldAccess(_) => IdentifierExpr {
@@ -472,6 +470,7 @@ impl Parser {
 		}
 
 		Ok(Expr::Call(CallExpr {
+			mode,
 			arguments,
 			callee,
 			position: start,
@@ -816,6 +815,13 @@ impl Parser {
 		else {
 			Visibility::Private
 		};
+
+		let is_async = self.current().is_some_and(|token| token.kind == TokenKind::AsyncKeyword);
+
+		if is_async {
+			self.next();
+		}
+
 		let function_keyword = self.expect_token(TokenKind::FnKeyword, "Expected `fn` to start function declaration.")?;
 		let name = self.expect_token(TokenKind::Identifier, "Expected function name.")?;
 		self.expect_token(TokenKind::LeftParenthesis, "Expected `(` after function name.")?;
@@ -860,6 +866,7 @@ impl Parser {
 		};
 
 		Ok(FunctionDeclaration {
+			is_async,
 			body,
 			name: name.lexeme,
 			parameters,
@@ -1152,7 +1159,7 @@ impl Parser {
 			}
 			TokenKind::LeftBrace => self.parse_object_construction_expression(left, operator.start),
 			TokenKind::LeftBracket => self.parse_index_expression(left, operator.start),
-			TokenKind::LeftParenthesis => self.parse_call_expression(left, operator.start),
+			TokenKind::LeftParenthesis => self.parse_call_expression(left, operator.start, CallMode::Plain),
 			TokenKind::LessThan => {
 				let right = self.parse_expression_with_binding_power(binding_power, treat_equal_as_equality)?;
 
@@ -1656,6 +1663,31 @@ impl Parser {
 		})?;
 
 		match token.kind {
+			TokenKind::AsyncKeyword => {
+				let Statement::Block(block) = self.parse_block_statement()? else {
+					unreachable!("Expected a block after async");
+				};
+
+				Ok(Expr::AsyncBlock { block, end_position: self.tokens[self.position - 1].start })
+			}
+			TokenKind::BlockKeyword | TokenKind::SuspendKeyword => {
+				let mode = if token.kind == TokenKind::BlockKeyword { CallMode::Block } else { CallMode::Suspend };
+				let name = self.expect_token(TokenKind::Identifier, "Expected an async function name.")?;
+
+				if mode == CallMode::Suspend && !self.current().is_some_and(|token| token.kind == TokenKind::LeftParenthesis) {
+					return Ok(Expr::Call(CallExpr {
+						mode: CallMode::WaitHandle,
+						arguments: Vec::new(),
+						callee: IdentifierExpr { name: name.lexeme, position: name.start },
+						position: token.start,
+					}));
+				}
+
+				let callee = self.parse_identifier_expression(name);
+
+				self.expect_token(TokenKind::LeftParenthesis, "Expected a direct async function call.")?;
+				self.parse_call_expression(callee, token.start, mode)
+			}
 			TokenKind::CountKeyword => self.parse_count_expression(token.start),
 			TokenKind::Dash => self.parse_negation_expression_with_position(token.start),
 			TokenKind::DateLiteral => self.parse_temporal_literal(token),
@@ -1714,6 +1746,15 @@ impl Parser {
 			TokenKind::DateKeyword => Ok(DataType::Date),
 			TokenKind::DecKeyword => Ok(DataType::Dec),
 			TokenKind::FloatKeyword => Ok(DataType::Float),
+			TokenKind::Identifier if token.lexeme == "task" && self.current().is_some_and(|next| next.kind == TokenKind::LessThan) => {
+				self.next();
+
+				let result = self.parse_data_type()?;
+
+				self.expect_token(TokenKind::GreaterThan, "Expected `>` after task result type.")?;
+
+				Ok(DataType::Task(Box::new(result)))
+			}
 			TokenKind::Identifier => {
 				let position = token.start;
 				Ok(DataType::Object(ObjectTypeName::new(
@@ -1911,7 +1952,7 @@ impl Parser {
 				}))
 			}
 			TokenKind::LeftBracket => self.parse_query_index_expression(left, operator.start),
-			TokenKind::LeftParenthesis => self.parse_call_expression(left, operator.start),
+			TokenKind::LeftParenthesis => self.parse_call_expression(left, operator.start, CallMode::Plain),
 			TokenKind::LessThan => {
 				let right = self.parse_query_expression_with_binding_power(binding_power)?;
 
@@ -2130,7 +2171,11 @@ impl Parser {
 			Some(token) if matches!(token.kind, TokenKind::ConstKeyword | TokenKind::VarKeyword) => self.parse_variable_declaration_statement(),
 			Some(_) => {
 				let expression = self.parse_assignment_expression()?;
-				self.expect_token(TokenKind::Semicolon, "Expected `;` after expression statement.")?;
+
+				if !matches!(&expression, Expr::AsyncBlock { .. }) || self.current().is_some_and(|next| next.kind == TokenKind::Semicolon) {
+					self.expect_token(TokenKind::Semicolon, "Expected `;` after expression statement.")?;
+				}
+
 				Ok(Statement::Expression(expression))
 			}
 			None => Err(ParseError {
@@ -2296,7 +2341,15 @@ impl Parser {
 				Some((IdentifierExpr { name: name.lexeme, position: name.start }, self.parse_data_type()?))
 			};
 
-			catches.push(CatchClause { binding, body: self.parse_block_statement()? });
+			let suppressed = if self.current().is_some_and(|token| token.kind == TokenKind::Comma) {
+				self.next();
+				let name = self.expect_token(TokenKind::Identifier, "Expected a name for suppressed failures.")?;
+				Some(IdentifierExpr { name: name.lexeme, position: name.start })
+			} else {
+				None
+			};
+
+			catches.push(CatchClause { binding, suppressed, body: self.parse_block_statement()? });
 		}
 
 		let finally = if self.current().is_some_and(|token| token.kind == TokenKind::FinallyKeyword) {
@@ -2594,6 +2647,10 @@ mod tests {
 
 	fn normalize_expr(expression: Expr) -> Expr {
 		match expression {
+			Expr::AsyncBlock { block, .. } => Expr::AsyncBlock {
+				block: normalize_block(block),
+				end_position: 0,
+			},
 			Expr::Array(ArrayLiteral { elements, .. }) => Expr::Array(ArrayLiteral {
 				elements: elements.into_iter().map(normalize_expr).collect(),
 				position: 0,
@@ -2625,10 +2682,12 @@ mod tests {
 				value,
 			}),
 			Expr::Call(CallExpr {
+				mode,
 				arguments,
 				callee,
 				..
 			}) => Expr::Call(CallExpr {
+				mode,
 				arguments: arguments.into_iter().map(normalize_call_argument).collect(),
 				callee: normalize_identifier(callee),
 				position: 0,
@@ -2765,6 +2824,7 @@ mod tests {
 
 	fn normalize_function_declaration(function: FunctionDeclaration) -> FunctionDeclaration {
 		FunctionDeclaration {
+			is_async: function.is_async,
 			body: normalize_block(function.body),
 			name: function.name,
 			parameters: function.parameters.into_iter().map(normalize_function_parameter).collect(),
@@ -2948,6 +3008,7 @@ mod tests {
 			Statement::Try(statement) => Statement::Try(TryStatement {
 				body: Box::new(normalize_statement(*statement.body)),
 				catches: statement.catches.into_iter().map(|clause| CatchClause {
+					suppressed: clause.suppressed.map(normalize_identifier),
 					binding: clause.binding.map(|(name, ty)| (normalize_identifier(name), ty)),
 					body: normalize_statement(clause.body),
 				}).collect(),
@@ -3260,6 +3321,7 @@ mod tests {
 			Program {
 				functions: vec![
 					FunctionDeclaration {
+						is_async: false,
 						body: BlockStatement {
 							position: 0,
 							statements: vec![
@@ -3504,6 +3566,7 @@ mod tests {
 		assert_eq!(
 			parse("bump(&x)"),
 			Expr::Call(CallExpr {
+				mode: CallMode::Plain,
 				arguments: vec![
 					CallArgument {
 						is_by_ref: true,
@@ -3531,6 +3594,7 @@ mod tests {
 			Program {
 				functions: vec![
 					FunctionDeclaration {
+						is_async: false,
 						body: BlockStatement {
 							position: 0,
 							statements: vec![
@@ -3577,6 +3641,7 @@ mod tests {
 		assert_eq!(
 			parse("int(value)"),
 			Expr::Call(CallExpr {
+				mode: CallMode::Plain,
 				arguments: vec![
 					CallArgument {
 						is_by_ref: false,
@@ -4176,6 +4241,7 @@ mod tests {
 									position: 0,
 								}),
 								expression: Expr::Call(CallExpr {
+									mode: CallMode::Plain,
 									arguments: vec![
 										CallArgument {
 											is_by_ref: false,
@@ -4359,6 +4425,7 @@ mod tests {
 		assert_eq!(
 			parse("add(1, 2)"),
 			Expr::Call(CallExpr {
+				mode: CallMode::Plain,
 				arguments: vec![
 					CallArgument {
 						is_by_ref: false,
@@ -4395,6 +4462,7 @@ mod tests {
 			Program {
 				functions: vec![
 					FunctionDeclaration {
+						is_async: false,
 						body: BlockStatement {
 							position: 0,
 							statements: vec![
@@ -4441,6 +4509,7 @@ mod tests {
 				],
 				objects: vec![],
 				result: Some(Expr::Call(CallExpr {
+					mode: CallMode::Plain,
 					arguments: vec![
 						CallArgument {
 							is_by_ref: false,
@@ -5194,10 +5263,12 @@ mod tests {
 			Program {
 				functions: vec![
 					FunctionDeclaration {
+						is_async: false,
 						body: BlockStatement {
 							position: 0,
 							statements: vec![
 								Statement::FunctionDeclaration(FunctionDeclaration {
+									is_async: false,
 									body: BlockStatement {
 										position: 0,
 										statements: vec![
@@ -5277,6 +5348,7 @@ mod tests {
 			Program {
 				functions: vec![
 					FunctionDeclaration {
+						is_async: false,
 						body: BlockStatement {
 							position: 0,
 							statements: vec![
@@ -5502,6 +5574,7 @@ mod tests {
 			Program {
 				functions: vec![
 					FunctionDeclaration {
+						is_async: false,
 						body: BlockStatement {
 							position: 0,
 							statements: vec![
@@ -5592,6 +5665,7 @@ mod tests {
 		assert_eq!(normalize_program(program), Program {
 			functions: vec![
 				FunctionDeclaration {
+					is_async: false,
 					body: BlockStatement {
 						position: 0,
 						statements: vec![
@@ -5773,6 +5847,7 @@ mod tests {
 			Program {
 				functions: vec![
 					FunctionDeclaration {
+						is_async: false,
 						body: BlockStatement {
 							position: 0,
 							statements: vec![],
@@ -6229,6 +6304,7 @@ mod tests {
 			Program {
 				functions: vec![
 					FunctionDeclaration {
+						is_async: false,
 						body: BlockStatement {
 							position: 0,
 							statements: vec![
@@ -6312,6 +6388,7 @@ mod tests {
 			Program {
 				functions: vec![
 					FunctionDeclaration {
+						is_async: false,
 						body: BlockStatement {
 							position: 0,
 							statements: vec![
@@ -6462,6 +6539,7 @@ mod tests {
 			Program {
 				functions: vec![
 					FunctionDeclaration {
+						is_async: false,
 						body: BlockStatement {
 							position: 0,
 							statements: vec![

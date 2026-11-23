@@ -311,11 +311,15 @@ impl DapServer {
 				})
 			});
 
+			let body = frame.source_location().and_then(|location| location.body_name()).unwrap_or("<entry>");
+			let name = match &frame.awaited_at {
+				Some(wait) => format!("{body} (awaited at {}:{}:{})", wait.display_name().unwrap_or("<source>"), wait.line(), wait.column()),
+				None => body.to_owned(),
+			};
+
 			json!({
 				"id": (index + 1) as i64,
-				"name": frame.source_location()
-					.and_then(|location| location.body_name())
-					.unwrap_or("<entry>"),
+				"name": name,
 				"line": frame.source_location().map(|location| location.line()).unwrap_or(1),
 				"column": frame.source_location().map(|location| location.column()).unwrap_or(1),
 				"source": source,
@@ -1247,6 +1251,7 @@ fn runtime_variable_type_name(value: &Value) -> &'static str {
 		Value::Object(_) => "object",
 		Value::RecordPointer(_) => "record pointer",
 		Value::Reference(_) => "reference",
+		Value::Task(_) => "task",
 		Value::Text(_) => "text",
 		Value::Time(_) => "time",
 		Value::TimeTz(_) => "timetz",
@@ -1293,7 +1298,8 @@ mod tests {
 			instruction_index: 0,
 			message: String::from("paused"),
 			source_location: None,
-			stack_trace: vec![VmStackFrame { instruction_index: 0, locals: Vec::new(), source_location: None }],
+			suppressed: Vec::new(),
+			stack_trace: vec![VmStackFrame { awaited_at: None, instruction_index: 0, locals: Vec::new(), source_location: None }],
 		});
 		let messages = server.handle_evaluate(1, Some(json!({
 			"expression": r#"json(text({ "values": [999999999999999999999999999999999999999, null] }))"#,
@@ -1328,6 +1334,44 @@ mod tests {
 	}
 
 	#[test]
+	fn suspended_caller_shows_the_compiled_library_task_result_type() {
+		let directory = tempfile::tempdir().unwrap();
+		let root = directory.path();
+		let module = root.join("Jobs.tablo");
+		let source = "pub obj Job { pub id: int };
+pub async fn Fetch(): Job {
+	return Job { id: 42 };
+}";
+		tablo::executable::compile_library(source, &module, &root.join("Jobs.tlib"), None, tablo::bytecode::DebugInfoLevel::Full).unwrap();
+		let object = root.join("main.tobj");
+		tablo::compile_with_source_name("use Fetch from './Jobs';
+fn Main(args: [text]): int {
+	return async {
+		var child: task<Job> = Fetch();
+		var job: Job = suspend child;
+		return job.id;
+	};
+}", root.join("main.tablo").display().to_string(), &object).unwrap();
+		let program = read_program_from_path(object).unwrap();
+		let mut session = DebuggerSession::new(&program);
+		session.set_breakpoints(session.resolve_source_breakpoints(module.to_str().unwrap(), &[3]));
+		let mut server = DapServer::new();
+		server.stop = Some(session.resume().unwrap());
+
+		let trace = server.handle_stack_trace(1).unwrap();
+		let caller = &trace[0]["body"]["stackFrames"][1];
+		assert_eq!(caller["name"], "Main");
+		assert_eq!(caller["line"], 5);
+		let scopes = server.handle_scopes(2, Some(json!({ "frameId": caller["id"] }))).unwrap();
+		let reference = &scopes[0]["body"]["scopes"][0]["variablesReference"];
+		let variables = server.handle_variables(3, Some(json!({ "variablesReference": reference }))).unwrap();
+		let child = variables[0]["body"]["variables"].as_array().unwrap().iter()
+			.find(|local| local["name"] == "child").unwrap();
+		assert_eq!(child["type"], "task<Jobs.Job>");
+		assert!(child["value"].as_str().unwrap().starts_with("task #"));
+	}
+
+	#[test]
 	fn debugger_descriptors_qualify_imported_object_types() {
 		let temp_dir = unique_temp_directory("tablodbg_imported_object_types");
 		let source_path = temp_dir.join("main.tablo");
@@ -1353,6 +1397,7 @@ mod tests {
 	#[test]
 	fn evaluates_watch_expression_in_dap_server() {
 		let frame = VmStackFrame {
+			awaited_at: None,
 			instruction_index: 0,
 			locals: vec![
 				VmVisibleLocal {
@@ -1419,6 +1464,7 @@ mod tests {
 			instruction_index: 0,
 			message: String::from("paused"),
 			source_location: None,
+			suppressed: Vec::new(),
 			stack_trace: vec![frame],
 		});
 

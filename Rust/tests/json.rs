@@ -98,7 +98,7 @@ fn json_keyword_and_watch_conversions_are_available() {
 	assert_eq!(tokens[0].kind, TokenKind::JsonKeyword);
 	assert_eq!(tokens[1].kind, TokenKind::JsonKeyword);
 	assert_eq!(tokens[2].kind, TokenKind::Identifier);
-	let frame = tablo::vm::VmStackFrame { instruction_index: 0, locals: Vec::new(), source_location: None };
+	let frame = tablo::vm::VmStackFrame { awaited_at: None, instruction_index: 0, locals: Vec::new(), source_location: None };
 	assert_eq!(tablo::vm::VirtualMachine::evaluate_watch_expression("text(v: json(v: '[1e999999999999999999999]'))", &frame).unwrap(),
 		Value::Text("[1e999999999999999999999]".into()));
 }
@@ -279,7 +279,7 @@ fn json_field_conversions_preserve_the_source_and_numeric_boundaries() {
 
 #[test]
 fn json_watch_field_access_preserves_quoted_names() {
-	let frame = tablo::vm::VmStackFrame { instruction_index: 0, locals: Vec::new(), source_location: None };
+	let frame = tablo::vm::VmStackFrame { awaited_at: None, instruction_index: 0, locals: Vec::new(), source_location: None };
 	assert_eq!(tablo::vm::VirtualMachine::evaluate_watch_expression(r#"exists json('{"Name":null,"name":1}')."Name""#, &frame).unwrap(), Value::Boolean(true));
 	assert!(tablo::vm::VirtualMachine::evaluate_watch_expression(r#"exists json('{"Name":null,"name":1}').name"#, &frame).unwrap_err().message.contains("ambiguous"));
 }
@@ -364,7 +364,7 @@ fn json_indices_require_integers_and_reject_compound_mutation() {
 
 #[test]
 fn json_watch_expressions_support_nested_indexing() {
-	let frame = tablo::vm::VmStackFrame { instruction_index: 0, locals: Vec::new(), source_location: None };
+	let frame = tablo::vm::VmStackFrame { awaited_at: None, instruction_index: 0, locals: Vec::new(), source_location: None };
 	assert_eq!(tablo::vm::VirtualMachine::evaluate_watch_expression(r#"json('[{"v":[null]}]')[1].v[1] == null"#, &frame).unwrap(), Value::Boolean(true));
 	assert!(tablo::vm::VirtualMachine::evaluate_watch_expression("json('[]')[1]", &frame).unwrap_err().message.contains("out of bounds"));
 }
@@ -624,6 +624,7 @@ fn json_literals_support_variadic_parameters() {
 #[test]
 fn json_literals_in_watches_match_compiled_expressions() {
 	let frame = tablo::vm::VmStackFrame {
+		awaited_at: None,
 		instruction_index: 0,
 		locals: vec![tablo::vm::VmVisibleLocal {
 			declared_type: "int".into(), is_const: false, name: "total".into(),
@@ -647,7 +648,7 @@ fn json_literals_in_watches_match_compiled_expressions() {
 
 #[test]
 fn json_literal_watches_reject_invalid_values_and_side_effects() {
-	let frame = tablo::vm::VmStackFrame { instruction_index: 0, locals: Vec::new(), source_location: None };
+	let frame = tablo::vm::VmStackFrame { awaited_at: None, instruction_index: 0, locals: Vec::new(), source_location: None };
 	for expression in [
 		r#"text({ unquoted: 1 })"#,
 		r#"text({ "same": 1, "same": 2 })"#,
